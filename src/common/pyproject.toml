@@ -1,0 +1,21 @@
+[project]
+name = "wato-world-common"
+version = "0.1.0"
+description = "Shared library for the wato_world multimodal 3D labeling pipeline."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2",
+    "pyarrow>=15",
+    "numpy>=1.26",
+    "scipy>=1.12",
+    "fsspec>=2024.2",
+    "click>=8",
+    "pyyaml>=6",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

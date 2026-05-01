@@ -1,0 +1,136 @@
+# Base compose stack — every component as a profile-gated service.
+# Stacked with docker-compose.infra.yaml, docker-compose.gpu.yaml (GPU components
+# on GPU hosts), and docker-compose.dev.yaml (when component:dev).
+
+services:
+  # ---------------------------------------------------------------------
+  ingest:
+    profiles: ["ingest"]
+    init: true
+    build:
+      context: ..
+      dockerfile: docker/ingest.Dockerfile
+      target: deploy
+    image: "${INGEST_IMAGE}:${TAG}"
+    environment:
+      - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
+      - BAG_ROOT=${BAG_ROOT}
+    volumes:
+      - ${WATO_WORLD_DIR}/data/bags:/data/bags:ro
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/config:/config:ro
+
+  # ---------------------------------------------------------------------
+  perception_2d:
+    profiles: ["perception_2d"]
+    init: true
+    build:
+      context: ..
+      dockerfile: docker/perception_2d.Dockerfile
+      target: deploy
+    image: "${PERCEPTION_2D_IMAGE}:${TAG}"
+    environment:
+      - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
+      - MODELS_ROOT=${MODELS_ROOT}
+    volumes:
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/data/models:/data/models:ro
+      - ${WATO_WORLD_DIR}/config:/config:ro
+
+  # ---------------------------------------------------------------------
+  lidar_preprocessing:
+    profiles: ["lidar_preprocessing"]
+    init: true
+    build:
+      context: ..
+      dockerfile: docker/lidar_preprocessing.Dockerfile
+      target: deploy
+    image: "${LIDAR_PREPROCESSING_IMAGE}:${TAG}"
+    environment:
+      - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
+    volumes:
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/config:/config:ro
+
+  # ---------------------------------------------------------------------
+  proposal_generation:
+    profiles: ["proposal_generation"]
+    init: true
+    build:
+      context: ..
+      dockerfile: docker/proposal_generation.Dockerfile
+      target: deploy
+    image: "${PROPOSAL_GENERATION_IMAGE}:${TAG}"
+    environment:
+      - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
+      - MODELS_ROOT=${MODELS_ROOT}
+    volumes:
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/data/models:/data/models:ro
+      - ${WATO_WORLD_DIR}/config:/config:ro
+
+  # ---------------------------------------------------------------------
+  tracking:
+    profiles: ["tracking"]
+    init: true
+    build:
+      context: ..
+      dockerfile: docker/tracking.Dockerfile
+      target: deploy
+    image: "${TRACKING_IMAGE}:${TAG}"
+    environment:
+      - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
+    volumes:
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/config:/config:ro
+
+  # ---------------------------------------------------------------------
+  label_refinement:
+    profiles: ["label_refinement"]
+    init: true
+    build:
+      context: ..
+      dockerfile: docker/label_refinement.Dockerfile
+      target: deploy
+    image: "${LABEL_REFINEMENT_IMAGE}:${TAG}"
+    environment:
+      - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
+      - MODELS_ROOT=${MODELS_ROOT}
+    volumes:
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/data/models:/data/models:ro
+      - ${WATO_WORLD_DIR}/config:/config:ro
+
+  # ---------------------------------------------------------------------
+  open_vocab_discovery:
+    profiles: ["open_vocab_discovery"]
+    init: true
+    build:
+      context: ..
+      dockerfile: docker/open_vocab_discovery.Dockerfile
+      target: deploy
+    image: "${OPEN_VOCAB_DISCOVERY_IMAGE}:${TAG}"
+    environment:
+      - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
+      - MODELS_ROOT=${MODELS_ROOT}
+    volumes:
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/data/models:/data/models:ro
+      - ${WATO_WORLD_DIR}/config:/config:ro
+
+  # ---------------------------------------------------------------------
+  student_training:
+    profiles: ["student_training"]
+    init: true
+    build:
+      context: ..
+      dockerfile: docker/student_training.Dockerfile
+      target: deploy
+    image: "${STUDENT_TRAINING_IMAGE}:${TAG}"
+    environment:
+      - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
+      - MODELS_ROOT=${MODELS_ROOT}
+    volumes:
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/data/models:/data/models
+      - ${WATO_WORLD_DIR}/config:/config:ro

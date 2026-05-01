@@ -1,0 +1,4 @@
+# Optional shared infra services live here.  The current pipeline uses the
+# artifact tree as its metadata index, so no always-on service is required.
+
+services: {}

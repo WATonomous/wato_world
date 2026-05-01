@@ -1,0 +1,20 @@
+# Per-component artifact version. Read by the storage adapter when constructing
+# output paths: ${ARTIFACT_ROOT_URI}/<component>/<version>/<bag>/<chunk>/...
+#
+# Bump a component's version whenever:
+#   - its model checkpoint changes,
+#   - its hyperparameters in config/pipeline.yaml change in a way that
+#     invalidates downstream consumption,
+#   - its output schema changes.
+#
+# Downstream components may read multiple versions of upstream components; pin
+# the desired upstream version per component in pipeline.yaml.
+
+ingest: v1
+perception_2d: v1
+lidar_preprocessing: v1
+proposal_generation: v1
+tracking: v1
+label_refinement: v1
+open_vocab_discovery: v1
+student_training: v1

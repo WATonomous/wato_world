@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# watod — entrypoint for the multimodal 3D auto-labeling pipeline.
+# Mirrors the structure of wato_monorepo/watod: parses options, sources config,
+# generates modules/.env, stacks compose files, and delegates to docker compose.
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Locate repo root by searching upward for watod-config.sh.
+# ---------------------------------------------------------------------------
+find_repo_root() {
+    local d="${PWD}"
+    while [[ "${d}" != "/" ]]; do
+        if [[ -f "${d}/watod-config.sh" ]]; then
+            echo "${d}"
+            return 0
+        fi
+        d="$(dirname "${d}")"
+    done
+    # Fallback: directory of this script.
+    cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
+}
+
+WATO_WORLD_DIR="$(find_repo_root)"
+export WATO_WORLD_DIR
+
+SCRIPTS_DIR="${WATO_WORLD_DIR}/watod_scripts"
+MODULES_DIR="${WATO_WORLD_DIR}/modules"
+
+# ---------------------------------------------------------------------------
+# Defaults (overridden by watod-config.sh and CLI flags).
+# ---------------------------------------------------------------------------
+ALL_COMPONENTS=(ingest perception_2d lidar_preprocessing proposal_generation tracking label_refinement open_vocab_discovery student_training)
+GPU_COMPONENTS=(perception_2d proposal_generation tracking label_refinement open_vocab_discovery student_training)
+ACTIVE_COMPONENTS=""
+VERBOSE=0
+TERMINAL=""
+
+normalize_component() {
+    echo "$1"
+}
+
+# ---------------------------------------------------------------------------
+# Source user config + optional local override.
+# ---------------------------------------------------------------------------
+# shellcheck source=/dev/null
+source "${WATO_WORLD_DIR}/watod-config.sh"
+if [[ -f "${WATO_WORLD_DIR}/watod-config.local.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${WATO_WORLD_DIR}/watod-config.local.sh"
+fi
+
+# ---------------------------------------------------------------------------
+# Help.
+# ---------------------------------------------------------------------------
+usage() {
+    cat <<EOF
+watod — multimodal 3D auto-labeling pipeline orchestrator.
+
+Usage:
+  watod [OPTIONS] [COMMAND] [ARGS...]
+
+Options:
+  -c, --component TARGET   Add a component to the active set (repeatable).
+                           Append :dev to use the develop target with source bind-mounts.
+                           Use "all" to expand to every component.
+                           Examples: -c ingest  -c perception_2d:dev  -c all
+  -t, --terminal SERVICE   Open an interactive bash shell in SERVICE container.
+  -v, --verbose            Print env-setup output.
+  -h, --help               Show this help.
+
+Commands:
+  install                  Symlink watod into /usr/local/bin.
+  up                       docker compose up -d for selected components (+ infra).
+  down [SERVICE|all]       Stop containers.
+  build [TARGET...]        docker compose build (defaults to active components).
+  run TARGET BAG [CHUNK]   One-shot component runner. TARGET is a component name
+                           such as ingest or perception_2d.
+  bag ARGS...              Mount data/bags and exec ros2 bag inside the ingest image.
+  test [TARGET] [PYTEST_ARGS...]
+                           Run pytest inside the selected component's container.
+  <docker-compose-cmd>     Passthrough (ps, logs, pull, exec, ...).
+
+Examples:
+  watod -c ingest up
+  watod -c all build
+  watod -c perception_2d:dev up && watod -t perception_2d_dev
+  watod run ingest my_bag chunk_0001
+  watod down all
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing — option flags first, then command + passthrough args.
+# ---------------------------------------------------------------------------
+declare -a CLI_COMPONENTS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -c|--component)     CLI_COMPONENTS+=("$2"); shift 2 ;;
+        -t|--terminal)      TERMINAL="$2"; shift 2 ;;
+        -v|--verbose)       VERBOSE=1; shift ;;
+        -h|--help)          usage; exit 0 ;;
+        --)                 shift; break ;;
+        *)                  break ;;
+    esac
+done
+
+# Components: CLI flag wins; otherwise fall back to ACTIVE_COMPONENTS from config.
+if [[ ${#CLI_COMPONENTS[@]} -gt 0 ]]; then
+    ACTIVE_COMPONENTS="${CLI_COMPONENTS[*]}"
+fi
+
+# Expand "all" and split into a stable array.
+declare -a COMPONENTS_EXPANDED=()
+for s in ${ACTIVE_COMPONENTS}; do
+    if [[ "${s}" == "all" || "${s}" == "all:dev" ]]; then
+        local_suffix=""
+        [[ "${s}" == "all:dev" ]] && local_suffix=":dev"
+        for a in "${ALL_COMPONENTS[@]}"; do
+            COMPONENTS_EXPANDED+=("${a}${local_suffix}")
+        done
+    else
+        suffix=""
+        base="${s}"
+        if [[ "${s}" == *":dev" ]]; then
+            suffix=":dev"
+            base="${s%%:*}"
+        fi
+        COMPONENTS_EXPANDED+=("$(normalize_component "${base}")${suffix}")
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Generate modules/.env.
+# ---------------------------------------------------------------------------
+if [[ ${VERBOSE} -eq 1 ]]; then
+    bash "${SCRIPTS_DIR}/watod-setup-env.sh"
+else
+    bash "${SCRIPTS_DIR}/watod-setup-env.sh" >/dev/null
+fi
+
+# ---------------------------------------------------------------------------
+# Decide which compose files to stack.
+# ---------------------------------------------------------------------------
+COMMAND_PRE="${1:-}"
+declare -a COMPOSE_FILES=(
+    "-f" "${MODULES_DIR}/docker-compose.infra.yaml"
+    "-f" "${MODULES_DIR}/docker-compose.yaml"
+)
+
+needs_gpu=0
+needs_dev=0
+for s in "${COMPONENTS_EXPANDED[@]}"; do
+    base="${s%%:*}"
+    if [[ "${s}" == *":dev" ]]; then needs_dev=1; fi
+    for g in "${GPU_COMPONENTS[@]}"; do
+        if [[ "${base}" == "${g}" ]]; then needs_gpu=1; fi
+    done
+done
+if [[ "${COMMAND_PRE}" == "test" ]]; then
+    needs_dev=1
+fi
+
+if [[ "${GPU_AVAILABLE:-false}" == "true" && ${needs_gpu} -eq 1 ]]; then
+    COMPOSE_FILES+=("-f" "${MODULES_DIR}/docker-compose.gpu.yaml")
+fi
+if [[ ${needs_dev} -eq 1 ]]; then
+    COMPOSE_FILES+=("-f" "${MODULES_DIR}/docker-compose.dev.yaml")
+fi
+
+# ---------------------------------------------------------------------------
+# Build the --profile arg list.  Always include "infra".
+# ---------------------------------------------------------------------------
+declare -a PROFILE_ARGS=("--profile" "infra")
+for s in "${COMPONENTS_EXPANDED[@]}"; do
+    base="${s%%:*}"
+    PROFILE_ARGS+=("--profile" "${base}")
+    if [[ "${s}" == *":dev" ]]; then
+        PROFILE_ARGS+=("--profile" "${base}_dev")
+    fi
+done
+
+export COMPOSE_FILES_STR="${COMPOSE_FILES[*]}"
+export PROFILE_ARGS_STR="${PROFILE_ARGS[*]}"
+
+# ---------------------------------------------------------------------------
+# Command dispatch.
+# ---------------------------------------------------------------------------
+COMMAND="${1:-}"
+shift || true
+
+# -t shortcut: open a shell.
+if [[ -n "${TERMINAL}" ]]; then
+    exec docker compose --env-file "${MODULES_DIR}/.env" "${COMPOSE_FILES[@]}" \
+        "${PROFILE_ARGS[@]}" exec "${TERMINAL}" bash
+fi
+
+case "${COMMAND}" in
+    ""|help|-h|--help)
+        usage
+        ;;
+    install)
+        exec bash "${SCRIPTS_DIR}/watod-install.sh" "$@"
+        ;;
+    run)
+        exec bash "${SCRIPTS_DIR}/watod-run.sh" "$@"
+        ;;
+    bag)
+        exec bash "${SCRIPTS_DIR}/watod-bag.sh" "$@"
+        ;;
+    test)
+        exec bash "${SCRIPTS_DIR}/watod-test.sh" "$@"
+        ;;
+    *)
+        # Passthrough to docker compose with the assembled file + profile args.
+        exec bash "${SCRIPTS_DIR}/watod-compose.sh" "${COMMAND}" "$@"
+        ;;
+esac

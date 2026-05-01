@@ -1,0 +1,21 @@
+[project]
+name = "wato-world-open-vocab-discovery"
+version = "0.1.0"
+description = "Open-vocabulary discovery for rare-class tracks."
+requires-python = ">=3.11"
+dependencies = [
+    "wato-world-common",
+    "click>=8",
+    "pyyaml>=6",
+    "pydantic>=2",
+]
+
+[project.scripts]
+wato_open_vocab_discovery = "wato_open_vocab_discovery.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

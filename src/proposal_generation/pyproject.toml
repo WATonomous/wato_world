@@ -1,0 +1,21 @@
+[project]
+name = "wato-world-proposal-generation"
+version = "0.1.0"
+description = "Multimodal proposal generation with LiDAR detection, Segment-Lift-Fit, and fusion."
+requires-python = ">=3.11"
+dependencies = [
+    "wato-world-common",
+    "click>=8",
+    "pyyaml>=6",
+    "pydantic>=2",
+]
+
+[project.scripts]
+wato_proposal_generation = "wato_proposal_generation.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

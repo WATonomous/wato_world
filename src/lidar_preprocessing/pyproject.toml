@@ -1,0 +1,21 @@
+[project]
+name = "wato-world-lidar-preprocessing"
+version = "0.1.0"
+description = "LiDAR preprocessing with motion compensation, static/dynamic split, and ground extraction."
+requires-python = ">=3.11"
+dependencies = [
+    "wato-world-common",
+    "click>=8",
+    "pyyaml>=6",
+    "pydantic>=2",
+]
+
+[project.scripts]
+wato_lidar_preprocessing = "wato_lidar_preprocessing.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,145 @@
+# Dev overrides — separate <target>_dev services that:
+#   - build the develop target (host user mapped, dev tools installed)
+#   - bind-mount source for hot reload
+#   - command: sleep infinity (you `watod -t <target>_dev` in to work)
+#
+# Activated by `watod -c perception_2d:dev up`.
+
+services:
+  ingest_dev:
+    profiles: ["ingest_dev"]
+    extends:
+      file: docker-compose.yaml
+      service: ingest
+    build:
+      target: develop
+      args:
+        USERNAME: "${USERNAME}"
+        USER_UID: "${SETUID}"
+        USER_GID: "${SETGID}"
+        CLAUDE_CODE: "${CLAUDE_CODE}"
+    image: "${INGEST_IMAGE}:dev_${TAG}"
+    command: sleep infinity
+    volumes:
+      - ${WATO_WORLD_DIR}/src/common:/ws/src/common
+      - ${WATO_WORLD_DIR}/src/ingest:/ws/src/ingest
+      - ${WATO_WORLD_DIR}/data/bags:/data/bags:ro
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/config:/config:ro
+
+  perception_2d_dev:
+    profiles: ["perception_2d_dev"]
+    extends:
+      file: docker-compose.yaml
+      service: perception_2d
+    build:
+      target: develop
+      args: { USERNAME: "${USERNAME}", USER_UID: "${SETUID}", USER_GID: "${SETGID}", CLAUDE_CODE: "${CLAUDE_CODE}" }
+    image: "${PERCEPTION_2D_IMAGE}:dev_${TAG}"
+    command: sleep infinity
+    volumes:
+      - ${WATO_WORLD_DIR}/src/common:/ws/src/common
+      - ${WATO_WORLD_DIR}/src/perception_2d:/ws/src/perception_2d
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/data/models:/data/models:ro
+      - ${WATO_WORLD_DIR}/config:/config:ro
+
+  lidar_preprocessing_dev:
+    profiles: ["lidar_preprocessing_dev"]
+    extends:
+      file: docker-compose.yaml
+      service: lidar_preprocessing
+    build:
+      target: develop
+      args: { USERNAME: "${USERNAME}", USER_UID: "${SETUID}", USER_GID: "${SETGID}", CLAUDE_CODE: "${CLAUDE_CODE}" }
+    image: "${LIDAR_PREPROCESSING_IMAGE}:dev_${TAG}"
+    command: sleep infinity
+    volumes:
+      - ${WATO_WORLD_DIR}/src/common:/ws/src/common
+      - ${WATO_WORLD_DIR}/src/lidar_preprocessing:/ws/src/lidar_preprocessing
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/config:/config:ro
+
+  proposal_generation_dev:
+    profiles: ["proposal_generation_dev"]
+    extends:
+      file: docker-compose.yaml
+      service: proposal_generation
+    build:
+      target: develop
+      args: { USERNAME: "${USERNAME}", USER_UID: "${SETUID}", USER_GID: "${SETGID}", CLAUDE_CODE: "${CLAUDE_CODE}" }
+    image: "${PROPOSAL_GENERATION_IMAGE}:dev_${TAG}"
+    command: sleep infinity
+    volumes:
+      - ${WATO_WORLD_DIR}/src/common:/ws/src/common
+      - ${WATO_WORLD_DIR}/src/proposal_generation:/ws/src/proposal_generation
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/data/models:/data/models:ro
+      - ${WATO_WORLD_DIR}/config:/config:ro
+
+  tracking_dev:
+    profiles: ["tracking_dev"]
+    extends:
+      file: docker-compose.yaml
+      service: tracking
+    build:
+      target: develop
+      args: { USERNAME: "${USERNAME}", USER_UID: "${SETUID}", USER_GID: "${SETGID}", CLAUDE_CODE: "${CLAUDE_CODE}" }
+    image: "${TRACKING_IMAGE}:dev_${TAG}"
+    command: sleep infinity
+    volumes:
+      - ${WATO_WORLD_DIR}/src/common:/ws/src/common
+      - ${WATO_WORLD_DIR}/src/tracking:/ws/src/tracking
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/config:/config:ro
+
+  label_refinement_dev:
+    profiles: ["label_refinement_dev"]
+    extends:
+      file: docker-compose.yaml
+      service: label_refinement
+    build:
+      target: develop
+      args: { USERNAME: "${USERNAME}", USER_UID: "${SETUID}", USER_GID: "${SETGID}", CLAUDE_CODE: "${CLAUDE_CODE}" }
+    image: "${LABEL_REFINEMENT_IMAGE}:dev_${TAG}"
+    command: sleep infinity
+    volumes:
+      - ${WATO_WORLD_DIR}/src/common:/ws/src/common
+      - ${WATO_WORLD_DIR}/src/label_refinement:/ws/src/label_refinement
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/data/models:/data/models:ro
+      - ${WATO_WORLD_DIR}/config:/config:ro
+
+  open_vocab_discovery_dev:
+    profiles: ["open_vocab_discovery_dev"]
+    extends:
+      file: docker-compose.yaml
+      service: open_vocab_discovery
+    build:
+      target: develop
+      args: { USERNAME: "${USERNAME}", USER_UID: "${SETUID}", USER_GID: "${SETGID}", CLAUDE_CODE: "${CLAUDE_CODE}" }
+    image: "${OPEN_VOCAB_DISCOVERY_IMAGE}:dev_${TAG}"
+    command: sleep infinity
+    volumes:
+      - ${WATO_WORLD_DIR}/src/common:/ws/src/common
+      - ${WATO_WORLD_DIR}/src/open_vocab_discovery:/ws/src/open_vocab_discovery
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/data/models:/data/models:ro
+      - ${WATO_WORLD_DIR}/config:/config:ro
+
+  student_training_dev:
+    profiles: ["student_training_dev"]
+    extends:
+      file: docker-compose.yaml
+      service: student_training
+    build:
+      target: develop
+      args: { USERNAME: "${USERNAME}", USER_UID: "${SETUID}", USER_GID: "${SETGID}", CLAUDE_CODE: "${CLAUDE_CODE}" }
+    image: "${STUDENT_TRAINING_IMAGE}:dev_${TAG}"
+    command: sleep infinity
+    volumes:
+      - ${WATO_WORLD_DIR}/src/common:/ws/src/common
+      - ${WATO_WORLD_DIR}/src/student_training:/ws/src/student_training
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/data/models:/data/models
+      - ${WATO_WORLD_DIR}/config:/config:ro

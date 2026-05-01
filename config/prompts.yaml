@@ -1,0 +1,34 @@
+# Open-vocabulary prompts for perception_2d (GroundingDINO / YOLO-World).
+# Versioned alongside the perception_2d image; bump its version in component_versions.yaml
+# whenever this file changes meaningfully.
+
+primary_taxonomy:
+  - name: car
+    synonyms: ["car", "sedan", "suv", "hatchback", "wagon", "coupe"]
+  - name: truck
+    synonyms: ["truck", "pickup truck", "box truck", "delivery truck"]
+  - name: bus
+    synonyms: ["bus", "school bus", "shuttle bus"]
+  - name: motorcycle
+    synonyms: ["motorcycle", "motorbike", "moped", "scooter"]
+  - name: bicycle
+    synonyms: ["bicycle", "bike", "cyclist"]
+  - name: pedestrian
+    synonyms: ["pedestrian", "person", "walker", "jogger"]
+  - name: traffic_cone
+    synonyms: ["traffic cone", "road cone", "pylon"]
+  - name: barrier
+    synonyms: ["barrier", "jersey barrier", "construction barrier"]
+
+# Open-vocabulary discovery: anything detected in this list is routed through the
+# rare-class branch.
+open_vocab_discovery:
+  - "stroller"
+  - "wheelchair"
+  - "dog"
+  - "skateboard"
+  - "shopping cart"
+  - "debris"
+  - "fallen tree"
+  - "trailer"
+  - "construction equipment"

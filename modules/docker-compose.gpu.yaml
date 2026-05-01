@@ -1,0 +1,23 @@
+# GPU overrides — applied on hosts with nvidia-container-toolkit.
+# The watod CLI stacks this only when GPU_AVAILABLE=true and a GPU component
+# is active.
+
+services:
+  perception_2d: &gpu-defaults
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  proposal_generation: *gpu-defaults
+  tracking:  *gpu-defaults
+  label_refinement: *gpu-defaults
+  open_vocab_discovery: *gpu-defaults
+  student_training:    *gpu-defaults

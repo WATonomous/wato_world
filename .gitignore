@@ -1,0 +1,31 @@
+# Generated env file
+modules/.env
+
+# Local config override
+watod-config.local.sh
+
+# Pipeline data — bind-mounted into containers, never checked in
+data/bags/*
+data/artifacts/*
+data/models/*
+!data/bags/.gitkeep
+!data/artifacts/.gitkeep
+!data/models/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg
+build/
+dist/
+
+# IDE / editors
+.vscode/
+.idea/
+*.swp
+.DS_Store

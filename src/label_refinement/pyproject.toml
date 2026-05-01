@@ -1,0 +1,21 @@
+[project]
+name = "wato-world-label-refinement"
+version = "0.1.0"
+description = "Track-centric label refinement with multimodal LabelFormer."
+requires-python = ">=3.11"
+dependencies = [
+    "wato-world-common",
+    "click>=8",
+    "pyyaml>=6",
+    "pydantic>=2",
+]
+
+[project.scripts]
+wato_label_refinement = "wato_label_refinement.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

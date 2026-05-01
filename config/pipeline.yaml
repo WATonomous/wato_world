@@ -1,0 +1,94 @@
+# Per-component hyperparameters. Loaded by each component's config.py via Pydantic.
+
+ingest:
+  chunk_seconds: 30
+  reference_clock: lidar
+  max_cam_offset_ms: 50
+  upstream_versions: {}
+
+perception_2d:
+  detector: grounding_dino           # or "yolo_world"
+  detector_score_threshold: 0.25
+  sam2_checkpoint: sam2_hiera_large
+  reid_features:
+    model: dinov2_vitl14
+    every_k_frames: 5
+  cross_camera_match_radius_m: 1.5
+  upstream_versions:
+    ingest: v1
+
+lidar_preprocessing:
+  voxel_size_m: 0.15
+  static_min_persistence: 0.7
+  ground:
+    method: patchworkpp
+  upstream_versions:
+    ingest: v1
+
+proposal_generation:
+  lidar_detectors:
+    - centerpoint
+    - transfusion_l
+  ensemble_iou3d: 0.5
+  slf:
+    min_lidar_points_for_fit: 5
+    min_cameras_for_silhouette: 3
+  fusion:
+    match_iou3d: 0.3
+    match_center_distance_m: 1.5
+  upstream_versions:
+    ingest: v1
+    perception_2d: v1
+    lidar_preprocessing: v1
+
+tracking:
+  kalman_motion_model:
+    car: constant_velocity
+    pedestrian: near_static
+  birth_frames: 3
+  death_frames: 5
+  cost_weights:
+    iou3d: 1.0
+    center_distance: 0.5
+    masklet_match: 2.0
+    dino_cosine: 1.0
+  upstream_versions:
+    perception_2d: v1
+    proposal_generation: v1
+
+label_refinement:
+  mode: bootstrap                   # or "learned"
+  silhouette_loss_weight: 1.0
+  smoothness_loss_weight: 0.5
+  static_speed_threshold_mps: 0.5
+  virtual_points:
+    grid_resolution_m: 0.2
+    occlusion_check: true
+  learned:
+    transformer_layers: 6
+    transformer_heads: 8
+    train_min_confidence: 0.85
+  upstream_versions:
+    perception_2d: v1
+    lidar_preprocessing: v1
+    tracking: v1
+
+open_vocab_discovery:
+  min_mask_area_px: 4000
+  min_persistence_frames: 10
+  upstream_versions:
+    perception_2d: v1
+    lidar_preprocessing: v1
+
+student_training:
+  architecture: bevfusion
+  train:
+    batch_size: 8
+    optimizer: adamw
+    lr: 1.0e-4
+    epochs: 24
+  data:
+    min_track_confidence: 0.85
+    holdout_bags: ["bag_eval_001", "bag_eval_002"]
+  upstream_versions:
+    label_refinement: v1

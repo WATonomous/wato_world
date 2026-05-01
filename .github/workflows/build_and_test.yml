@@ -1,0 +1,49 @@
+name: build-and-test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - {name: ingest, dockerfile: docker/ingest.Dockerfile, pkg: wato_ingest, dir: ingest}
+          - {name: perception_2d, dockerfile: docker/perception_2d.Dockerfile, pkg: wato_perception_2d, dir: perception_2d}
+          - {name: lidar_preprocessing, dockerfile: docker/lidar_preprocessing.Dockerfile, pkg: wato_lidar_preprocessing, dir: lidar_preprocessing}
+          - {name: proposal_generation, dockerfile: docker/proposal_generation.Dockerfile, pkg: wato_proposal_generation, dir: proposal_generation}
+          - {name: tracking, dockerfile: docker/tracking.Dockerfile, pkg: wato_tracking, dir: tracking}
+          - {name: label_refinement, dockerfile: docker/label_refinement.Dockerfile, pkg: wato_label_refinement, dir: label_refinement}
+          - {name: open_vocab_discovery, dockerfile: docker/open_vocab_discovery.Dockerfile, pkg: wato_open_vocab_discovery, dir: open_vocab_discovery}
+          - {name: student_training, dockerfile: docker/student_training.Dockerfile, pkg: wato_student_training, dir: student_training}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build develop target
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.component.dockerfile }}
+          target: develop
+          load: true
+          tags: wato-world-${{ matrix.component.name }}:test
+          cache-from: type=gha,scope=${{ matrix.component.name }}
+          cache-to: type=gha,scope=${{ matrix.component.name }},mode=max
+
+      - name: Run pytest in container
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/src/${{ matrix.component.dir }}":/ws/src/${{ matrix.component.dir }} \
+            -v "${{ github.workspace }}/src/common":/ws/src/common \
+            wato-world-${{ matrix.component.name }}:test \
+            pytest /ws/src/${{ matrix.component.dir }}/tests
