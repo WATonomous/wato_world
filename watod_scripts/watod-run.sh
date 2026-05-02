@@ -49,5 +49,5 @@ fi
 exec docker compose \
     --env-file "${WATO_WORLD_DIR}/modules/.env" \
     "${COMPOSE_FILES[@]}" \
-    --profile "${TARGET}" --profile "infra" \
+    --profile "${TARGET}" \
     run --rm "${SERVICE}" python -m "${PKG}" "${ARGS[@]}"

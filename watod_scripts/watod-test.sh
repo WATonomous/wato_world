@@ -35,5 +35,5 @@ SERVICE="${TARGET}_dev"
 exec docker compose \
     --env-file "${WATO_WORLD_DIR}/modules/.env" \
     "${COMPOSE_FILES[@]}" \
-    --profile "${TARGET}_dev" --profile "infra" \
+    --profile "${TARGET}_dev" \
     exec "${SERVICE}" pytest /ws/src/"${TARGET}"/tests "$@"

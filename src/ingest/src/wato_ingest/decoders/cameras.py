@@ -58,8 +58,10 @@ def decode_chunk(
     t_end_ns: int,
     cfg: IngestConfig,
 ) -> list[CameraDecodeResult]:
-    """Decode every configured camera topic for a chunk's time range."""
-    cam_topics = cfg.topics.cameras  # logical name -> bag topic
+    """Decode every configured camera image topic for a chunk's time range."""
+    # Logical name -> image topic (CameraInfo is handled at bag scope by
+    # inputs/calibration.py, not here).
+    cam_topics = {cam_id: c.image for cam_id, c in cfg.topics.cameras.items()}
     topic_to_cam = {v: k for k, v in cam_topics.items()}
     if not topic_to_cam:
         return []

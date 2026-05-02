@@ -71,7 +71,7 @@ Options:
 
 Commands:
   install                  Symlink watod into /usr/local/bin.
-  up                       docker compose up -d for selected components (+ infra).
+  up                       docker compose up -d for selected components.
   down [SERVICE|all]       Stop containers.
   build [TARGET...]        docker compose build (defaults to active components).
   run TARGET BAG [CHUNK]   One-shot component runner. TARGET is a component name
@@ -169,9 +169,11 @@ if [[ ${needs_dev} -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Build the --profile arg list.  Always include "infra".
+# Build the --profile arg list — one profile per active component (plus its
+# _dev variant if requested).  docker-compose.infra.yaml is stacked but holds
+# no services today; future shared services can opt in via their own profile.
 # ---------------------------------------------------------------------------
-declare -a PROFILE_ARGS=("--profile" "infra")
+declare -a PROFILE_ARGS=()
 for s in "${COMPONENTS_EXPANDED[@]}"; do
     base="${s%%:*}"
     PROFILE_ARGS+=("--profile" "${base}")

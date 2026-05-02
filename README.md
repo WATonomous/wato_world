@@ -1,14 +1,7 @@
 # wato_world
 
-Multimodal 3D auto-labeling pipeline. Offline batch system that turns rosbags
-(12 cameras + LiDAR + ego-pose) into 3D box tracks with class labels, plus a
-self-trained multimodal student detector.
+Dockerized 3D auto-labeling pipeline for the WATonomous self driving car (dubbed EVE). Encompasses an offline batch system that turns rosbags (12 cameras + LiDAR + ego-pose) into 3D box tracks with class labels.
 
-This repo is infrastructure-first: every component runs in its own Docker image,
-materializes its outputs to durable storage, and is independently re-runnable.
-It mirrors the conventions of `wato_monorepo` (per-module Dockerfiles, stacked
-compose files, a shell entrypoint) but is offline batch — no ROS messaging at
-runtime.
 
 See [`docs/architecture.md`](docs/architecture.md) (TODO) for the full pipeline
 description. This README covers infra only.

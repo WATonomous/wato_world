@@ -14,7 +14,7 @@ COMPOSE_FILES=(${COMPOSE_FILES_STR})
 docker compose \
     --env-file "${WATO_WORLD_DIR}/modules/.env" \
     "${COMPOSE_FILES[@]}" \
-    --profile ingest --profile infra \
+    --profile ingest \
     up -d ingest
 
 exec docker compose \
