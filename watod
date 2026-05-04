@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# watod — entrypoint for the multimodal 3D auto-labeling pipeline.
-# Mirrors the structure of wato_monorepo/watod: parses options, sources config,
-# generates modules/.env, stacks compose files, and delegates to docker compose.
+# watod — entrypoint for the wato_world auto-labeling pipeline.
+#
+# Mirrors wato_monorepo/watod: source watod-config.sh, parse ACTIVE_MODULES
+# (with :dev suffix), generate modules/.env, stack compose files, delegate to
+# docker compose.  ACTIVE_MODULES is the single source of truth — there's no
+# CLI override flag like the monorepo's -m, but you can edit
+# watod-config.local.sh per-host.
 
 set -euo pipefail
 
@@ -17,7 +21,6 @@ find_repo_root() {
         fi
         d="$(dirname "${d}")"
     done
-    # Fallback: directory of this script.
     cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
 }
 
@@ -28,20 +31,21 @@ SCRIPTS_DIR="${WATO_WORLD_DIR}/watod_scripts"
 MODULES_DIR="${WATO_WORLD_DIR}/modules"
 
 # ---------------------------------------------------------------------------
-# Defaults (overridden by watod-config.sh and CLI flags).
+# Module registry.  Each module declares which base flavor it FROM's so we
+# only build the bases that are actually needed.
 # ---------------------------------------------------------------------------
-ALL_COMPONENTS=(ingest perception_2d lidar_preprocessing proposal_generation tracking label_refinement open_vocab_discovery student_training)
-GPU_COMPONENTS=(perception_2d proposal_generation tracking label_refinement open_vocab_discovery student_training)
-ACTIVE_COMPONENTS=""
-VERBOSE=0
-TERMINAL=""
+ALL_MODULES=(ingest perception_2d lidar_preprocessing proposal_generation tracking label_refinement open_vocab_discovery student_training)
 
-normalize_component() {
-    echo "$1"
+base_flavor_for() {
+    case "$1" in
+        ingest|lidar_preprocessing) echo "cpu" ;;
+        perception_2d|proposal_generation|tracking|label_refinement|open_vocab_discovery|student_training) echo "cuda" ;;
+        *) echo "" ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
-# Source user config + optional local override.
+# Source user config (+ optional local override).
 # ---------------------------------------------------------------------------
 # shellcheck source=/dev/null
 source "${WATO_WORLD_DIR}/watod-config.sh"
@@ -50,83 +54,77 @@ if [[ -f "${WATO_WORLD_DIR}/watod-config.local.sh" ]]; then
     source "${WATO_WORLD_DIR}/watod-config.local.sh"
 fi
 
+VERBOSE=0
+TERMINAL=""
+
 # ---------------------------------------------------------------------------
 # Help.
 # ---------------------------------------------------------------------------
 usage() {
     cat <<EOF
-watod — multimodal 3D auto-labeling pipeline orchestrator.
+watod — wato_world auto-labeling pipeline orchestrator.
 
 Usage:
   watod [OPTIONS] [COMMAND] [ARGS...]
 
+Active modules are read from ACTIVE_MODULES in watod-config.sh.  Append :dev
+to a module name to use the develop target with source bind-mounts.  Use
+"all" or "all:dev" to expand to every module.
+
 Options:
-  -c, --component TARGET   Add a component to the active set (repeatable).
-                           Append :dev to use the develop target with source bind-mounts.
-                           Use "all" to expand to every component.
-                           Examples: -c ingest  -c perception_2d:dev  -c all
   -t, --terminal SERVICE   Open an interactive bash shell in SERVICE container.
   -v, --verbose            Print env-setup output.
   -h, --help               Show this help.
 
 Commands:
   install                  Symlink watod into /usr/local/bin.
-  up                       docker compose up -d for selected components.
+  build                    Pull base images + docker compose build active modules.
+  build-base [cpu|cuda]    First-time setup: build base images locally when ghcr
+                           hasn't published them yet (CI normally does this).
+  up                       docker compose up -d for active modules.
   down [SERVICE|all]       Stop containers.
-  build [TARGET...]        docker compose build (defaults to active components).
-  run TARGET BAG [CHUNK]   One-shot component runner. TARGET is a component name
-                           such as ingest or perception_2d.
-  bag ARGS...              Mount data/bags and exec ros2 bag inside the ingest image.
-  test [TARGET] [PYTEST_ARGS...]
-                           Run pytest inside the selected component's container.
+  run MODULE BAG [CHUNK]   One-shot module run.
+  test [MODULE] [ARGS...]  Run pytest inside the module's dev container.
   <docker-compose-cmd>     Passthrough (ps, logs, pull, exec, ...).
 
+Configuration: edit ACTIVE_MODULES in watod-config.sh (or watod-config.local.sh).
+
 Examples:
-  watod -c ingest up
-  watod -c all build
-  watod -c perception_2d:dev up && watod -t perception_2d_dev
-  watod run ingest my_bag chunk_0001
-  watod down all
+  # In watod-config.sh:    export ACTIVE_MODULES="ingest:dev"
+  watod build-base cpu     # one-time, only if ghcr lacks the base image
+  watod build              # pulls base + builds ingest dev image
+  watod up                 # brings up ingest_dev
+  watod -t ingest_dev      # shell into the ingest dev container
+  watod run ingest /data/bags/scene-0001.mcap
 EOF
 }
 
 # ---------------------------------------------------------------------------
-# Argument parsing — option flags first, then command + passthrough args.
+# Argument parsing.
 # ---------------------------------------------------------------------------
-declare -a CLI_COMPONENTS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -c|--component)     CLI_COMPONENTS+=("$2"); shift 2 ;;
-        -t|--terminal)      TERMINAL="$2"; shift 2 ;;
-        -v|--verbose)       VERBOSE=1; shift ;;
-        -h|--help)          usage; exit 0 ;;
-        --)                 shift; break ;;
-        *)                  break ;;
+        -t|--terminal)  TERMINAL="$2"; shift 2 ;;
+        -v|--verbose)   VERBOSE=1; shift ;;
+        -h|--help)      usage; exit 0 ;;
+        --)             shift; break ;;
+        *)              break ;;
     esac
 done
 
-# Components: CLI flag wins; otherwise fall back to ACTIVE_COMPONENTS from config.
-if [[ ${#CLI_COMPONENTS[@]} -gt 0 ]]; then
-    ACTIVE_COMPONENTS="${CLI_COMPONENTS[*]}"
-fi
-
-# Expand "all" and split into a stable array.
-declare -a COMPONENTS_EXPANDED=()
-for s in ${ACTIVE_COMPONENTS}; do
-    if [[ "${s}" == "all" || "${s}" == "all:dev" ]]; then
+# ---------------------------------------------------------------------------
+# Expand ACTIVE_MODULES into a normalized array.  Handles "all" and "all:dev".
+# ---------------------------------------------------------------------------
+declare -a MODULES_EXPANDED=()
+for m in ${ACTIVE_MODULES:-}; do
+    if [[ "${m}" == "all" || "${m}" == "all:dev" ]]; then
         local_suffix=""
-        [[ "${s}" == "all:dev" ]] && local_suffix=":dev"
-        for a in "${ALL_COMPONENTS[@]}"; do
-            COMPONENTS_EXPANDED+=("${a}${local_suffix}")
+        [[ "${m}" == "all:dev" ]] && local_suffix=":dev"
+        for a in "${ALL_MODULES[@]}"; do
+            MODULES_EXPANDED+=("${a}${local_suffix}")
         done
     else
-        suffix=""
-        base="${s}"
-        if [[ "${s}" == *":dev" ]]; then
-            suffix=":dev"
-            base="${s%%:*}"
-        fi
-        COMPONENTS_EXPANDED+=("$(normalize_component "${base}")${suffix}")
+        MODULES_EXPANDED+=("${m}")
     fi
 done
 
@@ -140,26 +138,28 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Decide which compose files to stack.
+# Decide which compose files to stack and which base flavors are needed.
 # ---------------------------------------------------------------------------
-COMMAND_PRE="${1:-}"
 declare -a COMPOSE_FILES=(
-    "-f" "${MODULES_DIR}/docker-compose.infra.yaml"
     "-f" "${MODULES_DIR}/docker-compose.yaml"
 )
 
 needs_gpu=0
 needs_dev=0
-for s in "${COMPONENTS_EXPANDED[@]}"; do
+declare -A NEEDED_BASE_FLAVORS=()
+for s in "${MODULES_EXPANDED[@]}"; do
     base="${s%%:*}"
-    if [[ "${s}" == *":dev" ]]; then needs_dev=1; fi
-    for g in "${GPU_COMPONENTS[@]}"; do
-        if [[ "${base}" == "${g}" ]]; then needs_gpu=1; fi
-    done
+    [[ "${s}" == *":dev" ]] && needs_dev=1
+    flavor="$(base_flavor_for "${base}")"
+    if [[ -n "${flavor}" ]]; then
+        NEEDED_BASE_FLAVORS["${flavor}"]=1
+        [[ "${flavor}" == "cuda" ]] && needs_gpu=1
+    fi
 done
-if [[ "${COMMAND_PRE}" == "test" ]]; then
-    needs_dev=1
-fi
+
+# Force dev compose for `test` (tests run in dev containers).
+COMMAND_PRE="${1:-}"
+[[ "${COMMAND_PRE}" == "test" ]] && needs_dev=1
 
 if [[ "${GPU_AVAILABLE:-false}" == "true" && ${needs_gpu} -eq 1 ]]; then
     COMPOSE_FILES+=("-f" "${MODULES_DIR}/docker-compose.gpu.yaml")
@@ -169,29 +169,35 @@ if [[ ${needs_dev} -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Build the --profile arg list — one profile per active component (plus its
-# _dev variant if requested).  docker-compose.infra.yaml is stacked but holds
-# no services today; future shared services can opt in via their own profile.
+# Profile arg list — one per active module (+ _dev variant if requested).
 # ---------------------------------------------------------------------------
 declare -a PROFILE_ARGS=()
-for s in "${COMPONENTS_EXPANDED[@]}"; do
+declare -a SELECTED_SERVICES=()
+for s in "${MODULES_EXPANDED[@]}"; do
     base="${s%%:*}"
     PROFILE_ARGS+=("--profile" "${base}")
     if [[ "${s}" == *":dev" ]]; then
         PROFILE_ARGS+=("--profile" "${base}_dev")
+        SELECTED_SERVICES+=("${base}_dev")
+    else
+        SELECTED_SERVICES+=("${base}")
     fi
 done
 
 export COMPOSE_FILES_STR="${COMPOSE_FILES[*]}"
 export PROFILE_ARGS_STR="${PROFILE_ARGS[*]}"
+export SELECTED_SERVICES_STR="${SELECTED_SERVICES[*]}"
 
 # ---------------------------------------------------------------------------
-# Command dispatch.
+# Command dispatch.  `build` and `up` go through watod-compose.sh, which
+# mirrors the monorepo: pull base images from the registry on build.  Locals
+# never build bases — CI publishes them.  For first-time setup before CI
+# has published, run `watod build-base` once to seed the bases locally.
 # ---------------------------------------------------------------------------
 COMMAND="${1:-}"
 shift || true
 
-# -t shortcut: open a shell.
+# -t shortcut: open a shell in a running container.
 if [[ -n "${TERMINAL}" ]]; then
     exec docker compose --env-file "${MODULES_DIR}/.env" "${COMPOSE_FILES[@]}" \
         "${PROFILE_ARGS[@]}" exec "${TERMINAL}" bash
@@ -204,17 +210,28 @@ case "${COMMAND}" in
     install)
         exec bash "${SCRIPTS_DIR}/watod-install.sh" "$@"
         ;;
+    build-base)
+        # Local fallback: build the base images that CI would normally publish
+        # to ghcr.  Run once on a fresh clone if `watod build` reports the
+        # base image is missing.
+        exec bash "${SCRIPTS_DIR}/watod-build-base.sh" "$@"
+        ;;
+    up)
+        # Default to detached mode and only the active modules' services.
+        if [[ $# -eq 0 ]]; then
+            exec bash "${SCRIPTS_DIR}/watod-compose.sh" up -d "${SELECTED_SERVICES[@]}"
+        else
+            exec bash "${SCRIPTS_DIR}/watod-compose.sh" up "$@"
+        fi
+        ;;
     run)
         exec bash "${SCRIPTS_DIR}/watod-run.sh" "$@"
-        ;;
-    bag)
-        exec bash "${SCRIPTS_DIR}/watod-bag.sh" "$@"
         ;;
     test)
         exec bash "${SCRIPTS_DIR}/watod-test.sh" "$@"
         ;;
     *)
-        # Passthrough to docker compose with the assembled file + profile args.
+        # Passthrough — `build`, `ps`, `logs`, `pull`, `down`, `exec`, ...
         exec bash "${SCRIPTS_DIR}/watod-compose.sh" "${COMMAND}" "$@"
         ;;
 esac

@@ -1,8 +1,13 @@
-# CPU base image for CPU components.
+# CPU base injection.  Mirrors wato_monorepo/docker/base/inject_*.Dockerfile:
+# takes a generic external image via ARG GENERIC_IMAGE and adds the wato_world
+# Python toolchain (python3 + uv) on top.
+#
 # Built and pushed by .github/workflows/build_base_images.yml as
-# ${REGISTRY}/base:cpu-${UBUNTU_TAG}.
+# ${REGISTRY}/base:cpu-ubuntu24.04 .  For local-only first-time setup, run
+# `watod build-base cpu` to build it locally with the same tag.
 
-FROM ubuntu:24.04
+ARG GENERIC_IMAGE=ubuntu:24.04
+FROM ${GENERIC_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -11,12 +16,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3.11 python3.11-dev python3.11-venv python3-pip \
+        python3 python3-dev python3-venv python3-pip \
         git curl ca-certificates build-essential cmake ninja-build pkg-config \
         libgl1 libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/* \
-    && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+    && rm -rf /var/lib/apt/lists/*
 
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 

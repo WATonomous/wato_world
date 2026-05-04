@@ -35,41 +35,29 @@ storage_id: mcap
 topics:
   # Each camera gets two topics: the image stream + its CameraInfo (intrinsics,
   # distortion, dimensions, frame_id).  Ingest auto-builds calibration.json
-  # from the first CameraInfo per camera + /tf_static.
+  # from the first CameraInfo per camera + the configured TFMessage topic.
   cameras:
-    CAM_LOWER_NE: { image: /camera_lower_ne/image_rect_compressed, info: /camera_lower_ne/camera_info }
-    CAM_LOWER_NW: { image: /camera_lower_nw/image_rect_compressed, info: /camera_lower_nw/camera_info }
-    CAM_LOWER_SE: { image: /camera_lower_se/image_rect_compressed, info: /camera_lower_se/camera_info }
-    CAM_LOWER_SW: { image: /camera_lower_sw/image_rect_compressed, info: /camera_lower_sw/camera_info }
-    CAM_PANO_NN:  { image: /camera_pano_nn/image_rect_compressed,  info: /camera_pano_nn/camera_info  }
-    CAM_PANO_NE:  { image: /camera_pano_ne/image_rect_compressed,  info: /camera_pano_ne/camera_info  }
-    CAM_PANO_EE:  { image: /camera_pano_ee/image_rect_compressed,  info: /camera_pano_ee/camera_info  }
-    CAM_PANO_SE:  { image: /camera_pano_se/image_rect_compressed,  info: /camera_pano_se/camera_info  }
-    CAM_PANO_SS:  { image: /camera_pano_ss/image_rect_compressed,  info: /camera_pano_ss/camera_info  }
-    CAM_PANO_SW:  { image: /camera_pano_sw/image_rect_compressed,  info: /camera_pano_sw/camera_info  }
-    CAM_PANO_WW:  { image: /camera_pano_ww/image_rect_compressed,  info: /camera_pano_ww/camera_info  }
-    CAM_PANO_NW:  { image: /camera_pano_nw/image_rect_compressed,  info: /camera_pano_nw/camera_info  }
+    CAM_FRONT:       { image: /CAM_FRONT/image_rect_compressed,       info: /CAM_FRONT/camera_info       }
+    CAM_FRONT_LEFT:  { image: /CAM_FRONT_LEFT/image_rect_compressed,  info: /CAM_FRONT_LEFT/camera_info  }
+    CAM_FRONT_RIGHT: { image: /CAM_FRONT_RIGHT/image_rect_compressed, info: /CAM_FRONT_RIGHT/camera_info }
+    CAM_BACK:        { image: /CAM_BACK/image_rect_compressed,        info: /CAM_BACK/camera_info        }
+    CAM_BACK_LEFT:   { image: /CAM_BACK_LEFT/image_rect_compressed,   info: /CAM_BACK_LEFT/camera_info   }
+    CAM_BACK_RIGHT:  { image: /CAM_BACK_RIGHT/image_rect_compressed,  info: /CAM_BACK_RIGHT/camera_info  }
   lidars:
-    LIDAR_CC: /lidar_cc/velodyne_points
-  # /tf_static carries rigid extrinsics (ego_T_cam, ego_T_lidar).  Ingest reads
-  # this once at bag scope to populate calibration.json automatically.
-  tf_static: /tf_static
-  # Pose comes from eidos (factor-graph SLAM in wato_monorepo/src/world_modeling/eidos).
-  # eidos publishes nav_msgs/Odometry on slam/odometry, in the map frame with
-  # base_footprint as the ego frame, stamped at the LiDAR keyframe sensor time
-  # (NOT wall clock).  Do not consume /tf — eidos doesn't publish it; that's
-  # eidos_transform's job and is wrong for offline auto-labeling.
-  #
-  # If the bag predates eidos integration, run eidos against the bag first to
-  # produce this topic, OR set this to /novatel/oem7/odom as a temporary
-  # raw-INS fallback (degraded accuracy — no SLAM optimization or loop closure).
-  pose: /world_modeling/eidos_node/slam/odometry
+    LIDAR_TOP: /LIDAR_TOP
+  # The nuScenes rosbag provides TFMessage data on /tf rather than /tf_static.
+  # Ingest reads the first transform per parent/child pair at bag scope to
+  # populate calibration.json automatically.
+  tf_static: /tf
+  # nuScenes provides nav_msgs/Odometry on /odom in the map frame with
+  # child_frame_id=base_link.
+  pose: /odom
 
 # ---------------------------------------------------------------------------
 # Ego frame name used as the TF parent when resolving ego_T_cam / ego_T_lidar
-# from /tf_static.  Eidos publishes pose with child_frame_id=base_footprint.
+# from the configured TFMessage topic.
 # ---------------------------------------------------------------------------
-ego_frame: base_footprint
+ego_frame: base_link
 
 # ---------------------------------------------------------------------------
 # Per-chunk quality thresholds — drive the tags emitted in quality.json.

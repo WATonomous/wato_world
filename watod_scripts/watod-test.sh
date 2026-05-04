@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run pytest inside a component's dev container.  Usage:
-#   watod test [component] [pytest_args...]
+# Run pytest inside a module's dev container.  Usage:
+#   watod test [module] [pytest_args...]
 
 set -euo pipefail
 
@@ -10,23 +10,23 @@ set -euo pipefail
 # shellcheck disable=SC2206
 COMPOSE_FILES=(${COMPOSE_FILES_STR})
 
-COMPONENT="${1:-}"
+MODULE="${1:-}"
 shift || true
 
-if [[ -z "${COMPONENT}" ]]; then
-    echo "Usage: watod test <component> [pytest_args...]" >&2
+if [[ -z "${MODULE}" ]]; then
+    echo "Usage: watod test <module> [pytest_args...]" >&2
     exit 64
 fi
 
-normalize_component() {
+normalize_module() {
     echo "$1"
 }
 
-TARGET="$(normalize_component "${COMPONENT}")"
+TARGET="$(normalize_module "${MODULE}")"
 case "${TARGET}" in
     ingest|perception_2d|lidar_preprocessing|proposal_generation|tracking|label_refinement|open_vocab_discovery|student_training) ;;
     *)
-    echo "Unknown component: ${COMPONENT}" >&2
+    echo "Unknown module: ${MODULE}" >&2
     exit 64
     ;;
 esac
