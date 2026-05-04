@@ -51,8 +51,6 @@ topics:
     CAM_PANO_NW:  { image: /camera_pano_nw/image_rect_compressed,  info: /camera_pano_nw/camera_info  }
   lidars:
     LIDAR_CC: /lidar_cc/velodyne_points
-    LIDAR_NE: /lidar_ne/velodyne_points
-    LIDAR_NW: /lidar_nw/velodyne_points
   # /tf_static carries rigid extrinsics (ego_T_cam, ego_T_lidar).  Ingest reads
   # this once at bag scope to populate calibration.json automatically.
   tf_static: /tf_static

@@ -25,6 +25,7 @@ http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME
         > /etc/apt/sources.list.d/ros2.list \
     && apt-get update && apt-get install -y --no-install-recommends \
         ros-jazzy-ros-base ros-jazzy-rosbag2 ros-jazzy-rosbag2-py \
+        ros-jazzy-rosbag2-storage-mcap \
         ros-jazzy-sensor-msgs ros-jazzy-geometry-msgs ros-jazzy-nav-msgs \
     && rm -rf /var/lib/apt/lists/*
 
