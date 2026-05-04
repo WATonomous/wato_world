@@ -1,10 +1,8 @@
 # Per-component hyperparameters. Loaded by each component's config.py via Pydantic.
-
-ingest:
-  chunk_seconds: 30
-  reference_clock: lidar
-  max_cam_offset_ms: 50
-  upstream_versions: {}
+#
+# NOTE: each component owns its own YAML inside src/<component>/config/.
+# Ingest, for example, lives entirely in src/ingest/config/ingest.yaml.
+# This file is kept temporarily for the components that haven't migrated yet.
 
 perception_2d:
   detector: grounding_dino           # or "yolo_world"

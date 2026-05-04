@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# One-shot component runner.  Usage:
-#   watod run <component> <bag-or-bag-id> [chunk_id]
-# Runs the requested component in a fresh container, with artifacts/bags bind-mounted.
+# One-shot module runner.  Usage:
+#   watod run <module> <bag-or-bag-id> [chunk_id]
+# Runs the requested module in a fresh container, with artifacts/bags bind-mounted.
 
 set -euo pipefail
 
@@ -9,19 +9,19 @@ set -euo pipefail
 : "${COMPOSE_FILES_STR:?COMPOSE_FILES_STR must be set}"
 
 if [[ $# -lt 2 ]]; then
-    echo "Usage: watod run <component> <bag-or-bag-id> [chunk_id]" >&2
+    echo "Usage: watod run <module> <bag-or-bag-id> [chunk_id]" >&2
     exit 64
 fi
 
-COMPONENT="$1"
+MODULE="$1"
 BAG="$2"
 CHUNK_ID="${3:-}"
 
-normalize_component() {
+normalize_module() {
     echo "$1"
 }
 
-TARGET="$(normalize_component "${COMPONENT}")"
+TARGET="$(normalize_module "${MODULE}")"
 
 case "${TARGET}" in
     ingest)               SERVICE="ingest";               PKG="wato_ingest"  ;;
@@ -33,7 +33,7 @@ case "${TARGET}" in
     open_vocab_discovery) SERVICE="open_vocab_discovery"; PKG="wato_open_vocab_discovery" ;;
     student_training)     SERVICE="student_training";     PKG="wato_student_training"  ;;
     *)
-        echo "Unknown component: ${COMPONENT}" >&2
+        echo "Unknown module: ${MODULE}" >&2
         exit 64
         ;;
 esac
@@ -49,5 +49,5 @@ fi
 exec docker compose \
     --env-file "${WATO_WORLD_DIR}/modules/.env" \
     "${COMPOSE_FILES[@]}" \
-    --profile "${TARGET}" --profile "infra" \
+    --profile "${TARGET}" \
     run --rm "${SERVICE}" python -m "${PKG}" "${ARGS[@]}"

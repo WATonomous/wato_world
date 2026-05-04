@@ -1,13 +1,17 @@
-"""Ingest CLI. Subcommands match the architecture document's recipe.
+"""Command line entrypoint for the ingest component.
 
-  watod run ingest <bag>               → full pass
-  python -m wato_ingest inspect-bag    → dump topics + duration
-  python -m wato_ingest split          → write chunks/index.parquet
-  python -m wato_ingest decode-chunk   → cameras + LiDAR + poses for one chunk
-  python -m wato_ingest build-frame-index
-  python -m wato_ingest quality
-  python -m wato_ingest freeze-calibration
-  python -m wato_ingest run            → full pass (register + chunk + per-chunk decode/index/quality)
+Primary path:
+  python -m wato_ingest run --bag <bag_path>
+
+Debug and rerun commands:
+  inspect-bag         Read topics and duration without writing artifacts.
+  register            Write bag-level metadata.
+  freeze-calibration  Copy authored calibration into the artifact tree.
+  split               Compute virtual chunk windows.
+  decode-chunk        Decode camera, LiDAR, and pose rows for one chunk.
+  build-frame-index   Join LiDAR sweeps to nearest camera frames and poses.
+  quality             Compute per-chunk quality metrics and tags.
+  manifest            Write per-chunk traceability metadata.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ import sys
 
 import click
 
-from wato_ingest import runner
+from wato_ingest import pipeline
 from wato_ingest.artifacts import frame_index, manifest, quality
 from wato_ingest.config import load_config
 from wato_ingest.decoders import cameras, lidar, poses
@@ -29,7 +33,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 @click.group()
 def main() -> None:
-    """Ingest — rosbag ingest (frames, LiDAR, poses, frame_index)."""
+    """Ingest: rosbag ingest for frames, LiDAR, poses, and frame_index."""
 
 
 # ---------------------------------------------------------------------------
@@ -66,11 +70,27 @@ def register_cmd(bag_path: str, bag_id: str | None, storage_id: str) -> None:
 # ---------------------------------------------------------------------------
 @main.command("freeze-calibration")
 @click.option("--bag-id", required=True)
-@click.option("--from-file", "source_path", required=True, type=click.Path(exists=True))
+@click.option("--bag", "bag_path", default=None, type=click.Path(exists=True),
+              help="Auto-extract from this bag (CameraInfo + /tf_static).")
+@click.option("--from-file", "source_path", default=None, type=click.Path(exists=True),
+              help="Override: copy this authored calibration JSON in instead.")
+@click.option("--config", "config_path", default="/ws/src/ingest/config/ingest.yaml")
 @click.option("--version", default=None)
-def freeze_calibration_cmd(bag_id: str, source_path: str, version: str | None) -> None:
-    """Copy an authored calibration JSON into raw/<bag_id>/calibration.json."""
-    uri = calibration.freeze_from_file(bag_id, source_path, version=version)
+def freeze_calibration_cmd(
+    bag_id: str,
+    bag_path: str | None,
+    source_path: str | None,
+    config_path: str,
+    version: str | None,
+) -> None:
+    """Build raw/<bag_id>/calibration.json from the bag (default) or a file (override)."""
+    if source_path is not None:
+        uri = calibration.freeze_from_file(bag_id, source_path, version=version)
+    elif bag_path is not None:
+        cfg = load_config(config_path)
+        uri = calibration.freeze_from_bag(bag_path, bag_id, cfg)
+    else:
+        raise click.UsageError("provide either --bag (auto-extract) or --from-file (override)")
     click.echo(uri)
 
 
@@ -78,7 +98,7 @@ def freeze_calibration_cmd(bag_id: str, source_path: str, version: str | None) -
 @main.command("split")
 @click.option("--bag", "bag_path", required=True, type=click.Path(exists=True))
 @click.option("--bag-id", required=True)
-@click.option("--config", "config_path", default="/config/pipeline.yaml")
+@click.option("--config", "config_path", default="/ws/src/ingest/config/ingest.yaml")
 def split_cmd(bag_path: str, bag_id: str, config_path: str) -> None:
     """Compute virtual chunks and write chunks/index.parquet."""
     cfg = load_config(config_path)
@@ -92,7 +112,7 @@ def split_cmd(bag_path: str, bag_id: str, config_path: str) -> None:
 @click.option("--bag", "bag_path", required=True, type=click.Path(exists=True))
 @click.option("--bag-id", required=True)
 @click.option("--chunk-id", required=True)
-@click.option("--config", "config_path", default="/config/pipeline.yaml")
+@click.option("--config", "config_path", default="/ws/src/ingest/config/ingest.yaml")
 def decode_chunk_cmd(bag_path: str, bag_id: str, chunk_id: str, config_path: str) -> None:
     """Decode cameras + LiDAR + poses for a single chunk."""
     cfg = load_config(config_path)
@@ -129,9 +149,9 @@ def decode_chunk_cmd(bag_path: str, bag_id: str, chunk_id: str, config_path: str
 @main.command("build-frame-index")
 @click.option("--bag-id", required=True)
 @click.option("--chunk-id", required=True)
-@click.option("--config", "config_path", default="/config/pipeline.yaml")
+@click.option("--config", "config_path", default="/ws/src/ingest/config/ingest.yaml")
 def build_frame_index_cmd(bag_id: str, chunk_id: str, config_path: str) -> None:
-    """Match LiDAR sweeps ↔ nearest camera frame per camera + interpolate poses."""
+    """Match LiDAR sweeps to nearest camera frame per camera and interpolate poses."""
     cfg = load_config(config_path)
     result = frame_index.build(
         bag_id, chunk_id, max_cam_offset_ms=cfg.max_cam_offset_ms,
@@ -148,7 +168,7 @@ def build_frame_index_cmd(bag_id: str, chunk_id: str, config_path: str) -> None:
 @main.command("quality")
 @click.option("--bag-id", required=True)
 @click.option("--chunk-id", required=True)
-@click.option("--config", "config_path", default="/config/pipeline.yaml")
+@click.option("--config", "config_path", default="/ws/src/ingest/config/ingest.yaml")
 def quality_cmd(bag_id: str, chunk_id: str, config_path: str) -> None:
     """Compute per-chunk metrics + tags from the existing artifacts."""
     cfg = load_config(config_path)
@@ -161,7 +181,7 @@ def quality_cmd(bag_id: str, chunk_id: str, config_path: str) -> None:
 @click.option("--bag", "bag_path", required=True, type=click.Path(exists=True))
 @click.option("--bag-id", required=True)
 @click.option("--chunk-id", required=True)
-@click.option("--config", "config_path", default="/config/pipeline.yaml")
+@click.option("--config", "config_path", default="/ws/src/ingest/config/ingest.yaml")
 def manifest_cmd(bag_path: str, bag_id: str, chunk_id: str, config_path: str) -> None:
     """Write the per-chunk manifest.json."""
     uri = manifest.write(
@@ -178,7 +198,7 @@ def manifest_cmd(bag_path: str, bag_id: str, chunk_id: str, config_path: str) ->
               help="Process only this chunk_id (default: all chunks).")
 @click.option("--calibration", "calib_source", default=None, type=click.Path(),
               help="Path to a pre-authored calibration.json to freeze.")
-@click.option("--config", "config_path", default="/config/pipeline.yaml")
+@click.option("--config", "config_path", default="/ws/src/ingest/config/ingest.yaml")
 def run_cmd(
     bag_path: str,
     bag_id: str | None,
@@ -188,7 +208,7 @@ def run_cmd(
 ) -> None:
     """Full pass: register, validate, chunk, decode, frame-index, quality, manifest."""
     cfg = load_config(config_path)
-    results = runner.run_bag(
+    results = pipeline.run_bag(
         bag_path=bag_path,
         cfg=cfg,
         config_path=config_path,

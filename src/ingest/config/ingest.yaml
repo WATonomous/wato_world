@@ -1,0 +1,70 @@
+# wato_ingest configuration.
+#
+# This file is the single source of truth for ingest's parameters.  It is
+# loaded by `wato_ingest.config.load_config()` (called from cli.py).
+#
+# Edit these values per recording — especially the `topics` map, which depends
+# on how the bag was recorded.  Override per host/run with --config path/to/other.yaml.
+
+# ---------------------------------------------------------------------------
+# Chunking — virtual time windows over the bag.  No physical splitting.
+# ---------------------------------------------------------------------------
+chunk_seconds: 30.0          # window length
+chunk_overlap_seconds: 2.0   # overlap with neighbors so tracks can be stitched
+reference_clock: lidar       # which sensor stream defines a "frame"
+
+# ---------------------------------------------------------------------------
+# Time alignment — used by artifacts/frame_index.py.
+# ---------------------------------------------------------------------------
+max_cam_offset_ms: 50.0      # drop a (sweep, cam) row if the camera frame is
+                             # more than this far from the LiDAR sweep timestamp
+
+# ---------------------------------------------------------------------------
+# rosbag2 storage backend.  Usually "sqlite3"; "mcap" if the bag was recorded
+# with the MCAP plugin.
+# ---------------------------------------------------------------------------
+storage_id: mcap
+
+# ---------------------------------------------------------------------------
+# Topic mapping.  LEFT side is the logical name ingest uses for outputs
+# (cam_<id>/, lidar_<id>/, etc.).  RIGHT side is the actual topic in the bag.
+#
+# If your recording uses different topic names, edit this section — no Python
+# change required.
+# ---------------------------------------------------------------------------
+topics:
+  # Each camera gets two topics: the image stream + its CameraInfo (intrinsics,
+  # distortion, dimensions, frame_id).  Ingest auto-builds calibration.json
+  # from the first CameraInfo per camera + the configured TFMessage topic.
+  cameras:
+    CAM_FRONT:       { image: /CAM_FRONT/image_rect_compressed,       info: /CAM_FRONT/camera_info       }
+    CAM_FRONT_LEFT:  { image: /CAM_FRONT_LEFT/image_rect_compressed,  info: /CAM_FRONT_LEFT/camera_info  }
+    CAM_FRONT_RIGHT: { image: /CAM_FRONT_RIGHT/image_rect_compressed, info: /CAM_FRONT_RIGHT/camera_info }
+    CAM_BACK:        { image: /CAM_BACK/image_rect_compressed,        info: /CAM_BACK/camera_info        }
+    CAM_BACK_LEFT:   { image: /CAM_BACK_LEFT/image_rect_compressed,   info: /CAM_BACK_LEFT/camera_info   }
+    CAM_BACK_RIGHT:  { image: /CAM_BACK_RIGHT/image_rect_compressed,  info: /CAM_BACK_RIGHT/camera_info  }
+  lidars:
+    LIDAR_TOP: /LIDAR_TOP
+  # The nuScenes rosbag provides TFMessage data on /tf rather than /tf_static.
+  # Ingest reads the first transform per parent/child pair at bag scope to
+  # populate calibration.json automatically.
+  tf_static: /tf
+  # nuScenes provides nav_msgs/Odometry on /odom in the map frame with
+  # child_frame_id=base_link.
+  pose: /odom
+
+# ---------------------------------------------------------------------------
+# Ego frame name used as the TF parent when resolving ego_T_cam / ego_T_lidar
+# from the configured TFMessage topic.
+# ---------------------------------------------------------------------------
+ego_frame: base_link
+
+# ---------------------------------------------------------------------------
+# Per-chunk quality thresholds — drive the tags emitted in quality.json.
+# ---------------------------------------------------------------------------
+quality_thresholds:
+  low_light_v_max:           50.0    # mean V (HSV) below this → LOW_LIGHT
+  stationary_speed_mps:       0.5    # mean ego speed below this → STATIONARY
+  min_pose_availability:      0.95   # frame_index pose-valid fraction below this → POSE_MISSING
+  max_camera_drop_fraction:   0.10   # fraction of dropped (sweep, cam) rows above this → CAMERA_DROPS
+  min_lidar_points:       10000      # any sweep below this → LOW_LIDAR_POINTS
