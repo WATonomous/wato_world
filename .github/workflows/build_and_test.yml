@@ -36,13 +36,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build develop target
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.component.dockerfile }}
           target: develop
           load: true
           tags: wato-world-${{ matrix.component.name }}:test
+          provenance: false
           cache-from: type=gha,scope=${{ matrix.component.name }}
           cache-to: type=gha,scope=${{ matrix.component.name }},mode=max
 

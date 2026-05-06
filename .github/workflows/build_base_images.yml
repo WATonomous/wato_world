@@ -40,11 +40,19 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.dockerfile }}
           push: true
           tags: ghcr.io/${{ steps.repo.outputs.lower }}/base:${{ matrix.tag }}
+          # OCI source label auto-links the ghcr package to this repo, which is
+          # what grants the build_and_test workflow's GITHUB_TOKEN
+          # (packages: read) permission to pull these bases. Without this, the
+          # package exists "orphaned" and downstream workflows hit
+          # 403 Forbidden on the anonymous token endpoint.
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          provenance: false
           cache-from: type=gha,scope=base-${{ matrix.flavor }}
           cache-to: type=gha,scope=base-${{ matrix.flavor }},mode=max
