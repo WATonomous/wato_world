@@ -49,9 +49,7 @@ def run_bag(
     bag_id = meta.bag_id
     log.info("registered bag_id=%s duration=%.1fs", bag_id, meta.duration_s)
 
-    topic_check = topics.validate(
-        {t: "" for t in meta.topics}, cfg
-    )
+    topic_check = topics.validate({t: "" for t in meta.topics}, cfg)
     if not topic_check.ok:
         raise RuntimeError(
             f"bag {bag_id} missing topics required by ingest: {topic_check.missing}"
@@ -80,20 +78,34 @@ def run_bag(
     for c in chunk_rows:
         log.info("processing chunk %s", c.chunk_id)
         cameras.decode_chunk(
-            bag_path, bag_id, c.chunk_id,
-            t_start_ns=c.t_overlap_start_ns, t_end_ns=c.t_overlap_end_ns, cfg=cfg,
+            bag_path,
+            bag_id,
+            c.chunk_id,
+            t_start_ns=c.t_overlap_start_ns,
+            t_end_ns=c.t_overlap_end_ns,
+            cfg=cfg,
         )
         lidar.decode_chunk(
-            bag_path, bag_id, c.chunk_id,
-            t_start_ns=c.t_overlap_start_ns, t_end_ns=c.t_overlap_end_ns, cfg=cfg,
+            bag_path,
+            bag_id,
+            c.chunk_id,
+            t_start_ns=c.t_overlap_start_ns,
+            t_end_ns=c.t_overlap_end_ns,
+            cfg=cfg,
         )
         poses.extract(
-            bag_path, bag_id, c.chunk_id,
-            t_start_ns=c.t_overlap_start_ns, t_end_ns=c.t_overlap_end_ns, cfg=cfg,
+            bag_path,
+            bag_id,
+            c.chunk_id,
+            t_start_ns=c.t_overlap_start_ns,
+            t_end_ns=c.t_overlap_end_ns,
+            cfg=cfg,
         )
 
         frame_index_result = frame_index.build(
-            bag_id, c.chunk_id, max_cam_offset_ms=cfg.max_cam_offset_ms,
+            bag_id,
+            c.chunk_id,
+            max_cam_offset_ms=cfg.max_cam_offset_ms,
         )
         report = quality.compute(bag_id, c.chunk_id, cfg)
 
@@ -105,10 +117,10 @@ def run_bag(
             extra={
                 "topic_check": {
                     "found_camera_images": topic_check.found_camera_image_topics,
-                    "found_camera_infos":  topic_check.found_camera_info_topics,
-                    "found_lidars":        topic_check.found_lidar_topics,
-                    "found_pose":          topic_check.found_pose_topics,
-                    "found_tf_static":     topic_check.found_tf_static_topics,
+                    "found_camera_infos": topic_check.found_camera_info_topics,
+                    "found_lidars": topic_check.found_lidar_topics,
+                    "found_pose": topic_check.found_pose_topics,
+                    "found_tf_static": topic_check.found_tf_static_topics,
                 },
                 "frame_index_summary": {
                     "rows": frame_index_result.rows_written,
@@ -118,13 +130,15 @@ def run_bag(
             },
         )
 
-        results.append(ChunkRunResult(
-            bag_id=bag_id,
-            chunk_id=c.chunk_id,
-            quality_tags=report.tags,
-            valid_camera_count=frame_index_result.valid_camera_count,
-            dropped_camera_count=frame_index_result.dropped_camera_count,
-        ))
+        results.append(
+            ChunkRunResult(
+                bag_id=bag_id,
+                chunk_id=c.chunk_id,
+                quality_tags=report.tags,
+                valid_camera_count=frame_index_result.valid_camera_count,
+                dropped_camera_count=frame_index_result.dropped_camera_count,
+            )
+        )
 
     return results
 

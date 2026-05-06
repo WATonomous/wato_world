@@ -60,14 +60,16 @@ def _compute_chunks(
         ov_start = max(starting_time_ns, t_start - overlap_ns)
         # Overlap with next: 2 s after t_end (clamped to bag end).
         ov_end = min(end_ns, t_end + overlap_ns)
-        chunks.append(ChunkRow(
-            bag_id=bag_id,
-            chunk_id=chunk_id_for(idx),
-            t_start_ns=t_start,
-            t_end_ns=t_end,
-            t_overlap_start_ns=ov_start,
-            t_overlap_end_ns=ov_end,
-        ))
+        chunks.append(
+            ChunkRow(
+                bag_id=bag_id,
+                chunk_id=chunk_id_for(idx),
+                t_start_ns=t_start,
+                t_end_ns=t_end,
+                t_overlap_start_ns=ov_start,
+                t_overlap_end_ns=ov_end,
+            )
+        )
         if t_end >= end_ns:
             break
         idx += 1

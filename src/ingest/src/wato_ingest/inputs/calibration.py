@@ -47,7 +47,7 @@ from wato_common.artifact_store import (
     ensure_local_dir,
     local_path,
 )
-from wato_common.geometry import flatten_se3, make_se3
+from wato_common.geometry import make_se3
 from wato_common.io.rosbag_reader import messages
 
 from wato_ingest.config import IngestConfig
@@ -56,6 +56,7 @@ from wato_ingest.config import IngestConfig
 # ---------------------------------------------------------------------------
 # Pure-logic builder — exposed for unit tests.
 # ---------------------------------------------------------------------------
+
 
 def build_calibration_dict(
     *,
@@ -87,7 +88,9 @@ def build_calibration_dict(
         frame_id = info["frame_id"]
         ego_T_cam = _resolve_chain(static_transforms, ego_frame, frame_id)
         if ego_T_cam is None:
-            notes.append(f"camera {cam_id}: no /tf_static path {ego_frame} -> {frame_id}")
+            notes.append(
+                f"camera {cam_id}: no /tf_static path {ego_frame} -> {frame_id}"
+            )
         K_3x3 = np.asarray(info["K"], dtype=np.float64).reshape(3, 3).tolist()
         calib["cameras"][cam_id] = {
             "frame_id": frame_id,
@@ -102,7 +105,9 @@ def build_calibration_dict(
     for lidar_id, frame_id in lidar_frame_ids.items():
         ego_T_lidar = _resolve_chain(static_transforms, ego_frame, frame_id)
         if ego_T_lidar is None:
-            notes.append(f"lidar {lidar_id}: no /tf_static path {ego_frame} -> {frame_id}")
+            notes.append(
+                f"lidar {lidar_id}: no /tf_static path {ego_frame} -> {frame_id}"
+            )
         calib["lidars"][lidar_id] = {
             "frame_id": frame_id,
             "ego_T_lidar": ego_T_lidar.tolist() if ego_T_lidar is not None else None,
@@ -155,6 +160,7 @@ def _resolve_chain(
 # Bag-reading wrapper.  Uses the rosbag2 reader; not unit-testable directly.
 # ---------------------------------------------------------------------------
 
+
 def freeze_from_bag(bag_path: str, bag_id: str, cfg: IngestConfig) -> str:
     """Auto-build calibration.json from the bag's CameraInfo + tf_static.
 
@@ -166,7 +172,9 @@ def freeze_from_bag(bag_path: str, bag_id: str, cfg: IngestConfig) -> str:
     Writes raw/<bag_id>/calibration.json and returns its URI.
     """
     info_topic_to_cam = {c.info: cam_id for cam_id, c in cfg.topics.cameras.items()}
-    lidar_topic_to_id = {topic: lidar_id for lidar_id, topic in cfg.topics.lidars.items()}
+    lidar_topic_to_id = {
+        topic: lidar_id for lidar_id, topic in cfg.topics.lidars.items()
+    }
     needed_camera_ids = set(info_topic_to_cam.values())
     needed_lidar_ids = set(lidar_topic_to_id.values())
 
@@ -181,7 +189,9 @@ def freeze_from_bag(bag_path: str, bag_id: str, cfg: IngestConfig) -> str:
         + [cfg.topics.tf_static]
     )
 
-    with messages(bag_path, storage_id=cfg.storage_id, topics=topics_to_read) as iterator:
+    with messages(
+        bag_path, storage_id=cfg.storage_id, topics=topics_to_read
+    ) as iterator:
         for topic, msg, _ts in iterator:
             mt = type(msg).__name__
             if mt == "CameraInfo":
@@ -244,7 +254,10 @@ def _transform_se3(transform) -> np.ndarray:
 # or wrong and you want to substitute an authored calibration).
 # ---------------------------------------------------------------------------
 
-def freeze_from_file(bag_id: str, source_path: str, *, version: str | None = None) -> str:
+
+def freeze_from_file(
+    bag_id: str, source_path: str, *, version: str | None = None
+) -> str:
     """Copy an authored calibration JSON to the bag's artifact root."""
     with open(source_path, "r", encoding="utf-8") as fh:
         calib = json.load(fh)

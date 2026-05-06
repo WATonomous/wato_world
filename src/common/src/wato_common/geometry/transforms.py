@@ -18,11 +18,13 @@ def quat_to_matrix(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
     xx, yy, zz = qx * qx * s, qy * qy * s, qz * qz * s
     xy, xz, yz = qx * qy * s, qx * qz * s, qy * qz * s
     wx, wy, wz = qw * qx * s, qw * qy * s, qw * qz * s
-    return np.array([
-        [1.0 - (yy + zz), xy - wz,         xz + wy],
-        [xy + wz,         1.0 - (xx + zz), yz - wx],
-        [xz - wy,         yz + wx,         1.0 - (xx + yy)],
-    ])
+    return np.array(
+        [
+            [1.0 - (yy + zz), xy - wz, xz + wy],
+            [xy + wz, 1.0 - (xx + zz), yz - wx],
+            [xz - wy, yz + wx, 1.0 - (xx + yy)],
+        ]
+    )
 
 
 def matrix_to_quat(R: np.ndarray) -> tuple[float, float, float, float]:
@@ -55,7 +57,9 @@ def matrix_to_quat(R: np.ndarray) -> tuple[float, float, float, float]:
     return float(qx), float(qy), float(qz), float(qw)
 
 
-def make_se3(translation: np.ndarray, quat_xyzw: np.ndarray | tuple[float, ...]) -> np.ndarray:
+def make_se3(
+    translation: np.ndarray, quat_xyzw: np.ndarray | tuple[float, ...]
+) -> np.ndarray:
     """Compose a 4x4 transform from a 3-vector and an xyzw quaternion."""
     qx, qy, qz, qw = quat_xyzw
     T = np.eye(4)

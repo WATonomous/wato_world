@@ -30,7 +30,7 @@ def test_slerp_halfway_between_0_and_pi_yaw():
 
 def test_interpolate_translation_is_linear():
     samples = [
-        PoseSample(0,           np.array([0.0, 0.0, 0.0]), _identity_quat()),
+        PoseSample(0, np.array([0.0, 0.0, 0.0]), _identity_quat()),
         PoseSample(1_000_000_000, np.array([10.0, 0.0, 0.0]), _identity_quat()),
     ]
     T, err = interpolate_pose(samples, 500_000_000)

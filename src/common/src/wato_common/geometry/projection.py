@@ -34,8 +34,6 @@ def project_points(
 
     if image_size is not None:
         w, h = image_size
-        valid &= (
-            (pix[:, 0] >= 0) & (pix[:, 0] < w) & (pix[:, 1] >= 0) & (pix[:, 1] < h)
-        )
+        valid &= (pix[:, 0] >= 0) & (pix[:, 0] < w) & (pix[:, 1] >= 0) & (pix[:, 1] < h)
 
     return pix, valid

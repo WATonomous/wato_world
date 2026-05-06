@@ -42,11 +42,18 @@ def compute(bag_id: str, chunk_id: str, cfg: IngestConfig) -> QualityReport:
     if frames:
         invalid = sum(1 for f in frames if not f["valid_camera"])
         metrics["camera_drop_fraction"] = invalid / len(frames)
-        if metrics["camera_drop_fraction"] > cfg.quality_thresholds["max_camera_drop_fraction"]:
+        if (
+            metrics["camera_drop_fraction"]
+            > cfg.quality_thresholds["max_camera_drop_fraction"]
+        ):
             tags.append("CAMERA_DROPS")
 
     # ---- camera-LiDAR offset stats (only over valid rows). ------------------
-    offsets = [f["camera_offset_ms"] for f in frames if f["valid_camera"] and f["camera_offset_ms"] is not None]
+    offsets = [
+        f["camera_offset_ms"]
+        for f in frames
+        if f["valid_camera"] and f["camera_offset_ms"] is not None
+    ]
     if offsets:
         metrics["mean_camera_lidar_offset_ms"] = float(np.mean(np.abs(offsets)))
         metrics["max_camera_lidar_offset_ms"] = float(np.max(np.abs(offsets)))
@@ -76,12 +83,18 @@ def compute(bag_id: str, chunk_id: str, cfg: IngestConfig) -> QualityReport:
     if frames:
         with_pose = sum(1 for f in frames if f["valid_pose"])
         metrics["pose_availability_fraction"] = with_pose / len(frames)
-        if metrics["pose_availability_fraction"] < cfg.quality_thresholds["min_pose_availability"]:
+        if (
+            metrics["pose_availability_fraction"]
+            < cfg.quality_thresholds["min_pose_availability"]
+        ):
             tags.append("POSE_MISSING")
 
     # ---- Lighting (mean V channel) — sample a few images to keep this cheap.
     metrics["lighting_mean_v"] = _sample_v_channel(cameras, max_samples=12)
-    if metrics["lighting_mean_v"] > 0 and metrics["lighting_mean_v"] < cfg.quality_thresholds["low_light_v_max"]:
+    if (
+        metrics["lighting_mean_v"] > 0
+        and metrics["lighting_mean_v"] < cfg.quality_thresholds["low_light_v_max"]
+    ):
         tags.append("LOW_LIGHT")
 
     if not tags:

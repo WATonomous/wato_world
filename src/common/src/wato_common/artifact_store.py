@@ -51,7 +51,9 @@ def camera_dir(bag_id: str, chunk_id: str, cam_id: str) -> str:
     return _join(chunk_root(bag_id, chunk_id), f"cam_{cam_id}")
 
 
-def camera_image_path(bag_id: str, chunk_id: str, cam_id: str, seq: int, ext: str) -> str:
+def camera_image_path(
+    bag_id: str, chunk_id: str, cam_id: str, seq: int, ext: str
+) -> str:
     return _join(camera_dir(bag_id, chunk_id, cam_id), f"{seq:06d}.{ext.lstrip('.')}")
 
 

@@ -128,7 +128,6 @@ def messages(
                 msg_class_cache[topic] = cls
             yield topic, deserialize_message(raw, cls), int(ts)
 
-    try:
-        yield _iter()
-    finally:
-        del reader
+    # Reader is held by the _iter closure; CPython refcounting releases it
+    # when the contextmanager's frame and the closure both go out of scope.
+    yield _iter()

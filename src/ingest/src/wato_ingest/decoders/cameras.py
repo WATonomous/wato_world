@@ -11,9 +11,7 @@ read directly from disk without touching the bag.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
-from typing import Iterable
 
 from wato_common.artifact_store import (
     camera_dir,
@@ -158,11 +156,16 @@ def _write_one_image(
         except ImportError as e:
             raise RuntimeError("Pillow + numpy required for raw Image decode") from e
 
-        arr = np.frombuffer(bytes(msg.data), dtype=np.uint8).reshape(msg.height, msg.step)
+        arr = np.frombuffer(bytes(msg.data), dtype=np.uint8).reshape(
+            msg.height, msg.step
+        )
         # Strip row padding if step > width * channels.
         bytes_per_pixel = max(msg.step // max(msg.width, 1), 1)
         arr = arr[:, : msg.width * bytes_per_pixel]
-        if "rgb" in (msg.encoding or "").lower() or "bgr" in (msg.encoding or "").lower():
+        if (
+            "rgb" in (msg.encoding or "").lower()
+            or "bgr" in (msg.encoding or "").lower()
+        ):
             arr = arr.reshape(msg.height, msg.width, 3)
         else:
             arr = arr.reshape(msg.height, msg.width)

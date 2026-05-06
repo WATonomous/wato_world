@@ -72,7 +72,12 @@ def _pose_row(bag_id: str, chunk_id: str, msg) -> dict:
     pose = msg.pose.pose
     T = make_se3(
         np.array([pose.position.x, pose.position.y, pose.position.z], dtype=np.float64),
-        (pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w),
+        (
+            pose.orientation.x,
+            pose.orientation.y,
+            pose.orientation.z,
+            pose.orientation.w,
+        ),
     )
     return PoseRow(
         bag_id=bag_id,

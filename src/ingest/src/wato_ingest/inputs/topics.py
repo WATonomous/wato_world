@@ -31,27 +31,27 @@ def validate(bag_topics: dict[str, str], cfg: IngestConfig) -> TopicValidationRe
       - /tf_static (drives calibration extrinsics)
     """
     image_topics = [c.image for c in cfg.topics.cameras.values()]
-    info_topics  = [c.info  for c in cfg.topics.cameras.values()]
-    lidars       = list(cfg.topics.lidars.values())
-    pose_topics  = [cfg.topics.pose]
-    tf_static    = [cfg.topics.tf_static]
+    info_topics = [c.info for c in cfg.topics.cameras.values()]
+    lidars = list(cfg.topics.lidars.values())
+    pose_topics = [cfg.topics.pose]
+    tf_static = [cfg.topics.tf_static]
 
     missing: list[str] = []
     found_image: list[str] = []
-    found_info:  list[str] = []
+    found_info: list[str] = []
     found_lidars: list[str] = []
     found_poses: list[str] = []
-    found_tf:    list[str] = []
+    found_tf: list[str] = []
 
     def _check(topics, found, label):
         for t in topics:
             (found if t in bag_topics else missing).append(t)
 
     _check(image_topics, found_image, "camera image")
-    _check(info_topics,  found_info,  "camera info")
-    _check(lidars,       found_lidars, "lidar")
-    _check(pose_topics,  found_poses, "pose")
-    _check(tf_static,    found_tf,    "tf_static")
+    _check(info_topics, found_info, "camera info")
+    _check(lidars, found_lidars, "lidar")
+    _check(pose_topics, found_poses, "pose")
+    _check(tf_static, found_tf, "tf_static")
 
     return TopicValidationResult(
         ok=len(missing) == 0,

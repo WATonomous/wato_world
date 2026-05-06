@@ -57,14 +57,19 @@ def _identity_pose_at(ts_ns: int) -> PoseSample:
 def test_one_camera_two_sweeps_within_threshold():
     sweeps = [_sweep(0, 100_000_000), _sweep(1, 200_000_000)]
     cams = [
-        _cam("CAM_FRONT", 0,  98_000_000),  # 2 ms before sweep 0 → valid
+        _cam("CAM_FRONT", 0, 98_000_000),  # 2 ms before sweep 0 → valid
         _cam("CAM_FRONT", 1, 205_000_000),  # 5 ms after  sweep 1 → valid
     ]
     poses = [_identity_pose_at(0), _identity_pose_at(300_000_000)]
     rows = _build_rows(
-        bag_id="b", chunk_id="0000",
-        sweeps=sweeps, camera_frames=cams, pose_samples=poses,
-        calib_uri="file:///x", max_cam_offset_ms=50.0, max_pose_gap_ns=10_000_000_000,
+        bag_id="b",
+        chunk_id="0000",
+        sweeps=sweeps,
+        camera_frames=cams,
+        pose_samples=poses,
+        calib_uri="file:///x",
+        max_cam_offset_ms=50.0,
+        max_pose_gap_ns=10_000_000_000,
     )
     assert len(rows) == 2
     assert all(r.valid_camera for r in rows)
@@ -77,9 +82,14 @@ def test_camera_drops_when_offset_exceeds_threshold():
     sweeps = [_sweep(0, 100_000_000)]
     cams = [_cam("CAM_FRONT", 0, 200_000_000)]  # 100 ms off
     rows = _build_rows(
-        bag_id="b", chunk_id="0000",
-        sweeps=sweeps, camera_frames=cams, pose_samples=[_identity_pose_at(0)],
-        calib_uri="x", max_cam_offset_ms=50.0, max_pose_gap_ns=10_000_000_000,
+        bag_id="b",
+        chunk_id="0000",
+        sweeps=sweeps,
+        camera_frames=cams,
+        pose_samples=[_identity_pose_at(0)],
+        calib_uri="x",
+        max_cam_offset_ms=50.0,
+        max_pose_gap_ns=10_000_000_000,
     )
     assert len(rows) == 1
     assert rows[0].valid_camera is False
@@ -90,9 +100,14 @@ def test_two_cameras_each_get_their_own_row():
     sweeps = [_sweep(0, 100_000_000)]
     cams = [_cam("CAM_FRONT", 0, 99_000_000), _cam("CAM_LEFT", 0, 101_000_000)]
     rows = _build_rows(
-        bag_id="b", chunk_id="0000",
-        sweeps=sweeps, camera_frames=cams, pose_samples=[_identity_pose_at(0)],
-        calib_uri="x", max_cam_offset_ms=50.0, max_pose_gap_ns=10_000_000_000,
+        bag_id="b",
+        chunk_id="0000",
+        sweeps=sweeps,
+        camera_frames=cams,
+        pose_samples=[_identity_pose_at(0)],
+        calib_uri="x",
+        max_cam_offset_ms=50.0,
+        max_pose_gap_ns=10_000_000_000,
     )
     assert len(rows) == 2
     assert {r.cam_id for r in rows} == {"CAM_FRONT", "CAM_LEFT"}
@@ -103,10 +118,14 @@ def test_pose_marked_invalid_when_no_samples_close_enough():
     cams = [_cam("CAM_FRONT", 0, 100_000_000)]
     # Only sample is 1 second away; max_pose_gap_ns at 50 ms → invalid_pose.
     rows = _build_rows(
-        bag_id="b", chunk_id="0000",
-        sweeps=sweeps, camera_frames=cams,
+        bag_id="b",
+        chunk_id="0000",
+        sweeps=sweeps,
+        camera_frames=cams,
         pose_samples=[_identity_pose_at(1_100_000_000)],
-        calib_uri="x", max_cam_offset_ms=50.0, max_pose_gap_ns=50_000_000,
+        calib_uri="x",
+        max_cam_offset_ms=50.0,
+        max_pose_gap_ns=50_000_000,
     )
     assert rows[0].valid_pose is False
     assert rows[0].world_T_ego_flat is None

@@ -50,7 +50,13 @@ def test_overlap_window_is_clamped_to_bag_bounds():
 
 
 def test_zero_duration_yields_no_chunks():
-    assert _compute_chunks(
-        bag_id="b", starting_time_ns=0, duration_ns=0,
-        chunk_seconds=30.0, overlap_seconds=2.0,
-    ) == []
+    assert (
+        _compute_chunks(
+            bag_id="b",
+            starting_time_ns=0,
+            duration_ns=0,
+            chunk_seconds=30.0,
+            overlap_seconds=2.0,
+        )
+        == []
+    )

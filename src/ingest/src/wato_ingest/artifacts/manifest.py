@@ -9,7 +9,6 @@ import os
 import subprocess
 from typing import Any
 
-import yaml
 
 from wato_common.artifact_store import (
     bag_meta_path,
@@ -37,9 +36,13 @@ def _config_hash(config_path: str) -> str:
 
 def _git_commit() -> str:
     try:
-        out = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
-        ).decode().strip()
+        out = (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
+            )
+            .decode()
+            .strip()
+        )
         return out
     except (subprocess.CalledProcessError, FileNotFoundError):
         return ""

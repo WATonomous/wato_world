@@ -16,6 +16,7 @@ jobs:
   build-base:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - flavor: cuda
@@ -26,6 +27,9 @@ jobs:
             tag: cpu-ubuntu24.04
     steps:
       - uses: actions/checkout@v4
+
+      - id: repo
+        run: echo "lower=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
       - uses: docker/setup-buildx-action@v3
 
@@ -41,6 +45,6 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           push: true
-          tags: ghcr.io/${{ github.repository }}/base:${{ matrix.tag }}
+          tags: ghcr.io/${{ steps.repo.outputs.lower }}/base:${{ matrix.tag }}
           cache-from: type=gha,scope=base-${{ matrix.flavor }}
           cache-to: type=gha,scope=base-${{ matrix.flavor }},mode=max

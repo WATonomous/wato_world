@@ -51,7 +51,9 @@ def decode_pointcloud2(
     if n == 0 or not data:
         return {f.name: np.zeros(0, dtype=DTYPE_BY_PF[f.datatype][0]) for f in fields}
 
-    buf = np.frombuffer(data, dtype=np.uint8, count=n * point_step).reshape(n, point_step)
+    buf = np.frombuffer(data, dtype=np.uint8, count=n * point_step).reshape(
+        n, point_step
+    )
     out: dict[str, np.ndarray] = {}
     bo = ">" if is_bigendian else "<"
 
@@ -60,7 +62,7 @@ def decode_pointcloud2(
             continue
         kind, size = DTYPE_BY_PF[f.datatype]
         dtype = np.dtype(f"{bo}{kind}")
-        view = buf[:, f.offset:f.offset + size].copy()
+        view = buf[:, f.offset : f.offset + size].copy()
         out[f.name] = view.view(dtype).reshape(n)
 
     return out

@@ -12,7 +12,12 @@ from wato_common.io.pointcloud2 import PointFieldSpec, decode_pointcloud2
 def test_decode_xyz_intensity():
     # Build a 4-point cloud: 4 floats per point (x, y, z, intensity), little-endian.
     point_step = 16
-    points = [(1.0, 2.0, 3.0, 0.5), (4.0, 5.0, 6.0, 0.8), (-1.0, -2.0, -3.0, 0.0), (10.0, 20.0, 30.0, 1.0)]
+    points = [
+        (1.0, 2.0, 3.0, 0.5),
+        (4.0, 5.0, 6.0, 0.8),
+        (-1.0, -2.0, -3.0, 0.0),
+        (10.0, 20.0, 30.0, 1.0),
+    ]
     buf = b"".join(struct.pack("<ffff", *p) for p in points)
 
     fields = [
@@ -21,7 +26,9 @@ def test_decode_xyz_intensity():
         PointFieldSpec("z", 8, 7),
         PointFieldSpec("intensity", 12, 7),
     ]
-    out = decode_pointcloud2(buf, fields, point_step=point_step, width=4, height=1, is_bigendian=False)
+    out = decode_pointcloud2(
+        buf, fields, point_step=point_step, width=4, height=1, is_bigendian=False
+    )
 
     np.testing.assert_allclose(out["x"], [1.0, 4.0, -1.0, 10.0])
     np.testing.assert_allclose(out["y"], [2.0, 5.0, -2.0, 20.0])
@@ -45,7 +52,9 @@ def test_decode_with_padding_offsets():
         PointFieldSpec("intensity", 12, 7),
         PointFieldSpec("ring", 16, 4),  # UINT16
     ]
-    out = decode_pointcloud2(buf, fields, point_step=point_step, width=2, height=1, is_bigendian=False)
+    out = decode_pointcloud2(
+        buf, fields, point_step=point_step, width=2, height=1, is_bigendian=False
+    )
 
     np.testing.assert_allclose(out["x"], [1.0, 4.0])
     np.testing.assert_allclose(out["intensity"], [0.7, 0.2])

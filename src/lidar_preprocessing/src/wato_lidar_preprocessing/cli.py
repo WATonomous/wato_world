@@ -15,7 +15,9 @@ def main() -> None:
 
 @main.command("run")
 @click.option("--bag", "bag_id", required=True, help="bag_id to process.")
-@click.option("--chunk", "chunk_id", default=None, help="optional chunk_id; default: all chunks.")
+@click.option(
+    "--chunk", "chunk_id", default=None, help="optional chunk_id; default: all chunks."
+)
 @click.option("--config", "config_path", default="/config/pipeline.yaml")
 def run_cmd(bag_id: str, chunk_id: str | None, config_path: str) -> None:
     cfg = load_config(config_path)

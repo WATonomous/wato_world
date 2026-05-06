@@ -17,7 +17,7 @@ from wato_common.geometry.transforms import make_se3, quat_to_matrix
 class PoseSample:
     timestamp_ns: int
     translation: np.ndarray  # shape (3,)
-    quat_xyzw: np.ndarray    # shape (4,) [qx, qy, qz, qw]
+    quat_xyzw: np.ndarray  # shape (4,) [qx, qy, qz, qw]
 
 
 def slerp(q0: np.ndarray, q1: np.ndarray, t: float) -> np.ndarray:
@@ -57,30 +57,47 @@ def interpolate_pose(
         raise ValueError("interpolate_pose: empty pose samples")
     if len(samples) == 1:
         s = samples[0]
-        return make_se3(s.translation, s.quat_xyzw), float(abs(s.timestamp_ns - target_timestamp_ns))
+        return make_se3(s.translation, s.quat_xyzw), float(
+            abs(s.timestamp_ns - target_timestamp_ns)
+        )
 
-    timestamps = np.fromiter((s.timestamp_ns for s in samples), dtype=np.int64, count=len(samples))
+    timestamps = np.fromiter(
+        (s.timestamp_ns for s in samples), dtype=np.int64, count=len(samples)
+    )
     idx = int(np.searchsorted(timestamps, target_timestamp_ns))
 
     if idx <= 0:
         s = samples[0]
-        return make_se3(s.translation, s.quat_xyzw), float(abs(s.timestamp_ns - target_timestamp_ns))
+        return make_se3(s.translation, s.quat_xyzw), float(
+            abs(s.timestamp_ns - target_timestamp_ns)
+        )
     if idx >= len(samples):
         s = samples[-1]
-        return make_se3(s.translation, s.quat_xyzw), float(abs(s.timestamp_ns - target_timestamp_ns))
+        return make_se3(s.translation, s.quat_xyzw), float(
+            abs(s.timestamp_ns - target_timestamp_ns)
+        )
 
     s0, s1 = samples[idx - 1], samples[idx]
     span = float(s1.timestamp_ns - s0.timestamp_ns)
     if span <= 0:
         # Coincident timestamps — pick the closer one.
-        s = s0 if abs(s0.timestamp_ns - target_timestamp_ns) <= abs(s1.timestamp_ns - target_timestamp_ns) else s1
+        s = (
+            s0
+            if abs(s0.timestamp_ns - target_timestamp_ns)
+            <= abs(s1.timestamp_ns - target_timestamp_ns)
+            else s1
+        )
         return make_se3(s.translation, s.quat_xyzw), 0.0
 
     t = (float(target_timestamp_ns) - float(s0.timestamp_ns)) / span
     translation = (1.0 - t) * s0.translation + t * s1.translation
     quat = slerp(s0.quat_xyzw, s1.quat_xyzw, t)
-    interp_error = float(min(abs(s0.timestamp_ns - target_timestamp_ns),
-                             abs(s1.timestamp_ns - target_timestamp_ns)))
+    interp_error = float(
+        min(
+            abs(s0.timestamp_ns - target_timestamp_ns),
+            abs(s1.timestamp_ns - target_timestamp_ns),
+        )
+    )
 
     T = np.eye(4)
     T[:3, :3] = quat_to_matrix(*quat)

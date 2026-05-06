@@ -120,30 +120,33 @@ def _build_rows(
             else:
                 drop_reason = None
 
-            rows.append(FrameIndexRow(
-                frame_id=f"{bag_id}__{chunk_id}__{sweep_id:06d}__{cam_id}",
-                bag_id=bag_id,
-                chunk_id=chunk_id,
-                sweep_id=sweep_id,
-                lidar_id=lidar_id,
-                lidar_path=lidar_path,
-                reference_timestamp_ns=sweep_ts,
-
-                cam_id=cam_id,
-                image_path=nearest["image_path"] if nearest else None,
-                camera_seq=int(nearest["camera_seq"]) if nearest else None,
-                camera_timestamp_ns=int(nearest["header_timestamp_ns"]) if nearest else None,
-                camera_offset_ms=float(offset_ns / 1e6) if nearest else None,
-                valid_camera=valid_cam,
-                camera_drop_reason=drop_reason,
-
-                pose_timestamp_ns=pose.pose_timestamp_ns if pose.valid else None,
-                world_T_ego_flat=flatten_se3(pose.world_T_ego) if pose.valid else None,
-                pose_interp_error=pose.interp_error_ns if pose.valid else None,
-                valid_pose=pose.valid,
-
-                calibration_path=calib_uri,
-            ))
+            rows.append(
+                FrameIndexRow(
+                    frame_id=f"{bag_id}__{chunk_id}__{sweep_id:06d}__{cam_id}",
+                    bag_id=bag_id,
+                    chunk_id=chunk_id,
+                    sweep_id=sweep_id,
+                    lidar_id=lidar_id,
+                    lidar_path=lidar_path,
+                    reference_timestamp_ns=sweep_ts,
+                    cam_id=cam_id,
+                    image_path=nearest["image_path"] if nearest else None,
+                    camera_seq=int(nearest["camera_seq"]) if nearest else None,
+                    camera_timestamp_ns=int(nearest["header_timestamp_ns"])
+                    if nearest
+                    else None,
+                    camera_offset_ms=float(offset_ns / 1e6) if nearest else None,
+                    valid_camera=valid_cam,
+                    camera_drop_reason=drop_reason,
+                    pose_timestamp_ns=pose.pose_timestamp_ns if pose.valid else None,
+                    world_T_ego_flat=flatten_se3(pose.world_T_ego)
+                    if pose.valid
+                    else None,
+                    pose_interp_error=pose.interp_error_ns if pose.valid else None,
+                    valid_pose=pose.valid,
+                    calibration_path=calib_uri,
+                )
+            )
 
     return rows
 

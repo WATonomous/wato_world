@@ -14,9 +14,9 @@ from wato_common.io.parquet_io import read_rows
 @dataclass
 class InterpolatedPose:
     target_timestamp_ns: int
-    world_T_ego: np.ndarray          # 4x4
+    world_T_ego: np.ndarray  # 4x4
     interp_error_ns: float
-    pose_timestamp_ns: int           # nearest source sample
+    pose_timestamp_ns: int  # nearest source sample
     valid: bool
 
 
@@ -50,7 +50,9 @@ def interpolate_at(
         return InterpolatedPose(target_ts_ns, np.eye(4), float("inf"), 0, valid=False)
 
     T, err = interpolate_pose(samples, target_ts_ns)
-    nearest_ts = min(samples, key=lambda s: abs(s.timestamp_ns - target_ts_ns)).timestamp_ns
+    nearest_ts = min(
+        samples, key=lambda s: abs(s.timestamp_ns - target_ts_ns)
+    ).timestamp_ns
     return InterpolatedPose(
         target_timestamp_ns=target_ts_ns,
         world_T_ego=T,

@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 # Ingest — bag / chunk / sensor tables.
 # ---------------------------------------------------------------------------
 
+
 class BagMeta(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -42,16 +43,18 @@ class ChunkRow(BaseModel):
     num_camera_frames: int = 0
 
 
-CHUNK_SCHEMA = pa.schema([
-    pa.field("bag_id", pa.string()),
-    pa.field("chunk_id", pa.string()),
-    pa.field("t_start_ns", pa.int64()),
-    pa.field("t_end_ns", pa.int64()),
-    pa.field("t_overlap_start_ns", pa.int64()),
-    pa.field("t_overlap_end_ns", pa.int64()),
-    pa.field("num_lidar_sweeps", pa.int64()),
-    pa.field("num_camera_frames", pa.int64()),
-])
+CHUNK_SCHEMA = pa.schema(
+    [
+        pa.field("bag_id", pa.string()),
+        pa.field("chunk_id", pa.string()),
+        pa.field("t_start_ns", pa.int64()),
+        pa.field("t_end_ns", pa.int64()),
+        pa.field("t_overlap_start_ns", pa.int64()),
+        pa.field("t_overlap_end_ns", pa.int64()),
+        pa.field("num_lidar_sweeps", pa.int64()),
+        pa.field("num_camera_frames", pa.int64()),
+    ]
+)
 
 
 class CameraFrameRow(BaseModel):
@@ -72,21 +75,23 @@ class CameraFrameRow(BaseModel):
     drop_reason: Optional[str] = None
 
 
-CAMERA_FRAMES_SCHEMA = pa.schema([
-    pa.field("bag_id", pa.string()),
-    pa.field("chunk_id", pa.string()),
-    pa.field("cam_id", pa.string()),
-    pa.field("camera_seq", pa.int64()),
-    pa.field("image_path", pa.string()),
-    pa.field("header_timestamp_ns", pa.int64()),
-    pa.field("record_timestamp_ns", pa.int64()),
-    pa.field("width", pa.int64()),
-    pa.field("height", pa.int64()),
-    pa.field("encoding", pa.string()),
-    pa.field("is_compressed", pa.bool_()),
-    pa.field("valid", pa.bool_()),
-    pa.field("drop_reason", pa.string()),
-])
+CAMERA_FRAMES_SCHEMA = pa.schema(
+    [
+        pa.field("bag_id", pa.string()),
+        pa.field("chunk_id", pa.string()),
+        pa.field("cam_id", pa.string()),
+        pa.field("camera_seq", pa.int64()),
+        pa.field("image_path", pa.string()),
+        pa.field("header_timestamp_ns", pa.int64()),
+        pa.field("record_timestamp_ns", pa.int64()),
+        pa.field("width", pa.int64()),
+        pa.field("height", pa.int64()),
+        pa.field("encoding", pa.string()),
+        pa.field("is_compressed", pa.bool_()),
+        pa.field("valid", pa.bool_()),
+        pa.field("drop_reason", pa.string()),
+    ]
+)
 
 
 class LidarSweepRow(BaseModel):
@@ -109,23 +114,25 @@ class LidarSweepRow(BaseModel):
     drop_reason: Optional[str] = None
 
 
-LIDAR_SWEEPS_SCHEMA = pa.schema([
-    pa.field("bag_id", pa.string()),
-    pa.field("chunk_id", pa.string()),
-    pa.field("lidar_id", pa.string()),
-    pa.field("sweep_id", pa.int64()),
-    pa.field("lidar_path", pa.string()),
-    pa.field("header_timestamp_ns", pa.int64()),
-    pa.field("record_timestamp_ns", pa.int64()),
-    pa.field("num_points", pa.int64()),
-    pa.field("has_ring", pa.bool_()),
-    pa.field("has_intensity", pa.bool_()),
-    pa.field("has_point_time", pa.bool_()),
-    pa.field("min_range_m", pa.float64()),
-    pa.field("max_range_m", pa.float64()),
-    pa.field("valid", pa.bool_()),
-    pa.field("drop_reason", pa.string()),
-])
+LIDAR_SWEEPS_SCHEMA = pa.schema(
+    [
+        pa.field("bag_id", pa.string()),
+        pa.field("chunk_id", pa.string()),
+        pa.field("lidar_id", pa.string()),
+        pa.field("sweep_id", pa.int64()),
+        pa.field("lidar_path", pa.string()),
+        pa.field("header_timestamp_ns", pa.int64()),
+        pa.field("record_timestamp_ns", pa.int64()),
+        pa.field("num_points", pa.int64()),
+        pa.field("has_ring", pa.bool_()),
+        pa.field("has_intensity", pa.bool_()),
+        pa.field("has_point_time", pa.bool_()),
+        pa.field("min_range_m", pa.float64()),
+        pa.field("max_range_m", pa.float64()),
+        pa.field("valid", pa.bool_()),
+        pa.field("drop_reason", pa.string()),
+    ]
+)
 
 
 class PoseRow(BaseModel):
@@ -146,25 +153,28 @@ class PoseRow(BaseModel):
     valid: bool = True
 
 
-POSES_SCHEMA = pa.schema([
-    pa.field("bag_id", pa.string()),
-    pa.field("chunk_id", pa.string()),
-    pa.field("timestamp_ns", pa.int64()),
-    pa.field("x", pa.float64()),
-    pa.field("y", pa.float64()),
-    pa.field("z", pa.float64()),
-    pa.field("qx", pa.float64()),
-    pa.field("qy", pa.float64()),
-    pa.field("qz", pa.float64()),
-    pa.field("qw", pa.float64()),
-    pa.field("world_T_ego_flat", pa.list_(pa.float64(), 16)),
-    pa.field("source", pa.string()),
-    pa.field("valid", pa.bool_()),
-])
+POSES_SCHEMA = pa.schema(
+    [
+        pa.field("bag_id", pa.string()),
+        pa.field("chunk_id", pa.string()),
+        pa.field("timestamp_ns", pa.int64()),
+        pa.field("x", pa.float64()),
+        pa.field("y", pa.float64()),
+        pa.field("z", pa.float64()),
+        pa.field("qx", pa.float64()),
+        pa.field("qy", pa.float64()),
+        pa.field("qz", pa.float64()),
+        pa.field("qw", pa.float64()),
+        pa.field("world_T_ego_flat", pa.list_(pa.float64(), 16)),
+        pa.field("source", pa.string()),
+        pa.field("valid", pa.bool_()),
+    ]
+)
 
 
 class FrameIndexRow(BaseModel):
     """One row per (sweep_id, cam_id) — the contract for downstream components."""
+
     model_config = ConfigDict(extra="forbid")
 
     frame_id: str
@@ -191,35 +201,35 @@ class FrameIndexRow(BaseModel):
     calibration_path: Optional[str] = None
 
 
-FRAME_INDEX_SCHEMA = pa.schema([
-    pa.field("frame_id", pa.string()),
-    pa.field("bag_id", pa.string()),
-    pa.field("chunk_id", pa.string()),
-    pa.field("sweep_id", pa.int64()),
-    pa.field("lidar_id", pa.string()),
-    pa.field("lidar_path", pa.string()),
-    pa.field("reference_timestamp_ns", pa.int64()),
-
-    pa.field("cam_id", pa.string()),
-    pa.field("image_path", pa.string()),
-    pa.field("camera_seq", pa.int64()),
-    pa.field("camera_timestamp_ns", pa.int64()),
-    pa.field("camera_offset_ms", pa.float64()),
-    pa.field("valid_camera", pa.bool_()),
-    pa.field("camera_drop_reason", pa.string()),
-
-    pa.field("pose_timestamp_ns", pa.int64()),
-    pa.field("world_T_ego_flat", pa.list_(pa.float64(), 16)),
-    pa.field("pose_interp_error", pa.float64()),
-    pa.field("valid_pose", pa.bool_()),
-
-    pa.field("calibration_path", pa.string()),
-])
+FRAME_INDEX_SCHEMA = pa.schema(
+    [
+        pa.field("frame_id", pa.string()),
+        pa.field("bag_id", pa.string()),
+        pa.field("chunk_id", pa.string()),
+        pa.field("sweep_id", pa.int64()),
+        pa.field("lidar_id", pa.string()),
+        pa.field("lidar_path", pa.string()),
+        pa.field("reference_timestamp_ns", pa.int64()),
+        pa.field("cam_id", pa.string()),
+        pa.field("image_path", pa.string()),
+        pa.field("camera_seq", pa.int64()),
+        pa.field("camera_timestamp_ns", pa.int64()),
+        pa.field("camera_offset_ms", pa.float64()),
+        pa.field("valid_camera", pa.bool_()),
+        pa.field("camera_drop_reason", pa.string()),
+        pa.field("pose_timestamp_ns", pa.int64()),
+        pa.field("world_T_ego_flat", pa.list_(pa.float64(), 16)),
+        pa.field("pose_interp_error", pa.float64()),
+        pa.field("valid_pose", pa.bool_()),
+        pa.field("calibration_path", pa.string()),
+    ]
+)
 
 
 # ---------------------------------------------------------------------------
 # Downstream component artifacts (unchanged from the original skeleton).
 # ---------------------------------------------------------------------------
+
 
 class Box3D(BaseModel):
     model_config = ConfigDict(extra="forbid")

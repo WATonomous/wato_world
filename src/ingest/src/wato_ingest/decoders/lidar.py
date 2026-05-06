@@ -143,7 +143,9 @@ def _write_sweep(
     out_uri = lidar_sweep_path(bag_id, chunk_id, sweep_id)
     np.savez_compressed(local_path(out_uri), **save_kwargs)
 
-    ranges = np.linalg.norm(np.stack([save_kwargs["x"], save_kwargs["y"], save_kwargs["z"]], axis=1), axis=1)
+    ranges = np.linalg.norm(
+        np.stack([save_kwargs["x"], save_kwargs["y"], save_kwargs["z"]], axis=1), axis=1
+    )
 
     row = LidarSweepRow(
         bag_id=bag_id,
