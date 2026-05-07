@@ -38,7 +38,7 @@ build_flavor() {
             ;;
         cuda)
             dockerfile="${WATO_WORLD_DIR}/docker/base/inject_cuda_base.Dockerfile"
-            tag="${REGISTRY}/base:cuda-12.4"
+            tag="${REGISTRY}/base:cuda12.8.1-cudnn-runtime-ubuntu24.04"
             ;;
         *)  echo "build_flavor: unknown flavor ${flavor}" >&2; return 1 ;;
     esac

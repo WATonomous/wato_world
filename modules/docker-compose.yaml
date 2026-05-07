@@ -1,16 +1,55 @@
 # Base compose stack — every component as a profile-gated service.
-# Stacked with docker-compose.infra.yaml, docker-compose.gpu.yaml (GPU components
-# on GPU hosts), and docker-compose.dev.yaml (when component:dev).
+# Stacked with docker-compose.gpu.yaml (GPU components on GPU hosts) and
+# docker-compose.dev.yaml (when component:dev).
+#
+# Per-component shape mirrors wato_monorepo/modules/docker-compose.yaml:
+#   <comp>_source       — builds <comp>.Dockerfile target=source           (profile: <comp>_pre)
+#   <comp>_deps         — builds <comp>.Dockerfile target=dependencies     (profile: <comp>_pre)
+#   <comp>              — builds template.Dockerfile target=deploy with
+#                         MODULE_SOURCE / MODULE_DEPS pointing at the two
+#                         pre-built layers above.                          (profile: <comp>)
+#
+# `watod build` activates the _pre profiles first so the source/deps images
+# exist locally by the time the runtime stage's FROM ${MODULE_SOURCE} resolves.
 
 services:
-  # ---------------------------------------------------------------------
+  # =====================================================================
+  # ingest
+  # =====================================================================
+  ingest_source:
+    profiles: ["ingest_pre"]
+    build:
+      context: ..
+      dockerfile: docker/ingest.Dockerfile
+      target: source
+      cache_from:
+        - "${INGEST_IMAGE}:source_${TAG}"
+    image: "${INGEST_IMAGE}:source_${TAG}"
+
+  ingest_deps:
+    profiles: ["ingest_pre"]
+    build:
+      context: ..
+      dockerfile: docker/ingest.Dockerfile
+      target: dependencies
+      cache_from:
+        - "${INGEST_IMAGE}:deps_${TAG}"
+    image: "${INGEST_IMAGE}:deps_${TAG}"
+
   ingest:
     profiles: ["ingest"]
     init: true
     build:
       context: ..
-      dockerfile: docker/ingest.Dockerfile
+      dockerfile: docker/template.Dockerfile
       target: deploy
+      args:
+        MODULE_SOURCE: "${INGEST_IMAGE}:source_${TAG}"
+        MODULE_DEPS: "${INGEST_IMAGE}:deps_${TAG}"
+        COMPONENT_PACKAGE_DIR: ingest
+        COMPONENT_PACKAGE: wato_ingest
+      cache_from:
+        - "${INGEST_IMAGE}:${TAG}"
     image: "${INGEST_IMAGE}:${TAG}"
     environment:
       - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
@@ -20,14 +59,43 @@ services:
       - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
       - ${WATO_WORLD_DIR}/config:/config:ro
 
-  # ---------------------------------------------------------------------
+  # =====================================================================
+  # perception_2d
+  # =====================================================================
+  perception_2d_source:
+    profiles: ["perception_2d_pre"]
+    build:
+      context: ..
+      dockerfile: docker/perception_2d.Dockerfile
+      target: source
+      cache_from:
+        - "${PERCEPTION_2D_IMAGE}:source_${TAG}"
+    image: "${PERCEPTION_2D_IMAGE}:source_${TAG}"
+
+  perception_2d_deps:
+    profiles: ["perception_2d_pre"]
+    build:
+      context: ..
+      dockerfile: docker/perception_2d.Dockerfile
+      target: dependencies
+      cache_from:
+        - "${PERCEPTION_2D_IMAGE}:deps_${TAG}"
+    image: "${PERCEPTION_2D_IMAGE}:deps_${TAG}"
+
   perception_2d:
     profiles: ["perception_2d"]
     init: true
     build:
       context: ..
-      dockerfile: docker/perception_2d.Dockerfile
+      dockerfile: docker/template.Dockerfile
       target: deploy
+      args:
+        MODULE_SOURCE: "${PERCEPTION_2D_IMAGE}:source_${TAG}"
+        MODULE_DEPS: "${PERCEPTION_2D_IMAGE}:deps_${TAG}"
+        COMPONENT_PACKAGE_DIR: perception_2d
+        COMPONENT_PACKAGE: wato_perception_2d
+      cache_from:
+        - "${PERCEPTION_2D_IMAGE}:${TAG}"
     image: "${PERCEPTION_2D_IMAGE}:${TAG}"
     environment:
       - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
@@ -37,14 +105,43 @@ services:
       - ${WATO_WORLD_DIR}/data/models:/data/models:ro
       - ${WATO_WORLD_DIR}/config:/config:ro
 
-  # ---------------------------------------------------------------------
+  # =====================================================================
+  # lidar_preprocessing
+  # =====================================================================
+  lidar_preprocessing_source:
+    profiles: ["lidar_preprocessing_pre"]
+    build:
+      context: ..
+      dockerfile: docker/lidar_preprocessing.Dockerfile
+      target: source
+      cache_from:
+        - "${LIDAR_PREPROCESSING_IMAGE}:source_${TAG}"
+    image: "${LIDAR_PREPROCESSING_IMAGE}:source_${TAG}"
+
+  lidar_preprocessing_deps:
+    profiles: ["lidar_preprocessing_pre"]
+    build:
+      context: ..
+      dockerfile: docker/lidar_preprocessing.Dockerfile
+      target: dependencies
+      cache_from:
+        - "${LIDAR_PREPROCESSING_IMAGE}:deps_${TAG}"
+    image: "${LIDAR_PREPROCESSING_IMAGE}:deps_${TAG}"
+
   lidar_preprocessing:
     profiles: ["lidar_preprocessing"]
     init: true
     build:
       context: ..
-      dockerfile: docker/lidar_preprocessing.Dockerfile
+      dockerfile: docker/template.Dockerfile
       target: deploy
+      args:
+        MODULE_SOURCE: "${LIDAR_PREPROCESSING_IMAGE}:source_${TAG}"
+        MODULE_DEPS: "${LIDAR_PREPROCESSING_IMAGE}:deps_${TAG}"
+        COMPONENT_PACKAGE_DIR: lidar_preprocessing
+        COMPONENT_PACKAGE: wato_lidar_preprocessing
+      cache_from:
+        - "${LIDAR_PREPROCESSING_IMAGE}:${TAG}"
     image: "${LIDAR_PREPROCESSING_IMAGE}:${TAG}"
     environment:
       - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
@@ -52,14 +149,43 @@ services:
       - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
       - ${WATO_WORLD_DIR}/config:/config:ro
 
-  # ---------------------------------------------------------------------
+  # =====================================================================
+  # proposal_generation
+  # =====================================================================
+  proposal_generation_source:
+    profiles: ["proposal_generation_pre"]
+    build:
+      context: ..
+      dockerfile: docker/proposal_generation.Dockerfile
+      target: source
+      cache_from:
+        - "${PROPOSAL_GENERATION_IMAGE}:source_${TAG}"
+    image: "${PROPOSAL_GENERATION_IMAGE}:source_${TAG}"
+
+  proposal_generation_deps:
+    profiles: ["proposal_generation_pre"]
+    build:
+      context: ..
+      dockerfile: docker/proposal_generation.Dockerfile
+      target: dependencies
+      cache_from:
+        - "${PROPOSAL_GENERATION_IMAGE}:deps_${TAG}"
+    image: "${PROPOSAL_GENERATION_IMAGE}:deps_${TAG}"
+
   proposal_generation:
     profiles: ["proposal_generation"]
     init: true
     build:
       context: ..
-      dockerfile: docker/proposal_generation.Dockerfile
+      dockerfile: docker/template.Dockerfile
       target: deploy
+      args:
+        MODULE_SOURCE: "${PROPOSAL_GENERATION_IMAGE}:source_${TAG}"
+        MODULE_DEPS: "${PROPOSAL_GENERATION_IMAGE}:deps_${TAG}"
+        COMPONENT_PACKAGE_DIR: proposal_generation
+        COMPONENT_PACKAGE: wato_proposal_generation
+      cache_from:
+        - "${PROPOSAL_GENERATION_IMAGE}:${TAG}"
     image: "${PROPOSAL_GENERATION_IMAGE}:${TAG}"
     environment:
       - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
@@ -69,14 +195,43 @@ services:
       - ${WATO_WORLD_DIR}/data/models:/data/models:ro
       - ${WATO_WORLD_DIR}/config:/config:ro
 
-  # ---------------------------------------------------------------------
+  # =====================================================================
+  # tracking
+  # =====================================================================
+  tracking_source:
+    profiles: ["tracking_pre"]
+    build:
+      context: ..
+      dockerfile: docker/tracking.Dockerfile
+      target: source
+      cache_from:
+        - "${TRACKING_IMAGE}:source_${TAG}"
+    image: "${TRACKING_IMAGE}:source_${TAG}"
+
+  tracking_deps:
+    profiles: ["tracking_pre"]
+    build:
+      context: ..
+      dockerfile: docker/tracking.Dockerfile
+      target: dependencies
+      cache_from:
+        - "${TRACKING_IMAGE}:deps_${TAG}"
+    image: "${TRACKING_IMAGE}:deps_${TAG}"
+
   tracking:
     profiles: ["tracking"]
     init: true
     build:
       context: ..
-      dockerfile: docker/tracking.Dockerfile
+      dockerfile: docker/template.Dockerfile
       target: deploy
+      args:
+        MODULE_SOURCE: "${TRACKING_IMAGE}:source_${TAG}"
+        MODULE_DEPS: "${TRACKING_IMAGE}:deps_${TAG}"
+        COMPONENT_PACKAGE_DIR: tracking
+        COMPONENT_PACKAGE: wato_tracking
+      cache_from:
+        - "${TRACKING_IMAGE}:${TAG}"
     image: "${TRACKING_IMAGE}:${TAG}"
     environment:
       - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
@@ -84,14 +239,43 @@ services:
       - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
       - ${WATO_WORLD_DIR}/config:/config:ro
 
-  # ---------------------------------------------------------------------
+  # =====================================================================
+  # label_refinement
+  # =====================================================================
+  label_refinement_source:
+    profiles: ["label_refinement_pre"]
+    build:
+      context: ..
+      dockerfile: docker/label_refinement.Dockerfile
+      target: source
+      cache_from:
+        - "${LABEL_REFINEMENT_IMAGE}:source_${TAG}"
+    image: "${LABEL_REFINEMENT_IMAGE}:source_${TAG}"
+
+  label_refinement_deps:
+    profiles: ["label_refinement_pre"]
+    build:
+      context: ..
+      dockerfile: docker/label_refinement.Dockerfile
+      target: dependencies
+      cache_from:
+        - "${LABEL_REFINEMENT_IMAGE}:deps_${TAG}"
+    image: "${LABEL_REFINEMENT_IMAGE}:deps_${TAG}"
+
   label_refinement:
     profiles: ["label_refinement"]
     init: true
     build:
       context: ..
-      dockerfile: docker/label_refinement.Dockerfile
+      dockerfile: docker/template.Dockerfile
       target: deploy
+      args:
+        MODULE_SOURCE: "${LABEL_REFINEMENT_IMAGE}:source_${TAG}"
+        MODULE_DEPS: "${LABEL_REFINEMENT_IMAGE}:deps_${TAG}"
+        COMPONENT_PACKAGE_DIR: label_refinement
+        COMPONENT_PACKAGE: wato_label_refinement
+      cache_from:
+        - "${LABEL_REFINEMENT_IMAGE}:${TAG}"
     image: "${LABEL_REFINEMENT_IMAGE}:${TAG}"
     environment:
       - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
@@ -101,14 +285,43 @@ services:
       - ${WATO_WORLD_DIR}/data/models:/data/models:ro
       - ${WATO_WORLD_DIR}/config:/config:ro
 
-  # ---------------------------------------------------------------------
+  # =====================================================================
+  # open_vocab_discovery
+  # =====================================================================
+  open_vocab_discovery_source:
+    profiles: ["open_vocab_discovery_pre"]
+    build:
+      context: ..
+      dockerfile: docker/open_vocab_discovery.Dockerfile
+      target: source
+      cache_from:
+        - "${OPEN_VOCAB_DISCOVERY_IMAGE}:source_${TAG}"
+    image: "${OPEN_VOCAB_DISCOVERY_IMAGE}:source_${TAG}"
+
+  open_vocab_discovery_deps:
+    profiles: ["open_vocab_discovery_pre"]
+    build:
+      context: ..
+      dockerfile: docker/open_vocab_discovery.Dockerfile
+      target: dependencies
+      cache_from:
+        - "${OPEN_VOCAB_DISCOVERY_IMAGE}:deps_${TAG}"
+    image: "${OPEN_VOCAB_DISCOVERY_IMAGE}:deps_${TAG}"
+
   open_vocab_discovery:
     profiles: ["open_vocab_discovery"]
     init: true
     build:
       context: ..
-      dockerfile: docker/open_vocab_discovery.Dockerfile
+      dockerfile: docker/template.Dockerfile
       target: deploy
+      args:
+        MODULE_SOURCE: "${OPEN_VOCAB_DISCOVERY_IMAGE}:source_${TAG}"
+        MODULE_DEPS: "${OPEN_VOCAB_DISCOVERY_IMAGE}:deps_${TAG}"
+        COMPONENT_PACKAGE_DIR: open_vocab_discovery
+        COMPONENT_PACKAGE: wato_open_vocab_discovery
+      cache_from:
+        - "${OPEN_VOCAB_DISCOVERY_IMAGE}:${TAG}"
     image: "${OPEN_VOCAB_DISCOVERY_IMAGE}:${TAG}"
     environment:
       - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
@@ -118,14 +331,43 @@ services:
       - ${WATO_WORLD_DIR}/data/models:/data/models:ro
       - ${WATO_WORLD_DIR}/config:/config:ro
 
-  # ---------------------------------------------------------------------
+  # =====================================================================
+  # student_training
+  # =====================================================================
+  student_training_source:
+    profiles: ["student_training_pre"]
+    build:
+      context: ..
+      dockerfile: docker/student_training.Dockerfile
+      target: source
+      cache_from:
+        - "${STUDENT_TRAINING_IMAGE}:source_${TAG}"
+    image: "${STUDENT_TRAINING_IMAGE}:source_${TAG}"
+
+  student_training_deps:
+    profiles: ["student_training_pre"]
+    build:
+      context: ..
+      dockerfile: docker/student_training.Dockerfile
+      target: dependencies
+      cache_from:
+        - "${STUDENT_TRAINING_IMAGE}:deps_${TAG}"
+    image: "${STUDENT_TRAINING_IMAGE}:deps_${TAG}"
+
   student_training:
     profiles: ["student_training"]
     init: true
     build:
       context: ..
-      dockerfile: docker/student_training.Dockerfile
+      dockerfile: docker/template.Dockerfile
       target: deploy
+      args:
+        MODULE_SOURCE: "${STUDENT_TRAINING_IMAGE}:source_${TAG}"
+        MODULE_DEPS: "${STUDENT_TRAINING_IMAGE}:deps_${TAG}"
+        COMPONENT_PACKAGE_DIR: student_training
+        COMPONENT_PACKAGE: wato_student_training
+      cache_from:
+        - "${STUDENT_TRAINING_IMAGE}:${TAG}"
     image: "${STUDENT_TRAINING_IMAGE}:${TAG}"
     environment:
       - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}

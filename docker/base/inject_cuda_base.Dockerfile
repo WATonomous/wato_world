@@ -3,10 +3,17 @@
 # Python toolchain on top.
 #
 # Built and pushed by .github/workflows/build_base_images.yml as
-# ${REGISTRY}/base:cuda-12.4 .  For local-only first-time setup, run
-# `watod build-base cuda` to build it locally with the same tag.
+# ${REGISTRY}/base:cuda12.8.1-cudnn-runtime-ubuntu24.04 .  For local-only
+# first-time setup, run `watod build-base cuda` to build it locally with the
+# same tag.
+#
+# Tag matches the monorepo's convention: full nvidia tag preserved verbatim
+# with a `cuda` prefix (see wato_monorepo/.github/include/base_image_config.json).
+# Source registry is nvcr.io (NGC) rather than Docker Hub, also per monorepo.
+# `runtime` (not `devel`) keeps the image small — components install
+# pre-built wheels (torch, etc.) and don't compile cuda kernels from source.
 
-ARG GENERIC_IMAGE=nvidia/cuda:12.4.1-cudnn-devel-ubuntu24.04
+ARG GENERIC_IMAGE=nvcr.io/nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
 FROM ${GENERIC_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \

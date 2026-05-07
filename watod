@@ -169,12 +169,19 @@ if [[ ${needs_dev} -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Profile arg list — one per active module (+ _dev variant if requested).
+# Profile arg lists.
+#   PRE_PROFILE_ARGS   — <comp>_pre  (source + dependencies stages)
+#   PROFILE_ARGS       — <comp> and <comp>_dev (runtime + dev variants)
+# `watod build` runs both: _pre first to populate :source_TAG / :deps_TAG
+# images locally, then the runtime build whose template Dockerfile FROMs
+# them. Mirrors wato_monorepo's two-phase build orchestration.
 # ---------------------------------------------------------------------------
+declare -a PRE_PROFILE_ARGS=()
 declare -a PROFILE_ARGS=()
 declare -a SELECTED_SERVICES=()
 for s in "${MODULES_EXPANDED[@]}"; do
     base="${s%%:*}"
+    PRE_PROFILE_ARGS+=("--profile" "${base}_pre")
     PROFILE_ARGS+=("--profile" "${base}")
     if [[ "${s}" == *":dev" ]]; then
         PROFILE_ARGS+=("--profile" "${base}_dev")
@@ -185,6 +192,7 @@ for s in "${MODULES_EXPANDED[@]}"; do
 done
 
 export COMPOSE_FILES_STR="${COMPOSE_FILES[*]}"
+export PRE_PROFILE_ARGS_STR="${PRE_PROFILE_ARGS[*]}"
 export PROFILE_ARGS_STR="${PROFILE_ARGS[*]}"
 export SELECTED_SERVICES_STR="${SELECTED_SERVICES[*]}"
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Run pytest inside a module's dev container.  Usage:
+# Build a module's dev image, then run pytest in a one-shot container.
+# Usage:
 #   watod test [module] [pytest_args...]
 
 set -euo pipefail
@@ -10,30 +11,77 @@ set -euo pipefail
 # shellcheck disable=SC2206
 COMPOSE_FILES=(${COMPOSE_FILES_STR})
 
-MODULE="${1:-}"
-shift || true
+ALL_MODULES=(
+    ingest
+    perception_2d
+    lidar_preprocessing
+    proposal_generation
+    tracking
+    label_refinement
+    open_vocab_discovery
+    student_training
+)
 
-if [[ -z "${MODULE}" ]]; then
-    echo "Usage: watod test <module> [pytest_args...]" >&2
+is_module() {
+    local candidate="$1"
+    local module
+    for module in "${ALL_MODULES[@]}"; do
+        [[ "${candidate}" == "${module}" ]] && return 0
+    done
+    return 1
+}
+
+module_arg="${1:-}"
+declare -a targets=()
+
+if [[ -n "${module_arg}" ]] && is_module "${module_arg}"; then
+    targets+=("${module_arg}")
+    shift
+elif [[ -n "${module_arg}" ]] && [[ "${module_arg}" != -* ]]; then
+    echo "Unknown module: ${module_arg}" >&2
+    exit 64
+else
+    # Test every active service from watod. Strip _dev for active dev modules.
+    # shellcheck disable=SC2206
+    selected_services=(${SELECTED_SERVICES_STR:-})
+    for service in "${selected_services[@]}"; do
+        target="${service%_dev}"
+        if is_module "${target}"; then
+            targets+=("${target}")
+        fi
+    done
+fi
+
+if [[ ${#targets[@]} -eq 0 ]]; then
+    echo "Usage: watod test [module] [pytest_args...]" >&2
     exit 64
 fi
 
-normalize_module() {
-    echo "$1"
+run_compose() {
+    DOCKER_BUILDKIT=${DOCKER_BUILDKIT:-1} \
+        COMPOSE_BAKE=${COMPOSE_BAKE:-true} \
+        docker compose \
+            --env-file "${WATO_WORLD_DIR}/modules/.env" \
+            "${COMPOSE_FILES[@]}" \
+            "$@"
 }
 
-TARGET="$(normalize_module "${MODULE}")"
-case "${TARGET}" in
-    ingest|perception_2d|lidar_preprocessing|proposal_generation|tracking|label_refinement|open_vocab_discovery|student_training) ;;
-    *)
-    echo "Unknown module: ${MODULE}" >&2
-    exit 64
-    ;;
-esac
-SERVICE="${TARGET}_dev"
+run_module_tests() {
+    local target="$1"
+    shift
+    local service="${target}_dev"
 
-exec docker compose \
-    --env-file "${WATO_WORLD_DIR}/modules/.env" \
-    "${COMPOSE_FILES[@]}" \
-    --profile "${TARGET}_dev" \
-    exec "${SERVICE}" pytest /ws/src/"${TARGET}"/tests "$@"
+    echo "[watod test] Building ${service}"
+    PRE_PROFILE_ARGS_STR="--profile ${target}_pre" \
+        PROFILE_ARGS_STR="--profile ${target}_dev" \
+        bash "${WATO_WORLD_DIR}/watod_scripts/watod-compose.sh" build
+
+    echo "[watod test] Running pytest for ${target}"
+    run_compose \
+        --profile "${target}_dev" \
+        run --rm "${service}" pytest "/ws/src/${target}/tests" "$@"
+}
+
+for target in "${targets[@]}"; do
+    run_module_tests "${target}" "$@"
+done

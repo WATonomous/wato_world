@@ -1,9 +1,11 @@
-# Dev overrides — separate <target>_dev services that:
-#   - build the develop target (host user mapped, dev tools installed)
+# Dev overrides — separate <comp>_dev services that:
+#   - build template.Dockerfile target=develop (host user mapped, dev tools)
 #   - bind-mount source for hot reload
-#   - command: sleep infinity (you `watod -t <target>_dev` in to work)
+#   - command: sleep infinity (you `watod -t <comp>_dev` in to work)
 #
-# Activated by `watod -c perception_2d:dev up`.
+# Each _dev service `extends:` the runtime service in docker-compose.yaml,
+# inheriting its build context + MODULE_SOURCE / MODULE_DEPS / COMPONENT_*
+# args, then adds the host-user args needed by template's develop stage.
 
 services:
   ingest_dev:

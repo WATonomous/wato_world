@@ -1,0 +1,89 @@
+---
+name: Check source file changes
+
+outputs:
+  modified_modules:
+    description: "Space-delimited list of modified modules"
+    value: ${{ steps.output-changes.outputs.modified_modules }}
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Find changed files outside src
+      id: changed-files-outside-src
+      uses: tj-actions/changed-files@v42
+      with:
+        files: "!src/**"
+
+    - name: Find changed files inside src/common
+      id: changed-files-common
+      uses: tj-actions/changed-files@v42
+      with:
+        files: src/common/**
+
+    - name: Find changed files inside src/ingest
+      id: changed-files-ingest
+      uses: tj-actions/changed-files@v42
+      with:
+        files: src/ingest/**
+
+    - name: Find changed files inside src/perception_2d
+      id: changed-files-perception-2d
+      uses: tj-actions/changed-files@v42
+      with:
+        files: src/perception_2d/**
+
+    - name: Find changed files inside src/lidar_preprocessing
+      id: changed-files-lidar-preprocessing
+      uses: tj-actions/changed-files@v42
+      with:
+        files: src/lidar_preprocessing/**
+
+    - name: Find changed files inside src/proposal_generation
+      id: changed-files-proposal-generation
+      uses: tj-actions/changed-files@v42
+      with:
+        files: src/proposal_generation/**
+
+    - name: Find changed files inside src/tracking
+      id: changed-files-tracking
+      uses: tj-actions/changed-files@v42
+      with:
+        files: src/tracking/**
+
+    - name: Find changed files inside src/label_refinement
+      id: changed-files-label-refinement
+      uses: tj-actions/changed-files@v42
+      with:
+        files: src/label_refinement/**
+
+    - name: Find changed files inside src/open_vocab_discovery
+      id: changed-files-open-vocab-discovery
+      uses: tj-actions/changed-files@v42
+      with:
+        files: src/open_vocab_discovery/**
+
+    - name: Find changed files inside src/student_training
+      id: changed-files-student-training
+      uses: tj-actions/changed-files@v42
+      with:
+        files: src/student_training/**
+
+    - name: Create list of changed modules
+      id: output-changes
+      env:
+        ALL_CHANGED: ${{ steps.changed-files-outside-src.outputs.any_changed == 'true' || steps.changed-files-common.outputs.any_changed == 'true' }}
+        INGEST_CHANGED: ${{ steps.changed-files-ingest.outputs.any_changed }}
+        PERCEPTION_2D_CHANGED: ${{ steps.changed-files-perception-2d.outputs.any_changed }}
+        LIDAR_PREPROCESSING_CHANGED: ${{ steps.changed-files-lidar-preprocessing.outputs.any_changed }}
+        PROPOSAL_GENERATION_CHANGED: ${{ steps.changed-files-proposal-generation.outputs.any_changed }}
+        TRACKING_CHANGED: ${{ steps.changed-files-tracking.outputs.any_changed }}
+        LABEL_REFINEMENT_CHANGED: ${{ steps.changed-files-label-refinement.outputs.any_changed }}
+        OPEN_VOCAB_DISCOVERY_CHANGED: ${{ steps.changed-files-open-vocab-discovery.outputs.any_changed }}
+        STUDENT_TRAINING_CHANGED: ${{ steps.changed-files-student-training.outputs.any_changed }}
+      run: ${{ github.action_path }}/check_src_changes.sh
+      shell: bash

@@ -1,0 +1,28 @@
+---
+name: Generate Docker Environment
+
+inputs:
+  modified_modules:
+    description: "Space-delimited list of modified modules"
+    required: true
+    default: ""
+
+outputs:
+  docker_matrix:
+    description: "Docker build/test matrix"
+    value: ${{ steps.environment-generator.outputs.docker_matrix }}
+  registry:
+    description: "Docker registry host"
+    value: ${{ steps.environment-generator.outputs.registry }}
+  repository:
+    description: "Docker repository path"
+    value: ${{ steps.environment-generator.outputs.repository }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: environment-generator
+      env:
+        MODIFIED_MODULES: ${{ inputs.modified_modules }}
+      run: ${{ github.action_path }}/docker_context.sh
+      shell: bash

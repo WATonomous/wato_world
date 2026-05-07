@@ -1,0 +1,16 @@
+{
+  "include": [
+    {
+      "flavor": "cuda",
+      "tag": "cuda12.8.1-cudnn-runtime-ubuntu24.04",
+      "external_image": "nvcr.io/nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04",
+      "dockerfile": "docker/base/inject_cuda_base.Dockerfile"
+    },
+    {
+      "flavor": "cpu",
+      "tag": "cpu-ubuntu24.04",
+      "external_image": "ubuntu:24.04",
+      "dockerfile": "docker/base/inject_cpu_base.Dockerfile"
+    }
+  ]
+}

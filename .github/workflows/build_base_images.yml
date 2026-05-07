@@ -1,10 +1,14 @@
-name: build-base-images
+---
+name: Build Wato World Base Images
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
       - "docker/base/**"
+      - ".github/include/base_image_config.json"
+      - ".github/templates/docker_context/**"
       - ".github/workflows/build_base_images.yml"
   workflow_dispatch:
 
@@ -13,44 +17,89 @@ permissions:
   packages: write
 
 jobs:
-  build-base:
+  setup-environment:
+    name: Setup Environment
     runs-on: ubuntu-latest
+
+    outputs:
+      registry: ${{ steps.docker-context.outputs.registry }}
+      repository: ${{ steps.docker-context.outputs.repository }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Generate Docker Context
+        id: docker-context
+        uses: "./.github/templates/docker_context"
+
+  base-matrix-prep:
+    name: Prepare Base Image Matrix JSON
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.prep.outputs.matrix }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Base Image Matrix
+        id: prep
+        run: |
+          matrix="$(jq -c . .github/include/base_image_config.json)"
+          echo "Base Image Matrix: ${matrix}"
+          echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
+        shell: bash
+
+  build:
+    name: Build Base Images
+    runs-on: ubuntu-latest
+    needs: [setup-environment, base-matrix-prep]
+
+    env:
+      DOCKER_REGISTRY: ${{ needs.setup-environment.outputs.registry }}
+      DOCKER_REPOSITORY: ${{ needs.setup-environment.outputs.repository }}
+
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - flavor: cuda
-            dockerfile: docker/base/inject_cuda_base.Dockerfile
-            tag: cuda-12.4
-          - flavor: cpu
-            dockerfile: docker/base/inject_cpu_base.Dockerfile
-            tag: cpu-ubuntu24.04
+      matrix: ${{ fromJSON(needs.base-matrix-prep.outputs.matrix) }}
+
+    concurrency:
+      group: ${{ matrix.tag }}-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - id: repo
-        run: echo "lower=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+      - name: Construct Registry URL
+        id: construct-registry-url
+        run: |
+          echo "url=${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_REPOSITORY }}/base:${{ matrix.tag }}" \
+            >> "${GITHUB_OUTPUT}"
+        shell: bash
 
-      - uses: docker/setup-buildx-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        id: buildx
 
-      - uses: docker/login-action@v3
+      - name: Docker Login
+        uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.DOCKER_REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
+      - name: Build and Push Base Image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.dockerfile }}
           push: true
-          tags: ghcr.io/${{ steps.repo.outputs.lower }}/base:${{ matrix.tag }}
-          # OCI source label auto-links the ghcr package to this repo, which is
-          # what grants the build_and_test workflow's GITHUB_TOKEN
-          # (packages: read) permission to pull these bases. Without this, the
-          # package exists "orphaned" and downstream workflows hit
-          # 403 Forbidden on the anonymous token endpoint.
+          tags: ${{ steps.construct-registry-url.outputs.url }}
+          builder: ${{ steps.buildx.outputs.name }}
+          build-args: |
+            GENERIC_IMAGE=${{ matrix.external_image }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           provenance: false

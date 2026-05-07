@@ -132,7 +132,8 @@ bootstrap requires the workflow to actually run successfully once.
 ### Three workflows
 
 - `.github/workflows/build_base_images.yml` — builds + pushes the two base
-  images (`base:cpu-ubuntu24.04`, `base:cuda-12.4`) to ghcr. Triggers on:
+  images (`base:cpu-ubuntu24.04`, `base:cuda12.8.1-cudnn-runtime-ubuntu24.04`)
+  to ghcr. Triggers on:
   push to main with `docker/base/**` changes, OR `workflow_dispatch`.
 - `.github/workflows/build_and_test.yml` — builds each component matrix
   entry against the published bases and runs pytest. Triggers on PRs and
