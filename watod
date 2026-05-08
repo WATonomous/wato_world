@@ -169,32 +169,36 @@ if [[ ${needs_dev} -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Profile arg lists.
-#   PRE_PROFILE_ARGS   — <comp>_pre  (source + dependencies stages)
-#   PROFILE_ARGS       — <comp> and <comp>_dev (runtime + dev variants)
-# `watod build` runs both: _pre first to populate :source_TAG / :deps_TAG
-# images locally, then the runtime build whose template Dockerfile FROMs
-# them. Mirrors wato_monorepo's two-phase build orchestration.
+# Profile lists (plain names, no --profile prefix).
+#   PRE_PROFILES — <comp>_pre  (source + dependencies stages)
+#   ALL_PROFILES — <comp> and <comp>_dev (runtime + dev variants)
+# watod-compose.sh receives these via --pre-profiles / --all-profiles flags
+# and runs the two-phase build. Mirrors wato_monorepo's calling convention.
 # ---------------------------------------------------------------------------
-declare -a PRE_PROFILE_ARGS=()
-declare -a PROFILE_ARGS=()
+declare -a PRE_PROFILES=()
+declare -a ALL_PROFILES=()
 declare -a SELECTED_SERVICES=()
 for s in "${MODULES_EXPANDED[@]}"; do
     base="${s%%:*}"
-    PRE_PROFILE_ARGS+=("--profile" "${base}_pre")
-    PROFILE_ARGS+=("--profile" "${base}")
+    PRE_PROFILES+=("${base}_pre")
+    ALL_PROFILES+=("${base}")
     if [[ "${s}" == *":dev" ]]; then
-        PROFILE_ARGS+=("--profile" "${base}_dev")
+        ALL_PROFILES+=("${base}_dev")
         SELECTED_SERVICES+=("${base}_dev")
     else
         SELECTED_SERVICES+=("${base}")
     fi
 done
 
-export COMPOSE_FILES_STR="${COMPOSE_FILES[*]}"
-export PRE_PROFILE_ARGS_STR="${PRE_PROFILE_ARGS[*]}"
-export PROFILE_ARGS_STR="${PROFILE_ARGS[*]}"
-export SELECTED_SERVICES_STR="${SELECTED_SERVICES[*]}"
+# Build --profile flag arrays for direct docker compose calls in this script.
+declare -a ALL_PROFILE_FLAGS=()
+for p in "${ALL_PROFILES[@]}"; do
+    ALL_PROFILE_FLAGS+=("--profile" "$p")
+done
+
+export COMPOSE_FILES_STR="${COMPOSE_FILES[*]}"        # for watod-run.sh
+export GPU_AVAILABLE="${GPU_AVAILABLE:-false}"         # for watod-compose.sh
+export SELECTED_SERVICES_STR="${SELECTED_SERVICES[*]}" # for watod-test.sh
 
 # ---------------------------------------------------------------------------
 # Command dispatch.  `build` and `up` go through watod-compose.sh, which
@@ -208,7 +212,7 @@ shift || true
 # -t shortcut: open a shell in a running container.
 if [[ -n "${TERMINAL}" ]]; then
     exec docker compose --env-file "${MODULES_DIR}/.env" "${COMPOSE_FILES[@]}" \
-        "${PROFILE_ARGS[@]}" exec "${TERMINAL}" bash
+        "${ALL_PROFILE_FLAGS[@]}" exec "${TERMINAL}" bash
 fi
 
 case "${COMMAND}" in
@@ -225,12 +229,10 @@ case "${COMMAND}" in
         exec bash "${SCRIPTS_DIR}/watod-build-base.sh" "$@"
         ;;
     up)
-        # Default to detached mode and only the active modules' services.
-        if [[ $# -eq 0 ]]; then
-            exec bash "${SCRIPTS_DIR}/watod-compose.sh" up -d "${SELECTED_SERVICES[@]}"
-        else
-            exec bash "${SCRIPTS_DIR}/watod-compose.sh" up "$@"
-        fi
+        exec bash "${SCRIPTS_DIR}/watod-compose.sh" up \
+            --pre-profiles "${PRE_PROFILES[@]}" \
+            --all-profiles "${ALL_PROFILES[@]}" \
+            "$@"
         ;;
     run)
         exec bash "${SCRIPTS_DIR}/watod-run.sh" "$@"
@@ -240,6 +242,9 @@ case "${COMMAND}" in
         ;;
     *)
         # Passthrough — `build`, `ps`, `logs`, `pull`, `down`, `exec`, ...
-        exec bash "${SCRIPTS_DIR}/watod-compose.sh" "${COMMAND}" "$@"
+        exec bash "${SCRIPTS_DIR}/watod-compose.sh" "${COMMAND}" \
+            --pre-profiles "${PRE_PROFILES[@]}" \
+            --all-profiles "${ALL_PROFILES[@]}" \
+            "$@"
         ;;
 esac

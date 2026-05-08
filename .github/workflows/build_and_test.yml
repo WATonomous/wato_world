@@ -11,7 +11,7 @@ on:
 
 permissions:
   contents: read
-  packages: read
+  packages: write
 
 jobs:
   setup-environment:
@@ -85,6 +85,7 @@ jobs:
       - name: Build and Test Module with Watod
         env:
           DOCKER_BUILDKIT: 1
+          COMPOSE_BAKE: "true"
           REGISTRY: ${{ needs.setup-environment.outputs.registry }}/${{ needs.setup-environment.outputs.repository }}
         run: ./watod test ${{ matrix.module }}
 
