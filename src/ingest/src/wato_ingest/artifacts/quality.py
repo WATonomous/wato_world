@@ -49,6 +49,10 @@ def compute(bag_id: str, chunk_id: str, cfg: IngestConfig) -> QualityReport:
             tags.append("CAMERA_DROPS")
 
     # ---- camera-LiDAR offset stats (only over valid rows). ------------------
+    # Stats are intentionally over valid frames only (those within the
+    # max_cam_offset_ms threshold). Dropped frames appear in frame_index with
+    # valid_camera=False and will show a wider signed range there — that's
+    # expected, not a discrepancy.
     offsets = [
         f["camera_offset_ms"]
         for f in frames

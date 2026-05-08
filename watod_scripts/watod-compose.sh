@@ -28,7 +28,6 @@ PROFILE_ARGS=(${PROFILE_ARGS_STR})
 
 run_compose() {
     DOCKER_BUILDKIT=${DOCKER_BUILDKIT:-1} \
-        COMPOSE_BAKE=${COMPOSE_BAKE:-true} \
         docker compose \
             --env-file "${WATO_WORLD_DIR}/modules/.env" \
             "${COMPOSE_FILES[@]}" \

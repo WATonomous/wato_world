@@ -92,6 +92,11 @@ def build_calibration_dict(
                 f"camera {cam_id}: no /tf_static path {ego_frame} -> {frame_id}"
             )
         K_3x3 = np.asarray(info["K"], dtype=np.float64).reshape(3, 3).tolist()
+        if not info["D"]:
+            notes.append(
+                f"camera {cam_id}: empty distortion — bag camera_info has no D"
+                " (pre-undistorted images or missing calibration)"
+            )
         calib["cameras"][cam_id] = {
             "frame_id": frame_id,
             "K": K_3x3,

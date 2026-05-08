@@ -50,4 +50,4 @@ exec docker compose \
     --env-file "${WATO_WORLD_DIR}/modules/.env" \
     "${COMPOSE_FILES[@]}" \
     --profile "${TARGET}" \
-    run --rm "${SERVICE}" python -m "${PKG}" "${ARGS[@]}"
+    run --rm "${SERVICE}" python3 -m "${PKG}" "${ARGS[@]}"

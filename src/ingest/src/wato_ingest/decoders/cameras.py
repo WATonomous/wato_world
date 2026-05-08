@@ -107,6 +107,19 @@ def decode_chunk(
     ]
 
 
+def _dims_from_compressed(data: bytes) -> tuple[int, int]:
+    """Read (width, height) from compressed image bytes without full decode."""
+    try:
+        from io import BytesIO
+
+        from PIL import Image as _PILImage
+
+        with _PILImage.open(BytesIO(data)) as img:
+            return img.size
+    except Exception:
+        return 0, 0
+
+
 def _write_one_image(
     *,
     msg,
@@ -128,10 +141,10 @@ def _write_one_image(
     if is_compressed:
         ext = _ext_for_format(getattr(msg, "format", ""))
         out_uri = camera_image_path(bag_id, chunk_id, cam_id, seq, ext)
+        img_bytes = bytes(msg.data)
         with open(local_path(out_uri), "wb") as fh:
-            fh.write(bytes(msg.data))
-        # CompressedImage doesn't expose width/height — leave as 0; downstream
-        # readers can pull dimensions from the file when needed.
+            fh.write(img_bytes)
+        width, height = _dims_from_compressed(img_bytes)
         row = CameraFrameRow(
             bag_id=bag_id,
             chunk_id=chunk_id,
@@ -140,8 +153,8 @@ def _write_one_image(
             image_path=out_uri,
             header_timestamp_ns=header_ts,
             record_timestamp_ns=record_ts_ns,
-            width=0,
-            height=0,
+            width=width,
+            height=height,
             encoding=getattr(msg, "format", "compressed"),
             is_compressed=True,
             valid=True,
