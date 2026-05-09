@@ -28,7 +28,7 @@ COPY --from=source_resolved /ws /ws
 RUN uv pip install --system --break-system-packages --no-deps \
         -e /ws/src/common -e /ws/src/${COMPONENT_PACKAGE_DIR}
 
-# Entrypoint: sources /opt/ros/${ROS_DISTRO}/setup.bash then exec "$@".
+# Entrypoint: sources /opt/ros/${ROS_DISTRO}/setup.bash if ROS is present, then exec "$@".
 # Mirrors wato_monorepo/docker/config/wato_entrypoint.sh.
 # Set here so both deploy and develop stages inherit it.
 RUN mkdir -p /opt/watonomous

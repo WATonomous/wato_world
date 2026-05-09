@@ -19,11 +19,12 @@ alias ll='ls -alF'
 alias la='ls -A'
 alias l='ls -CF'
 
-# Source ROS2 environment
-source /opt/ros/${ROS_DISTRO}/setup.bash
-
-# Allow ANSI color codes in ROS2 log output
-export RCUTILS_COLORIZED_OUTPUT=1
+# Source ROS2 environment only if present (wato_world components mostly have no ROS).
+if [ -n "${ROS_DISTRO}" ] && [ -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]; then
+    # shellcheck disable=SC1090,SC1091
+    source /opt/ros/${ROS_DISTRO}/setup.bash
+    export RCUTILS_COLORIZED_OUTPUT=1
+fi
 
 # Add ~/.local/bin to PATH
 export PATH="$HOME/.local/bin:$PATH"
