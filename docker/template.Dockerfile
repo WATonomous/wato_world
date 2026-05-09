@@ -22,19 +22,27 @@ FROM ${MODULE_SOURCE} AS source_resolved
 FROM deps_resolved AS build
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG COMPONENT_PACKAGE_DIR
-COPY --from=source_resolved /ws /ws
-RUN uv pip install --system --no-deps -e /ws/src/common \
-                                      -e /ws/src/${COMPONENT_PACKAGE_DIR}
-
-# ---------------------------------------------------------------------------
-# Deploy: minimal runtime image. ENTRYPOINT set per component via PACKAGE_NAME.
-# ---------------------------------------------------------------------------
-FROM build AS deploy
 ARG COMPONENT_PACKAGE
 ENV COMPONENT_PACKAGE=${COMPONENT_PACKAGE}
+COPY --from=source_resolved /ws /ws
+RUN uv pip install --system --break-system-packages --no-deps \
+        -e /ws/src/common -e /ws/src/${COMPONENT_PACKAGE_DIR}
+
+# Entrypoint: sources /opt/ros/${ROS_DISTRO}/setup.bash then exec "$@".
+# Mirrors wato_monorepo/docker/config/wato_entrypoint.sh.
+# Set here so both deploy and develop stages inherit it.
+RUN mkdir -p /opt/watonomous
+COPY docker/config/wato_entrypoint.sh /opt/watonomous/wato_entrypoint.sh
+RUN chmod +x /opt/watonomous/wato_entrypoint.sh
 WORKDIR /ws
-ENTRYPOINT ["sh", "-c", "exec python -m \"${COMPONENT_PACKAGE}\" \"$@\"", "--"]
-CMD ["--help"]
+ENTRYPOINT ["/opt/watonomous/wato_entrypoint.sh"]
+
+# ---------------------------------------------------------------------------
+# Deploy: minimal runtime image.
+# ---------------------------------------------------------------------------
+FROM build AS deploy
+# Shell-form CMD so ${COMPONENT_PACKAGE} expands at runtime.
+CMD python3 -m ${COMPONENT_PACKAGE} --help
 
 # ---------------------------------------------------------------------------
 # Develop: adds host-user mapping + dev tooling.  `command: sleep infinity`
@@ -66,7 +74,7 @@ RUN existing_user=$(getent passwd ${USER_UID} | cut -d: -f1 || true) \
  && apt-get -qq autoremove -y && apt-get -qq clean \
  && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc/* /usr/share/man/*
 
-RUN uv pip install --system pytest pytest-cov ruff black ipython
+RUN uv pip install --system --break-system-packages pytest pytest-cov ruff black ipython
 
 # Hand /ws to the dev user so pytest can write __pycache__, ruff its cache,
 # etc. without permission errors. Mirrors the chown step in
@@ -80,4 +88,9 @@ RUN if [ "${CLAUDE_CODE}" = "true" ]; then \
 
 USER ${USERNAME}
 WORKDIR /ws
+
+# Setup dev bashrc — mirrors wato_monorepo/docker/template.Dockerfile.
+COPY docker/config/wato_dev.bashrc /opt/watonomous/wato_dev.bashrc
+RUN echo "source /opt/watonomous/wato_dev.bashrc" >> ~/.bashrc
+
 CMD ["sleep", "infinity"]

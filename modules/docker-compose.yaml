@@ -39,6 +39,7 @@ services:
   ingest:
     profiles: ["ingest"]
     init: true
+    user: "${SETUID}:${SETGID}"
     build:
       context: ..
       dockerfile: docker/template.Dockerfile
@@ -85,6 +86,7 @@ services:
   perception_2d:
     profiles: ["perception_2d"]
     init: true
+    user: "${SETUID}:${SETGID}"
     build:
       context: ..
       dockerfile: docker/template.Dockerfile
@@ -131,6 +133,7 @@ services:
   lidar_preprocessing:
     profiles: ["lidar_preprocessing"]
     init: true
+    user: "${SETUID}:${SETGID}"
     build:
       context: ..
       dockerfile: docker/template.Dockerfile
@@ -175,6 +178,7 @@ services:
   proposal_generation:
     profiles: ["proposal_generation"]
     init: true
+    user: "${SETUID}:${SETGID}"
     build:
       context: ..
       dockerfile: docker/template.Dockerfile
@@ -221,6 +225,7 @@ services:
   tracking:
     profiles: ["tracking"]
     init: true
+    user: "${SETUID}:${SETGID}"
     build:
       context: ..
       dockerfile: docker/template.Dockerfile
@@ -265,6 +270,7 @@ services:
   label_refinement:
     profiles: ["label_refinement"]
     init: true
+    user: "${SETUID}:${SETGID}"
     build:
       context: ..
       dockerfile: docker/template.Dockerfile
@@ -311,6 +317,7 @@ services:
   open_vocab_discovery:
     profiles: ["open_vocab_discovery"]
     init: true
+    user: "${SETUID}:${SETGID}"
     build:
       context: ..
       dockerfile: docker/template.Dockerfile
@@ -357,6 +364,7 @@ services:
   student_training:
     profiles: ["student_training"]
     init: true
+    user: "${SETUID}:${SETGID}"
     build:
       context: ..
       dockerfile: docker/template.Dockerfile

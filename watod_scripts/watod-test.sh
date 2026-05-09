@@ -6,10 +6,11 @@
 set -euo pipefail
 
 : "${WATO_WORLD_DIR:?WATO_WORLD_DIR must be set}"
-: "${COMPOSE_FILES_STR:?COMPOSE_FILES_STR must be set}"
 
-# shellcheck disable=SC2206
-COMPOSE_FILES=(${COMPOSE_FILES_STR})
+declare -a COMPOSE_FILES=(
+    "-f" "${WATO_WORLD_DIR}/modules/docker-compose.yaml"
+    "-f" "${WATO_WORLD_DIR}/modules/docker-compose.dev.yaml"
+)
 
 ALL_MODULES=(
     ingest
@@ -57,9 +58,9 @@ if [[ ${#targets[@]} -eq 0 ]]; then
     exit 64
 fi
 
-run_compose() {
+run_docker_compose() {
     DOCKER_BUILDKIT=${DOCKER_BUILDKIT:-1} \
-        COMPOSE_BAKE=${COMPOSE_BAKE:-true} \
+    COMPOSE_BAKE=${COMPOSE_BAKE:-true} \
         docker compose \
             --env-file "${WATO_WORLD_DIR}/modules/.env" \
             "${COMPOSE_FILES[@]}" \
@@ -69,17 +70,16 @@ run_compose() {
 run_module_tests() {
     local target="$1"
     shift
-    local service="${target}_dev"
 
-    echo "[watod test] Building ${service}"
-    PRE_PROFILE_ARGS_STR="--profile ${target}_pre" \
-        PROFILE_ARGS_STR="--profile ${target}_dev" \
-        bash "${WATO_WORLD_DIR}/watod_scripts/watod-compose.sh" build
+    echo "[watod test] Building ${target}_dev"
+    bash "${WATO_WORLD_DIR}/watod_scripts/watod-compose.sh" build \
+        --pre-profiles "${target}_pre" \
+        --all-profiles "${target}_dev"
 
     echo "[watod test] Running pytest for ${target}"
-    run_compose \
+    run_docker_compose \
         --profile "${target}_dev" \
-        run --rm "${service}" pytest "/ws/src/${target}/tests" "$@"
+        run --rm "${target}_dev" pytest "/ws/src/${target}/tests" "$@"
 }
 
 for target in "${targets[@]}"; do

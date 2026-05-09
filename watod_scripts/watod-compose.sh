@@ -1,97 +1,141 @@
 #!/usr/bin/env bash
-# Generic passthrough to `docker compose` with the compose-file stack and
-# profile flags assembled by the watod entrypoint.
-#
-# On `build`, mirrors wato_monorepo/watod_scripts/watod-compose.sh:
-#   1. Pull each active module's BASE_IMAGE from the registry so the per-module
-#      FROM resolves locally. If a base isn't on the registry yet (first-time
-#      setup before CI has published), `watod build-base` seeds it locally.
-#   2. Run `compose build` with the _pre profiles to produce the
-#      <comp>:source_<TAG> and <comp>:deps_<TAG> images.
-#   3. Run `compose build` with the runtime/dev profiles. The runtime stage
-#      is template.Dockerfile, whose `FROM ${MODULE_SOURCE}` and
-#      `FROM ${MODULE_DEPS}` resolve to the images produced in step 2.
+# watod-compose.sh - Handles all docker compose operations with preprocessing
+# Usage: watod-compose.sh <command> [--pre-profiles <p>...] [--all-profiles <p>...] [--compose-files <f>...] [extra-args...]
 
 set -euo pipefail
 
-: "${WATO_WORLD_DIR:?WATO_WORLD_DIR must be set}"
-: "${COMPOSE_FILES_STR:?COMPOSE_FILES_STR must be set}"
-: "${PROFILE_ARGS_STR:?PROFILE_ARGS_STR must be set}"
-: "${PRE_PROFILE_ARGS_STR:=}"
-
-# shellcheck disable=SC2206
-COMPOSE_FILES=(${COMPOSE_FILES_STR})
-# shellcheck disable=SC2206
-PRE_PROFILE_ARGS=(${PRE_PROFILE_ARGS_STR})
-# shellcheck disable=SC2206
-PROFILE_ARGS=(${PROFILE_ARGS_STR})
-
-run_compose() {
-    DOCKER_BUILDKIT=${DOCKER_BUILDKIT:-1} \
-        COMPOSE_BAKE=${COMPOSE_BAKE:-true} \
-        docker compose \
-            --env-file "${WATO_WORLD_DIR}/modules/.env" \
-            "${COMPOSE_FILES[@]}" \
-            "$@"
+run_docker_compose() {
+  DOCKER_BUILDKIT=${DOCKER_BUILDKIT:-1} \
+    COMPOSE_BAKE=${COMPOSE_BAKE:-true} \
+    docker compose \
+      --env-file "${WATO_WORLD_DIR}/modules/.env" \
+      "$@"
 }
 
-COMPOSE_CMD="${1:-}"
+WATO_WORLD_DIR="${WATO_WORLD_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "$WATO_WORLD_DIR"
 
-# ---------------------------------------------------------------------------
-# Build path: pull bases, then two-phase compose build.
-# ---------------------------------------------------------------------------
-if [[ "${COMPOSE_CMD}" == "build" ]]; then
-    shift  # consume "build"; remaining $@ is extra build args.
-    EXTRA_BUILD_ARGS=("$@")
+declare -a PRE_PROFILES=()
+declare -a ALL_PROFILES=()
+declare -a CUSTOM_COMPOSE_FILES=()
+declare -a EXTRA_COMPOSE_ARGS=()
 
-    # Derive Dockerfiles from the active runtime --profile flags so we know
-    # which BASE_IMAGE values to pre-pull.
-    declare -a active_dockerfiles=()
-    for ((i = 0; i < ${#PROFILE_ARGS[@]}; i++)); do
-        if [[ "${PROFILE_ARGS[i]}" == "--profile" ]]; then
-            module_name="${PROFILE_ARGS[i+1]%_dev}"
-            dockerfile="${WATO_WORLD_DIR}/docker/${module_name}.Dockerfile"
-            [[ -f "${dockerfile}" ]] && active_dockerfiles+=("${dockerfile}")
-        fi
-    done
-
-    if [[ ${#active_dockerfiles[@]} -gt 0 ]]; then
-        echo "Pulling base images for active modules..."
-        # shellcheck disable=SC1091
-        set -a; source "${WATO_WORLD_DIR}/modules/.env"; set +a
-
-        base_images=$(grep -h '^ARG BASE_IMAGE=' "${active_dockerfiles[@]}" 2>/dev/null \
-                      | sed 's/ARG BASE_IMAGE=//' \
-                      | envsubst \
-                      | sort -u)
-
-        if [[ -n "${base_images}" ]]; then
-            while IFS= read -r base_image; do
-                [[ -z "${base_image}" ]] && continue
-                echo "  Pulling ${base_image}..."
-                docker pull "${base_image}" 2>/dev/null \
-                    || echo "    (Skipped — using cached version, offline, or run 'watod build-base' to seed locally)"
-            done <<< "${base_images}"
-        fi
-    fi
-
-    # Phase 1: build the source + dependencies layers (per-component).
-    if [[ ${#PRE_PROFILE_ARGS[@]} -gt 0 ]]; then
-        echo "[watod build] Phase 1/2 — building source + deps layers"
-        run_compose "${PRE_PROFILE_ARGS[@]}" build "${EXTRA_BUILD_ARGS[@]}"
-    fi
-
-    # Phase 2: build runtime (template.Dockerfile) and dev variants.
-    echo "[watod build] Phase 2/2 — building runtime / dev images via template"
-    exec_status=0
-    run_compose "${PROFILE_ARGS[@]}" build "${EXTRA_BUILD_ARGS[@]}" || exec_status=$?
-    exit ${exec_status}
+if [[ $# -lt 1 ]]; then
+  echo "Error: Missing compose command" >&2
+  echo "Usage: watod-compose.sh <command> [--pre-profiles <p>...] [--all-profiles <p>...] [--compose-files <f>...] [extra-args...]" >&2
+  exit 1
 fi
 
-# ---------------------------------------------------------------------------
-# All other commands: simple passthrough with runtime/dev profiles only.
-# (_pre services don't run — they're build-only.)
-# ---------------------------------------------------------------------------
-exec_status=0
-run_compose "${PROFILE_ARGS[@]}" "$@" || exec_status=$?
-exit ${exec_status}
+COMPOSE_CMD=("$1")
+shift
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --pre-profiles)
+      shift
+      while [[ $# -gt 0 && "$1" != --* ]]; do
+        PRE_PROFILES+=("$1")
+        shift
+      done
+      ;;
+    --all-profiles)
+      shift
+      while [[ $# -gt 0 && "$1" != --* ]]; do
+        ALL_PROFILES+=("$1")
+        shift
+      done
+      ;;
+    --compose-files)
+      shift
+      while [[ $# -gt 0 && "$1" != --* ]]; do
+        CUSTOM_COMPOSE_FILES+=("-f" "$1")
+        shift
+      done
+      ;;
+    *)
+      EXTRA_COMPOSE_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+# Assemble default compose files; include GPU overrides when GPU_AVAILABLE=true.
+declare -a DEFAULT_COMPOSE_FILES=("-f" "modules/docker-compose.yaml")
+if [[ "${GPU_AVAILABLE:-false}" == "true" ]]; then
+  DEFAULT_COMPOSE_FILES+=("-f" "modules/docker-compose.gpu.yaml")
+fi
+DEFAULT_COMPOSE_FILES+=("-f" "modules/docker-compose.dev.yaml")
+
+if [[ ${#CUSTOM_COMPOSE_FILES[@]} -gt 0 ]]; then
+  COMPOSE_FILES=("${CUSTOM_COMPOSE_FILES[@]}")
+else
+  COMPOSE_FILES=("${DEFAULT_COMPOSE_FILES[@]}")
+fi
+
+# On `build`, pull base images for active modules.
+if [[ "${COMPOSE_CMD[0]}" == "build" ]]; then
+  echo "Pulling base images for active modules..."
+  declare -a active_dockerfiles=()
+  for p in "${PRE_PROFILES[@]}"; do
+    module_name="${p%_pre}"
+    dockerfile="docker/${module_name}.Dockerfile"
+    if [[ -f "$dockerfile" ]]; then
+      active_dockerfiles+=("$dockerfile")
+    fi
+  done
+
+  if [[ ${#active_dockerfiles[@]} -gt 0 ]]; then
+    # shellcheck disable=SC1091
+    set -a; source "modules/.env"; set +a
+    base_images=$(grep -h "^ARG BASE_IMAGE=" "${active_dockerfiles[@]}" 2>/dev/null | \
+                  sed 's/ARG BASE_IMAGE=//' | \
+                  envsubst | \
+                  sort -u)
+    if [[ -n "$base_images" ]]; then
+      while IFS= read -r base_image; do
+        [[ -z "$base_image" ]] && continue
+        echo "  Pulling $base_image..."
+        docker pull "$base_image" 2>/dev/null || \
+          echo "    (Skipped — using cached version or run 'watod build-base' to seed locally)"
+      done <<< "$base_images"
+    fi
+  fi
+fi
+
+# Convert profile names to --profile flags.
+declare -a PRE_PROFILE_FLAGS=()
+for p in "${PRE_PROFILES[@]}"; do
+  PRE_PROFILE_FLAGS+=("--profile" "$p")
+done
+
+declare -a ALL_PROFILE_FLAGS=()
+for p in "${ALL_PROFILES[@]}"; do
+  ALL_PROFILE_FLAGS+=("--profile" "$p")
+done
+
+# Pre-build phase: source + dependencies stages.
+if [[ "${COMPOSE_CMD[0]}" == "build" && ${#PRE_PROFILES[@]} -gt 0 ]]; then
+  echo "RUNNING PRE-BUILD"
+  run_docker_compose "${COMPOSE_FILES[@]}" "${PRE_PROFILE_FLAGS[@]}" build "${EXTRA_COMPOSE_ARGS[@]}"
+  if [[ -n ${CI:-} || -n ${GITHUB_ACTIONS:-} ]]; then
+    echo "CI detected: Pushing PRE-BUILD images to registry..."
+    run_docker_compose "${COMPOSE_FILES[@]}" "${PRE_PROFILE_FLAGS[@]}" push
+  fi
+fi
+
+# Force detached mode for `up`.
+if [[ "${COMPOSE_CMD[0]}" == "up" && ! " ${EXTRA_COMPOSE_ARGS[*]:-} " =~ " -d " ]]; then
+  EXTRA_COMPOSE_ARGS+=(-d)
+fi
+
+if [[ "${COMPOSE_CMD[0]}" == "build" ]]; then
+  echo "RUNNING BUILD"
+fi
+
+run_docker_compose "${COMPOSE_FILES[@]}" "${ALL_PROFILE_FLAGS[@]}" "${COMPOSE_CMD[@]}" "${EXTRA_COMPOSE_ARGS[@]}"
+
+# In CI, push final images after successful build.
+if [[ "${COMPOSE_CMD[0]}" == "build" && ( -n ${CI:-} || -n ${GITHUB_ACTIONS:-} ) && ${#ALL_PROFILES[@]} -gt 0 ]]; then
+  echo "CI detected: Pushing final images to registry..."
+  run_docker_compose "${COMPOSE_FILES[@]}" "${ALL_PROFILE_FLAGS[@]}" push
+fi
