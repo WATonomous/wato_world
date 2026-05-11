@@ -6,8 +6,8 @@
 
 # syntax=docker/dockerfile:1.6
 
-ARG MODULE_SOURCE
-ARG MODULE_DEPS
+ARG MODULE_SOURCE=ingest:source_ingest
+ARG MODULE_DEPS=ingest:deps_ingest
 
 # ---------------------------------------------------------------------------
 # Resolve the two prebuilt build layers.

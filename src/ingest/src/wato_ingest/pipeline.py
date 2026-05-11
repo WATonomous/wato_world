@@ -106,6 +106,7 @@ def run_bag(
             bag_id,
             c.chunk_id,
             max_cam_offset_ms=cfg.max_cam_offset_ms,
+            max_pose_gap_ns=int(cfg.max_pose_gap_ms * 1e6),
         )
         report = quality.compute(bag_id, c.chunk_id, cfg)
 

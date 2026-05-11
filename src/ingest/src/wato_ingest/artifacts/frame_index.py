@@ -43,7 +43,7 @@ def build(
     chunk_id: str,
     *,
     max_cam_offset_ms: float,
-    max_pose_gap_ns: int = 200_000_000,
+    max_pose_gap_ns: int,
 ) -> FrameIndexResult:
     sweeps = read_rows(lidar_sweeps_path(bag_id, chunk_id))
     camera_frames = read_rows(camera_frames_path(bag_id, chunk_id))

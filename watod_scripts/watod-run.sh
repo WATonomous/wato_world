@@ -9,13 +9,22 @@ set -euo pipefail
 : "${COMPOSE_FILES_STR:?COMPOSE_FILES_STR must be set}"
 
 if [[ $# -lt 2 ]]; then
-    echo "Usage: watod run <module> <bag-or-bag-id> [chunk_id]" >&2
+    echo "Usage: watod run <module> [--bag] <bag-or-bag-id> [extra-flags]" >&2
     exit 64
 fi
 
 MODULE="$1"
-BAG="$2"
-CHUNK_ID="${3:-}"
+shift 1
+
+# Accept both positional and flag-style bag argument:
+#   watod run <module> <bag>
+#   watod run <module> --bag <bag>
+if [[ "${1:-}" == "--bag" ]]; then
+    shift 1
+fi
+BAG="${1:?bag argument required}"
+shift 1
+EXTRA_ARGS=("$@")
 
 normalize_module() {
     echo "$1"
@@ -38,13 +47,21 @@ case "${TARGET}" in
         ;;
 esac
 
+# Use the dev service (with source bind-mounts) when the module is active in
+# dev mode, so `watod run` picks up live source changes without a rebuild.
+# shellcheck disable=SC2206
+SELECTED_SERVICES=(${SELECTED_SERVICES_STR:-})
+for s in "${SELECTED_SERVICES[@]}"; do
+    if [[ "${s}" == "${TARGET}_dev" ]]; then
+        SERVICE="${TARGET}_dev"
+        break
+    fi
+done
+
 # shellcheck disable=SC2206
 COMPOSE_FILES=(${COMPOSE_FILES_STR})
 
-ARGS=(run --bag "${BAG}")
-if [[ -n "${CHUNK_ID}" ]]; then
-    ARGS+=(--chunk "${CHUNK_ID}")
-fi
+ARGS=(run --bag "${BAG}" "${EXTRA_ARGS[@]}")
 
 exec docker compose \
     --env-file "${WATO_WORLD_DIR}/modules/.env" \

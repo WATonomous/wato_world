@@ -11,7 +11,10 @@ read directly from disk without touching the bag.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+
+log = logging.getLogger(__name__)
 
 from wato_common.artifact_store import (
     camera_dir,
@@ -44,6 +47,11 @@ def _ext_for_format(fmt: str) -> str:
         return "jpg"
     if "png" in f:
         return "png"
+    log.warning(
+        "CompressedImage.format %r is not jpeg/png — writing raw bytes as .bin; "
+        "downstream perception will not be able to open this file",
+        fmt,
+    )
     return "bin"
 
 

@@ -1,0 +1,40 @@
+lidar_preprocessing:
+  # Step B — voxel static/dynamic classification.
+  voxel_size_m: 0.15
+  # Voxel is classified static if seen in at least this fraction of chunk sweeps.
+  static_sweep_fraction: 0.30
+  # Minimum sweep count regardless of fraction (avoids over-classifying short chunks).
+  static_sweep_min: 5
+
+  # Step D — global static map reduce.
+  global_map_voxel_size_m: 0.30
+
+  # Unit of the t_offset_us field written by ingest.
+  # Velodyne "t" field is seconds; adjust if using a different LiDAR.
+  # Options: "seconds" | "microseconds" | "nanoseconds"
+  point_time_unit: "seconds"
+
+  # Step C — Patchwork++ ground segmentation.
+  # Parameters match wato_monorepo perception/patchwork/patchwork/config/params.yaml.
+  patchwork:
+    sensor_height: 1.8        # metres above ground plane
+    num_iter: 3
+    num_lpr: 20
+    num_min_pts: 10
+    th_seeds: 0.3
+    th_dist: 0.15             # ground inlier distance threshold (m)
+    th_seeds_v: 0.25
+    th_dist_v: 0.85
+    max_range: 90.0
+    min_range: 1.0
+    uprightness_thr: 0.101
+    enable_RNR: false
+    verbose: false
+    ground_cell_size_m: 0.5  # height-grid resolution (m)
+
+  # Set true to export voxel_occupancy.npz (all occupied voxels as sparse
+  # int32 coords) alongside static_map.npz. Used by SAM4D/MinkUNet encoders.
+  save_voxel_occupancy: false
+
+  upstream_versions:
+    ingest: "0.1.0"

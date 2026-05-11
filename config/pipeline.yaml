@@ -15,14 +15,6 @@ perception_2d:
   upstream_versions:
     ingest: v1
 
-lidar_preprocessing:
-  voxel_size_m: 0.15
-  static_min_persistence: 0.7
-  ground:
-    method: patchworkpp
-  upstream_versions:
-    ingest: v1
-
 proposal_generation:
   lidar_detectors:
     - centerpoint

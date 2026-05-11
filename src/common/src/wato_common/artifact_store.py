@@ -57,12 +57,12 @@ def camera_image_path(
     return _join(camera_dir(bag_id, chunk_id, cam_id), f"{seq:06d}.{ext.lstrip('.')}")
 
 
-def lidar_dir(bag_id: str, chunk_id: str) -> str:
-    return _join(chunk_root(bag_id, chunk_id), "lidar")
+def lidar_dir(bag_id: str, chunk_id: str, lidar_id: str) -> str:
+    return _join(chunk_root(bag_id, chunk_id), "lidar", lidar_id)
 
 
-def lidar_sweep_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
-    return _join(lidar_dir(bag_id, chunk_id), f"{sweep_id:06d}.npz")
+def lidar_sweep_path(bag_id: str, chunk_id: str, lidar_id: str, sweep_id: int) -> str:
+    return _join(lidar_dir(bag_id, chunk_id, lidar_id), f"{sweep_id:06d}.npz")
 
 
 def poses_path(bag_id: str, chunk_id: str) -> str:
@@ -87,6 +87,85 @@ def quality_path(bag_id: str, chunk_id: str) -> str:
 
 def manifest_path(bag_id: str, chunk_id: str) -> str:
     return _join(chunk_root(bag_id, chunk_id), "manifest.json")
+
+
+# ---------------------------------------------------------------------------
+# lidar_preprocessing artifacts.
+# ---------------------------------------------------------------------------
+def lidar_proc_dir(bag_id: str, chunk_id: str) -> str:
+    return _join(chunk_root(bag_id, chunk_id), "lidar_proc")
+
+
+def lidar_world_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
+    return _join(lidar_proc_dir(bag_id, chunk_id), f"{sweep_id:06d}_world.npz")
+
+
+def dynamic_mask_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
+    return _join(lidar_proc_dir(bag_id, chunk_id), f"{sweep_id:06d}_dynamic_mask.npy")
+
+
+def lidar_proc_index_path(bag_id: str, chunk_id: str) -> str:
+    return _join(chunk_root(bag_id, chunk_id), "lidar_proc_index.parquet")
+
+
+def lidar_proc_summary_path(bag_id: str, chunk_id: str) -> str:
+    return _join(chunk_root(bag_id, chunk_id), "lidar_proc_summary.parquet")
+
+
+def static_map_path(bag_id: str, chunk_id: str) -> str:
+    return _join(chunk_root(bag_id, chunk_id), "static_map.npz")
+
+
+def ground_path(bag_id: str, chunk_id: str) -> str:
+    return _join(chunk_root(bag_id, chunk_id), "ground.npz")
+
+
+def global_static_map_path(bag_id: str) -> str:
+    return _join(bag_root(bag_id), "global_static_map.npz")
+
+
+def voxel_occupancy_path(bag_id: str, chunk_id: str) -> str:
+    return _join(chunk_root(bag_id, chunk_id), "voxel_occupancy.npz")
+
+
+# ---------------------------------------------------------------------------
+# perception_2d artifacts.
+# ---------------------------------------------------------------------------
+def detections_2d_path(bag_id: str, chunk_id: str) -> str:
+    return _join(chunk_root(bag_id, chunk_id), "detections_2d.parquet")
+
+
+def tracklets_2d_path(bag_id: str, chunk_id: str) -> str:
+    return _join(chunk_root(bag_id, chunk_id), "tracklets_2d.parquet")
+
+
+def masks_2d_dir(bag_id: str, chunk_id: str) -> str:
+    """Directory containing per-masklet mask PNGs.
+
+    Layout: masks_2d/<masklet_id>/<camera_seq:06d>.png
+    """
+    return _join(chunk_root(bag_id, chunk_id), "masks_2d")
+
+
+# ---------------------------------------------------------------------------
+# proposal_generation artifacts.
+# ---------------------------------------------------------------------------
+def proposals_path(bag_id: str, chunk_id: str) -> str:
+    return _join(chunk_root(bag_id, chunk_id), "proposals.parquet")
+
+
+# ---------------------------------------------------------------------------
+# tracking artifacts (bag-level — spans all chunks).
+# ---------------------------------------------------------------------------
+def tracks_path(bag_id: str) -> str:
+    return _join(bag_root(bag_id), "tracks.parquet")
+
+
+# ---------------------------------------------------------------------------
+# label_refinement artifacts (bag-level).
+# ---------------------------------------------------------------------------
+def refined_labels_path(bag_id: str) -> str:
+    return _join(bag_root(bag_id), "refined_labels.parquet")
 
 
 # ---------------------------------------------------------------------------
