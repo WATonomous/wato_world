@@ -116,12 +116,20 @@ def static_map_path(bag_id: str, chunk_id: str) -> str:
     return _join(chunk_root(bag_id, chunk_id), "static_map.npz")
 
 
+def dynamic_map_path(bag_id: str, chunk_id: str) -> str:
+    return _join(chunk_root(bag_id, chunk_id), "dynamic_map.npz")
+
+
 def ground_path(bag_id: str, chunk_id: str) -> str:
     return _join(chunk_root(bag_id, chunk_id), "ground.npz")
 
 
 def global_static_map_path(bag_id: str) -> str:
     return _join(bag_root(bag_id), "global_static_map.npz")
+
+
+def global_ground_path(bag_id: str) -> str:
+    return _join(bag_root(bag_id), "global_ground.npz")
 
 
 def voxel_occupancy_path(bag_id: str, chunk_id: str) -> str:

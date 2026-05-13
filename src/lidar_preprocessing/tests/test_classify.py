@@ -8,11 +8,13 @@ import numpy as np
 import pytest
 
 from wato_common.artifact_store import (
+    dynamic_map_path,
     dynamic_mask_path,
     lidar_proc_index_path,
     lidar_world_path,
     local_path,
     static_map_path,
+    voxel_occupancy_path,
 )
 from wato_common.io.parquet_io import write_table
 from wato_common.schemas import PROCESSED_SWEEPS_SCHEMA
@@ -94,7 +96,12 @@ def test_all_sweeps_present_classified_static(tmp_env):
 
 
 def test_single_sweep_classified_dynamic(tmp_env):
-    """Points seen in only 1 out of 10 sweeps → dynamic."""
+    """Points seen in only 1 out of 10 sweeps → dynamic.
+
+    Also asserts the new chunk-level dynamic_map.npz: it must carry exactly
+    the union of per-sweep dynamic points, with sweep_id-per-point matching
+    the originating sweep.  This is the contract proposal_generation reads.
+    """
     bag_id, chunk_id = "bag1", "chunk0"
     n_sweeps = 10
     # Background static points present in all sweeps.
@@ -119,6 +126,61 @@ def test_single_sweep_classified_dynamic(tmp_env):
     # First 2 points are static (background), last 2 are dynamic.
     assert not mask_5[0] and not mask_5[1], "background should be static"
     assert mask_5[2] and mask_5[3], "one-off points should be dynamic"
+
+    # dynamic_map.npz contract: exactly the dynamic points across the chunk,
+    # all sweep_ids pointing at sweep 5.
+    dyn = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
+    assert dyn["xyz"].shape == (2, 3)
+    assert dyn["sweep_id"].shape == (2,)
+    assert (dyn["sweep_id"] == 5).all()
+    # Coordinates round-trip.
+    np.testing.assert_allclose(np.sort(dyn["xyz"][:, 0]), [0.0, 0.15])
+
+
+def test_dynamic_map_aggregates_across_sweeps(tmp_env):
+    """Dynamic points from multiple sweeps land in one chunk-level NPZ."""
+    bag_id, chunk_id = "bag_dynagg", "chunk0"
+    n_sweeps = 10
+    static_xyz = np.array([[100.0, 0.0, 0.0]])
+    # Each sweep has its own unique dynamic point.
+    xyz_per_sweep: list[np.ndarray] = []
+    for i in range(n_sweeps):
+        dyn = np.array([[float(i), 50.0, 0.0]])  # unique per sweep
+        xyz = np.concatenate([static_xyz, dyn])
+        _write_world_sweep(bag_id, chunk_id, i, xyz)
+        xyz_per_sweep.append(xyz)
+    _write_proc_index(bag_id, chunk_id, list(range(n_sweeps)), xyz_per_sweep=xyz_per_sweep)
+
+    cfg = ComponentConfig(static_sweep_fraction=0.5, static_sweep_min=2)
+    process_chunk(cfg, bag_id, chunk_id)
+
+    dyn = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
+    # All 10 unique dynamic points should be in dynamic_map.
+    assert dyn["xyz"].shape[0] == n_sweeps
+    # sweep_id-per-point must match the originating sweep.
+    sort_idx = np.argsort(dyn["sweep_id"])
+    np.testing.assert_array_equal(dyn["sweep_id"][sort_idx], np.arange(n_sweeps, dtype=np.int32))
+    np.testing.assert_allclose(dyn["xyz"][sort_idx, 0], np.arange(n_sweeps, dtype=float))
+
+
+def test_voxel_occupancy_emitted_by_default(tmp_env):
+    """save_voxel_occupancy defaults to True (SAM4D / MinkUNet contract)."""
+    bag_id, chunk_id = "bag_occ", "chunk0"
+    xyz = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    for i in range(5):
+        _write_world_sweep(bag_id, chunk_id, i, xyz)
+    _write_proc_index(bag_id, chunk_id, list(range(5)), xyz_per_sweep=[xyz] * 5)
+
+    cfg = ComponentConfig()  # all defaults
+    assert cfg.save_voxel_occupancy is True
+    process_chunk(cfg, bag_id, chunk_id)
+
+    occ_path = local_path(voxel_occupancy_path(bag_id, chunk_id))
+    assert os.path.exists(occ_path), "voxel_occupancy.npz must be written by default"
+    data = np.load(occ_path)
+    assert data["coords"].shape[1] == 3
+    assert data["coords"].dtype == np.int32
+    assert "origin" in data and "voxel_size" in data
 
 
 def test_intensity_backfilled_when_first_sweep_lacks_it(tmp_env):
@@ -158,7 +220,7 @@ def test_intensity_backfilled_when_first_sweep_lacks_it(tmp_env):
 
 
 def test_empty_proc_index_writes_sentinel(tmp_env):
-    """No proc_index rows → write empty static_map.npz, don't crash."""
+    """No proc_index rows → write empty static_map + dynamic_map, don't crash."""
     bag_id, chunk_id = "bag_empty", "chunk0"
     write_table([], PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
 
@@ -168,6 +230,9 @@ def test_empty_proc_index_writes_sentinel(tmp_env):
     assert result.n_dynamic == 0
     static = np.load(local_path(static_map_path(bag_id, chunk_id)))
     assert static["xyz"].shape == (0, 3)
+    dyn = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
+    assert dyn["xyz"].shape == (0, 3)
+    assert dyn["sweep_id"].shape == (0,)
 
 
 def test_static_map_written(tmp_env):

@@ -17,10 +17,10 @@ from wato_common.artifact_store import (
     local_path,
     poses_path,
 )
-from wato_common.io.parquet_io import write_table
+from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.schemas import LIDAR_SWEEPS_SCHEMA, POSES_SCHEMA
-from wato_lidar_preprocessing.config import ComponentConfig
-from wato_lidar_preprocessing.deskew import process_chunk
+from wato_lidar_preprocessing.config import ComponentConfig, FrameSyncParams
+from wato_lidar_preprocessing.deskew import _assign_frame_ids, process_chunk
 
 
 @pytest.fixture()
@@ -479,3 +479,130 @@ def test_point_time_unit_mismatch_records_failure(tmp_env):
     assert len(rows) == 1
     assert rows[0]["valid"] is False
     assert "point_time_unit" in (rows[0]["drop_reason"] or "")
+
+
+# ---------------------------------------------------------------------------
+# Frame-id assignment (Issue E) — multi-lidar canonical-frame grouping.
+# Tested as a pure function so we don't need to fabricate real sweeps.
+# ---------------------------------------------------------------------------
+
+
+def _row(lidar_id: str, ts_ns: int, *, valid: bool = True) -> dict:
+    return {
+        "lidar_id": lidar_id,
+        "reference_timestamp_ns": ts_ns,
+        "valid": valid,
+    }
+
+
+def test_assign_frame_ids_single_lidar_sequential():
+    """canonical_lidar=None → per-lidar sequential frame_ids by timestamp."""
+    rows = [
+        _row("LIDAR_TOP", 0),
+        _row("LIDAR_TOP", 100_000_000),
+        _row("LIDAR_TOP", 200_000_000),
+    ]
+    _assign_frame_ids(rows, FrameSyncParams(canonical_lidar=None))
+    assert [r["frame_id"] for r in rows] == [0, 1, 2]
+
+
+def test_assign_frame_ids_invalid_rows_get_none():
+    rows = [
+        _row("LIDAR_TOP", 0, valid=False),
+        _row("LIDAR_TOP", 100_000_000),
+        _row("LIDAR_TOP", 200_000_000),
+    ]
+    _assign_frame_ids(rows, FrameSyncParams(canonical_lidar=None))
+    assert rows[0]["frame_id"] is None
+    # The two valid rows form a sequence on their own.
+    assert rows[1]["frame_id"] == 0
+    assert rows[2]["frame_id"] == 1
+
+
+def test_assign_frame_ids_canonical_with_tolerance():
+    """Non-canonical sweeps within tolerance share canonical's frame_id."""
+    # 3-LiDAR rig.  Frame 0 fires near t=0; frame 1 fires near t=100ms.
+    # Center is canonical.  NE/NW arrive ~10ms after center (within 25ms).
+    rows = [
+        _row("lidar_ne", 10_000_000),   # +10 ms from canonical@0
+        _row("lidar_cc", 0),
+        _row("lidar_nw", -8_000_000),   # -8 ms from canonical@0
+        _row("lidar_cc", 100_000_000),
+        _row("lidar_ne", 105_000_000),  # +5 ms from canonical@100ms
+        _row("lidar_nw", 130_000_000),  # +30 ms from canonical@100ms → outside ±25ms
+    ]
+    _assign_frame_ids(
+        rows,
+        FrameSyncParams(canonical_lidar="lidar_cc", tolerance_ms=25.0),
+    )
+    by_lidar_ts = {(r["lidar_id"], r["reference_timestamp_ns"]): r["frame_id"] for r in rows}
+    # Canonical sweeps get sequential frame_ids.
+    assert by_lidar_ts[("lidar_cc", 0)] == 0
+    assert by_lidar_ts[("lidar_cc", 100_000_000)] == 1
+    # Within-tolerance non-canonical inherit.
+    assert by_lidar_ts[("lidar_ne", 10_000_000)] == 0
+    assert by_lidar_ts[("lidar_nw", -8_000_000)] == 0
+    assert by_lidar_ts[("lidar_ne", 105_000_000)] == 1
+    # Outside tolerance → None (orphan).
+    assert by_lidar_ts[("lidar_nw", 130_000_000)] is None
+
+
+def test_assign_frame_ids_canonical_missing_falls_back(caplog):
+    """canonical_lidar configured but not in chunk → log warning + per-lidar fallback."""
+    rows = [
+        _row("lidar_ne", 0),
+        _row("lidar_ne", 100_000_000),
+        _row("lidar_nw", 0),
+    ]
+    with caplog.at_level("WARNING", logger="wato_lidar_preprocessing.deskew"):
+        _assign_frame_ids(
+            rows,
+            FrameSyncParams(canonical_lidar="lidar_cc", tolerance_ms=25.0),
+        )
+    assert "not present in chunk" in caplog.text
+    # Each lidar gets its own sequential frame_ids.
+    by_lidar_ts = {(r["lidar_id"], r["reference_timestamp_ns"]): r["frame_id"] for r in rows}
+    assert by_lidar_ts[("lidar_ne", 0)] == 0
+    assert by_lidar_ts[("lidar_ne", 100_000_000)] == 1
+    assert by_lidar_ts[("lidar_nw", 0)] == 0
+
+
+def test_process_chunk_populates_frame_id(tmp_env):
+    """End-to-end: deskew populates frame_id in lidar_proc_index.parquet."""
+    bag_id, chunk_id = "bag_frameid", "chunk0"
+    _write_calibration(bag_id)
+    pose_row = {
+        "bag_id": bag_id, "chunk_id": chunk_id, "timestamp_ns": 0,
+        "x": 0.0, "y": 0.0, "z": 0.0,
+        "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
+        "world_T_ego_flat": _flat(np.eye(4)), "source": "odom", "valid": True,
+    }
+    _write_poses(bag_id, chunk_id, [pose_row])
+
+    from wato_common.artifact_store import lidar_proc_index_path, lidar_sweep_path
+    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
+
+    sweep_rows = []
+    for sid in range(3):
+        _write_raw_sweep(
+            bag_id, chunk_id, sid,
+            x=np.ones(1, dtype=np.float32),
+            y=np.zeros(1, dtype=np.float32),
+            z=np.zeros(1, dtype=np.float32),
+        )
+        sweep_rows.append({
+            "bag_id": bag_id, "chunk_id": chunk_id,
+            "lidar_id": "LIDAR_TOP", "sweep_id": sid,
+            "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", sid),
+            "header_timestamp_ns": sid * 100_000_000, "record_timestamp_ns": 0,
+            "num_points": 1, "has_ring": False, "has_intensity": False,
+            "has_point_time": False, "min_range_m": 1.0, "max_range_m": 1.0,
+            "valid": True, "drop_reason": None,
+        })
+    _write_sweep_index(bag_id, chunk_id, sweep_rows)
+
+    cfg = ComponentConfig()  # canonical_lidar=None → per-lidar sequential
+    process_chunk(cfg, bag_id, chunk_id)
+
+    rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
+    assert [r["frame_id"] for r in rows] == [0, 1, 2]

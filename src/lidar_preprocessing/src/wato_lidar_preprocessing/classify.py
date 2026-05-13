@@ -21,6 +21,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from wato_common.artifact_store import (
+    dynamic_map_path,
     dynamic_mask_path,
     ensure_local_dir,
     lidar_proc_dir,
@@ -90,7 +91,7 @@ def _write_empty_outputs(
     chunk_id: str,
     voxel_size: float,
 ) -> ClassifyResult:
-    """Write a sentinel static_map.npz when there's nothing to classify."""
+    """Write sentinel static_map.npz + dynamic_map.npz when there's nothing to classify."""
     ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
     out_uri = static_map_path(bag_id, chunk_id)
     np.savez_compressed(
@@ -102,6 +103,14 @@ def _write_empty_outputs(
         voxel_size=np.float32(voxel_size),
         origin=np.zeros(3, dtype=np.float64),
         static_voxel_keys=np.empty(0, dtype=np.int64),
+    )
+    # Empty dynamic_map.npz so downstream consumers can load unconditionally
+    # — distinguishing "chunk has no dynamic points" from "chunk not yet
+    # processed" still works via lidar_proc_summary.parquet.
+    np.savez_compressed(
+        local_path(dynamic_map_path(bag_id, chunk_id)),
+        xyz=np.empty((0, 3), dtype=np.float64),
+        sweep_id=np.empty(0, dtype=np.int32),
     )
     return ClassifyResult(0, 0, out_uri)
 
@@ -276,9 +285,15 @@ def process_chunk(
     else:
         static_arr = np.empty(0, dtype=np.int64)
 
-    # Pass 2: per-sweep masks + accumulate static cloud.
+    # Pass 2: per-sweep masks + accumulate static cloud + dynamic cloud.
+    # The dynamic accumulators mirror the static ones so downstream consumers
+    # (proposal_generation's LiDAR detector, SLF candidate clustering) can
+    # load one artifact per chunk instead of iterating every sweep.
     static_xyz_chunks: list[np.ndarray] = []
     static_intensity_chunks: list[np.ndarray] = []
+    dyn_xyz_chunks: list[np.ndarray] = []
+    dyn_intensity_chunks: list[np.ndarray] = []
+    dyn_sweep_id_chunks: list[np.ndarray] = []
     total_static = 0
     total_dynamic = 0
 
@@ -313,6 +328,7 @@ def process_chunk(
                     world_ymax=row.get("world_ymax"),
                     world_zmin=row.get("world_zmin"),
                     world_zmax=row.get("world_zmax"),
+                    frame_id=row.get("frame_id"),
                 ).model_dump()
             )
             continue
@@ -341,7 +357,7 @@ def process_chunk(
         total_static += n_static_s
         total_dynamic += n_dyn_s
 
-        if n_static_s > 0:
+        if n_static_s > 0 or n_dyn_s > 0:
             cached_xyz = xyz_cache[i]
             cached_intensity = intensity_cache[i]
             if cached_xyz is not None:
@@ -350,17 +366,36 @@ def process_chunk(
             else:
                 xyz, intensity = _load_world_xyz_intensity(row["world_path"])
             static_mask = ~mask
-            static_xyz_chunks.append(xyz[static_mask])
 
-            if any_intensity:
-                if has_intensity and intensity is not None:
-                    static_intensity_chunks.append(
-                        intensity[static_mask].astype(np.float32)
-                    )
-                else:
-                    static_intensity_chunks.append(
-                        np.zeros(n_static_s, dtype=np.float32)
-                    )
+            if n_static_s > 0:
+                static_xyz_chunks.append(xyz[static_mask])
+                if any_intensity:
+                    if has_intensity and intensity is not None:
+                        static_intensity_chunks.append(
+                            intensity[static_mask].astype(np.float32)
+                        )
+                    else:
+                        static_intensity_chunks.append(
+                            np.zeros(n_static_s, dtype=np.float32)
+                        )
+
+            if n_dyn_s > 0:
+                dyn_xyz_chunks.append(xyz[mask])
+                # sweep_id-per-point lets downstream recover temporal origin
+                # without iterating lidar_proc_index.  int32 is enough for any
+                # realistic chunk (32 k sweeps).
+                dyn_sweep_id_chunks.append(
+                    np.full(n_dyn_s, sweep_id, dtype=np.int32)
+                )
+                if any_intensity:
+                    if has_intensity and intensity is not None:
+                        dyn_intensity_chunks.append(
+                            intensity[mask].astype(np.float32)
+                        )
+                    else:
+                        dyn_intensity_chunks.append(
+                            np.zeros(n_dyn_s, dtype=np.float32)
+                        )
 
         updated_meta.append(
             ProcessedSweepMeta(
@@ -385,6 +420,7 @@ def process_chunk(
                 world_ymax=row.get("world_ymax"),
                 world_zmin=row.get("world_zmin"),
                 world_zmax=row.get("world_zmax"),
+                frame_id=row.get("frame_id"),
             ).model_dump()
         )
 
@@ -411,6 +447,23 @@ def process_chunk(
     save_kwargs["static_voxel_keys"] = static_arr
 
     np.savez_compressed(local_path(out_uri), **save_kwargs)
+
+    # Dynamic map: symmetric to static map; carries sweep_id per point so
+    # downstream (proposal_generation LiDAR detector, SLF candidate seeding,
+    # tracking ReID) can recover temporal info via a join on lidar_proc_index.
+    dyn_save_kwargs: dict[str, np.ndarray] = {}
+    if dyn_xyz_chunks:
+        dyn_save_kwargs["xyz"] = np.concatenate(dyn_xyz_chunks, axis=0)
+        dyn_save_kwargs["sweep_id"] = np.concatenate(dyn_sweep_id_chunks)
+        if any_intensity and dyn_intensity_chunks:
+            dyn_save_kwargs["intensity"] = np.concatenate(dyn_intensity_chunks)
+    else:
+        dyn_save_kwargs["xyz"] = np.empty((0, 3), dtype=np.float64)
+        dyn_save_kwargs["sweep_id"] = np.empty(0, dtype=np.int32)
+    np.savez_compressed(
+        local_path(dynamic_map_path(bag_id, chunk_id)), **dyn_save_kwargs
+    )
+
     log.info(
         "chunk %s: static=%d dynamic=%d voxel_threshold=%d/%d",
         chunk_id,

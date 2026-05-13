@@ -264,6 +264,12 @@ class ProcessedSweepMeta(BaseModel):
     world_ymax: Optional[float] = None
     world_zmin: Optional[float] = None
     world_zmax: Optional[float] = None
+    # SAM4D-style canonical-frame grouping: sweeps from different lidars whose
+    # reference_timestamp_ns falls within the configured tolerance of a
+    # canonical-lidar sweep share that sweep's frame_id.  Single-lidar bags
+    # (canonical_lidar=None in config) just get frame_id = sweep ordinal.
+    # Nullable: orphan sweeps outside any window are None.
+    frame_id: Optional[int] = None
 
 
 PROCESSED_SWEEPS_SCHEMA = pa.schema(
@@ -289,6 +295,7 @@ PROCESSED_SWEEPS_SCHEMA = pa.schema(
         pa.field("world_ymax", pa.float64()),
         pa.field("world_zmin", pa.float64()),
         pa.field("world_zmax", pa.float64()),
+        pa.field("frame_id", pa.int64()),
     ]
 )
 

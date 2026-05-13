@@ -32,9 +32,20 @@ lidar_preprocessing:
     verbose: false
     ground_cell_size_m: 0.5  # height-grid resolution (m)
 
-  # Set true to export voxel_occupancy.npz (all occupied voxels as sparse
-  # int32 coords) alongside static_map.npz. Used by SAM4D/MinkUNet encoders.
-  save_voxel_occupancy: false
+  # Export voxel_occupancy.npz (all occupied voxels as sparse int32 coords)
+  # alongside static_map.npz.  Consumed by SAM4D/MinkUNet encoders in
+  # perception_2d.  Cheap (single-digit MB per chunk) and enabled by default
+  # so the downstream paper-aligned contract is always populated.
+  save_voxel_occupancy: true
+
+  # Multi-lidar frame grouping for SAM4D-style cross-modal fusion.
+  # canonical_lidar=null disables grouping (each sweep is its own frame —
+  # right for single-lidar bags like NuScenes mini).  Once the WATO 3-Velodyne
+  # rig is in use, set canonical_lidar: "lidar_cc" so ne/nw sweeps within
+  # ±tolerance_ms inherit the center lidar's frame_id.
+  frame_sync:
+    canonical_lidar: null
+    tolerance_ms: 25.0
 
   upstream_versions:
     ingest: "0.1.0"

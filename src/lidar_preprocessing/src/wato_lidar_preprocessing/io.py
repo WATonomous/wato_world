@@ -9,7 +9,9 @@ from __future__ import annotations
 import numpy as np
 
 from wato_common.artifact_store import (
+    dynamic_map_path,
     dynamic_mask_path,
+    global_ground_path,
     global_static_map_path,
     ground_path,
     lidar_proc_index_path,
@@ -36,6 +38,18 @@ def load_static_map(bag_id: str, chunk_id: str) -> dict[str, np.ndarray]:
     return dict(np.load(local_path(static_map_path(bag_id, chunk_id))))
 
 
+def load_dynamic_map(bag_id: str, chunk_id: str) -> dict[str, np.ndarray]:
+    """Load the per-chunk dynamic cloud NPZ.
+
+    Keys:
+      xyz       float64 (M, 3) — dynamic-classified world-frame points
+      sweep_id  int32   (M,)   — originating sweep_id per point
+      intensity float32 (M,)   — only present when any contributing sweep
+                                 had intensity (mirrors static_map.npz).
+    """
+    return dict(np.load(local_path(dynamic_map_path(bag_id, chunk_id))))
+
+
 def load_ground(bag_id: str, chunk_id: str) -> dict[str, np.ndarray]:
     """Load the ground height grid NPZ for a chunk."""
     return dict(np.load(local_path(ground_path(bag_id, chunk_id))))
@@ -45,6 +59,16 @@ def load_global_static_map(bag_id: str) -> np.ndarray:
     """Load the bag-level global static map; returns xyz (N,3) float64."""
     data = np.load(local_path(global_static_map_path(bag_id)))
     return data["xyz"]
+
+
+def load_global_ground(bag_id: str) -> dict[str, np.ndarray]:
+    """Load the bag-level ground height grid NPZ.
+
+    Schema mirrors per-chunk ground.npz (height_grid, normal_grid, grid_origin,
+    cell_size, ground_xyz) so consumers can use a single loader regardless of
+    scope.  Produced by `wato_lidar_preprocessing reduce`.
+    """
+    return dict(np.load(local_path(global_ground_path(bag_id))))
 
 
 def load_proc_index(bag_id: str, chunk_id: str) -> list[dict]:

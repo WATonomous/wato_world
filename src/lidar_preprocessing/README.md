@@ -118,6 +118,7 @@ lidar rather than silently applying the wrong transform.
 | `n_points_total`, `n_points_static`, `n_points_dynamic` | int32 | Point counts |
 | `world_xmin`, `world_xmax`, `world_ymin`, `world_ymax`, `world_zmin`, `world_zmax` | float | Bounding box in world frame |
 | `has_intensity`, `deskewed` | bool | Feature flags |
+| `frame_id` | int64 (nullable) | Canonical-frame grouping per `frame_sync` config. When `canonical_lidar=null`, each lidar's sweeps are numbered sequentially. When set, non-canonical sweeps within `±tolerance_ms` inherit the canonical sweep's frame_id; orphans are null. Consumed by `perception_2d` for SAM4D-style multi-modal frame fusion. |
 
 The `world_*min/max` columns are written by deskew and used by classify to
 validate per-sweep coordinate ranges. Missing or zero values in these columns
@@ -181,6 +182,8 @@ extraction and proposal scoring.
 |---|---|
 | `lidar_proc/<sweep_id:06d>_dynamic_mask.npy` | `bool[N]`, True = dynamic point |
 | `static_map.npz` | Accumulated static cloud: `xyz` (float64, M×3), `intensity`, `voxel_size`, `origin` |
+| `dynamic_map.npz` | Accumulated dynamic cloud: `xyz` (float64, M×3), `sweep_id` (int32, M), `intensity` (when present). Symmetric to `static_map.npz` so downstream (`proposal_generation`'s LiDAR detector, SLF candidate seeding) loads one artifact per chunk instead of iterating every sweep. |
+| `voxel_occupancy.npz` | Sparse int32 voxel coords (`coords`, `origin`, `voxel_size`) for SAM4D / MinkUNet encoders in `perception_2d`. Includes all occupied voxels — static and dynamic. Toggle via `save_voxel_occupancy` config (default: true). |
 | `lidar_proc_index.parquet` | Updated with `n_points_static`, `n_points_dynamic`, `dynamic_mask_path` per sweep |
 
 ---
@@ -285,17 +288,24 @@ can use them as hard negative space when scoring proposals.
 
 ---
 
-### Step D — Global static map reduce (`reduce.py`)
+### Step D — Bag-level reduce (`reduce.py`)
 
 **What it does.** After all chunks for a bag have been processed by steps A–C,
-the `reduce` subcommand merges all per-chunk `static_map.npz` files into a single
-bag-level `global_static_map.npz` and voxel-downsamples it to ~30 cm resolution
-using a numpy-based voxel snap (quantize to grid cells and keep unique points).
+the `reduce` subcommand merges per-chunk artifacts into two bag-level outputs:
+
+- `global_static_map.npz` — concatenates every chunk's `static_map.npz` and
+  voxel-downsamples to ~30 cm resolution via numpy voxel snap (quantize to grid
+  cells, keep unique points).
+- `global_ground.npz` — concatenates every chunk's `ground_xyz` and rebuilds
+  a single bag-level height grid + normal grid via the same `_build_height_grid`
+  helper Step C uses. This solves SLF's `L_ground` chunk-boundary problem in
+  `proposal_generation`: a box fit near a chunk seam can query `z_ground(x, y)`
+  over the full bag without stitching multiple per-chunk grids.
 
 **Why this is a separate command.** Steps A–C are chunk-parallel: different
 chunks of the same bag can run on different machines simultaneously without
-coordination. The global static map requires all chunks to be finished first.
-Separating it into its own command makes the dependency explicit and avoids
+coordination. The global outputs require all chunks to be finished first.
+Separating reduce into its own command makes the dependency explicit and avoids
 blocking the chunk-level pipeline.
 
 **Downstream use.** The global static map is useful for:
@@ -309,15 +319,24 @@ blocking the chunk-level pipeline.
 - **Visualization and dataset-level QA.** The global map is the closest thing
   this pipeline has to a 3D scene reconstruction.
 
+The global ground grid feeds `proposal_generation` (SLF `L_ground` ground
+alignment loss) and `label_refinement` (per-frame box-bottom validation).
+
 **Graceful partial runs.** If some chunks have not yet been processed (their
-`static_map.npz` is missing), the reduce step silently skips them and processes
-whatever is available. This allows incremental reduces during long pipeline runs.
+`static_map.npz` / `ground.npz` is missing), the reduce step silently skips
+them and processes whatever is available. This allows incremental reduces
+during long pipeline runs.
 
-**Output** (`raw/<bag_id>/global_static_map.npz`):
+**Outputs:**
 
-| Field | Dtype | Description |
-|---|---|---|
-| `xyz` | float64, N×3 | Downsampled static world-frame points |
+| Artifact | Field | Dtype | Description |
+|---|---|---|---|
+| `raw/<bag_id>/global_static_map.npz` | `xyz` | float64, N×3 | Downsampled static world-frame points |
+| `raw/<bag_id>/global_ground.npz` | `height_grid` | float32, H×W | Ground Z at each grid cell (full bag) |
+| `raw/<bag_id>/global_ground.npz` | `normal_grid` | float32, H×W×3 | Unit surface normals |
+| `raw/<bag_id>/global_ground.npz` | `grid_origin` | float64, (2,) | [x₀, y₀] lower-left cell, world frame |
+| `raw/<bag_id>/global_ground.npz` | `cell_size` | float32 | Cell size in metres |
+| `raw/<bag_id>/global_ground.npz` | `ground_xyz` | float64, M×3 | Concatenated per-chunk ground points |
 
 ---
 
@@ -340,11 +359,14 @@ All outputs are written under `data/artifacts/raw/<bag_id>/`.
 |---|---|
 | `chunks/<chunk_id>/lidar_proc/<sweep_id:06d>_world.npz` | Deskewed world-frame sweep |
 | `chunks/<chunk_id>/lidar_proc/<sweep_id:06d>_dynamic_mask.npy` | Per-point dynamic boolean mask |
-| `chunks/<chunk_id>/lidar_proc_index.parquet` | Per-sweep processing metadata |
+| `chunks/<chunk_id>/lidar_proc_index.parquet` | Per-sweep processing metadata (includes `frame_id` for cross-lidar grouping) |
 | `chunks/<chunk_id>/lidar_proc_summary.parquet` | Chunk-level aggregation: point counts, sweep stats, cache budget |
 | `chunks/<chunk_id>/static_map.npz` | Accumulated static cloud |
+| `chunks/<chunk_id>/dynamic_map.npz` | Accumulated dynamic cloud + `sweep_id` per point (proposal_generation / SLF input) |
+| `chunks/<chunk_id>/voxel_occupancy.npz` | Sparse int32 voxel coords (SAM4D / MinkUNet input; enabled by default) |
 | `chunks/<chunk_id>/ground.npz` | Height grid, normal grid, ground points |
 | `global_static_map.npz` | Bag-level downsampled static cloud (from `reduce`) |
+| `global_ground.npz` | Bag-level height grid + normal grid (from `reduce`; spans all chunks so consumers near chunk boundaries don't have to stitch) |
 
 **Chunk summary schema** (`lidar_proc_summary.parquet`):
 
@@ -375,7 +397,8 @@ All outputs are written under `data/artifacts/raw/<bag_id>/`.
 # Re-process already-completed chunks (e.g. after a code change).
 ./watod run lidar_preprocessing --bag data/bags/NuScenes-v1.0-mini-scene-1100/ --force
 
-# After all chunks are done, build the global static map (step D).
+# After all chunks are done, build the bag-level reductions (step D):
+# global_static_map.npz + global_ground.npz.
 # reduce is a separate subcommand — run it directly inside the dev container.
 ./watod -t lidar_preprocessing_dev   # open a shell in the dev container
 python -m wato_lidar_preprocessing reduce --bag NuScenes_v1_0_mini_scene_1100
@@ -404,11 +427,24 @@ print("world-frame x range:", d['x'].min(), d['x'].max())
 s = np.load("data/artifacts/raw/<bag_id>/chunks/<chunk_id>/static_map.npz")
 print("static points:", s['xyz'].shape[0])
 
+# Check dynamic map (proposal_generation input).  sweep_id is per-point.
+dm = np.load("data/artifacts/raw/<bag_id>/chunks/<chunk_id>/dynamic_map.npz")
+print("dynamic points:", dm['xyz'].shape[0], "across",
+      len(np.unique(dm['sweep_id'])), "sweeps")
+
+# Check voxel occupancy (SAM4D input).
+vo = np.load("data/artifacts/raw/<bag_id>/chunks/<chunk_id>/voxel_occupancy.npz")
+print("occupied voxels:", vo['coords'].shape[0])
+
 # Check ground grid.
 g = np.load("data/artifacts/raw/<bag_id>/chunks/<chunk_id>/ground.npz")
 print("height grid shape:", g['height_grid'].shape)
 print("grid origin:", g['grid_origin'])
 print("ground point count:", g['ground_xyz'].shape[0])
+
+# Check bag-level global ground (after `reduce`).  Spans all chunks.
+gg = np.load("data/artifacts/raw/<bag_id>/global_ground.npz")
+print("global ground grid:", gg['height_grid'].shape, "origin:", gg['grid_origin'])
 ```
 
 ## Configuration
@@ -425,9 +461,12 @@ The Pydantic schema is in [`src/wato_lidar_preprocessing/config.py`](src/wato_li
 | `static_sweep_min` | 5 | Minimum sweep count regardless of fraction |
 | `global_map_voxel_size_m` | 0.30 | Voxel size for global static map downsampling (m) |
 | `point_time_unit` | `"seconds"` | Unit of `t_offset_us` field: `"seconds"` \| `"microseconds"` \| `"nanoseconds"` |
+| `save_voxel_occupancy` | `true` | Emit `voxel_occupancy.npz` for SAM4D / MinkUNet encoders |
 | `patchwork.sensor_height` | 1.8 | LiDAR height above ground (m) |
 | `patchwork.th_dist` | 0.15 | Ground inlier distance threshold (m) |
 | `patchwork.max_range` | 90.0 | Maximum range considered for ground (m) |
+| `frame_sync.canonical_lidar` | `null` | Canonical lidar for multi-lidar frame grouping. `null` → each sweep is its own frame (right for single-lidar bags). Set e.g. `"lidar_cc"` for the 3-Velodyne rig. |
+| `frame_sync.tolerance_ms` | 25.0 | Non-canonical sweeps within ±this window of a canonical sweep inherit its `frame_id`. |
 
 **`point_time_unit` note.** Ingest saves whatever per-point time field the LiDAR
 provides (under the name `t_offset_us`) without unit conversion. Velodyne's `t`

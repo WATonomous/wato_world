@@ -9,14 +9,20 @@ import pytest
 
 from wato_common.artifact_store import (
     chunks_index_path,
+    global_ground_path,
     global_static_map_path,
+    ground_path,
     local_path,
     static_map_path,
 )
 from wato_common.io.parquet_io import write_table
 from wato_common.schemas import CHUNK_SCHEMA
 from wato_lidar_preprocessing.config import ComponentConfig
-from wato_lidar_preprocessing.reduce import _voxel_snap_downsample, reduce_static_map
+from wato_lidar_preprocessing.reduce import (
+    _voxel_snap_downsample,
+    reduce_ground_map,
+    reduce_static_map,
+)
 
 
 @pytest.fixture()
@@ -127,3 +133,89 @@ def test_voxel_snap_negative_coordinates():
 def test_voxel_snap_empty():
     out = _voxel_snap_downsample(np.empty((0, 3)), voxel_size=0.5)
     assert out.shape == (0, 3)
+
+
+# ---------------------------------------------------------------------------
+# Global ground reduce (Issue C) — bag-level height grid for SLF L_ground.
+# ---------------------------------------------------------------------------
+
+
+def _write_ground_chunk(bag_id: str, chunk_id: str, ground_xyz: np.ndarray):
+    """Write a minimal ground.npz that reduce_ground_map can ingest."""
+    path = local_path(ground_path(bag_id, chunk_id))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # The other fields (height_grid etc.) aren't read by reduce — only ground_xyz.
+    np.savez_compressed(
+        path,
+        height_grid=np.zeros((1, 1), dtype=np.float32),
+        normal_grid=np.zeros((1, 1, 3), dtype=np.float32),
+        grid_origin=np.zeros(2, dtype=np.float64),
+        cell_size=np.float32(0.5),
+        ground_xyz=ground_xyz,
+    )
+
+
+def test_reduce_ground_merges_two_chunks(tmp_env):
+    """global_ground.npz spans both chunks' x/y ranges."""
+    bag_id = "bag_gg"
+    _write_chunk_index(bag_id, ["chunk0", "chunk1"])
+
+    # Two non-overlapping ground patches.  chunk0 covers x in [0, 5);
+    # chunk1 covers x in [10, 15).  After merge the height grid origin
+    # should be at the lower-left of the union.
+    g0 = np.column_stack([
+        np.linspace(0.0, 5.0, 50),
+        np.linspace(0.0, 5.0, 50),
+        np.zeros(50),
+    ])
+    g1 = np.column_stack([
+        np.linspace(10.0, 15.0, 50),
+        np.linspace(10.0, 15.0, 50),
+        np.full(50, 1.0),  # higher Z so we can detect mixing
+    ])
+    _write_ground_chunk(bag_id, "chunk0", g0)
+    _write_ground_chunk(bag_id, "chunk1", g1)
+
+    cfg = ComponentConfig()
+    out = reduce_ground_map(bag_id, cfg)
+    assert os.path.exists(local_path(global_ground_path(bag_id)))
+
+    data = np.load(local_path(out))
+    # All inputs survive.
+    assert data["ground_xyz"].shape[0] == 100
+    # Grid spans the union of both chunks.
+    assert data["grid_origin"][0] <= 0.0
+    assert data["grid_origin"][1] <= 0.0
+    H, W = data["height_grid"].shape
+    cell = float(data["cell_size"])
+    assert data["grid_origin"][0] + W * cell >= 15.0
+    assert data["grid_origin"][1] + H * cell >= 15.0
+    # Heights from chunk1 (z=1) should show up somewhere in the grid.
+    assert data["height_grid"].max() >= 0.9
+
+
+def test_reduce_ground_skips_missing_chunks(tmp_env):
+    """Partial run: one chunk's ground.npz absent → reduce still produces output."""
+    bag_id = "bag_gg_partial"
+    _write_chunk_index(bag_id, ["chunk0", "chunk1"])
+    g0 = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+    _write_ground_chunk(bag_id, "chunk0", g0)
+    # chunk1 missing.
+
+    cfg = ComponentConfig()
+    out = reduce_ground_map(bag_id, cfg)
+    data = np.load(local_path(out))
+    assert data["ground_xyz"].shape[0] == 3
+
+
+def test_reduce_ground_all_missing_writes_sentinel(tmp_env):
+    """No chunks have ground.npz → reduce writes an empty global_ground."""
+    bag_id = "bag_gg_empty"
+    _write_chunk_index(bag_id, ["chunk0"])
+
+    cfg = ComponentConfig()
+    out = reduce_ground_map(bag_id, cfg)
+    data = np.load(local_path(out))
+    # Sentinel: 1x1 height grid + empty ground_xyz.
+    assert data["ground_xyz"].shape == (0, 3)
+    assert data["height_grid"].shape == (1, 1)

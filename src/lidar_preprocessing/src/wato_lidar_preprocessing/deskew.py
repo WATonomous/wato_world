@@ -35,7 +35,11 @@ from wato_common.artifact_store import (
 from wato_common.geometry import PoseSample, batch_interpolate_poses, unflatten_se3
 from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.schemas import PROCESSED_SWEEPS_SCHEMA, ProcessedSweepMeta
-from wato_lidar_preprocessing.config import ComponentConfig, PatchworkParams
+from wato_lidar_preprocessing.config import (
+    ComponentConfig,
+    FrameSyncParams,
+    PatchworkParams,
+)
 
 log = logging.getLogger(__name__)
 
@@ -148,6 +152,95 @@ def _estimate_ground_mask(
         view_g = ground_pts[:, :3].view([("", np.float32)] * 3).reshape(-1)
         mask = np.isin(view_in, view_g)
     return mask
+
+
+def _assign_frame_ids(
+    meta_rows: list[dict],
+    frame_sync: FrameSyncParams,
+) -> None:
+    """Populate the ``frame_id`` field on each meta row in place.
+
+    Two modes:
+
+    1. ``frame_sync.canonical_lidar`` is None / not in the chunk → each lidar's
+       sweeps get sequential frame_ids (0, 1, 2, ...) ordered by timestamp.
+       This is the right behaviour for single-lidar bags (NuScenes mini) and
+       the only sensible fallback when the configured canonical lidar isn't
+       present in this chunk.
+
+    2. ``frame_sync.canonical_lidar`` matches sweeps in the chunk → the
+       canonical sweeps anchor the frames (frame_id = 0..N-1 by sorted
+       timestamp); non-canonical sweeps whose timestamp falls within
+       ±tolerance_ns of a canonical sweep inherit that canonical frame_id.
+       Non-canonical sweeps outside any window get frame_id=None — downstream
+       can drop them or treat them as standalone.
+
+    Rows with ``valid is False`` always get ``frame_id=None``.
+    """
+    tol_ns = frame_sync.tolerance_ns()
+    canonical = frame_sync.canonical_lidar
+
+    valid_rows = [r for r in meta_rows if r.get("valid", True) is not False]
+    canonical_rows = (
+        [r for r in valid_rows if r["lidar_id"] == canonical] if canonical else []
+    )
+
+    if not canonical_rows:
+        # Mode 1: per-lidar sequential.  Group valid rows by lidar_id and
+        # assign frame_id by sorted timestamp.
+        if canonical:
+            log.warning(
+                "frame_sync.canonical_lidar=%r not present in chunk; "
+                "falling back to per-lidar sequential frame_id",
+                canonical,
+            )
+        by_lidar: dict[str, list[dict]] = {}
+        for r in valid_rows:
+            by_lidar.setdefault(r["lidar_id"], []).append(r)
+        for rows in by_lidar.values():
+            rows.sort(key=lambda r: int(r["reference_timestamp_ns"]))
+            for i, r in enumerate(rows):
+                r["frame_id"] = i
+        for r in meta_rows:
+            if r.get("valid", True) is False:
+                r["frame_id"] = None
+            elif "frame_id" not in r:
+                r["frame_id"] = None
+        return
+
+    # Mode 2: canonical lidar present.  Sort canonical sweeps, assign 0..N-1,
+    # then for every non-canonical valid sweep look up the nearest canonical
+    # timestamp via searchsorted (both left/right neighbour candidates).
+    canonical_rows.sort(key=lambda r: int(r["reference_timestamp_ns"]))
+    can_ts = np.array(
+        [int(r["reference_timestamp_ns"]) for r in canonical_rows], dtype=np.int64
+    )
+    for i, r in enumerate(canonical_rows):
+        r["frame_id"] = i
+
+    can_id_by_ts_id = {id(r): i for i, r in enumerate(canonical_rows)}
+
+    for r in meta_rows:
+        if r.get("valid", True) is False:
+            r["frame_id"] = None
+            continue
+        if r["lidar_id"] == canonical:
+            # Already assigned above.  (Guard against rows that snuck past
+            # valid_rows because of None-typed `valid` columns.)
+            if "frame_id" not in r:
+                r["frame_id"] = can_id_by_ts_id.get(id(r))
+            continue
+        ts = int(r["reference_timestamp_ns"])
+        i = int(np.searchsorted(can_ts, ts))
+        best = -1
+        best_delta = tol_ns + 1
+        for j in (i - 1, i):
+            if 0 <= j < can_ts.size:
+                d = abs(int(can_ts[j]) - ts)
+                if d <= tol_ns and d < best_delta:
+                    best = j
+                    best_delta = d
+        r["frame_id"] = int(best) if best >= 0 else None
 
 
 def _deskew_sweep(
@@ -375,6 +468,12 @@ def process_chunk(
             world_zmax=zmax,
         )
         meta_rows.append(meta.model_dump())
+
+    # Assign frame_id across all sweeps in this chunk before we persist the
+    # parquet.  Done here (rather than in pipeline.py post-pass) so the index
+    # is correct on disk after deskew completes — classify reads it back and
+    # must preserve the column.
+    _assign_frame_ids(meta_rows, cfg.frame_sync)
 
     write_table(meta_rows, PROCESSED_SWEEPS_SCHEMA, index_uri)
     log.info("deskewed %d sweeps for chunk %s", len(results), chunk_id)

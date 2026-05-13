@@ -20,12 +20,15 @@ import numpy as np
 
 from wato_common.artifact_store import (
     chunks_index_path,
+    global_ground_path,
     global_static_map_path,
+    ground_path,
     local_path,
     static_map_path,
 )
 from wato_common.io.parquet_io import read_rows
 from wato_lidar_preprocessing.config import ComponentConfig
+from wato_lidar_preprocessing.ground import _build_height_grid
 
 log = logging.getLogger(__name__)
 
@@ -123,4 +126,90 @@ def reduce_static_map(bag_id: str, cfg: ComponentConfig) -> str:
 
     out_uri = global_static_map_path(bag_id)
     np.savez_compressed(local_path(out_uri), xyz=xyz_down)
+    return out_uri
+
+
+def reduce_ground_map(bag_id: str, cfg: ComponentConfig) -> str:
+    """Merge per-chunk ground.npz into a bag-level global_ground.npz.
+
+    Concatenates `ground_xyz` from every chunk and rebuilds one bag-level
+    height_grid + normal_grid via the existing `_build_height_grid` helper
+    (the same one ground.py uses), so the schema matches per-chunk ground.npz
+    and downstream consumers can use a single loader regardless of scope.
+
+    This solves the SLF chunk-boundary problem: proposal_generation can query
+    z_ground(x, y) over the full bag without stitching per-chunk grids.
+
+    Silently skips chunks whose ground.npz is missing or has empty
+    `ground_xyz` so partial runs still produce a useful artifact.
+    """
+    chunk_rows = read_rows(chunks_index_path(bag_id))
+    if not chunk_rows:
+        raise RuntimeError(f"No chunks found for bag_id={bag_id!r}")
+
+    cell_size = cfg.patchwork.ground_cell_size_m
+    out_uri = global_ground_path(bag_id)
+
+    all_ground: list[np.ndarray] = []
+    for row in chunk_rows:
+        chunk_id = row["chunk_id"]
+        path = local_path(ground_path(bag_id, chunk_id))
+        if not os.path.exists(path):
+            log.warning(
+                "chunk %s ground.npz not found — chunk not yet processed, skipping",
+                chunk_id,
+            )
+            continue
+        data = np.load(path)
+        ground_xyz = data.get("ground_xyz")
+        if ground_xyz is None or ground_xyz.shape[0] == 0:
+            log.debug("chunk %s has no ground points, skipping", chunk_id)
+            continue
+        all_ground.append(np.asarray(ground_xyz, dtype=np.float64))
+
+    if not all_ground:
+        log.warning(
+            "bag %s: no per-chunk ground points found, writing empty global ground map",
+            bag_id,
+        )
+        # Sentinel: 1x1 height grid so consumers don't have to special-case
+        # the empty path; matches what _build_height_grid does for empty input.
+        height_grid, normal_grid, grid_origin = _build_height_grid(
+            np.empty((0, 3), dtype=np.float64), cell_size=cell_size
+        )
+        np.savez_compressed(
+            local_path(out_uri),
+            height_grid=height_grid,
+            normal_grid=normal_grid,
+            grid_origin=grid_origin,
+            cell_size=np.float32(cell_size),
+            ground_xyz=np.empty((0, 3), dtype=np.float64),
+        )
+        return out_uri
+
+    merged = np.concatenate(all_ground, axis=0)
+    log.info(
+        "bag %s: merging %d ground points across %d chunks (cell=%.2f m)",
+        bag_id,
+        merged.shape[0],
+        len(all_ground),
+        cell_size,
+    )
+    height_grid, normal_grid, grid_origin = _build_height_grid(
+        merged, cell_size=cell_size
+    )
+    np.savez_compressed(
+        local_path(out_uri),
+        height_grid=height_grid,
+        normal_grid=normal_grid,
+        grid_origin=grid_origin,
+        cell_size=np.float32(cell_size),
+        ground_xyz=merged,
+    )
+    log.info(
+        "bag %s: wrote global_ground.npz (grid=%s, origin=%s)",
+        bag_id,
+        tuple(height_grid.shape),
+        grid_origin.tolist(),
+    )
     return out_uri

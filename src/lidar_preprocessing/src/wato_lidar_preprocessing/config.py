@@ -2,10 +2,39 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class FrameSyncParams(BaseModel):
+    """Multi-lidar sweep-to-frame grouping for SAM4D-style downstream fusion.
+
+    A "frame" is one tick of `canonical_lidar`.  Every non-canonical sweep
+    whose reference_timestamp_ns falls within ±tolerance_ms of a canonical
+    sweep inherits that sweep's frame_id.
+
+    canonical_lidar=None disables grouping: each sweep becomes its own frame
+    indexed sequentially per lidar_id.  That's the right behavior for
+    single-lidar bags (NuScenes mini, KITTI) and for the current state of
+    the WATO recordings where the 3-Velodyne rig isn't yet wired in.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    canonical_lidar: Optional[str] = None
+    tolerance_ms: float = 25.0
+
+    @field_validator("tolerance_ms")
+    @classmethod
+    def _positive_tolerance(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"tolerance_ms must be > 0, got {v}")
+        return v
+
+    def tolerance_ns(self) -> int:
+        return int(self.tolerance_ms * 1_000_000)
 
 
 class PatchworkParams(BaseModel):
@@ -73,10 +102,13 @@ class ComponentConfig(BaseModel):
     # Step C — Patchwork++ parameters.
     patchwork: PatchworkParams = PatchworkParams()
 
-    # Optional SAM4D/MinkUNet alignment: export binary voxel occupancy.
-    # When True, classify writes voxel_occupancy.npz alongside static_map.npz.
-    # Includes ALL occupied voxels (static + dynamic), not just static ones.
-    save_voxel_occupancy: bool = False
+    # Multi-lidar frame grouping (SAM4D alignment).
+    frame_sync: FrameSyncParams = FrameSyncParams()
+
+    # SAM4D/MinkUNet alignment: export binary voxel occupancy alongside
+    # static_map.npz.  Includes ALL occupied voxels (static + dynamic), not
+    # just static ones — that's what the MinkUNet encoder consumes.
+    save_voxel_occupancy: bool = True
 
     upstream_versions: dict[str, str] = Field(default_factory=dict)
 

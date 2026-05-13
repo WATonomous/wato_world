@@ -10,7 +10,7 @@ import click
 
 from wato_lidar_preprocessing.config import load_config
 from wato_lidar_preprocessing.pipeline import run as run_pipeline
-from wato_lidar_preprocessing.reduce import reduce_static_map
+from wato_lidar_preprocessing.reduce import reduce_ground_map, reduce_static_map
 
 _SLUG = re.compile(r"[^a-zA-Z0-9_]+")
 
@@ -72,11 +72,60 @@ def run_cmd(
 @click.option("--bag", "bag_id", required=True, help="bag_id or bag path to reduce.")
 @click.option("--config", "config_path", default="/ws/src/lidar_preprocessing/config/lidar_preprocessing.yaml")
 def reduce_cmd(bag_id: str, config_path: str) -> None:
-    """Merge all per-chunk static maps into a bag-level global_static_map.npz."""
+    """Merge per-chunk artifacts into bag-level global maps.
+
+    Produces both ``global_static_map.npz`` (downsampled bag-level static
+    cloud) and ``global_ground.npz`` (bag-level height grid for queries
+    that span chunk boundaries, e.g. SLF L_ground for boxes near chunk
+    seams).
+    """
     bag_id = _resolve_bag_id(bag_id)
     cfg = load_config(config_path)
-    out = reduce_static_map(bag_id, cfg)
-    click.echo(f"global static map written to {out}")
+    static_out = reduce_static_map(bag_id, cfg)
+    click.echo(f"global static map written to {static_out}")
+    ground_out = reduce_ground_map(bag_id, cfg)
+    click.echo(f"global ground map written to {ground_out}")
+
+
+@main.command("viz")
+@click.option("--bag", "bag_id", required=True, help="bag_id or bag path.")
+@click.option("--chunk", "chunk_id", default=None, help="chunk_id to visualize (default: all chunks).")
+@click.option("--sweep", "sweep_id", default=None, type=int, help="optional specific sweep_id (stages A/B only).")
+@click.option(
+    "--stage",
+    default="all",
+    type=click.Choice(["A", "B", "C", "D", "all"]),
+    help="Pipeline stage to visualize (default: all).",
+)
+def viz_cmd(bag_id: str, chunk_id: str | None, sweep_id: int | None, stage: str) -> None:
+    """Write PNG visualizations of pipeline artifacts to <chunk_root>/viz/ and <bag_root>/viz/."""
+    from wato_common.artifact_store import chunks_index_path
+    from wato_common.io.parquet_io import read_rows
+    from wato_lidar_preprocessing.viz import viz_chunk, viz_stage_D
+
+    bag_id = _resolve_bag_id(bag_id)
+
+    if stage == "D":
+        out = viz_stage_D(bag_id)
+        click.echo(f"wrote {out}")
+        return
+
+    if chunk_id is not None:
+        chunk_ids = [chunk_id]
+    else:
+        rows = read_rows(chunks_index_path(bag_id))
+        chunk_ids = [r["chunk_id"] for r in rows]
+
+    for cid in chunk_ids:
+        for out in viz_chunk(bag_id, cid, sweep_id=sweep_id, stage=stage):
+            click.echo(f"wrote {out}")
+
+    if stage == "all":
+        try:
+            out = viz_stage_D(bag_id)
+            click.echo(f"wrote {out}")
+        except FileNotFoundError:
+            click.echo("skipping stage D: global_static_map.npz not found (run 'reduce' first)")
 
 
 if __name__ == "__main__":
