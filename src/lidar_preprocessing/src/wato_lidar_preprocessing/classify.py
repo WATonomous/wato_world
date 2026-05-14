@@ -28,6 +28,7 @@ from wato_common.artifact_store import (
     lidar_proc_index_path,
     local_path,
     static_map_path,
+    voxel_occupancy_frame_path,
     voxel_occupancy_path,
 )
 from wato_common.io.parquet_io import read_rows, write_table
@@ -256,6 +257,8 @@ def process_chunk(
     xyz_cache: list[np.ndarray | None] = []
     intensity_cache: list[np.ndarray | None] = []
     sweep_keys: list[np.ndarray] = []  # one int64 array per sweep
+    # frame_id → list of key arrays (for per-frame voxel occupancy export).
+    frame_keys: dict[int, list[np.ndarray]] = {}
 
     for row in meta_rows:
         if row.get("valid") is False:
@@ -273,6 +276,9 @@ def process_chunk(
         sweep_keys.append(keys)
         xyz_cache.append(xyz if cache_xyz else None)
         intensity_cache.append(intensity if cache_xyz else None)
+        fid = row.get("frame_id")
+        if fid is not None:
+            frame_keys.setdefault(int(fid), []).append(keys)
 
     unique_keys, sweep_counts = _count_unique_sweeps_per_voxel(sweep_keys)
 
@@ -473,11 +479,15 @@ def process_chunk(
         n_sweeps,
     )
 
+    # Shared bit-mask for unpacking packed int64 keys → (vx, vy, vz) int32.
+    # Used by both the per-chunk and per-frame occupancy blocks below.
+    axis_mask = np.int64((1 << AXIS_BITS) - 1)
+
     if cfg.save_voxel_occupancy and unique_keys.size > 0:
-        # Unpack packed int64 keys → (N, 3) int32 voxel-index coords.
-        # All occupied voxels (static + dynamic) are included so that
-        # MinkUNet-style encoders (e.g. SAM4D) see the full scene.
-        axis_mask = np.int64((1 << AXIS_BITS) - 1)
+        # All occupied voxels (static + dynamic) aggregated across the full
+        # chunk.  Useful for QA/visualization but NOT what SAM4D's MinkUNet
+        # encoder consumes directly — use save_per_frame_voxel_occupancy for
+        # that (each file covers one frame, not the whole chunk).
         vz = (unique_keys & axis_mask).astype(np.int32)
         vy = ((unique_keys >> np.int64(AXIS_BITS)) & axis_mask).astype(np.int32)
         vx = ((unique_keys >> np.int64(2 * AXIS_BITS)) & axis_mask).astype(np.int32)
@@ -489,6 +499,25 @@ def process_chunk(
             voxel_size=np.float32(cfg.voxel_size_m),
         )
         log.info("chunk %s: wrote voxel_occupancy.npz (%d occupied voxels)", chunk_id, occ_coords.shape[0])
+
+    if cfg.save_per_frame_voxel_occupancy and frame_keys:
+        n_frames = 0
+        for fid, key_list in frame_keys.items():
+            merged = np.unique(np.concatenate(key_list))
+            if merged.size == 0:
+                continue
+            vz = (merged & axis_mask).astype(np.int32)
+            vy = ((merged >> np.int64(AXIS_BITS)) & axis_mask).astype(np.int32)
+            vx = ((merged >> np.int64(2 * AXIS_BITS)) & axis_mask).astype(np.int32)
+            frame_coords = np.stack([vx, vy, vz], axis=1)  # (N, 3) int32
+            np.savez_compressed(
+                local_path(voxel_occupancy_frame_path(bag_id, chunk_id, fid)),
+                coords=frame_coords,
+                origin=origin,
+                voxel_size=np.float32(cfg.voxel_size_m),
+            )
+            n_frames += 1
+        log.info("chunk %s: wrote %d per-frame voxel_occupancy files", chunk_id, n_frames)
 
     return ClassifyResult(
         n_static=total_static,

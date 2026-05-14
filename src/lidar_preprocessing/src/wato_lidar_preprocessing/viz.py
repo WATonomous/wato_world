@@ -249,14 +249,27 @@ def viz_chunk(
     outputs: list[Path] = []
     do = lambda s: stage in ("all", s)
 
-    if do("A"):
+    # Check open3d availability once rather than per-sweep.
+    try:
+        _o3d()
+        has_o3d = True
+    except ImportError as exc:
+        has_o3d = False
+        if do("A") or do("B"):
+            log.warning(
+                "open3d not available — skipping stages A/B point-cloud renders (%s). "
+                "Stage C (height grid) will still render.",
+                exc,
+            )
+
+    if do("A") and has_o3d:
         for sid in sweep_ids:
             try:
                 outputs.append(viz_stage_A(bag_id, chunk_id, sid))
             except Exception as exc:
                 log.warning("stage A viz failed for sweep %d: %s", sid, exc)
 
-    if do("B"):
+    if do("B") and has_o3d:
         for sid in sweep_ids:
             try:
                 outputs.append(viz_stage_B_sweep(bag_id, chunk_id, sid))

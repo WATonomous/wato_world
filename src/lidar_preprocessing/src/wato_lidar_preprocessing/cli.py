@@ -6,6 +6,8 @@ import logging
 import re
 from pathlib import Path
 
+log = logging.getLogger(__name__)
+
 import click
 
 from wato_lidar_preprocessing.config import load_config
@@ -55,17 +57,32 @@ def main(log_level: str) -> None:
     "--workers", "workers", default=1, type=int,
     help="number of concurrent worker processes (default 1 = sequential).",
 )
+@click.option(
+    "--auto-reduce/--no-auto-reduce", "auto_reduce", default=True,
+    help=(
+        "after all chunks finish, automatically run the bag-level reduce "
+        "(global_static_map.npz + global_ground.npz). "
+        "Disable with --no-auto-reduce when processing chunks in parallel "
+        "across multiple machines — run 'reduce' manually once all chunks are done."
+    ),
+)
 def run_cmd(
     bag_id: str,
     chunk_id: str | None,
     config_path: str,
     force: bool,
     workers: int,
+    auto_reduce: bool,
 ) -> None:
     """Run deskew → classify → ground for all chunks (or one chunk) of a bag."""
     bag_id = _resolve_bag_id(bag_id)
     cfg = load_config(config_path)
     run_pipeline(cfg, bag_id=bag_id, chunk_id=chunk_id, force=force, workers=workers)
+    if auto_reduce and chunk_id is None:
+        log.info("auto-reduce: building global_static_map.npz + global_ground.npz ...")
+        static_out = reduce_static_map(bag_id, cfg)
+        ground_out = reduce_ground_map(bag_id, cfg)
+        log.info("auto-reduce complete: %s  %s", static_out, ground_out)
 
 
 @main.command("reduce")
@@ -126,6 +143,8 @@ def viz_cmd(bag_id: str, chunk_id: str | None, sweep_id: int | None, stage: str)
             click.echo(f"wrote {out}")
         except FileNotFoundError:
             click.echo("skipping stage D: global_static_map.npz not found (run 'reduce' first)")
+        except ImportError as exc:
+            click.echo(f"skipping stage D: {exc}")
 
 
 if __name__ == "__main__":

@@ -16,16 +16,21 @@ COPY src/lidar_preprocessing /ws/src/lidar_preprocessing
 
 # ---------------------------------------------------------------------------
 FROM ${BASE_IMAGE} AS dependencies
+# libeigen3-dev  — required by pypatchworkpp C++ build
+# libegl1 libgl1 — required by Open3D's OffscreenRenderer (headless EGL)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgomp1 libeigen3-dev \
+        libegl1 libgl1 \
     && apt-get -qq autoremove -y && apt-get -qq clean \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc/* /usr/share/man/*
 
-# Note: Open3D used to be installed here for reduce.py's voxel_down_sample;
-# replaced with a numpy voxel-snap (see reduce.py) so the apt deps for
-# Open3D's GL/USB stack and the ~80 MB wheel are no longer needed.
 RUN uv pip install --system --break-system-packages \
-        pyarrow numpy scipy pydantic fsspec click pyyaml
+        pyarrow numpy scipy pydantic fsspec click pyyaml \
+        matplotlib
+
+# Open3D for point-cloud visualization (stages A, B, D in `watod viz`).
+# ~80 MB wheel; skipped gracefully at runtime if absent.
+RUN uv pip install --system --break-system-packages open3d
 
 # Patchwork++ Python bindings (v1.0.4 matches the monorepo's pinned tag).
 # Requires libeigen3-dev (added above) and cmake (present in base image).

@@ -363,7 +363,8 @@ All outputs are written under `data/artifacts/raw/<bag_id>/`.
 | `chunks/<chunk_id>/lidar_proc_summary.parquet` | Chunk-level aggregation: point counts, sweep stats, cache budget |
 | `chunks/<chunk_id>/static_map.npz` | Accumulated static cloud |
 | `chunks/<chunk_id>/dynamic_map.npz` | Accumulated dynamic cloud + `sweep_id` per point (proposal_generation / SLF input) |
-| `chunks/<chunk_id>/voxel_occupancy.npz` | Sparse int32 voxel coords (SAM4D / MinkUNet input; enabled by default) |
+| `chunks/<chunk_id>/voxel_occupancy.npz` | Sparse int32 voxel coords, all sweeps aggregated — QA/visualization only |
+| `chunks/<chunk_id>/voxel_occupancy_frame_NNNN.npz` | Per-frame sparse int32 voxel coords — what `perception_2d` feeds to SAM4D's MinkUNet encoder. Written when `save_per_frame_voxel_occupancy: true`. |
 | `chunks/<chunk_id>/ground.npz` | Height grid, normal grid, ground points |
 | `global_static_map.npz` | Bag-level downsampled static cloud (from `reduce`) |
 | `global_ground.npz` | Bag-level height grid + normal grid (from `reduce`; spans all chunks so consumers near chunk boundaries don't have to stitch) |
@@ -387,19 +388,21 @@ All outputs are written under `data/artifacts/raw/<bag_id>/`.
 ./watod build
 
 # Process all chunks of a bag (steps A + B + C per chunk).
+# Automatically runs the bag-level reduce (step D) after all chunks finish,
+# producing global_static_map.npz + global_ground.npz in one command.
 # Both the bag directory path and the normalized bag_id are accepted.
 ./watod run lidar_preprocessing --bag data/bags/NuScenes-v1.0-mini-scene-1100/
 ./watod run lidar_preprocessing --bag NuScenes_v1_0_mini_scene_1100   # equivalent
 
-# Process a single chunk only.
+# Process a single chunk only (auto-reduce is skipped on single-chunk runs).
 ./watod run lidar_preprocessing --bag data/bags/NuScenes-v1.0-mini-scene-1100/ --chunk 0000
 
 # Re-process already-completed chunks (e.g. after a code change).
 ./watod run lidar_preprocessing --bag data/bags/NuScenes-v1.0-mini-scene-1100/ --force
 
-# After all chunks are done, build the bag-level reductions (step D):
-# global_static_map.npz + global_ground.npz.
-# reduce is a separate subcommand — run it directly inside the dev container.
+# Disable auto-reduce when processing chunks across multiple machines — run
+# 'reduce' manually once all chunks are done on every machine.
+./watod run lidar_preprocessing --bag <bag> --no-auto-reduce
 ./watod -t lidar_preprocessing_dev   # open a shell in the dev container
 python -m wato_lidar_preprocessing reduce --bag NuScenes_v1_0_mini_scene_1100
 
@@ -461,10 +464,12 @@ The Pydantic schema is in [`src/wato_lidar_preprocessing/config.py`](src/wato_li
 | `static_sweep_min` | 5 | Minimum sweep count regardless of fraction |
 | `global_map_voxel_size_m` | 0.30 | Voxel size for global static map downsampling (m) |
 | `point_time_unit` | `"seconds"` | Unit of `t_offset_us` field: `"seconds"` \| `"microseconds"` \| `"nanoseconds"` |
-| `save_voxel_occupancy` | `true` | Emit `voxel_occupancy.npz` for SAM4D / MinkUNet encoders |
+| `save_voxel_occupancy` | `true` | Emit `voxel_occupancy.npz` (all sweeps aggregated) — useful for QA. **Not** what MinkUNet consumes directly; see `save_per_frame_voxel_occupancy`. |
+| `save_per_frame_voxel_occupancy` | `false` | Emit one `voxel_occupancy_frame_NNNN.npz` per `frame_id` — the artifact `perception_2d` feeds to SAM4D's MinkUNet encoder. Enable when developing `perception_2d`. |
 | `patchwork.sensor_height` | 1.8 | LiDAR height above ground (m) |
 | `patchwork.th_dist` | 0.15 | Ground inlier distance threshold (m) |
 | `patchwork.max_range` | 90.0 | Maximum range considered for ground (m) |
+| `patchwork.ground_cell_size_m` | 0.25 | Height-grid cell resolution (m). 0.25m → ±12.5cm ground uncertainty, acceptable for pedestrian/cyclist SLF `L_ground`. |
 | `frame_sync.canonical_lidar` | `null` | Canonical lidar for multi-lidar frame grouping. `null` → each sweep is its own frame (right for single-lidar bags). Set e.g. `"lidar_cc"` for the 3-Velodyne rig. |
 | `frame_sync.tolerance_ms` | 25.0 | Non-canonical sweeps within ±this window of a canonical sweep inherit its `frame_id`. |
 

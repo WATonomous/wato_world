@@ -10,11 +10,19 @@ set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
     echo "Usage: watod run <module> [--bag] <bag-or-bag-id> [extra-flags]" >&2
+    echo "       watod run <module> <subcommand> [--bag] <bag-or-bag-id> [extra-flags]" >&2
     exit 64
 fi
 
 MODULE="$1"
 shift 1
+
+# If the next argument is a known CLI subcommand (e.g. "viz", "reduce"),
+# pass it as-is rather than treating it as the bag path.
+SUBCMD="run"
+case "${1:-}" in
+    viz|reduce) SUBCMD="$1"; shift 1 ;;
+esac
 
 # Accept both positional and flag-style bag argument:
 #   watod run <module> <bag>
@@ -61,7 +69,7 @@ done
 # shellcheck disable=SC2206
 COMPOSE_FILES=(${COMPOSE_FILES_STR})
 
-ARGS=(run --bag "${BAG}" "${EXTRA_ARGS[@]}")
+ARGS=("${SUBCMD}" --bag "${BAG}" "${EXTRA_ARGS[@]}")
 
 exec docker compose \
     --env-file "${WATO_WORLD_DIR}/modules/.env" \

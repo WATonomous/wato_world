@@ -30,13 +30,19 @@ lidar_preprocessing:
     uprightness_thr: 0.101
     enable_RNR: false
     verbose: false
-    ground_cell_size_m: 0.5  # height-grid resolution (m)
+    ground_cell_size_m: 0.25  # height-grid resolution (m) — 0.25m gives ±12.5cm ground uncertainty, acceptable for pedestrian/cyclist L_ground
 
-  # Export voxel_occupancy.npz (all occupied voxels as sparse int32 coords)
-  # alongside static_map.npz.  Consumed by SAM4D/MinkUNet encoders in
-  # perception_2d.  Cheap (single-digit MB per chunk) and enabled by default
-  # so the downstream paper-aligned contract is always populated.
+  # Export voxel_occupancy.npz (all occupied voxels, all sweeps aggregated).
+  # Useful for QA/visualization but NOT what SAM4D's MinkUNet encoder consumes
+  # directly — MinkUNet needs per-frame voxels (see save_per_frame_voxel_occupancy).
   save_voxel_occupancy: true
+
+  # Export one voxel_occupancy_frame_NNNN.npz per frame_id in each chunk.
+  # This IS what perception_2d feeds to SAM4D's MinkUNet encoder: each file
+  # contains the merged occupancy for all sweeps belonging to that frame
+  # (canonical + non-canonical LiDARs within tolerance_ms).
+  # Disabled by default; enable once perception_2d development starts.
+  save_per_frame_voxel_occupancy: false
 
   # Multi-lidar frame grouping for SAM4D-style cross-modal fusion.
   # canonical_lidar=null disables grouping (each sweep is its own frame —

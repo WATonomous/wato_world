@@ -58,7 +58,7 @@ class PatchworkParams(BaseModel):
     uprightness_thr: float = 0.101
     enable_RNR: bool = False
     verbose: bool = False
-    ground_cell_size_m: float = 0.5
+    ground_cell_size_m: float = 0.25
 
     def to_patchwork_dict(self) -> dict[str, Any]:
         """Return kwargs accepted by pypatchworkpp.patchworkpp()."""
@@ -109,6 +109,14 @@ class ComponentConfig(BaseModel):
     # static_map.npz.  Includes ALL occupied voxels (static + dynamic), not
     # just static ones — that's what the MinkUNet encoder consumes.
     save_voxel_occupancy: bool = True
+
+    # Per-frame voxel occupancy for SAM4D's MinkUNet encoder.  When true,
+    # writes one voxel_occupancy_frame_NNNN.npz per frame_id in the chunk
+    # (all sweeps sharing that frame_id merged into one occupancy grid).
+    # This is what perception_2d actually feeds to MinkUNet — the per-chunk
+    # voxel_occupancy.npz aggregates all frames and is only useful for QA.
+    # Disabled by default; enable once perception_2d development starts.
+    save_per_frame_voxel_occupancy: bool = False
 
     upstream_versions: dict[str, str] = Field(default_factory=dict)
 
