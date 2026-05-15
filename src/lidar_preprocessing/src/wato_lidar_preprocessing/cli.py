@@ -115,7 +115,11 @@ def reduce_cmd(bag_id: str, config_path: str) -> None:
     help="Pipeline stage to visualize (default: all).",
 )
 def viz_cmd(bag_id: str, chunk_id: str | None, sweep_id: int | None, stage: str) -> None:
-    """Write PNG visualizations of pipeline artifacts to <chunk_root>/viz/ and <bag_root>/viz/."""
+    """Open interactive Open3D / matplotlib windows for pipeline artifacts.
+
+    Each window blocks until you close it. Requires DISPLAY (or WSLg) to be
+    forwarded into the container — see modules/docker-compose.dev.yaml.
+    """
     from wato_common.artifact_store import chunks_index_path
     from wato_common.io.parquet_io import read_rows
     from wato_lidar_preprocessing.viz import viz_chunk, viz_stage_D
@@ -123,8 +127,7 @@ def viz_cmd(bag_id: str, chunk_id: str | None, sweep_id: int | None, stage: str)
     bag_id = _resolve_bag_id(bag_id)
 
     if stage == "D":
-        out = viz_stage_D(bag_id)
-        click.echo(f"wrote {out}")
+        viz_stage_D(bag_id)
         return
 
     if chunk_id is not None:
@@ -134,13 +137,11 @@ def viz_cmd(bag_id: str, chunk_id: str | None, sweep_id: int | None, stage: str)
         chunk_ids = [r["chunk_id"] for r in rows]
 
     for cid in chunk_ids:
-        for out in viz_chunk(bag_id, cid, sweep_id=sweep_id, stage=stage):
-            click.echo(f"wrote {out}")
+        viz_chunk(bag_id, cid, sweep_id=sweep_id, stage=stage)
 
     if stage == "all":
         try:
-            out = viz_stage_D(bag_id)
-            click.echo(f"wrote {out}")
+            viz_stage_D(bag_id)
         except FileNotFoundError:
             click.echo("skipping stage D: global_static_map.npz not found (run 'reduce' first)")
         except ImportError as exc:

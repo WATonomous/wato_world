@@ -56,11 +56,22 @@ services:
       args: { USERNAME: "${USERNAME}", USER_UID: "${SETUID}", USER_GID: "${SETGID}", CLAUDE_CODE: "${CLAUDE_CODE}" }
     image: "${LIDAR_PREPROCESSING_IMAGE}:dev_${TAG}"
     command: sleep infinity
+    # X11 / WSLg forwarding so `watod run lidar_preprocessing viz` can pop a
+    # window onto the host display. Variables that are unset on the host
+    # expand to empty strings — harmless on Linux/Mac without WSLg.
+    environment:
+      - DISPLAY=${DISPLAY:-}
+      - WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-}
+      - XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/runtime-root}
+      - PULSE_SERVER=${PULSE_SERVER:-}
+      - QT_X11_NO_MITSHM=1
     volumes:
       - ${WATO_WORLD_DIR}/src/common:/ws/src/common
       - ${WATO_WORLD_DIR}/src/lidar_preprocessing:/ws/src/lidar_preprocessing
       - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
       - ${WATO_WORLD_DIR}/config:/config:ro
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /mnt/wslg:/mnt/wslg
 
   proposal_generation_dev:
     profiles: ["proposal_generation_dev"]
