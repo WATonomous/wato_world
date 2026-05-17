@@ -20,7 +20,10 @@ from wato_perception_2d.tracker_2d import Masklet
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _simple_calib(fx: float = 500.0, cx: float = 320.0, cy: float = 240.0) -> CalibrationInfo:
+
+def _simple_calib(
+    fx: float = 500.0, cx: float = 320.0, cy: float = 240.0
+) -> CalibrationInfo:
     K = np.array([[fx, 0, cx], [0, fx, cy], [0, 0, 1]], dtype=np.float64)
     ego_T_cam = np.eye(4, dtype=np.float64)
     return CalibrationInfo(K=K, ego_T_cam=ego_T_cam)
@@ -49,6 +52,7 @@ def _masklet_with_png(
 # ---------------------------------------------------------------------------
 # Unit tests for helper functions
 # ---------------------------------------------------------------------------
+
 
 def test_mask_centroid_px_center():
     """Centroid of a centered square should be at its geometric center."""
@@ -106,6 +110,7 @@ def test_estimate_depth_from_lidar_close_point():
 # ---------------------------------------------------------------------------
 # Integration tests for merge_cross_camera
 # ---------------------------------------------------------------------------
+
 
 def test_same_camera_masklets_never_merged(tmp_path):
     """
@@ -216,9 +221,14 @@ def test_empty_masklets_returns_empty():
 def test_masklet_without_mask_path_still_gets_id(tmp_path):
     """Masklet with no mask_paths should still get a global_object_id (just not merged)."""
     mkl = Masklet(
-        masklet_id="m1", bag_id="bag0", chunk_id="chunk0",
-        cam_id="cam_front", cls="car", score=0.9,
-        frames_present=[0], mask_paths=[],
+        masklet_id="m1",
+        bag_id="bag0",
+        chunk_id="chunk0",
+        cam_id="cam_front",
+        cls="car",
+        score=0.9,
+        frames_present=[0],
+        mask_paths=[],
     )
     calib = {"cam_front": _simple_calib()}
     world_T_ego = {"cam_front": np.eye(4, dtype=np.float64)}

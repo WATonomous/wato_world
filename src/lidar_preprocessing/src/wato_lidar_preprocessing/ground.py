@@ -48,7 +48,9 @@ class GroundResult:
     n_nonground: int
     ground_path: str
     status: str = "ok"  # "ok" | "skipped_no_ground_mask" | "empty"
-    n_dropped_dynamic: int = 0  # ground candidates rejected by static-voxel intersection
+    n_dropped_dynamic: int = (
+        0  # ground candidates rejected by static-voxel intersection
+    )
 
 
 def _load_static_voxel_set(
@@ -68,7 +70,9 @@ def _load_static_voxel_set(
             f"static_map.npz missing for chunk {chunk_id!r} — run Step B (classify) first."
         )
     data = np.load(path)
-    missing = [k for k in ("static_voxel_keys", "origin", "voxel_size") if k not in data]
+    missing = [
+        k for k in ("static_voxel_keys", "origin", "voxel_size") if k not in data
+    ]
     if missing:
         raise KeyError(
             f"static_map.npz for chunk {chunk_id!r} is missing keys {missing} — "
@@ -134,7 +138,10 @@ def _build_height_grid(
     if H * W > _GRID_CELL_WARN_THRESHOLD:
         log.warning(
             "height grid is %dx%d (~%.1f GB float32) at cell_size=%.2fm — consider downsampling",
-            H, W, (H * W * 4) / 1e9, cell_size,
+            H,
+            W,
+            (H * W * 4) / 1e9,
+            cell_size,
         )
 
     x_edges = x0 + np.arange(W + 1) * cell_size
@@ -153,9 +160,7 @@ def _build_height_grid(
         height_grid[:] = 0.0
     elif nan_mask.any():
         _, indices = distance_transform_edt(nan_mask, return_indices=True)
-        height_grid[nan_mask] = height_grid[
-            indices[0][nan_mask], indices[1][nan_mask]
-        ]
+        height_grid[nan_mask] = height_grid[indices[0][nan_mask], indices[1][nan_mask]]
 
     # Surface normals via finite differences on the height grid.
     hf = height_grid.astype(np.float64)
@@ -189,9 +194,12 @@ def process_chunk(
     """Aggregate per-sweep ground masks and build the height grid."""
     meta_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
     if not meta_rows:
-        log.warning("chunk %s: empty proc index — writing sentinel ground.npz", chunk_id)
+        log.warning(
+            "chunk %s: empty proc index — writing sentinel ground.npz", chunk_id
+        )
         return _save_ground(
-            bag_id, chunk_id,
+            bag_id,
+            chunk_id,
             np.empty((0, 3), dtype=np.float64),
             cfg.patchwork,
             status="empty",
@@ -230,7 +238,11 @@ def process_chunk(
         ).astype(np.float64)
         n_before = xyz.shape[0]
         xyz = _filter_by_static_voxels(
-            xyz, static_keys, static_origin, static_voxel_size, chunk_id=chunk_id,
+            xyz,
+            static_keys,
+            static_origin,
+            static_voxel_size,
+            chunk_id=chunk_id,
         )
         n_dropped_dynamic += n_before - xyz.shape[0]
         if xyz.shape[0] == 0:
@@ -243,7 +255,8 @@ def process_chunk(
             chunk_id,
         )
         return _save_ground(
-            bag_id, chunk_id,
+            bag_id,
+            chunk_id,
             np.empty((0, 3), dtype=np.float64),
             cfg.patchwork,
             status="skipped_no_ground_mask",
@@ -258,11 +271,18 @@ def process_chunk(
     n_nonground = n_classified_pts - n_ground - n_dropped_dynamic
     log.info(
         "chunk %s: aggregated ground=%d nonground=%d dropped_dynamic=%d across %d classified sweeps",
-        chunk_id, n_ground, n_nonground, n_dropped_dynamic, n_with_mask,
+        chunk_id,
+        n_ground,
+        n_nonground,
+        n_dropped_dynamic,
+        n_with_mask,
     )
 
     return _save_ground(
-        bag_id, chunk_id, ground_pts, cfg.patchwork,
+        bag_id,
+        chunk_id,
+        ground_pts,
+        cfg.patchwork,
         status="ok" if n_ground > 0 else "empty",
         n_nonground=n_nonground,
         n_dropped_dynamic=n_dropped_dynamic,

@@ -14,8 +14,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-log = logging.getLogger(__name__)
-
 from wato_common.artifact_store import (
     camera_dir,
     camera_frames_path,
@@ -27,6 +25,8 @@ from wato_common.io.parquet_io import write_table
 from wato_common.io.rosbag_reader import messages
 from wato_common.schemas import CAMERA_FRAMES_SCHEMA, CameraFrameRow
 from wato_ingest.config import IngestConfig
+
+log = logging.getLogger(__name__)
 
 
 @dataclass

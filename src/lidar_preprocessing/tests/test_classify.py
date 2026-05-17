@@ -35,19 +35,28 @@ def _write_world_sweep(bag_id: str, chunk_id: str, sweep_id: int, xyz: np.ndarra
 
 
 def _proc_row(
-    bag_id: str, chunk_id: str, sweep_id: int, xyz: np.ndarray,
-    *, has_intensity: bool = False,
+    bag_id: str,
+    chunk_id: str,
+    sweep_id: int,
+    xyz: np.ndarray,
+    *,
+    has_intensity: bool = False,
 ) -> dict:
     """Build a parquet row that mirrors what real deskew would write."""
     n = xyz.shape[0]
     return {
-        "bag_id": bag_id, "chunk_id": chunk_id,
-        "sweep_id": sweep_id, "lidar_id": "LIDAR_TOP",
+        "bag_id": bag_id,
+        "chunk_id": chunk_id,
+        "sweep_id": sweep_id,
+        "lidar_id": "LIDAR_TOP",
         "reference_timestamp_ns": sweep_id * 100_000_000,
-        "n_points_total": n, "n_points_static": 0, "n_points_dynamic": 0,
+        "n_points_total": n,
+        "n_points_static": 0,
+        "n_points_dynamic": 0,
         "world_path": lidar_world_path(bag_id, chunk_id, sweep_id),
         "dynamic_mask_path": "",
-        "has_intensity": has_intensity, "deskewed": True,
+        "has_intensity": has_intensity,
+        "deskewed": True,
         "world_xmin": float(xyz[:, 0].min()) if n else None,
         "world_xmax": float(xyz[:, 0].max()) if n else None,
         "world_ymin": float(xyz[:, 1].min()) if n else None,
@@ -57,8 +66,12 @@ def _proc_row(
     }
 
 
-def _write_proc_index(bag_id: str, chunk_id: str, sweep_ids: list[int],
-                      xyz_per_sweep: list[np.ndarray] | None = None):
+def _write_proc_index(
+    bag_id: str,
+    chunk_id: str,
+    sweep_ids: list[int],
+    xyz_per_sweep: list[np.ndarray] | None = None,
+):
     if xyz_per_sweep is None:
         xyz_per_sweep = [np.empty((0, 3))] * len(sweep_ids)
     rows = [
@@ -77,7 +90,9 @@ def test_all_sweeps_present_classified_static(tmp_env):
     for i in range(n_sweeps):
         _write_world_sweep(bag_id, chunk_id, i, static_xyz)
     _write_proc_index(
-        bag_id, chunk_id, list(range(n_sweeps)),
+        bag_id,
+        chunk_id,
+        list(range(n_sweeps)),
         xyz_per_sweep=[static_xyz] * n_sweeps,
     )
 
@@ -117,7 +132,9 @@ def test_single_sweep_classified_dynamic(tmp_env):
             xyz = static_xyz
         _write_world_sweep(bag_id, chunk_id, i, xyz)
         xyz_per_sweep.append(xyz)
-    _write_proc_index(bag_id, chunk_id, list(range(n_sweeps)), xyz_per_sweep=xyz_per_sweep)
+    _write_proc_index(
+        bag_id, chunk_id, list(range(n_sweeps)), xyz_per_sweep=xyz_per_sweep
+    )
 
     cfg = ComponentConfig(static_sweep_fraction=0.3, static_sweep_min=2)
     process_chunk(cfg, bag_id, chunk_id)
@@ -149,7 +166,9 @@ def test_dynamic_map_aggregates_across_sweeps(tmp_env):
         xyz = np.concatenate([static_xyz, dyn])
         _write_world_sweep(bag_id, chunk_id, i, xyz)
         xyz_per_sweep.append(xyz)
-    _write_proc_index(bag_id, chunk_id, list(range(n_sweeps)), xyz_per_sweep=xyz_per_sweep)
+    _write_proc_index(
+        bag_id, chunk_id, list(range(n_sweeps)), xyz_per_sweep=xyz_per_sweep
+    )
 
     cfg = ComponentConfig(static_sweep_fraction=0.5, static_sweep_min=2)
     process_chunk(cfg, bag_id, chunk_id)
@@ -159,8 +178,12 @@ def test_dynamic_map_aggregates_across_sweeps(tmp_env):
     assert dyn["xyz"].shape[0] == n_sweeps
     # sweep_id-per-point must match the originating sweep.
     sort_idx = np.argsort(dyn["sweep_id"])
-    np.testing.assert_array_equal(dyn["sweep_id"][sort_idx], np.arange(n_sweeps, dtype=np.int32))
-    np.testing.assert_allclose(dyn["xyz"][sort_idx, 0], np.arange(n_sweeps, dtype=float))
+    np.testing.assert_array_equal(
+        dyn["sweep_id"][sort_idx], np.arange(n_sweeps, dtype=np.int32)
+    )
+    np.testing.assert_allclose(
+        dyn["xyz"][sort_idx, 0], np.arange(n_sweeps, dtype=float)
+    )
 
 
 def test_voxel_occupancy_emitted_by_default(tmp_env):

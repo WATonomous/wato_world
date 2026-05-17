@@ -102,7 +102,9 @@ def _validate_chunk_inputs(bag_id: str, chunk_id: str) -> None:
         "lidar_sweeps.parquet": lidar_sweeps_path(bag_id, chunk_id),
         "poses.parquet": poses_path(bag_id, chunk_id),
     }
-    missing = [name for name, uri in required.items() if not os.path.exists(local_path(uri))]
+    missing = [
+        name for name, uri in required.items() if not os.path.exists(local_path(uri))
+    ]
     if missing:
         raise FileNotFoundError(
             f"chunk {chunk_id!r} of bag {bag_id!r} is missing ingest artifacts "
@@ -190,12 +192,16 @@ def run(
     if skipped:
         log.info(
             "skipping %d already-processed chunks (use force=True to re-run): %s",
-            len(skipped), skipped[:5] + (["..."] if len(skipped) > 5 else []),
+            len(skipped),
+            skipped[:5] + (["..."] if len(skipped) > 5 else []),
         )
 
     if not pending:
-        log.info("lidar_preprocessing: all %d chunks already processed for bag %s",
-                 len(chunk_rows), bag_id)
+        log.info(
+            "lidar_preprocessing: all %d chunks already processed for bag %s",
+            len(chunk_rows),
+            bag_id,
+        )
         return
 
     n_total = len(pending)
@@ -225,7 +231,9 @@ def run(
 
     log.info(
         "lidar_preprocessing complete for bag %s: %d/%d chunks succeeded",
-        bag_id, n_ok, n_total,
+        bag_id,
+        n_ok,
+        n_total,
     )
     if failures:
         log.warning("failed chunks:")

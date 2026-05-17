@@ -49,8 +49,16 @@ class ComponentConfig(BaseModel):
         """
         path = self.prompts_path
         if not os.path.exists(path):
-            return ["car", "truck", "bus", "motorcycle", "bicycle",
-                    "pedestrian", "traffic cone", "barrier"]
+            return [
+                "car",
+                "truck",
+                "bus",
+                "motorcycle",
+                "bicycle",
+                "pedestrian",
+                "traffic cone",
+                "barrier",
+            ]
         with open(path, "r", encoding="utf-8") as fh:
             data: dict[str, Any] = yaml.safe_load(fh) or {}
         synonyms: list[str] = []

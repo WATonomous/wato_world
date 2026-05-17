@@ -29,22 +29,26 @@ _MAX_GLOBAL_MAP_PTS = 1_000_000
 _WIN_W = 1600
 _WIN_H = 900
 
-_STATIC_RGB = [0.29, 0.56, 0.85]   # blue
+_STATIC_RGB = [0.29, 0.56, 0.85]  # blue
 _DYNAMIC_RGB = [0.91, 0.30, 0.24]  # red
-_GROUND_RGB = [0.20, 1.00, 0.20]   # green
+_GROUND_RGB = [0.20, 1.00, 0.20]  # green
 
 
 def _o3d():
     try:
         import open3d as o3d
+
         return o3d
     except ImportError as e:
-        raise ImportError("open3d is required for point-cloud visualization: pip install open3d") from e
+        raise ImportError(
+            "open3d is required for point-cloud visualization: pip install open3d"
+        ) from e
 
 
 def _height_colors(z: np.ndarray) -> np.ndarray:
     """Map Z values to RGB using RdYlBu (low=red, mid=yellow, high=blue)."""
     import matplotlib.cm as cm
+
     lo, hi = np.percentile(z, 2), np.percentile(z, 98)
     norm = np.clip((z - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
     return cm.RdYlBu(1.0 - norm)[:, :3].astype(np.float64)
@@ -107,8 +111,7 @@ def _show(
     o3d = _o3d()
 
     nonempty = {
-        n: g for n, g in geoms.items()
-        if not (hasattr(g, "is_empty") and g.is_empty())
+        n: g for n, g in geoms.items() if not (hasattr(g, "is_empty") and g.is_empty())
     }
     if not nonempty:
         log.warning("nothing to show for %s", title)
@@ -133,12 +136,21 @@ def _show(
     center, _extent = _scene_center_extent(nonempty.values())
 
     # View presets — Z is up in world frame.
-    vis.register_key_callback(ord("1"), lambda v: _set_view(v, [0, 0, -1], [0, 1, 0],  center, 0.4))   # top-down BEV
-    vis.register_key_callback(ord("2"), lambda v: _set_view(v, [-1, 0, 0], [0, 0, 1], center, 0.5))   # front (looking -X)
-    vis.register_key_callback(ord("3"), lambda v: _set_view(v, [0, -1, 0], [0, 0, 1], center, 0.5))   # side (looking -Y)
-    vis.register_key_callback(ord("4"), lambda v: _set_view(v, [-1, -1, -1], [0, 0, 1], center, 0.5)) # isometric
+    vis.register_key_callback(
+        ord("1"), lambda v: _set_view(v, [0, 0, -1], [0, 1, 0], center, 0.4)
+    )  # top-down BEV
+    vis.register_key_callback(
+        ord("2"), lambda v: _set_view(v, [-1, 0, 0], [0, 0, 1], center, 0.5)
+    )  # front (looking -X)
+    vis.register_key_callback(
+        ord("3"), lambda v: _set_view(v, [0, -1, 0], [0, 0, 1], center, 0.5)
+    )  # side (looking -Y)
+    vis.register_key_callback(
+        ord("4"), lambda v: _set_view(v, [-1, -1, -1], [0, 0, 1], center, 0.5)
+    )  # isometric
 
     if toggle_keys:
+
         def make_toggle(name):
             def cb(v):
                 if visible[name]:
@@ -147,7 +159,9 @@ def _show(
                     v.add_geometry(nonempty[name], reset_bounding_box=False)
                 visible[name] = not visible[name]
                 return False
+
             return cb
+
         for key, name in toggle_keys.items():
             if name in nonempty:
                 vis.register_key_callback(ord(key.upper()), make_toggle(name))
@@ -157,11 +171,13 @@ def _show(
 
     toggle_help = (
         f" | toggle: {', '.join(f'{k}={n}' for k, n in (toggle_keys or {}).items())}"
-        if toggle_keys else ""
+        if toggle_keys
+        else ""
     )
     log.info(
         "viewer open: %s — keys: 1=top 2=front 3=side 4=iso R=reset +/-=ptsize%s — close to continue",
-        title, toggle_help,
+        title,
+        toggle_help,
     )
 
     vis.run()
@@ -171,6 +187,7 @@ def _show(
 # ---------------------------------------------------------------------------
 # Accumulated chunk view — the default
 # ---------------------------------------------------------------------------
+
 
 def viz_chunk_classified(bag_id: str, chunk_id: str) -> None:
     """Single window: every processed sweep in the chunk, merged and classified.
@@ -212,6 +229,7 @@ def viz_chunk_classified(bag_id: str, chunk_id: str) -> None:
 # ---------------------------------------------------------------------------
 # Per-sweep views — opt-in via --sweep
 # ---------------------------------------------------------------------------
+
 
 def viz_stage_A(bag_id: str, chunk_id: str, sweep_id: int) -> None:
     """Single deskewed sweep, height-colored, ground in green. Press G to toggle ground."""
@@ -266,9 +284,7 @@ def viz_stage_B_sweep(bag_id: str, chunk_id: str, sweep_id: int) -> None:
 
     n_dyn = int(dynamic.sum())
     n_static = len(xyz) - n_dyn
-    title = (
-        f"sweep {sweep_id} — static={n_static:,} (blue), dynamic={n_dyn:,} (red)"
-    )
+    title = f"sweep {sweep_id} — static={n_static:,} (blue), dynamic={n_dyn:,} (red)"
     _show(
         {"static": static_pcd, "dynamic": dyn_pcd},
         title,
@@ -279,6 +295,7 @@ def viz_stage_B_sweep(bag_id: str, chunk_id: str, sweep_id: int) -> None:
 # ---------------------------------------------------------------------------
 # Stage C / D — ground grid + bag-level global map
 # ---------------------------------------------------------------------------
+
 
 def viz_stage_C(bag_id: str, chunk_id: str) -> None:
     """Stage C: height grid heatmap + HSV-encoded surface normals (matplotlib)."""
@@ -291,7 +308,9 @@ def viz_stage_C(bag_id: str, chunk_id: str) -> None:
     if isinstance(status, (bytes, np.bytes_)):
         status = status.decode()
     if status in ("skipped_no_ground_mask", "empty"):
-        log.warning("ground status=%s for chunk %s — skipping stage C", status, chunk_id)
+        log.warning(
+            "ground status=%s for chunk %s — skipping stage C", status, chunk_id
+        )
         return
 
     height_grid = g["height_grid"]
@@ -308,7 +327,9 @@ def viz_stage_C(bag_id: str, chunk_id: str) -> None:
     valid = np.isfinite(height_grid)
     vmin = float(height_grid[valid].min()) if valid.any() else 0.0
     vmax = float(height_grid[valid].max()) if valid.any() else 1.0
-    im = axes[0].imshow(height_grid, origin="lower", cmap="viridis", vmin=vmin, vmax=vmax)
+    im = axes[0].imshow(
+        height_grid, origin="lower", cmap="viridis", vmin=vmin, vmax=vmax
+    )
     plt.colorbar(im, ax=axes[0], label="Height Z (m)")
     axes[0].set_title("Height grid")
 
@@ -345,6 +366,7 @@ def viz_static_map(bag_id: str, chunk_id: str) -> None:
 # Orchestrator
 # ---------------------------------------------------------------------------
 
+
 def viz_chunk(
     bag_id: str,
     chunk_id: str,
@@ -363,7 +385,9 @@ def viz_chunk(
 
     stage: "A", "B", "C", or "all". Stage D is bag-level — call viz_stage_D() separately.
     """
-    do = lambda s: stage in ("all", s)
+
+    def do(s: str) -> bool:
+        return stage in ("all", s)
 
     try:
         _o3d()

@@ -13,7 +13,7 @@ flowchart TD
     subgraph ingest["ingest  ·  CPU"]
         I["decode sensor streams\nbag_meta · calibration · chunks\ncamera_frames · lidar_sweeps\nposes · frame_index"]
     end
-    
+
     subgraph lidar_prep["lidar_preprocessing  ·  CPU"]
         LP["motion compensation\nstatic / dynamic split\nground mesh extraction"]
     end

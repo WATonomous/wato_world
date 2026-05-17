@@ -358,7 +358,7 @@ class Box3D:
     cy: float
     cz: float
     w: float
-    l: float
+    l: float  # noqa: E741 — domain term: length, matches parquet w/l/h column triplet
     h: float
     heading: float  # radians, world frame
 
@@ -380,13 +380,13 @@ class MaskletRow(BaseModel):
     masklet_id: str
     bag_id: str
     chunk_id: str
-    cam_id: str            # camera name, e.g. "CAM_FRONT"
-    cls: str               # "vehicle" | "pedestrian" | "cyclist"
+    cam_id: str  # camera name, e.g. "CAM_FRONT"
+    cls: str  # "vehicle" | "pedestrian" | "cyclist"
     score: float
-    frames_present: str    # JSON list[int] — camera_seq values where mask is present
-    mask_path: str         # path to directory of per-frame mask PNG files
-    dino_feature_path: Optional[str] = None   # DINOv2 embedding NPZ
-    global_object_id: Optional[str] = None    # cross-camera identity
+    frames_present: str  # JSON list[int] — camera_seq values where mask is present
+    mask_path: str  # path to directory of per-frame mask PNG files
+    dino_feature_path: Optional[str] = None  # DINOv2 embedding NPZ
+    global_object_id: Optional[str] = None  # cross-camera identity
 
 
 MASKLET_SCHEMA = pa.schema(
@@ -427,15 +427,15 @@ class ProposalRow(BaseModel):
     cy: float
     cz: float
     w: float
-    l: float
+    l: float  # noqa: E741 — domain term: length, matches parquet w/l/h column triplet
     h: float
-    heading: float   # radians, world frame
-    cls: str         # "vehicle" | "pedestrian" | "cyclist"
+    heading: float  # radians, world frame
+    cls: str  # "vehicle" | "pedestrian" | "cyclist"
     score: float
     provenance: str  # "lidar_detector" | "slf" | "fused"
     lidar_point_count: Optional[int] = None
-    supporting_cam_ids: str = "[]"        # JSON list[str] of cam_id
-    supporting_masklet_ids: str = "[]"    # JSON list[str] of masklet_id
+    supporting_cam_ids: str = "[]"  # JSON list[str] of cam_id
+    supporting_masklet_ids: str = "[]"  # JSON list[str] of masklet_id
 
 
 PROPOSAL_SCHEMA = pa.schema(
@@ -499,12 +499,12 @@ class TrackRow(BaseModel):
     cy: float
     cz: float
     w: float
-    l: float
+    l: float  # noqa: E741 — domain term: length, matches parquet w/l/h column triplet
     h: float
     heading: float  # radians, world frame
-    cls: str        # "vehicle" | "pedestrian" | "cyclist"
+    cls: str  # "vehicle" | "pedestrian" | "cyclist"
     score: float
-    supporting_cam_ids: str = "[]"      # JSON list[str]
+    supporting_cam_ids: str = "[]"  # JSON list[str]
     supporting_masklet_ids: str = "[]"  # JSON list[str]
     dino_feature_path: Optional[str] = None
 
@@ -554,7 +554,7 @@ class RefinedTrackRow(BaseModel):
     cy: float
     cz: float
     w: float
-    l: float
+    l: float  # noqa: E741 — domain term: length, matches parquet w/l/h column triplet
     h: float
     heading: float  # radians, world frame
     cls: str

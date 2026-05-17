@@ -104,7 +104,9 @@ def reduce_static_map(bag_id: str, cfg: ComponentConfig) -> str:
         log.debug("loaded %d static points from chunk %s", xyz.shape[0], chunk_id)
 
     if not all_xyz:
-        log.warning("bag %s: no static map chunks found, writing empty global map", bag_id)
+        log.warning(
+            "bag %s: no static map chunks found, writing empty global map", bag_id
+        )
         out_uri = global_static_map_path(bag_id)
         np.savez_compressed(
             local_path(out_uri),
@@ -113,7 +115,12 @@ def reduce_static_map(bag_id: str, cfg: ComponentConfig) -> str:
         return out_uri
 
     merged = np.concatenate(all_xyz, axis=0)
-    log.info("bag %s: merging %d static points across %d chunks", bag_id, merged.shape[0], len(all_xyz))
+    log.info(
+        "bag %s: merging %d static points across %d chunks",
+        bag_id,
+        merged.shape[0],
+        len(all_xyz),
+    )
 
     xyz_down = _voxel_snap_downsample(merged, cfg.global_map_voxel_size_m)
     log.info(

@@ -6,13 +6,13 @@ import logging
 import re
 from pathlib import Path
 
-log = logging.getLogger(__name__)
-
 import click
 
 from wato_lidar_preprocessing.config import load_config
 from wato_lidar_preprocessing.pipeline import run as run_pipeline
 from wato_lidar_preprocessing.reduce import reduce_ground_map, reduce_static_map
+
+log = logging.getLogger(__name__)
 
 _SLUG = re.compile(r"[^a-zA-Z0-9_]+")
 
@@ -48,17 +48,30 @@ def main(log_level: str) -> None:
 @click.option(
     "--chunk", "chunk_id", default=None, help="optional chunk_id; default: all chunks."
 )
-@click.option("--config", "config_path", default="/ws/src/lidar_preprocessing/config/lidar_preprocessing.yaml")
 @click.option(
-    "--force", "-f", "force", is_flag=True, default=False,
+    "--config",
+    "config_path",
+    default="/ws/src/lidar_preprocessing/config/lidar_preprocessing.yaml",
+)
+@click.option(
+    "--force",
+    "-f",
+    "force",
+    is_flag=True,
+    default=False,
     help="re-process chunks whose ground.npz already exists.",
 )
 @click.option(
-    "--workers", "workers", default=1, type=int,
+    "--workers",
+    "workers",
+    default=1,
+    type=int,
     help="number of concurrent worker processes (default 1 = sequential).",
 )
 @click.option(
-    "--auto-reduce/--no-auto-reduce", "auto_reduce", default=True,
+    "--auto-reduce/--no-auto-reduce",
+    "auto_reduce",
+    default=True,
     help=(
         "after all chunks finish, automatically run the bag-level reduce "
         "(global_static_map.npz + global_ground.npz). "
@@ -87,7 +100,11 @@ def run_cmd(
 
 @main.command("reduce")
 @click.option("--bag", "bag_id", required=True, help="bag_id or bag path to reduce.")
-@click.option("--config", "config_path", default="/ws/src/lidar_preprocessing/config/lidar_preprocessing.yaml")
+@click.option(
+    "--config",
+    "config_path",
+    default="/ws/src/lidar_preprocessing/config/lidar_preprocessing.yaml",
+)
 def reduce_cmd(bag_id: str, config_path: str) -> None:
     """Merge per-chunk artifacts into bag-level global maps.
 
@@ -106,15 +123,28 @@ def reduce_cmd(bag_id: str, config_path: str) -> None:
 
 @main.command("viz")
 @click.option("--bag", "bag_id", required=True, help="bag_id or bag path.")
-@click.option("--chunk", "chunk_id", default=None, help="chunk_id to visualize (default: all chunks).")
-@click.option("--sweep", "sweep_id", default=None, type=int, help="optional specific sweep_id (stages A/B only).")
+@click.option(
+    "--chunk",
+    "chunk_id",
+    default=None,
+    help="chunk_id to visualize (default: all chunks).",
+)
+@click.option(
+    "--sweep",
+    "sweep_id",
+    default=None,
+    type=int,
+    help="optional specific sweep_id (stages A/B only).",
+)
 @click.option(
     "--stage",
     default="all",
     type=click.Choice(["A", "B", "C", "D", "all"]),
     help="Pipeline stage to visualize (default: all).",
 )
-def viz_cmd(bag_id: str, chunk_id: str | None, sweep_id: int | None, stage: str) -> None:
+def viz_cmd(
+    bag_id: str, chunk_id: str | None, sweep_id: int | None, stage: str
+) -> None:
     """Open interactive Open3D / matplotlib windows for pipeline artifacts.
 
     Each window blocks until you close it. Requires DISPLAY (or WSLg) to be
@@ -143,7 +173,9 @@ def viz_cmd(bag_id: str, chunk_id: str | None, sweep_id: int | None, stage: str)
         try:
             viz_stage_D(bag_id)
         except FileNotFoundError:
-            click.echo("skipping stage D: global_static_map.npz not found (run 'reduce' first)")
+            click.echo(
+                "skipping stage D: global_static_map.npz not found (run 'reduce' first)"
+            )
         except ImportError as exc:
             click.echo(f"skipping stage D: {exc}")
 

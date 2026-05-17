@@ -73,7 +73,9 @@ def _cache_byte_budget() -> int:
     except (TypeError, ValueError) as exc:
         log.warning(
             "WATO_LIDAR_CACHE_BYTES=%r ignored (%s); falling back to default %d",
-            raw, exc, _DEFAULT_CACHE_BYTES,
+            raw,
+            exc,
+            _DEFAULT_CACHE_BYTES,
         )
         return _DEFAULT_CACHE_BYTES
 
@@ -218,7 +220,10 @@ def process_chunk(
     """Classify all world-frame sweeps in a chunk as static or dynamic."""
     meta_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
     if not meta_rows:
-        log.warning("chunk %s: no processed sweeps in lidar_proc_index — writing empty static map", chunk_id)
+        log.warning(
+            "chunk %s: no processed sweeps in lidar_proc_index — writing empty static map",
+            chunk_id,
+        )
         return _write_empty_outputs(bag_id, chunk_id, cfg.voxel_size_m)
 
     # Pre-scan: do any sweeps carry intensity?  If so, every contributing sweep
@@ -236,7 +241,9 @@ def process_chunk(
     if cfg.cache_world_xyz_in_memory and estimated_bytes > cache_budget:
         log.warning(
             "chunk %s: estimated cache size %.2f GB exceeds %.2f GB cap — disabling in-memory cache",
-            chunk_id, estimated_bytes / 1e9, cache_budget / 1e9,
+            chunk_id,
+            estimated_bytes / 1e9,
+            cache_budget / 1e9,
         )
         cache_xyz = False
         cache_auto_disabled = True
@@ -390,18 +397,12 @@ def process_chunk(
                 # sweep_id-per-point lets downstream recover temporal origin
                 # without iterating lidar_proc_index.  int32 is enough for any
                 # realistic chunk (32 k sweeps).
-                dyn_sweep_id_chunks.append(
-                    np.full(n_dyn_s, sweep_id, dtype=np.int32)
-                )
+                dyn_sweep_id_chunks.append(np.full(n_dyn_s, sweep_id, dtype=np.int32))
                 if any_intensity:
                     if has_intensity and intensity is not None:
-                        dyn_intensity_chunks.append(
-                            intensity[mask].astype(np.float32)
-                        )
+                        dyn_intensity_chunks.append(intensity[mask].astype(np.float32))
                     else:
-                        dyn_intensity_chunks.append(
-                            np.zeros(n_dyn_s, dtype=np.float32)
-                        )
+                        dyn_intensity_chunks.append(np.zeros(n_dyn_s, dtype=np.float32))
 
         updated_meta.append(
             ProcessedSweepMeta(
@@ -431,7 +432,9 @@ def process_chunk(
         )
 
     # Write updated index with static/dynamic counts.
-    write_table(updated_meta, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
+    write_table(
+        updated_meta, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id)
+    )
 
     # Write static map.  origin / voxel_size are chunk-local descriptors —
     # different chunks of the same bag use different origins.  reduce.py
@@ -498,7 +501,11 @@ def process_chunk(
             origin=origin,
             voxel_size=np.float32(cfg.voxel_size_m),
         )
-        log.info("chunk %s: wrote voxel_occupancy.npz (%d occupied voxels)", chunk_id, occ_coords.shape[0])
+        log.info(
+            "chunk %s: wrote voxel_occupancy.npz (%d occupied voxels)",
+            chunk_id,
+            occ_coords.shape[0],
+        )
 
     if cfg.save_per_frame_voxel_occupancy and frame_keys:
         n_frames = 0
@@ -517,7 +524,9 @@ def process_chunk(
                 voxel_size=np.float32(cfg.voxel_size_m),
             )
             n_frames += 1
-        log.info("chunk %s: wrote %d per-frame voxel_occupancy files", chunk_id, n_frames)
+        log.info(
+            "chunk %s: wrote %d per-frame voxel_occupancy files", chunk_id, n_frames
+        )
 
     return ClassifyResult(
         n_static=total_static,

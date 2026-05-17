@@ -7,7 +7,7 @@ is not installed.  Returns empty results in that case with a one-time warning.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -22,7 +22,7 @@ class Detection:
     """Single 2D detection from the detector."""
 
     bbox_xyxy: np.ndarray  # (4,) float32: [x1, y1, x2, y2] in pixels
-    class_name: str        # raw detector label (synonym)
+    class_name: str  # raw detector label (synonym)
     score: float
 
 
@@ -43,13 +43,14 @@ class GroundingDINODetector:
     ) -> None:
         self._model_id = model_id
         self._device = device or self._default_device()
-        self._model = None   # lazy-loaded on first detect() call
+        self._model = None  # lazy-loaded on first detect() call
         self._processor = None
 
     @staticmethod
     def _default_device() -> str:
         try:
             import torch
+
             return "cuda" if torch.cuda.is_available() else "cpu"
         except ImportError:
             return "cpu"
@@ -61,6 +62,7 @@ class GroundingDINODetector:
             return True
         try:
             from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+
             self._processor = AutoProcessor.from_pretrained(self._model_id)
             self._model = AutoModelForZeroShotObjectDetection.from_pretrained(
                 self._model_id
@@ -118,9 +120,11 @@ class GroundingDINODetector:
             results["scores"].cpu().numpy(),
             results["labels"],
         ):
-            detections.append(Detection(
-                bbox_xyxy=box.astype(np.float32),
-                class_name=str(label),
-                score=float(score),
-            ))
+            detections.append(
+                Detection(
+                    bbox_xyxy=box.astype(np.float32),
+                    class_name=str(label),
+                    score=float(score),
+                )
+            )
         return detections

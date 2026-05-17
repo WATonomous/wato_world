@@ -12,7 +12,6 @@ Per-chunk steps (mirrors the lidar_preprocessing chunk-parallel pattern):
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from collections import defaultdict
@@ -21,7 +20,6 @@ from typing import Optional
 import numpy as np
 
 from wato_common.artifact_store import (
-    chunks_index_path,
     detections_2d_path,
     ensure_local_dir,
     local_path,
@@ -29,14 +27,13 @@ from wato_common.artifact_store import (
     tracklets_2d_path,
 )
 from wato_common.geometry import unflatten_se3
-from wato_common.io.parquet_io import read_rows, write_table
-from wato_common.schemas import MASKLET_SCHEMA, MaskletRow, encode_int_list, encode_str_list
+from wato_common.io.parquet_io import write_table
+from wato_common.schemas import MASKLET_SCHEMA, MaskletRow, encode_int_list
 from wato_perception_2d.config import ComponentConfig
 from wato_perception_2d.cross_cam_merge import merge_cross_camera
 from wato_perception_2d.detector import GroundingDINODetector
 from wato_perception_2d.io import (
     CameraFrameInfo,
-    CalibrationInfo,
     load_calibration,
     load_chunks,
     load_dynamic_lidar_points,
@@ -52,6 +49,7 @@ def _load_image(path: str) -> Optional[np.ndarray]:
     """Return (H, W, 3) uint8 RGB array, or None on error."""
     try:
         from PIL import Image as PILImage
+
         img = PILImage.open(path)
         if img.mode != "RGB":
             img = img.convert("RGB")
@@ -74,6 +72,7 @@ def _project_lidar_prompts(
     if lidar_world_pts is None or lidar_world_pts.shape[0] == 0:
         return None
     from wato_common.geometry import project_points
+
     pix, valid = project_points(lidar_world_pts, K, cam_T_world)
     if not valid.any():
         return None
@@ -86,10 +85,9 @@ def _project_lidar_prompts(
 
 def _chunk_complete(bag_id: str, chunk_id: str) -> bool:
     """True when both output parquets exist for this chunk."""
-    return (
-        os.path.exists(local_path(detections_2d_path(bag_id, chunk_id)))
-        and os.path.exists(local_path(tracklets_2d_path(bag_id, chunk_id)))
-    )
+    return os.path.exists(
+        local_path(detections_2d_path(bag_id, chunk_id))
+    ) and os.path.exists(local_path(tracklets_2d_path(bag_id, chunk_id)))
 
 
 def _process_chunk(
@@ -125,7 +123,9 @@ def _process_chunk(
     for cam_id, cam_frames in frames_by_cam.items():
         calib = calibration.get(cam_id)
         if calib is None:
-            log.warning("chunk %s: no calibration for camera %s — skipping", chunk_id, cam_id)
+            log.warning(
+                "chunk %s: no calibration for camera %s — skipping", chunk_id, cam_id
+            )
             continue
 
         tracker = Tracker2D(
@@ -148,6 +148,7 @@ def _process_chunk(
             if cfg.use_lidar_prompts and frame.valid_pose and frame.world_T_ego_flat:
                 world_T_ego = unflatten_se3(frame.world_T_ego_flat)
                 from wato_common.geometry import invert_se3
+
                 ego_T_cam = calib.ego_T_cam
                 cam_T_ego = invert_se3(ego_T_cam)
                 cam_T_world = cam_T_ego @ invert_se3(world_T_ego)
@@ -173,7 +174,10 @@ def _process_chunk(
         cam_masklets = tracker.finalize()
         log.info(
             "chunk %s / %s: %d masklets from %d frames",
-            chunk_id, cam_id, len(cam_masklets), len(cam_frames),
+            chunk_id,
+            cam_id,
+            len(cam_masklets),
+            len(cam_frames),
         )
         all_masklets.extend(cam_masklets)
 
@@ -267,7 +271,9 @@ def run(
     for chunk in chunks:
         cid = chunk["chunk_id"]
         if not force and _chunk_complete(bag_id, cid):
-            log.info("chunk %s already complete — skipping (use force=True to re-run)", cid)
+            log.info(
+                "chunk %s already complete — skipping (use force=True to re-run)", cid
+            )
             n_skip += 1
             continue
         try:
@@ -278,5 +284,7 @@ def run(
 
     log.info(
         "perception_2d complete for bag %s: %d processed, %d skipped",
-        bag_id, n_ok, n_skip,
+        bag_id,
+        n_ok,
+        n_skip,
     )

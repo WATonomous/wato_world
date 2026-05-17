@@ -17,17 +17,15 @@ from wato_common.artifact_store import (
     calibration_path,
     chunks_index_path,
     detections_2d_path,
-    dynamic_mask_path,
     ensure_local_dir,
     frame_index_path,
     lidar_proc_index_path,
-    lidar_world_path,
     local_path,
     masks_2d_dir,
     tracklets_2d_path,
 )
 from wato_common.io.parquet_io import read_rows, write_table
-from wato_common.schemas import MASKLET_SCHEMA, MaskletRow
+from wato_common.schemas import MASKLET_SCHEMA
 
 
 @dataclass
@@ -50,7 +48,7 @@ class CameraFrameInfo:
 class CalibrationInfo:
     """Per-camera calibration loaded from calibration.json."""
 
-    K: np.ndarray          # (3, 3) float64 intrinsic
+    K: np.ndarray  # (3, 3) float64 intrinsic
     ego_T_cam: np.ndarray  # (4, 4) float64 SE(3)
 
 
@@ -67,18 +65,20 @@ def load_frame_index(bag_id: str, chunk_id: str) -> list[CameraFrameInfo]:
         flat = r.get("world_T_ego_flat")
         if flat is not None:
             flat = list(flat)
-        result.append(CameraFrameInfo(
-            frame_id=str(r.get("frame_id", "")),
-            bag_id=bag_id,
-            chunk_id=chunk_id,
-            sweep_id=int(r["sweep_id"]),
-            cam_id=str(r["cam_id"]),
-            image_path=local_path(str(r["image_path"])),
-            camera_seq=int(r["camera_seq"]),
-            world_T_ego_flat=flat,
-            valid_camera=bool(r.get("valid_camera", False)),
-            valid_pose=bool(r.get("valid_pose", False)),
-        ))
+        result.append(
+            CameraFrameInfo(
+                frame_id=str(r.get("frame_id", "")),
+                bag_id=bag_id,
+                chunk_id=chunk_id,
+                sweep_id=int(r["sweep_id"]),
+                cam_id=str(r["cam_id"]),
+                image_path=local_path(str(r["image_path"])),
+                camera_seq=int(r["camera_seq"]),
+                world_T_ego_flat=flat,
+                valid_camera=bool(r.get("valid_camera", False)),
+                valid_pose=bool(r.get("valid_pose", False)),
+            )
+        )
     return result
 
 
@@ -99,7 +99,6 @@ def load_dynamic_lidar_points(
     bag_id: str, chunk_id: str, sweep_id: int
 ) -> Optional[np.ndarray]:
     """Return (N, 3) float64 world-frame dynamic points for one sweep, or None."""
-    from wato_common.artifact_store import lidar_proc_index_path
 
     proc_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
     row = next((r for r in proc_rows if int(r["sweep_id"]) == sweep_id), None)

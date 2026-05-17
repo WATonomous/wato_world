@@ -137,7 +137,9 @@ def voxel_occupancy_path(bag_id: str, chunk_id: str) -> str:
 
 
 def voxel_occupancy_frame_path(bag_id: str, chunk_id: str, frame_id: int) -> str:
-    return _join(chunk_root(bag_id, chunk_id), f"voxel_occupancy_frame_{frame_id:04d}.npz")
+    return _join(
+        chunk_root(bag_id, chunk_id), f"voxel_occupancy_frame_{frame_id:04d}.npz"
+    )
 
 
 # ---------------------------------------------------------------------------

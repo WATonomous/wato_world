@@ -75,7 +75,9 @@ def _load_pose_samples(bag_id: str, chunk_id: str) -> list[PoseSample]:
         if not np.allclose(T[:3, 3], xyz, atol=1e-6):
             log.warning(
                 "pose row at t=%d: world_T_ego translation %s != (x,y,z)=%s",
-                int(r["timestamp_ns"]), T[:3, 3].tolist(), xyz.tolist(),
+                int(r["timestamp_ns"]),
+                T[:3, 3].tolist(),
+                xyz.tolist(),
             )
         samples.append(
             PoseSample(
@@ -315,8 +317,8 @@ def _deskew_sweep(
     world_T_lidar_u = world_T_ego_u @ ego_T_lidar  # broadcast: (U,4,4) @ (4,4)
 
     # Map back to per-point and apply.
-    R = world_T_lidar_u[inv, :3, :3]   # (N, 3, 3)
-    t = world_T_lidar_u[inv, :3, 3]    # (N, 3)
+    R = world_T_lidar_u[inv, :3, :3]  # (N, 3, 3)
+    t = world_T_lidar_u[inv, :3, 3]  # (N, 3)
 
     # Batched: xyz_world[i] = R[i] @ xyz_lidar[i] + t[i]
     xyz_world = np.einsum("nij,nj->ni", R, xyz_lidar) + t  # (N, 3) float64
@@ -432,9 +434,7 @@ def process_chunk(
         else:
             xmin = xmax = ymin = ymax = zmin = zmax = None
 
-        n_ground = (
-            int(arrays["ground_mask"].sum()) if "ground_mask" in arrays else 0
-        )
+        n_ground = int(arrays["ground_mask"].sum()) if "ground_mask" in arrays else 0
 
         result = DeskewResult(
             sweep_id=sweep_id,
