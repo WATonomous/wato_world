@@ -163,7 +163,7 @@ def batch_interpolate_poses(
         (s.timestamp_ns for s in samples), dtype=np.int64, count=len(samples)
     )
     translations = np.stack([s.translation for s in samples])  # (M, 3)
-    quats = np.stack([s.quat_xyzw for s in samples])            # (M, 4) xyzw
+    quats = np.stack([s.quat_xyzw for s in samples])  # (M, 4) xyzw
 
     idx = np.searchsorted(sample_ts, timestamps_ns)
     idx = np.clip(idx, 1, len(samples) - 1)
@@ -179,7 +179,7 @@ def batch_interpolate_poses(
     trans = (1.0 - t[:, None]) * translations[idx - 1] + t[:, None] * translations[idx]
 
     q0 = quats[idx - 1]  # (N, 4)
-    q1 = quats[idx]       # (N, 4)
+    q1 = quats[idx]  # (N, 4)
 
     # Vectorised SLERP.
     q0 = q0 / np.linalg.norm(q0, axis=1, keepdims=True)
@@ -199,7 +199,7 @@ def batch_interpolate_poses(
     q_interp = q_interp / np.linalg.norm(q_interp, axis=1, keepdims=True)
 
     # Vectorised SE(3) assembly — no Python loop over N.
-    R = _quats_to_matrices(q_interp)               # (N, 3, 3)
+    R = _quats_to_matrices(q_interp)  # (N, 3, 3)
     result = np.zeros((n, 4, 4), dtype=np.float64)
     result[:, :3, :3] = R
     result[:, :3, 3] = trans

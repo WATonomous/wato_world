@@ -23,7 +23,9 @@ from wato_common.artifact_store import (
 from wato_common.io.parquet_io import read_rows
 
 
-def load_world_sweep(bag_id: str, chunk_id: str, sweep_id: int) -> dict[str, np.ndarray]:
+def load_world_sweep(
+    bag_id: str, chunk_id: str, sweep_id: int
+) -> dict[str, np.ndarray]:
     """Load a deskewed world-frame sweep NPZ."""
     return dict(np.load(local_path(lidar_world_path(bag_id, chunk_id, sweep_id))))
 

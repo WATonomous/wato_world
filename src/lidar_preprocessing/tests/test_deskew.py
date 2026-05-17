@@ -60,6 +60,7 @@ def _write_sweep_index(bag_id: str, chunk_id: str, rows: list[dict]):
 
 def _write_raw_sweep(bag_id: str, chunk_id: str, sweep_id: int, **arrays):
     from wato_common.artifact_store import lidar_sweep_path
+
     path = local_path(lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", sweep_id))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     np.savez_compressed(path, **arrays)
@@ -79,8 +80,13 @@ def test_static_transform_no_motion(tmp_env):
         "bag_id": bag_id,
         "chunk_id": chunk_id,
         "timestamp_ns": 0,
-        "x": 0.0, "y": 0.0, "z": 0.0,
-        "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0,
+        "qx": 0.0,
+        "qy": 0.0,
+        "qz": 0.0,
+        "qw": 1.0,
         "world_T_ego_flat": _flat(T_identity),
         "source": "odom",
         "valid": True,
@@ -94,16 +100,31 @@ def test_static_transform_no_motion(tmp_env):
     _write_raw_sweep(bag_id, chunk_id, 0, x=x, y=y, z=z)
 
     from wato_common.artifact_store import lidar_sweep_path
+
     ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
-    _write_sweep_index(bag_id, chunk_id, [{
-        "bag_id": bag_id, "chunk_id": chunk_id,
-        "lidar_id": "LIDAR_TOP", "sweep_id": 0,
-        "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
-        "header_timestamp_ns": 0, "record_timestamp_ns": 0,
-        "num_points": 3, "has_ring": False, "has_intensity": False,
-        "has_point_time": False, "min_range_m": 1.0, "max_range_m": 3.2,
-        "valid": True, "drop_reason": None,
-    }])
+    _write_sweep_index(
+        bag_id,
+        chunk_id,
+        [
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "lidar_id": "LIDAR_TOP",
+                "sweep_id": 0,
+                "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
+                "header_timestamp_ns": 0,
+                "record_timestamp_ns": 0,
+                "num_points": 3,
+                "has_ring": False,
+                "has_intensity": False,
+                "has_point_time": False,
+                "min_range_m": 1.0,
+                "max_range_m": 3.2,
+                "valid": True,
+                "drop_reason": None,
+            }
+        ],
+    )
 
     cfg = ComponentConfig()
     results = process_chunk(cfg, bag_id, chunk_id)
@@ -123,12 +144,19 @@ def test_translation_applied(tmp_env):
     T_shifted = np.eye(4)
     T_shifted[0, 3] = 10.0
     pose_row = {
-        "bag_id": bag_id, "chunk_id": chunk_id,
+        "bag_id": bag_id,
+        "chunk_id": chunk_id,
         "timestamp_ns": 0,
-        "x": 10.0, "y": 0.0, "z": 0.0,
-        "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
+        "x": 10.0,
+        "y": 0.0,
+        "z": 0.0,
+        "qx": 0.0,
+        "qy": 0.0,
+        "qz": 0.0,
+        "qw": 1.0,
         "world_T_ego_flat": _flat(T_shifted),
-        "source": "odom", "valid": True,
+        "source": "odom",
+        "valid": True,
     }
     _write_poses(bag_id, chunk_id, [pose_row])
 
@@ -138,16 +166,31 @@ def test_translation_applied(tmp_env):
     _write_raw_sweep(bag_id, chunk_id, 0, x=x, y=y, z=z)
 
     from wato_common.artifact_store import lidar_sweep_path
+
     ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
-    _write_sweep_index(bag_id, chunk_id, [{
-        "bag_id": bag_id, "chunk_id": chunk_id,
-        "lidar_id": "LIDAR_TOP", "sweep_id": 0,
-        "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
-        "header_timestamp_ns": 0, "record_timestamp_ns": 0,
-        "num_points": 2, "has_ring": False, "has_intensity": False,
-        "has_point_time": False, "min_range_m": 1.0, "max_range_m": 2.0,
-        "valid": True, "drop_reason": None,
-    }])
+    _write_sweep_index(
+        bag_id,
+        chunk_id,
+        [
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "lidar_id": "LIDAR_TOP",
+                "sweep_id": 0,
+                "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
+                "header_timestamp_ns": 0,
+                "record_timestamp_ns": 0,
+                "num_points": 2,
+                "has_ring": False,
+                "has_intensity": False,
+                "has_point_time": False,
+                "min_range_m": 1.0,
+                "max_range_m": 2.0,
+                "valid": True,
+                "drop_reason": None,
+            }
+        ],
+    )
 
     cfg = ComponentConfig()
     process_chunk(cfg, bag_id, chunk_id)
@@ -161,10 +204,19 @@ def test_drops_nonfinite_points(tmp_env):
     bag_id, chunk_id = "bag_nan", "chunk0"
     _write_calibration(bag_id)
     pose_row = {
-        "bag_id": bag_id, "chunk_id": chunk_id, "timestamp_ns": 0,
-        "x": 0.0, "y": 0.0, "z": 0.0,
-        "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
-        "world_T_ego_flat": _flat(np.eye(4)), "source": "odom", "valid": True,
+        "bag_id": bag_id,
+        "chunk_id": chunk_id,
+        "timestamp_ns": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0,
+        "qx": 0.0,
+        "qy": 0.0,
+        "qz": 0.0,
+        "qw": 1.0,
+        "world_T_ego_flat": _flat(np.eye(4)),
+        "source": "odom",
+        "valid": True,
     }
     _write_poses(bag_id, chunk_id, [pose_row])
 
@@ -175,16 +227,31 @@ def test_drops_nonfinite_points(tmp_env):
     _write_raw_sweep(bag_id, chunk_id, 0, x=x, y=y, z=z)
 
     from wato_common.artifact_store import lidar_sweep_path
+
     ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
-    _write_sweep_index(bag_id, chunk_id, [{
-        "bag_id": bag_id, "chunk_id": chunk_id,
-        "lidar_id": "LIDAR_TOP", "sweep_id": 0,
-        "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
-        "header_timestamp_ns": 0, "record_timestamp_ns": 0,
-        "num_points": 5, "has_ring": False, "has_intensity": False,
-        "has_point_time": False, "min_range_m": 1.0, "max_range_m": 3.0,
-        "valid": True, "drop_reason": None,
-    }])
+    _write_sweep_index(
+        bag_id,
+        chunk_id,
+        [
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "lidar_id": "LIDAR_TOP",
+                "sweep_id": 0,
+                "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
+                "header_timestamp_ns": 0,
+                "record_timestamp_ns": 0,
+                "num_points": 5,
+                "has_ring": False,
+                "has_intensity": False,
+                "has_point_time": False,
+                "min_range_m": 1.0,
+                "max_range_m": 3.0,
+                "valid": True,
+                "drop_reason": None,
+            }
+        ],
+    )
 
     cfg = ComponentConfig()
     results = process_chunk(cfg, bag_id, chunk_id)
@@ -200,10 +267,19 @@ def test_empty_poses_writes_empty_index(tmp_env):
     _write_calibration(bag_id)
     # Write a row but mark it invalid → no usable poses.
     pose_row = {
-        "bag_id": bag_id, "chunk_id": chunk_id, "timestamp_ns": 0,
-        "x": 0.0, "y": 0.0, "z": 0.0,
-        "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
-        "world_T_ego_flat": _flat(np.eye(4)), "source": "odom", "valid": False,
+        "bag_id": bag_id,
+        "chunk_id": chunk_id,
+        "timestamp_ns": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0,
+        "qx": 0.0,
+        "qy": 0.0,
+        "qz": 0.0,
+        "qw": 1.0,
+        "world_T_ego_flat": _flat(np.eye(4)),
+        "source": "odom",
+        "valid": False,
     }
     _write_poses(bag_id, chunk_id, [pose_row])
 
@@ -213,6 +289,7 @@ def test_empty_poses_writes_empty_index(tmp_env):
 
     from wato_common.artifact_store import lidar_proc_index_path
     from wato_common.io.parquet_io import read_rows
+
     rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
     assert rows == []
 
@@ -222,27 +299,55 @@ def test_deskewed_flag_false_when_no_point_time(tmp_env):
     _write_calibration(bag_id)
     T = np.eye(4)
     pose_row = {
-        "bag_id": bag_id, "chunk_id": chunk_id, "timestamp_ns": 0,
-        "x": 0.0, "y": 0.0, "z": 0.0,
-        "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
-        "world_T_ego_flat": _flat(T), "source": "odom", "valid": True,
+        "bag_id": bag_id,
+        "chunk_id": chunk_id,
+        "timestamp_ns": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0,
+        "qx": 0.0,
+        "qy": 0.0,
+        "qz": 0.0,
+        "qw": 1.0,
+        "world_T_ego_flat": _flat(T),
+        "source": "odom",
+        "valid": True,
     }
     _write_poses(bag_id, chunk_id, [pose_row])
-    _write_raw_sweep(bag_id, chunk_id, 0,
-                     x=np.ones(2, dtype=np.float32),
-                     y=np.zeros(2, dtype=np.float32),
-                     z=np.zeros(2, dtype=np.float32))
+    _write_raw_sweep(
+        bag_id,
+        chunk_id,
+        0,
+        x=np.ones(2, dtype=np.float32),
+        y=np.zeros(2, dtype=np.float32),
+        z=np.zeros(2, dtype=np.float32),
+    )
     from wato_common.artifact_store import lidar_sweep_path
+
     ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
-    _write_sweep_index(bag_id, chunk_id, [{
-        "bag_id": bag_id, "chunk_id": chunk_id,
-        "lidar_id": "LIDAR_TOP", "sweep_id": 0,
-        "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
-        "header_timestamp_ns": 0, "record_timestamp_ns": 0,
-        "num_points": 2, "has_ring": False, "has_intensity": False,
-        "has_point_time": False, "min_range_m": 1.0, "max_range_m": 1.0,
-        "valid": True, "drop_reason": None,
-    }])
+    _write_sweep_index(
+        bag_id,
+        chunk_id,
+        [
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "lidar_id": "LIDAR_TOP",
+                "sweep_id": 0,
+                "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
+                "header_timestamp_ns": 0,
+                "record_timestamp_ns": 0,
+                "num_points": 2,
+                "has_ring": False,
+                "has_intensity": False,
+                "has_point_time": False,
+                "min_range_m": 1.0,
+                "max_range_m": 1.0,
+                "valid": True,
+                "drop_reason": None,
+            }
+        ],
+    )
     cfg = ComponentConfig()
     results = process_chunk(cfg, bag_id, chunk_id)
     assert results[0].deskewed is False
@@ -328,9 +433,12 @@ def test_non_identity_ego_T_lidar(tmp_env, case):
     ego_T_lidar[:3, 3] = case["t"]
 
     calib = {
-        "calibration_version": "test", "ego_frame": "base_link", "cameras": {},
+        "calibration_version": "test",
+        "ego_frame": "base_link",
+        "cameras": {},
         "lidars": {"LIDAR_TOP": {"frame_id": "v", "ego_T_lidar": ego_T_lidar.tolist()}},
-        "static_transforms": {}, "checks": {"sanity": "ok", "notes": ""},
+        "static_transforms": {},
+        "checks": {"sanity": "ok", "notes": ""},
     }
     calib_p = local_path(calibration_path(bag_id))
     os.makedirs(os.path.dirname(calib_p), exist_ok=True)
@@ -339,32 +447,57 @@ def test_non_identity_ego_T_lidar(tmp_env, case):
 
     # Ego at world origin, identity rotation.
     pose_row = {
-        "bag_id": bag_id, "chunk_id": chunk_id, "timestamp_ns": 0,
-        "x": 0.0, "y": 0.0, "z": 0.0,
-        "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
+        "bag_id": bag_id,
+        "chunk_id": chunk_id,
+        "timestamp_ns": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0,
+        "qx": 0.0,
+        "qy": 0.0,
+        "qz": 0.0,
+        "qw": 1.0,
         "world_T_ego_flat": _flat(np.eye(4)),
-        "source": "odom", "valid": True,
+        "source": "odom",
+        "valid": True,
     }
     _write_poses(bag_id, chunk_id, [pose_row])
 
     _write_raw_sweep(
-        bag_id, chunk_id, 0,
+        bag_id,
+        chunk_id,
+        0,
         x=np.array([1.0], dtype=np.float32),
         y=np.zeros(1, dtype=np.float32),
         z=np.zeros(1, dtype=np.float32),
     )
 
     from wato_common.artifact_store import lidar_sweep_path
+
     ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
-    _write_sweep_index(bag_id, chunk_id, [{
-        "bag_id": bag_id, "chunk_id": chunk_id,
-        "lidar_id": "LIDAR_TOP", "sweep_id": 0,
-        "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
-        "header_timestamp_ns": 0, "record_timestamp_ns": 0,
-        "num_points": 1, "has_ring": False, "has_intensity": False,
-        "has_point_time": False, "min_range_m": 1.0, "max_range_m": 1.0,
-        "valid": True, "drop_reason": None,
-    }])
+    _write_sweep_index(
+        bag_id,
+        chunk_id,
+        [
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "lidar_id": "LIDAR_TOP",
+                "sweep_id": 0,
+                "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
+                "header_timestamp_ns": 0,
+                "record_timestamp_ns": 0,
+                "num_points": 1,
+                "has_ring": False,
+                "has_intensity": False,
+                "has_point_time": False,
+                "min_range_m": 1.0,
+                "max_range_m": 1.0,
+                "valid": True,
+                "drop_reason": None,
+            }
+        ],
+    )
 
     cfg = ComponentConfig()
     process_chunk(cfg, bag_id, chunk_id)
@@ -390,16 +523,34 @@ def test_motion_compensation_with_per_point_timestamps(tmp_env):
     T1[0, 3] = 10.0
     poses = [
         {
-            "bag_id": bag_id, "chunk_id": chunk_id, "timestamp_ns": 0,
-            "x": 0.0, "y": 0.0, "z": 0.0,
-            "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
-            "world_T_ego_flat": _flat(T0), "source": "odom", "valid": True,
+            "bag_id": bag_id,
+            "chunk_id": chunk_id,
+            "timestamp_ns": 0,
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": 0.0,
+            "qw": 1.0,
+            "world_T_ego_flat": _flat(T0),
+            "source": "odom",
+            "valid": True,
         },
         {
-            "bag_id": bag_id, "chunk_id": chunk_id, "timestamp_ns": 200_000_000,
-            "x": 10.0, "y": 0.0, "z": 0.0,
-            "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
-            "world_T_ego_flat": _flat(T1), "source": "odom", "valid": True,
+            "bag_id": bag_id,
+            "chunk_id": chunk_id,
+            "timestamp_ns": 200_000_000,
+            "x": 10.0,
+            "y": 0.0,
+            "z": 0.0,
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": 0.0,
+            "qw": 1.0,
+            "world_T_ego_flat": _flat(T1),
+            "source": "odom",
+            "valid": True,
         },
     ]
     _write_poses(bag_id, chunk_id, poses)
@@ -409,20 +560,37 @@ def test_motion_compensation_with_per_point_timestamps(tmp_env):
     x = np.array([1.0, 1.0], dtype=np.float32)
     y = np.zeros(2, dtype=np.float32)
     z = np.zeros(2, dtype=np.float32)
-    t_offset_us = np.array([0.0, 0.2], dtype=np.float32)  # config default unit = "seconds"
+    t_offset_us = np.array(
+        [0.0, 0.2], dtype=np.float32
+    )  # config default unit = "seconds"
     _write_raw_sweep(bag_id, chunk_id, 0, x=x, y=y, z=z, t_offset_us=t_offset_us)
 
     from wato_common.artifact_store import lidar_sweep_path
+
     ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
-    _write_sweep_index(bag_id, chunk_id, [{
-        "bag_id": bag_id, "chunk_id": chunk_id,
-        "lidar_id": "LIDAR_TOP", "sweep_id": 0,
-        "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
-        "header_timestamp_ns": 0, "record_timestamp_ns": 0,
-        "num_points": 2, "has_ring": False, "has_intensity": False,
-        "has_point_time": True, "min_range_m": 1.0, "max_range_m": 1.0,
-        "valid": True, "drop_reason": None,
-    }])
+    _write_sweep_index(
+        bag_id,
+        chunk_id,
+        [
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "lidar_id": "LIDAR_TOP",
+                "sweep_id": 0,
+                "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
+                "header_timestamp_ns": 0,
+                "record_timestamp_ns": 0,
+                "num_points": 2,
+                "has_ring": False,
+                "has_intensity": False,
+                "has_point_time": True,
+                "min_range_m": 1.0,
+                "max_range_m": 1.0,
+                "valid": True,
+                "drop_reason": None,
+            }
+        ],
+    )
 
     cfg = ComponentConfig()
     results = process_chunk(cfg, bag_id, chunk_id)
@@ -443,10 +611,19 @@ def test_point_time_unit_mismatch_records_failure(tmp_env):
     bag_id, chunk_id = "bag_unitmismatch", "chunk0"
     _write_calibration(bag_id)
     pose_row = {
-        "bag_id": bag_id, "chunk_id": chunk_id, "timestamp_ns": 0,
-        "x": 0.0, "y": 0.0, "z": 0.0,
-        "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
-        "world_T_ego_flat": _flat(np.eye(4)), "source": "odom", "valid": True,
+        "bag_id": bag_id,
+        "chunk_id": chunk_id,
+        "timestamp_ns": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0,
+        "qx": 0.0,
+        "qy": 0.0,
+        "qz": 0.0,
+        "qw": 1.0,
+        "world_T_ego_flat": _flat(np.eye(4)),
+        "source": "odom",
+        "valid": True,
     }
     _write_poses(bag_id, chunk_id, [pose_row])
 
@@ -460,16 +637,31 @@ def test_point_time_unit_mismatch_records_failure(tmp_env):
 
     from wato_common.artifact_store import lidar_proc_index_path, lidar_sweep_path
     from wato_common.io.parquet_io import read_rows
+
     ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
-    _write_sweep_index(bag_id, chunk_id, [{
-        "bag_id": bag_id, "chunk_id": chunk_id,
-        "lidar_id": "LIDAR_TOP", "sweep_id": 0,
-        "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
-        "header_timestamp_ns": 0, "record_timestamp_ns": 0,
-        "num_points": 2, "has_ring": False, "has_intensity": False,
-        "has_point_time": True, "min_range_m": 1.0, "max_range_m": 1.0,
-        "valid": True, "drop_reason": None,
-    }])
+    _write_sweep_index(
+        bag_id,
+        chunk_id,
+        [
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "lidar_id": "LIDAR_TOP",
+                "sweep_id": 0,
+                "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
+                "header_timestamp_ns": 0,
+                "record_timestamp_ns": 0,
+                "num_points": 2,
+                "has_ring": False,
+                "has_intensity": False,
+                "has_point_time": True,
+                "min_range_m": 1.0,
+                "max_range_m": 1.0,
+                "valid": True,
+                "drop_reason": None,
+            }
+        ],
+    )
 
     cfg = ComponentConfig()  # default point_time_unit = "seconds"
     results = process_chunk(cfg, bag_id, chunk_id)
@@ -524,9 +716,9 @@ def test_assign_frame_ids_canonical_with_tolerance():
     # 3-LiDAR rig.  Frame 0 fires near t=0; frame 1 fires near t=100ms.
     # Center is canonical.  NE/NW arrive ~10ms after center (within 25ms).
     rows = [
-        _row("lidar_ne", 10_000_000),   # +10 ms from canonical@0
+        _row("lidar_ne", 10_000_000),  # +10 ms from canonical@0
         _row("lidar_cc", 0),
-        _row("lidar_nw", -8_000_000),   # -8 ms from canonical@0
+        _row("lidar_nw", -8_000_000),  # -8 ms from canonical@0
         _row("lidar_cc", 100_000_000),
         _row("lidar_ne", 105_000_000),  # +5 ms from canonical@100ms
         _row("lidar_nw", 130_000_000),  # +30 ms from canonical@100ms → outside ±25ms
@@ -535,7 +727,9 @@ def test_assign_frame_ids_canonical_with_tolerance():
         rows,
         FrameSyncParams(canonical_lidar="lidar_cc", tolerance_ms=25.0),
     )
-    by_lidar_ts = {(r["lidar_id"], r["reference_timestamp_ns"]): r["frame_id"] for r in rows}
+    by_lidar_ts = {
+        (r["lidar_id"], r["reference_timestamp_ns"]): r["frame_id"] for r in rows
+    }
     # Canonical sweeps get sequential frame_ids.
     assert by_lidar_ts[("lidar_cc", 0)] == 0
     assert by_lidar_ts[("lidar_cc", 100_000_000)] == 1
@@ -561,7 +755,9 @@ def test_assign_frame_ids_canonical_missing_falls_back(caplog):
         )
     assert "not present in chunk" in caplog.text
     # Each lidar gets its own sequential frame_ids.
-    by_lidar_ts = {(r["lidar_id"], r["reference_timestamp_ns"]): r["frame_id"] for r in rows}
+    by_lidar_ts = {
+        (r["lidar_id"], r["reference_timestamp_ns"]): r["frame_id"] for r in rows
+    }
     assert by_lidar_ts[("lidar_ne", 0)] == 0
     assert by_lidar_ts[("lidar_ne", 100_000_000)] == 1
     assert by_lidar_ts[("lidar_nw", 0)] == 0
@@ -572,33 +768,55 @@ def test_process_chunk_populates_frame_id(tmp_env):
     bag_id, chunk_id = "bag_frameid", "chunk0"
     _write_calibration(bag_id)
     pose_row = {
-        "bag_id": bag_id, "chunk_id": chunk_id, "timestamp_ns": 0,
-        "x": 0.0, "y": 0.0, "z": 0.0,
-        "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
-        "world_T_ego_flat": _flat(np.eye(4)), "source": "odom", "valid": True,
+        "bag_id": bag_id,
+        "chunk_id": chunk_id,
+        "timestamp_ns": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0,
+        "qx": 0.0,
+        "qy": 0.0,
+        "qz": 0.0,
+        "qw": 1.0,
+        "world_T_ego_flat": _flat(np.eye(4)),
+        "source": "odom",
+        "valid": True,
     }
     _write_poses(bag_id, chunk_id, [pose_row])
 
     from wato_common.artifact_store import lidar_proc_index_path, lidar_sweep_path
+
     ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
 
     sweep_rows = []
     for sid in range(3):
         _write_raw_sweep(
-            bag_id, chunk_id, sid,
+            bag_id,
+            chunk_id,
+            sid,
             x=np.ones(1, dtype=np.float32),
             y=np.zeros(1, dtype=np.float32),
             z=np.zeros(1, dtype=np.float32),
         )
-        sweep_rows.append({
-            "bag_id": bag_id, "chunk_id": chunk_id,
-            "lidar_id": "LIDAR_TOP", "sweep_id": sid,
-            "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", sid),
-            "header_timestamp_ns": sid * 100_000_000, "record_timestamp_ns": 0,
-            "num_points": 1, "has_ring": False, "has_intensity": False,
-            "has_point_time": False, "min_range_m": 1.0, "max_range_m": 1.0,
-            "valid": True, "drop_reason": None,
-        })
+        sweep_rows.append(
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "lidar_id": "LIDAR_TOP",
+                "sweep_id": sid,
+                "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", sid),
+                "header_timestamp_ns": sid * 100_000_000,
+                "record_timestamp_ns": 0,
+                "num_points": 1,
+                "has_ring": False,
+                "has_intensity": False,
+                "has_point_time": False,
+                "min_range_m": 1.0,
+                "max_range_m": 1.0,
+                "valid": True,
+                "drop_reason": None,
+            }
+        )
     _write_sweep_index(bag_id, chunk_id, sweep_rows)
 
     cfg = ComponentConfig()  # canonical_lidar=None → per-lidar sequential

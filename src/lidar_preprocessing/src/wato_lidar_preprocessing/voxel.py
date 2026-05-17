@@ -42,9 +42,12 @@ def pack_voxel_key(
     Raises VoxelOverflowError if any index falls outside [0, AXIS_RANGE).
     """
     out_of_range = (
-        (vx < 0) | (vx >= AXIS_RANGE)
-        | (vy < 0) | (vy >= AXIS_RANGE)
-        | (vz < 0) | (vz >= AXIS_RANGE)
+        (vx < 0)
+        | (vx >= AXIS_RANGE)
+        | (vy < 0)
+        | (vy >= AXIS_RANGE)
+        | (vz < 0)
+        | (vz >= AXIS_RANGE)
     )
     n_bad = int(out_of_range.sum())
     if n_bad > 0:

@@ -66,11 +66,13 @@ def test_height_grid_axis_convention():
     of `height_grid` relies on; if the binned_statistic_2d transpose is ever
     accidentally removed, this test catches it.
     """
-    pts = np.array([
-        [0.0, 0.0, 5.0],   # (x=0, y=0)  → cell (row=0, col=0)
-        [3.0, 0.0, 7.0],   # (x=3, y=0)  → cell (row=0, col=3)
-        [0.0, 4.0, 9.0],   # (x=0, y=4)  → cell (row=4, col=0)
-    ])
+    pts = np.array(
+        [
+            [0.0, 0.0, 5.0],  # (x=0, y=0)  → cell (row=0, col=0)
+            [3.0, 0.0, 7.0],  # (x=3, y=0)  → cell (row=0, col=3)
+            [0.0, 4.0, 9.0],  # (x=0, y=4)  → cell (row=4, col=0)
+        ]
+    )
     hg, _, origin = _build_height_grid(pts, cell_size=1.0)
     # origin is the lower-left in (x, y) world units.
     np.testing.assert_allclose(origin, [0.0, 0.0])
@@ -97,8 +99,11 @@ def tmp_env(tmp_path, monkeypatch):
 
 
 def _write_world_sweep_with_mask(
-    bag_id: str, chunk_id: str, sweep_id: int,
-    xyz: np.ndarray, ground_mask: np.ndarray | None,
+    bag_id: str,
+    chunk_id: str,
+    sweep_id: int,
+    xyz: np.ndarray,
+    ground_mask: np.ndarray | None,
 ):
     path = local_path(lidar_world_path(bag_id, chunk_id, sweep_id))
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -109,7 +114,10 @@ def _write_world_sweep_with_mask(
 
 
 def _write_static_map_covering_all(
-    bag_id: str, chunk_id: str, all_xyz: np.ndarray, voxel_size: float = 0.15,
+    bag_id: str,
+    chunk_id: str,
+    all_xyz: np.ndarray,
+    voxel_size: float = 0.15,
 ):
     """Write a static_map.npz whose voxel keys cover every point in `all_xyz`.
 
@@ -117,6 +125,7 @@ def _write_static_map_covering_all(
     pass every candidate ground point through the filter.
     """
     from wato_lidar_preprocessing.voxel import voxel_indices
+
     origin = np.zeros(3, dtype=np.float64) if all_xyz.size == 0 else all_xyz.min(axis=0)
     if all_xyz.shape[0] > 0:
         keys = np.unique(voxel_indices(all_xyz, origin, voxel_size, chunk_id=chunk_id))
@@ -136,15 +145,22 @@ def _write_static_map_covering_all(
 def _write_proc_index(bag_id: str, chunk_id: str, sweep_ids: list[int]):
     rows = []
     for sid in sweep_ids:
-        rows.append({
-            "bag_id": bag_id, "chunk_id": chunk_id,
-            "sweep_id": sid, "lidar_id": "LIDAR_TOP",
-            "reference_timestamp_ns": sid * 100_000_000,
-            "n_points_total": 0, "n_points_static": 0, "n_points_dynamic": 0,
-            "world_path": lidar_world_path(bag_id, chunk_id, sid),
-            "dynamic_mask_path": "",
-            "has_intensity": False, "deskewed": True,
-        })
+        rows.append(
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "sweep_id": sid,
+                "lidar_id": "LIDAR_TOP",
+                "reference_timestamp_ns": sid * 100_000_000,
+                "n_points_total": 0,
+                "n_points_static": 0,
+                "n_points_dynamic": 0,
+                "world_path": lidar_world_path(bag_id, chunk_id, sid),
+                "dynamic_mask_path": "",
+                "has_intensity": False,
+                "deskewed": True,
+            }
+        )
     write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
 
 
@@ -164,7 +180,9 @@ def test_aggregates_per_sweep_ground_masks(tmp_env):
         xyz = np.concatenate([ground, obstacle])
         mask = np.concatenate([np.ones(100, bool), np.zeros(50, bool)])
         _write_world_sweep_with_mask(bag_id, chunk_id, sid, xyz, mask)
-        all_pts.append(xyz[mask])  # ground points only — those need to pass intersection
+        all_pts.append(
+            xyz[mask]
+        )  # ground points only — those need to pass intersection
     _write_proc_index(bag_id, chunk_id, list(range(n_per_sweep)))
     _write_static_map_covering_all(bag_id, chunk_id, np.concatenate(all_pts))
 
@@ -216,7 +234,12 @@ def _write_static_voxel_set(
 ):
     """Write a static_map.npz with static_voxel_keys derived from static_xyz."""
     from wato_lidar_preprocessing.classify import _voxel_indices
-    origin = np.zeros(3, dtype=np.float64) if static_xyz.size == 0 else static_xyz.min(axis=0)
+
+    origin = (
+        np.zeros(3, dtype=np.float64)
+        if static_xyz.size == 0
+        else static_xyz.min(axis=0)
+    )
     if static_xyz.shape[0] > 0:
         keys = _voxel_indices(static_xyz, origin, voxel_size, chunk_id=chunk_id)
         keys = np.unique(keys)
@@ -310,8 +333,12 @@ def test_deskew_estimates_ground_in_sensor_frame(tmp_env):
     ground.process_chunk aggregates the resulting masks."""
     import json
     from wato_common.artifact_store import (
-        calibration_path, ensure_local_dir, lidar_proc_dir,
-        lidar_sweep_path, lidar_sweeps_path, poses_path,
+        calibration_path,
+        ensure_local_dir,
+        lidar_proc_dir,
+        lidar_sweep_path,
+        lidar_sweeps_path,
+        poses_path,
     )
     from wato_common.schemas import LIDAR_SWEEPS_SCHEMA, POSES_SCHEMA
     from wato_lidar_preprocessing.deskew import process_chunk as deskew_chunk
@@ -319,10 +346,17 @@ def test_deskew_estimates_ground_in_sensor_frame(tmp_env):
     bag_id, chunk_id = "bag_e2e", "chunk0"
     # Calibration: identity ego_T_lidar.
     calib = {
-        "calibration_version": "test", "ego_frame": "base_link",
-        "cameras": {}, "lidars": {"LIDAR_TOP": {
-            "frame_id": "v", "ego_T_lidar": np.eye(4).tolist(),
-        }}, "static_transforms": {}, "checks": {"sanity": "ok", "notes": ""},
+        "calibration_version": "test",
+        "ego_frame": "base_link",
+        "cameras": {},
+        "lidars": {
+            "LIDAR_TOP": {
+                "frame_id": "v",
+                "ego_T_lidar": np.eye(4).tolist(),
+            }
+        },
+        "static_transforms": {},
+        "checks": {"sanity": "ok", "notes": ""},
     }
     p = local_path(calibration_path(bag_id))
     os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -331,18 +365,28 @@ def test_deskew_estimates_ground_in_sensor_frame(tmp_env):
 
     # Identity pose.
     pose_row = {
-        "bag_id": bag_id, "chunk_id": chunk_id, "timestamp_ns": 0,
-        "x": 0.0, "y": 0.0, "z": 0.0,
-        "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
+        "bag_id": bag_id,
+        "chunk_id": chunk_id,
+        "timestamp_ns": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0,
+        "qx": 0.0,
+        "qy": 0.0,
+        "qz": 0.0,
+        "qw": 1.0,
         "world_T_ego_flat": np.eye(4).flatten().tolist(),
-        "source": "odom", "valid": True,
+        "source": "odom",
+        "valid": True,
     }
     write_table([pose_row], POSES_SCHEMA, poses_path(bag_id, chunk_id))
 
     # Synthetic flat plane: 2000 ground points + 100 obstacle points.
     rng = np.random.default_rng(7)
     xy = rng.uniform(-20, 20, size=(2000, 2)).astype(np.float32)
-    z = rng.normal(-1.8, 0.02, size=2000).astype(np.float32)  # ground at sensor_height below sensor
+    z = rng.normal(-1.8, 0.02, size=2000).astype(
+        np.float32
+    )  # ground at sensor_height below sensor
     xy2 = rng.uniform(-5, 5, size=(100, 2)).astype(np.float32)
     z2 = np.full(100, 0.0, dtype=np.float32)
     x = np.concatenate([xy[:, 0], xy2[:, 0]])
@@ -354,15 +398,29 @@ def test_deskew_estimates_ground_in_sensor_frame(tmp_env):
     np.savez_compressed(sw_path, x=x, y=y, z=z_all)
 
     ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
-    write_table([{
-        "bag_id": bag_id, "chunk_id": chunk_id,
-        "lidar_id": "LIDAR_TOP", "sweep_id": 0,
-        "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
-        "header_timestamp_ns": 0, "record_timestamp_ns": 0,
-        "num_points": x.shape[0], "has_ring": False, "has_intensity": False,
-        "has_point_time": False, "min_range_m": 1.0, "max_range_m": 25.0,
-        "valid": True, "drop_reason": None,
-    }], LIDAR_SWEEPS_SCHEMA, lidar_sweeps_path(bag_id, chunk_id))
+    write_table(
+        [
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "lidar_id": "LIDAR_TOP",
+                "sweep_id": 0,
+                "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
+                "header_timestamp_ns": 0,
+                "record_timestamp_ns": 0,
+                "num_points": x.shape[0],
+                "has_ring": False,
+                "has_intensity": False,
+                "has_point_time": False,
+                "min_range_m": 1.0,
+                "max_range_m": 25.0,
+                "valid": True,
+                "drop_reason": None,
+            }
+        ],
+        LIDAR_SWEEPS_SCHEMA,
+        lidar_sweeps_path(bag_id, chunk_id),
+    )
 
     cfg = ComponentConfig()
     deskew_chunk(cfg, bag_id, chunk_id)

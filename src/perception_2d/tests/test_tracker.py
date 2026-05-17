@@ -68,7 +68,7 @@ def test_non_overlapping_masks_are_separate_tracks(tmp_path):
     """Two masks with zero IoU → two separate masklets."""
     tracker = Tracker2D("bag0", "chunk0", "cam_front", str(tmp_path))
     img = np.zeros((100, 100, 3), dtype=np.uint8)
-    m_a = _mask(100, 100, 0, 0, 10, 10)    # top-left
+    m_a = _mask(100, 100, 0, 0, 10, 10)  # top-left
     m_b = _mask(100, 100, 80, 80, 99, 99)  # bottom-right, no overlap
 
     # Both detections appear in the same frame.

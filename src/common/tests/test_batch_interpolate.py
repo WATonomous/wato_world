@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 
 from wato_common.geometry import PoseSample, batch_interpolate_poses, interpolate_pose
-from wato_common.geometry.transforms import make_se3
 
 
 def _make_sample(ts_ns: int, tx: float) -> PoseSample:

@@ -26,7 +26,7 @@ class SegmentedDetection:
     """Detection extended with a binary pixel mask."""
 
     detection: Detection
-    mask: np.ndarray       # (H, W) bool
+    mask: np.ndarray  # (H, W) bool
 
 
 class SAM2Segmenter:
@@ -52,6 +52,7 @@ class SAM2Segmenter:
     def _default_device() -> str:
         try:
             import torch
+
             return "cuda" if torch.cuda.is_available() else "cpu"
         except ImportError:
             return "cpu"
@@ -63,6 +64,7 @@ class SAM2Segmenter:
         try:
             from sam2.build_sam import build_sam2
             from sam2.sam2_image_predictor import SAM2ImagePredictor
+
             model = build_sam2(self._checkpoint, device=self._device)
             self._predictor = SAM2ImagePredictor(model)
             log.info("SAM2 loaded (%s) on %s", self._checkpoint, self._device)
@@ -101,8 +103,6 @@ class SAM2Segmenter:
         if not self._load():
             return self._bbox_fill_fallback(detections, H, W)
 
-        import torch
-
         self._predictor.set_image(image_rgb)
 
         results: list[SegmentedDetection] = []
@@ -116,10 +116,10 @@ class SAM2Segmenter:
                 # Keep only points inside this box.
                 x1, y1, x2, y2 = det.bbox_xyxy
                 inside = (
-                    (lidar_point_prompts[:, 0] >= x1) &
-                    (lidar_point_prompts[:, 0] <= x2) &
-                    (lidar_point_prompts[:, 1] >= y1) &
-                    (lidar_point_prompts[:, 1] <= y2)
+                    (lidar_point_prompts[:, 0] >= x1)
+                    & (lidar_point_prompts[:, 0] <= x2)
+                    & (lidar_point_prompts[:, 1] >= y1)
+                    & (lidar_point_prompts[:, 1] <= y2)
                 )
                 pts = lidar_point_prompts[inside]
                 if pts.shape[0] > 0:
@@ -133,7 +133,11 @@ class SAM2Segmenter:
                 multimask_output=False,
             )
             # masks_t: (1, H, W) bool tensor
-            mask = masks_t[0].cpu().numpy().astype(bool) if hasattr(masks_t, "cpu") else masks_t[0].astype(bool)
+            mask = (
+                masks_t[0].cpu().numpy().astype(bool)
+                if hasattr(masks_t, "cpu")
+                else masks_t[0].astype(bool)
+            )
             results.append(SegmentedDetection(detection=det, mask=mask))
 
         return results

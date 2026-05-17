@@ -35,9 +35,9 @@ class Masklet:
     cam_id: str
     cls: str
     score: float
-    frames_present: list[int]    # camera_seq values where the mask exists
-    mask_paths: list[str]        # parallel to frames_present
-    dino_feature: Optional[np.ndarray] = None   # (D,) float32 DINOv2 embedding
+    frames_present: list[int]  # camera_seq values where the mask exists
+    mask_paths: list[str]  # parallel to frames_present
+    dino_feature: Optional[np.ndarray] = None  # (D,) float32 DINOv2 embedding
     global_object_id: Optional[str] = None
 
 
@@ -70,17 +70,19 @@ def _extract_dino_feature(
             return None
         r0, r1 = np.where(rows)[0][[0, -1]]
         c0, c1 = np.where(cols)[0][[0, -1]]
-        crop = image_rgb[r0:r1 + 1, c0:c1 + 1]
+        crop = image_rgb[r0 : r1 + 1, c0 : c1 + 1]
 
         model = torch.hub.load("facebookresearch/dinov2", model_name)
         model.eval().to(device)
 
-        transform = T.Compose([
-            T.Resize(224),
-            T.CenterCrop(224),
-            T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
+        transform = T.Compose(
+            [
+                T.Resize(224),
+                T.CenterCrop(224),
+                T.ToTensor(),
+                T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ]
+        )
         tensor = transform(PILImage.fromarray(crop)).unsqueeze(0).to(device)
         with torch.no_grad():
             feat = model(tensor)[0].cpu().numpy().astype(np.float32)
@@ -225,6 +227,7 @@ class Tracker2D:
 
     def _save_mask(self, masklet_id: str, camera_seq: int, mask: np.ndarray) -> str:
         from PIL import Image as PILImage
+
         d = os.path.join(self.masks_2d_base_dir, masklet_id)
         os.makedirs(d, exist_ok=True)
         path = os.path.join(d, f"{camera_seq:06d}.png")
@@ -260,7 +263,8 @@ class _ActiveTrack:
     def to_masklet(self) -> Masklet:
         dino = (
             np.mean(self._dino_accum, axis=0).astype(np.float32)
-            if self._dino_accum else None
+            if self._dino_accum
+            else None
         )
         return Masklet(
             masklet_id=self.masklet_id,

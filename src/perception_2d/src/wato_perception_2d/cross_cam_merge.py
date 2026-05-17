@@ -16,7 +16,7 @@ from typing import Optional
 
 import numpy as np
 
-from wato_common.geometry import project_points, invert_se3, unflatten_se3
+from wato_common.geometry import project_points, invert_se3
 from wato_perception_2d.io import CalibrationInfo
 from wato_perception_2d.tracker_2d import Masklet
 
@@ -123,6 +123,7 @@ def merge_cross_camera(
             continue
         try:
             from PIL import Image as PILImage
+
             mask = np.array(PILImage.open(mkl.mask_paths[-1])).astype(bool)
         except Exception:  # noqa: BLE001
             world_positions.append(None)
@@ -139,12 +140,19 @@ def merge_cross_camera(
         cam_T_world = cam_T_ego @ invert_se3(world_T_ego)
 
         depth = _estimate_depth_from_lidar(
-            float(centroid[0]), float(centroid[1]),
-            lidar_world_pts, calib.K, cam_T_world,
+            float(centroid[0]),
+            float(centroid[1]),
+            lidar_world_pts,
+            calib.K,
+            cam_T_world,
         )
         world_pt = _lift_to_world(
-            float(centroid[0]), float(centroid[1]), depth,
-            calib.K, world_T_ego, ego_T_cam,
+            float(centroid[0]),
+            float(centroid[1]),
+            depth,
+            calib.K,
+            world_T_ego,
+            ego_T_cam,
         )
         world_positions.append(world_pt)
 
@@ -176,6 +184,7 @@ def merge_cross_camera(
     # Assign global_object_id by root.
     from collections import defaultdict
     import uuid
+
     cluster_ids: dict[int, str] = defaultdict(lambda: str(uuid.uuid4())[:12])
     for i, mkl in enumerate(masklets):
         root = find(i)

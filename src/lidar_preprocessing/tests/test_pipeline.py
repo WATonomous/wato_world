@@ -40,10 +40,17 @@ def _bootstrap_chunk(bag_id: str, chunk_id: str, sweep_id: int = 0):
     """Write the minimum on-disk state to make one chunk processable."""
     # calibration.json
     calib = {
-        "calibration_version": "t", "ego_frame": "base_link",
-        "cameras": {}, "lidars": {"LIDAR_TOP": {
-            "frame_id": "v", "ego_T_lidar": np.eye(4).tolist(),
-        }}, "static_transforms": {}, "checks": {"sanity": "ok", "notes": ""},
+        "calibration_version": "t",
+        "ego_frame": "base_link",
+        "cameras": {},
+        "lidars": {
+            "LIDAR_TOP": {
+                "frame_id": "v",
+                "ego_T_lidar": np.eye(4).tolist(),
+            }
+        },
+        "static_transforms": {},
+        "checks": {"sanity": "ok", "notes": ""},
     }
     p = local_path(calibration_path(bag_id))
     os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -51,11 +58,19 @@ def _bootstrap_chunk(bag_id: str, chunk_id: str, sweep_id: int = 0):
         json.dump(calib, fh)
 
     pose_row = {
-        "bag_id": bag_id, "chunk_id": chunk_id, "timestamp_ns": 0,
-        "x": 0.0, "y": 0.0, "z": 0.0,
-        "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
+        "bag_id": bag_id,
+        "chunk_id": chunk_id,
+        "timestamp_ns": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0,
+        "qx": 0.0,
+        "qy": 0.0,
+        "qz": 0.0,
+        "qw": 1.0,
         "world_T_ego_flat": np.eye(4).flatten().tolist(),
-        "source": "odom", "valid": True,
+        "source": "odom",
+        "valid": True,
     }
     write_table([pose_row], POSES_SCHEMA, poses_path(bag_id, chunk_id))
 
@@ -69,21 +84,36 @@ def _bootstrap_chunk(bag_id: str, chunk_id: str, sweep_id: int = 0):
     )
 
     ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
-    write_table([{
-        "bag_id": bag_id, "chunk_id": chunk_id,
-        "lidar_id": "LIDAR_TOP", "sweep_id": sweep_id,
-        "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", sweep_id),
-        "header_timestamp_ns": 0, "record_timestamp_ns": 0,
-        "num_points": 2, "has_ring": False, "has_intensity": False,
-        "has_point_time": False, "min_range_m": 1.0, "max_range_m": 2.0,
-        "valid": True, "drop_reason": None,
-    }], LIDAR_SWEEPS_SCHEMA, lidar_sweeps_path(bag_id, chunk_id))
+    write_table(
+        [
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "lidar_id": "LIDAR_TOP",
+                "sweep_id": sweep_id,
+                "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", sweep_id),
+                "header_timestamp_ns": 0,
+                "record_timestamp_ns": 0,
+                "num_points": 2,
+                "has_ring": False,
+                "has_intensity": False,
+                "has_point_time": False,
+                "min_range_m": 1.0,
+                "max_range_m": 2.0,
+                "valid": True,
+                "drop_reason": None,
+            }
+        ],
+        LIDAR_SWEEPS_SCHEMA,
+        lidar_sweeps_path(bag_id, chunk_id),
+    )
 
 
 def _write_chunks_index(bag_id: str, chunk_ids: list[str]):
     rows = [
         {
-            "bag_id": bag_id, "chunk_id": cid,
+            "bag_id": bag_id,
+            "chunk_id": cid,
             "t_start_ns": i * 30_000_000_000,
             "t_end_ns": (i + 1) * 30_000_000_000,
             "t_overlap_start_ns": i * 30_000_000_000,
@@ -169,9 +199,9 @@ def test_parallel_workers(tmp_env):
     cfg = ComponentConfig()
     pipeline.run(cfg, bag_id=bag_id, workers=2)
     for cid in chunk_ids:
-        assert os.path.exists(local_path(ground_path(bag_id, cid))), (
-            f"chunk {cid} did not produce ground.npz"
-        )
+        assert os.path.exists(
+            local_path(ground_path(bag_id, cid))
+        ), f"chunk {cid} did not produce ground.npz"
 
 
 def test_chunk_id_filter(tmp_env):

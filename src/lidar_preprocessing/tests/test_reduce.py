@@ -34,7 +34,8 @@ def tmp_env(tmp_path, monkeypatch):
 def _write_chunk_index(bag_id: str, chunk_ids: list[str]):
     rows = [
         {
-            "bag_id": bag_id, "chunk_id": cid,
+            "bag_id": bag_id,
+            "chunk_id": cid,
             "t_start_ns": i * 30_000_000_000,
             "t_end_ns": (i + 1) * 30_000_000_000,
             "t_overlap_start_ns": i * 30_000_000_000,
@@ -100,11 +101,13 @@ def test_all_chunks_missing_writes_empty(tmp_env):
 def test_voxel_snap_one_point_per_voxel():
     """Many points within one voxel collapse to a single output point."""
     # 10 points all inside the [0, 0.5)^3 voxel at voxel_size=0.5.
-    xyz = np.column_stack([
-        np.linspace(0.0, 0.49, 10),
-        np.linspace(0.0, 0.49, 10),
-        np.linspace(0.0, 0.49, 10),
-    ])
+    xyz = np.column_stack(
+        [
+            np.linspace(0.0, 0.49, 10),
+            np.linspace(0.0, 0.49, 10),
+            np.linspace(0.0, 0.49, 10),
+        ]
+    )
     out = _voxel_snap_downsample(xyz, voxel_size=0.5)
     assert out.shape == (1, 3)
     # Snapped to the cell centre (0.25, 0.25, 0.25).
@@ -163,16 +166,20 @@ def test_reduce_ground_merges_two_chunks(tmp_env):
     # Two non-overlapping ground patches.  chunk0 covers x in [0, 5);
     # chunk1 covers x in [10, 15).  After merge the height grid origin
     # should be at the lower-left of the union.
-    g0 = np.column_stack([
-        np.linspace(0.0, 5.0, 50),
-        np.linspace(0.0, 5.0, 50),
-        np.zeros(50),
-    ])
-    g1 = np.column_stack([
-        np.linspace(10.0, 15.0, 50),
-        np.linspace(10.0, 15.0, 50),
-        np.full(50, 1.0),  # higher Z so we can detect mixing
-    ])
+    g0 = np.column_stack(
+        [
+            np.linspace(0.0, 5.0, 50),
+            np.linspace(0.0, 5.0, 50),
+            np.zeros(50),
+        ]
+    )
+    g1 = np.column_stack(
+        [
+            np.linspace(10.0, 15.0, 50),
+            np.linspace(10.0, 15.0, 50),
+            np.full(50, 1.0),  # higher Z so we can detect mixing
+        ]
+    )
     _write_ground_chunk(bag_id, "chunk0", g0)
     _write_ground_chunk(bag_id, "chunk1", g1)
 
