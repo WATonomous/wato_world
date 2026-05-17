@@ -26,9 +26,21 @@ RUN uv pip install --system --break-system-packages \
         pyarrow numpy pydantic fsspec click pyyaml \
         zarr opencv-python-headless pillow
 
-# Heavy ML deps.  Pinned in perception_2d's pyproject.toml; uncomment when filling in.
-# RUN uv pip install --system --break-system-packages --extra-index-url \
-#         https://download.pytorch.org/whl/cu124 torch torchvision xformers
+# Torch + torchvision: required by both Depth Anything V2 and ultralytics
+# (YOLO-World).  cu124 wheels match the CUDA 12.8 runtime base image.
+RUN uv pip install --system --break-system-packages --extra-index-url \
+        https://download.pytorch.org/whl/cu124 torch torchvision
+
+# Depth Anything V2 (relative+metric monocular depth) and ultralytics
+# (YOLO-World v2-L).  Both consume torch.  Weights live under MODELS_ROOT,
+# not the image — fetch via `watod fetch-models`.
+RUN uv pip install --system --break-system-packages \
+        git+https://github.com/DepthAnything/Depth-Anything-V2.git \
+        ultralytics
+
+# Heavy ML deps for the existing perception_2d code paths (SAM2 + GroundingDINO
+# + DINOv2).  Uncomment once you're ready to put the full perception_2d image
+# into rotation — DA V2 / YOLO-World alone don't need these.
 # RUN uv pip install --system --break-system-packages \
 #         git+https://github.com/facebookresearch/sam2 \
 #         git+https://github.com/IDEA-Research/GroundingDINO \

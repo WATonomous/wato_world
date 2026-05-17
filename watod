@@ -81,6 +81,10 @@ Commands:
   build                    Pull base images + docker compose build active modules.
   build-base [cpu|cuda]    First-time setup: build base images locally when ghcr
                            hasn't published them yet (CI normally does this).
+  fetch-models             Download pretrained model checkpoints into
+                           \${WATO_WORLD_DIR}/data/models (the host side of
+                           the /data/models bind mount).  Run once after
+                           first clone; idempotent thereafter.
   up                       docker compose up -d for active modules.
   down [SERVICE|all]       Stop containers.
   run MODULE BAG [CHUNK]   One-shot module run.
@@ -227,6 +231,12 @@ case "${COMMAND}" in
         # to ghcr.  Run once on a fresh clone if `watod build` reports the
         # base image is missing.
         exec bash "${SCRIPTS_DIR}/watod-build-base.sh" "$@"
+        ;;
+    fetch-models)
+        # Download pretrained model checkpoints (DA V2, YOLO-World, ...)
+        # into ${WATO_WORLD_DIR}/data/models so GPU containers can mount
+        # them at /data/models.
+        exec bash "${SCRIPTS_DIR}/watod-fetch-models.sh" "$@"
         ;;
     up)
         exec bash "${SCRIPTS_DIR}/watod-compose.sh" up \

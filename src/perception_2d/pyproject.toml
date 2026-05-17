@@ -8,6 +8,20 @@ dependencies = [
     "click>=8",
     "pyyaml>=6",
     "pydantic>=2",
+    "numpy>=1.26",
+    "pillow>=10",
+    "pyarrow>=14",
+]
+
+# Heavy GPU stack — installed by docker/perception_2d.Dockerfile, not at
+# `pip install -e`.  Listed here so `pip install -e .[gpu]` works for local
+# dev outside containers; CI installs them via the Dockerfile.
+[project.optional-dependencies]
+gpu = [
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "ultralytics>=8.3",
+    "depth-anything-v2 @ git+https://github.com/DepthAnything/Depth-Anything-V2.git",
 ]
 
 [project.scripts]
