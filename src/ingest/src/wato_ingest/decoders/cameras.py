@@ -11,6 +11,7 @@ read directly from disk without touching the bag.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from wato_common.artifact_store import (
@@ -24,6 +25,8 @@ from wato_common.io.parquet_io import write_table
 from wato_common.io.rosbag_reader import messages
 from wato_common.schemas import CAMERA_FRAMES_SCHEMA, CameraFrameRow
 from wato_ingest.config import IngestConfig
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -44,6 +47,11 @@ def _ext_for_format(fmt: str) -> str:
         return "jpg"
     if "png" in f:
         return "png"
+    log.warning(
+        "CompressedImage.format %r is not jpeg/png — writing raw bytes as .bin; "
+        "downstream perception will not be able to open this file",
+        fmt,
+    )
     return "bin"
 
 

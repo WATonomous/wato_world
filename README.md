@@ -2,9 +2,61 @@
 
 Dockerized 3D auto-labeling pipeline for the WATonomous self driving car (dubbed EVE). Encompasses an offline batch system that turns rosbags (12 cameras + LiDAR + ego-pose) into 3D box tracks with class labels.
 
+## Architecture
 
-See [`docs/architecture.md`](docs/architecture.md) (TODO) for the full pipeline
-description. This README covers infra only.
+Eight components communicate only through artifacts on disk (`data/artifacts/`). No in-process imports across component boundaries.
+
+```mermaid
+flowchart TD
+    BAG[/"rosbags\n12 cameras · LiDAR · ego-pose"/]
+
+    subgraph ingest["ingest  ·  CPU"]
+        I["decode sensor streams\nbag_meta · calibration · chunks\ncamera_frames · lidar_sweeps\nposes · frame_index"]
+    end
+
+    subgraph lidar_prep["lidar_preprocessing  ·  CPU"]
+        LP["motion compensation\nstatic / dynamic split\nground mesh extraction"]
+    end
+
+    subgraph perception_2d["perception_2d  ·  GPU"]
+        P2["GroundingDINO + SAM 2\nDEVA temporal tracking\nDINOv2 embeddings\ncross-camera merge"]
+    end
+
+    subgraph proposal_gen["proposal_generation  ·  GPU"]
+        PG["LiDAR detector ensemble\nSegment-Lift-Fit\nproposal fusion"]
+    end
+
+    subgraph tracking["tracking  ·  GPU"]
+        TR["3D Kalman filter\nmasklet association\nDINOv2 ReID"]
+    end
+
+    subgraph label_ref["label_refinement  ·  GPU"]
+        LR["multimodal LabelFormer\nbootstrap → learned refinement"]
+    end
+
+    subgraph ovd["open_vocab_discovery  ·  GPU"]
+        OV["rare-class discovery branch"]
+    end
+
+    subgraph student["student_training  ·  GPU"]
+        ST["BEVFusion / TransFusion\nstudent detector training"]
+    end
+
+    BAG --> ingest
+    ingest -- "frame_index · camera_frames\ncalibration" --> perception_2d
+    ingest -- "frame_index · lidar_sweeps · poses" --> lidar_prep
+    lidar_prep -- "preprocessed sweeps · ground mesh" --> proposal_gen
+    perception_2d -- "2D masks · DINOv2 embeddings" --> proposal_gen
+    proposal_gen -- "3D proposals" --> tracking
+    tracking -- "3D tracks" --> label_ref
+    tracking -- "rare-class track candidates" --> ovd
+    label_ref -- "refined labels" --> student
+    ovd -- "rare-class labels" --> student
+```
+
+`frame_index.parquet` (written by **ingest**) is the cross-component contract: every downstream stage reads `world_T_ego_flat` (interpolated ego pose per LiDAR sweep) from it rather than consuming raw bag topics.
+
+Only **ingest** is implemented end-to-end. All other components are stubs.
 
 ## Layout
 

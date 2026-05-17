@@ -3,6 +3,10 @@
 # is active.
 
 services:
+  # `extends:` in docker-compose.dev.yaml deep-merges the runtime service def
+  # at parse time, BEFORE override files are layered on. So adding the
+  # nvidia runtime to e.g. `perception_2d` here does NOT propagate to
+  # `perception_2d_dev` — each _dev variant needs its own override entry.
   perception_2d: &gpu-defaults
     runtime: nvidia
     environment:
@@ -15,9 +19,19 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+  perception_2d_dev: *gpu-defaults
 
   proposal_generation: *gpu-defaults
-  tracking:  *gpu-defaults
+  proposal_generation_dev: *gpu-defaults
+
+  tracking: *gpu-defaults
+  tracking_dev: *gpu-defaults
+
   label_refinement: *gpu-defaults
+  label_refinement_dev: *gpu-defaults
+
   open_vocab_discovery: *gpu-defaults
-  student_training:    *gpu-defaults
+  open_vocab_discovery_dev: *gpu-defaults
+
+  student_training: *gpu-defaults
+  student_training_dev: *gpu-defaults

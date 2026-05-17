@@ -50,7 +50,7 @@ def decode_chunk(
         return []
 
     for lidar_id in lidar_topics:
-        ensure_local_dir(lidar_dir(bag_id, chunk_id))
+        ensure_local_dir(lidar_dir(bag_id, chunk_id, lidar_id))
 
     sweep_per_lidar: dict[str, int] = {lid: 0 for lid in lidar_topics}
     rows: list[dict] = []
@@ -83,7 +83,7 @@ def decode_chunk(
         LidarDecodeResult(
             lidar_id=lidar_id,
             sweeps_written=sweep_per_lidar[lidar_id],
-            output_dir=lidar_dir(bag_id, chunk_id),
+            output_dir=lidar_dir(bag_id, chunk_id, lidar_id),
         )
         for lidar_id in lidar_topics
     ]
@@ -140,12 +140,13 @@ def _write_sweep(
     if has_point_time:
         save_kwargs["t_offset_us"] = decoded[point_time_field].astype(np.float64)
 
-    out_uri = lidar_sweep_path(bag_id, chunk_id, sweep_id)
+    out_uri = lidar_sweep_path(bag_id, chunk_id, lidar_id, sweep_id)
     np.savez_compressed(local_path(out_uri), **save_kwargs)
 
     ranges = np.linalg.norm(
         np.stack([save_kwargs["x"], save_kwargs["y"], save_kwargs["z"]], axis=1), axis=1
     )
+    valid_ranges = ranges[np.isfinite(ranges)]
 
     row = LidarSweepRow(
         bag_id=bag_id,
@@ -159,8 +160,8 @@ def _write_sweep(
         has_ring=has_ring,
         has_intensity=has_intensity,
         has_point_time=has_point_time,
-        min_range_m=float(ranges.min()) if n > 0 else 0.0,
-        max_range_m=float(ranges.max()) if n > 0 else 0.0,
+        min_range_m=float(valid_ranges.min()) if len(valid_ranges) > 0 else 0.0,
+        max_range_m=float(valid_ranges.max()) if len(valid_ranges) > 0 else 0.0,
         valid=True,
     )
     return row.model_dump()

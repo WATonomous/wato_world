@@ -26,12 +26,12 @@
 ##   ACTIVE_MODULES="all"                             # every module in deploy mode
 ##   ACTIVE_MODULES="all:dev"                         # every module in dev mode
 
-export ACTIVE_MODULES="ingest:dev"
+export ACTIVE_MODULES="lidar_preprocessing:dev"
 
 ############################## ADVANCED CONFIGURATIONS ##############################
 ## Set to "true" if the host has an NVIDIA GPU + nvidia-container-toolkit.
 ## DEFAULT = "false"
-# export GPU_AVAILABLE="false"
+export GPU_AVAILABLE="true"
 
 ## Install Claude Code in dev containers. Set to "false" to skip.
 ## DEFAULT = "false"

@@ -134,12 +134,13 @@ def _resolve_chain(
     transforms: dict[tuple[str, str], np.ndarray],
     parent: str,
     child: str,
-    max_hops: int = 4,
+    max_hops: int = 8,
 ) -> np.ndarray | None:
-    """Forward-chain BFS for parent -> ... -> child in /tf_static.
+    """BFS for parent -> ... -> child through /tf_static, following both
+    forward edges (p→c = Tpc) and inverse edges (c→p = Tpc^-1).
 
-    Most racks have direct base->sensor transforms, but rigs with intermediate
-    frames (e.g. base -> roof_rack -> camera) need a hop or two.
+    ROS bags don't guarantee all transforms are published in the ego→sensor
+    direction; some rigs publish sensor→ego and this handles both.
     """
     if (parent, child) in transforms:
         return transforms[(parent, child)]
@@ -149,12 +150,20 @@ def _resolve_chain(
         nxt: list[tuple[str, np.ndarray]] = []
         for cur, T in frontier:
             for (p, c), Tpc in transforms.items():
+                # Forward edge: p→c
                 if p == cur and c not in visited:
                     Tnext = T @ Tpc
                     if c == child:
                         return Tnext
                     visited.add(c)
                     nxt.append((c, Tnext))
+                # Inverse edge: c→p (use T^-1 since Tpc is the forward transform)
+                elif c == cur and p not in visited:
+                    Tnext = T @ np.linalg.inv(Tpc)
+                    if p == child:
+                        return Tnext
+                    visited.add(p)
+                    nxt.append((p, Tnext))
         frontier = nxt
         if not frontier:
             break
@@ -186,7 +195,6 @@ def freeze_from_bag(bag_path: str, bag_id: str, cfg: IngestConfig) -> str:
     camera_infos: dict[str, dict] = {}
     lidar_frame_ids: dict[str, str] = {}
     static_transforms: dict[tuple[str, str], np.ndarray] = {}
-    saw_tf_static = False
 
     topics_to_read = (
         list(info_topic_to_cam.keys())
@@ -215,20 +223,27 @@ def freeze_from_bag(bag_path: str, bag_id: str, cfg: IngestConfig) -> str:
                 if lidar_id not in lidar_frame_ids:
                     lidar_frame_ids[lidar_id] = msg.header.frame_id
             elif mt == "TFMessage":
-                saw_tf_static = True
                 for ts_msg in msg.transforms:
                     key = (ts_msg.header.frame_id, ts_msg.child_frame_id)
                     if key not in static_transforms:
                         static_transforms[key] = _transform_se3(ts_msg.transform)
 
-            # Early exit once we have everything; tf_static is typically
-            # published in one batch at bag start.
+            # Early exit: once we have all sensor infos AND can resolve every
+            # needed ego→sensor transform, there's nothing more to collect.
+            # We must check both conditions together because /tf may publish
+            # transforms incrementally, and we need all of them before exiting.
             if (
-                saw_tf_static
-                and set(camera_infos.keys()) >= needed_camera_ids
+                set(camera_infos.keys()) >= needed_camera_ids
                 and set(lidar_frame_ids.keys()) >= needed_lidar_ids
             ):
-                break
+                needed_frames = {
+                    info["frame_id"] for info in camera_infos.values()
+                } | set(lidar_frame_ids.values())
+                if all(
+                    _resolve_chain(static_transforms, cfg.ego_frame, fid) is not None
+                    for fid in needed_frames
+                ):
+                    break
 
     calib = build_calibration_dict(
         camera_infos=camera_infos,

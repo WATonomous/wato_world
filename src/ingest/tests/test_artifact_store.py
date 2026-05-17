@@ -63,8 +63,8 @@ def test_camera_image_path_is_zero_padded():
 
 def test_lidar_sweep_path_is_zero_padded():
     assert (
-        artifact_store.lidar_sweep_path("b", "0000", 42)
-        == "file:///data/artifacts/raw/b/chunks/0000/lidar/000042.npz"
+        artifact_store.lidar_sweep_path("b", "0000", "LIDAR_TOP", 42)
+        == "file:///data/artifacts/raw/b/chunks/0000/lidar/LIDAR_TOP/000042.npz"
     )
 
 

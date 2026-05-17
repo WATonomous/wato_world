@@ -1,5 +1,6 @@
 from wato_common.geometry.interpolation import (
     PoseSample,
+    batch_interpolate_poses,
     interpolate_pose,
     slerp,
 )
@@ -16,6 +17,7 @@ from wato_common.geometry.transforms import (
 
 __all__ = [
     "PoseSample",
+    "batch_interpolate_poses",
     "flatten_se3",
     "interpolate_pose",
     "invert_se3",

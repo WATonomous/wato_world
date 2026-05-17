@@ -1,0 +1,57 @@
+lidar_preprocessing:
+  # Step B — voxel static/dynamic classification.
+  voxel_size_m: 0.15
+  # Voxel is classified static if seen in at least this fraction of chunk sweeps.
+  static_sweep_fraction: 0.30
+  # Minimum sweep count regardless of fraction (avoids over-classifying short chunks).
+  static_sweep_min: 5
+
+  # Step D — global static map reduce.
+  global_map_voxel_size_m: 0.30
+
+  # Unit of the t_offset_us field written by ingest.
+  # Velodyne "t" field is seconds; adjust if using a different LiDAR.
+  # Options: "seconds" | "microseconds" | "nanoseconds"
+  point_time_unit: "seconds"
+
+  # Step C — Patchwork++ ground segmentation.
+  # Parameters match wato_monorepo perception/patchwork/patchwork/config/params.yaml.
+  patchwork:
+    sensor_height: 1.8        # metres above ground plane
+    num_iter: 3
+    num_lpr: 20
+    num_min_pts: 10
+    th_seeds: 0.3
+    th_dist: 0.15             # ground inlier distance threshold (m)
+    th_seeds_v: 0.25
+    th_dist_v: 0.85
+    max_range: 90.0
+    min_range: 1.0
+    uprightness_thr: 0.101
+    enable_RNR: false
+    verbose: false
+    ground_cell_size_m: 0.25  # height-grid resolution (m) — 0.25m gives ±12.5cm ground uncertainty, acceptable for pedestrian/cyclist L_ground
+
+  # Export voxel_occupancy.npz (all occupied voxels, all sweeps aggregated).
+  # Useful for QA/visualization but NOT what SAM4D's MinkUNet encoder consumes
+  # directly — MinkUNet needs per-frame voxels (see save_per_frame_voxel_occupancy).
+  save_voxel_occupancy: true
+
+  # Export one voxel_occupancy_frame_NNNN.npz per frame_id in each chunk.
+  # This IS what perception_2d feeds to SAM4D's MinkUNet encoder: each file
+  # contains the merged occupancy for all sweeps belonging to that frame
+  # (canonical + non-canonical LiDARs within tolerance_ms).
+  # Disabled by default; enable once perception_2d development starts.
+  save_per_frame_voxel_occupancy: false
+
+  # Multi-lidar frame grouping for SAM4D-style cross-modal fusion.
+  # canonical_lidar=null disables grouping (each sweep is its own frame —
+  # right for single-lidar bags like NuScenes mini).  Once the WATO 3-Velodyne
+  # rig is in use, set canonical_lidar: "lidar_cc" so ne/nw sweeps within
+  # ±tolerance_ms inherit the center lidar's frame_id.
+  frame_sync:
+    canonical_lidar: null
+    tolerance_ms: 25.0
+
+  upstream_versions:
+    ingest: "0.1.0"

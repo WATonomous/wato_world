@@ -42,6 +42,7 @@ class IngestConfig(BaseModel):
     chunk_overlap_seconds: float
     reference_clock: str
     max_cam_offset_ms: float
+    max_pose_gap_ms: float
     storage_id: str
     topics: TopicMap
     ego_frame: str

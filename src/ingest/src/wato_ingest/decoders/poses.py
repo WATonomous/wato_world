@@ -48,18 +48,19 @@ def extract(
     and write `poses.parquet`.  One row per message, deduplicated on timestamp.
     """
     rows: list[dict] = []
+    pose_topic = cfg.topics.pose
 
     with messages(
         bag_path,
         storage_id=cfg.storage_id,
-        topics=[cfg.topics.pose],
+        topics=[pose_topic],
         t_start_ns=t_start_ns,
         t_end_ns=t_end_ns,
     ) as iterator:
         for _topic, msg, _record_ts_ns in iterator:
             if type(msg).__name__ != "Odometry":
                 continue
-            rows.append(_pose_row(bag_id, chunk_id, msg))
+            rows.append(_pose_row(bag_id, chunk_id, msg, pose_topic))
 
     rows = _dedupe_and_sort(rows)
     out_uri = poses_path(bag_id, chunk_id)
@@ -68,7 +69,7 @@ def extract(
     return PoseExtractionResult(rows_written=len(rows), output_uri=out_uri)
 
 
-def _pose_row(bag_id: str, chunk_id: str, msg) -> dict:
+def _pose_row(bag_id: str, chunk_id: str, msg, source_topic: str) -> dict:
     pose = msg.pose.pose
     T = make_se3(
         np.array([pose.position.x, pose.position.y, pose.position.z], dtype=np.float64),
@@ -91,7 +92,7 @@ def _pose_row(bag_id: str, chunk_id: str, msg) -> dict:
         qz=float(pose.orientation.z),
         qw=float(pose.orientation.w),
         world_T_ego_flat=flatten_se3(T),
-        source=msg.header.frame_id or "odom",
+        source=source_topic,
         valid=True,
     ).model_dump()
 

@@ -18,7 +18,7 @@ def _sweep(seq: int, ts_ns: int) -> dict:
         "chunk_id": "0000",
         "lidar_id": "LIDAR_TOP",
         "sweep_id": seq,
-        "lidar_path": f"/data/artifacts/raw/b/chunks/0000/lidar/{seq:06d}.npz",
+        "lidar_path": f"/data/artifacts/raw/b/chunks/0000/lidar/LIDAR_TOP/{seq:06d}.npz",
         "header_timestamp_ns": ts_ns,
         "record_timestamp_ns": ts_ns,
         "num_points": 100,
