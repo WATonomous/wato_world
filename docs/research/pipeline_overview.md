@@ -29,10 +29,10 @@ multi-view shape fitting and multi-LiDAR point density.
 ```
 ingest             ← bags + calibration + poses + chunk index
 lidar_preprocessing← SAM4D preprocessing, static/dynamic split, ground plane
-perception_2d      ← SAM4D camera encoding + 2D mask generation (SAM2/DEVA)
-proposal_generation← Segment-Lift-and-Fit, Fusion4DAL LiDAR detector ensemble
-tracking           ← Fusion4DAL 4D tracking + SAM4D temporal memory
-label_refinement   ← LabelFormer trajectory refinement
+perception_2d      ← SAM4D camera encoding + 2D masks (SAM2/DEVA) + YOLO-World + Depth Anything V2
+proposal_generation← MS3D++ detector ensemble + Segment-Lift-and-Fit + DA pseudo-LiDAR + cross-modal uncertainty
+tracking           ← Fusion4DAL/DetZero 4D bidirectional tracking + SAM4D temporal memory
+label_refinement   ← 3DAL/DetZero body-frame aggregation + LabelFormer trajectory refinement
 open_vocab_discovery← rare-class extension (not covered by these papers)
 student_training   ← distillation from auto-labels (not covered by these papers)
 ```
@@ -49,30 +49,79 @@ LiDAR streams using:
 - Promptable segmentation: a point/box/mask prompt in one modality propagates
   to the other
 
+See [sam4d_guidance.md](sam4d_guidance.md).
+
+### MS3D++ (arxiv 2308.05988)
+Drives the LiDAR-detector ensemble inside **`proposal_generation`**.
+
+MS3D++ combines architecturally diverse 3D detectors (CenterPoint + DSVT +
+FSDv2 in our setup) via Kernel-Based Fusion (or simpler Weighted Box Fusion):
+- Each detector runs over the per-frame dynamic LiDAR cloud
+- Optional test-time augmentation (flips, rotations) per detector
+- KBF/WBF clusters proposals by BEV proximity and fuses center/size/heading
+- Output records `n_detectors_agreeing` and `ensemble_score_var` as uncertainty
+  signals
+
+See [detector_ensemble_guidance.md](detector_ensemble_guidance.md).
+
 ### Segment-Lift-and-Fit (SLF)
-Drives **`proposal_generation`**.
+Drives the camera-side proposal path in **`proposal_generation`**.
 
 SLF turns a 2D mask (from SAM) into a 3D bounding box via three stages:
 1. Segment — SAM produces per-camera 2D masks from point/box prompts
 2. Lift — each mask is represented in a PCA vehicle-shape latent space via SDF
 3. Fit — Adam optimizer minimizes: dice loss (mask reprojection) + LiDAR
-   surface loss + ground alignment loss
+   surface loss + ground alignment loss + **DA pseudo-LiDAR Chamfer loss**
 
-### Fusion4DAL
-Drives **`proposal_generation`** (LiDAR detector side) and **`tracking`**.
+See [segment_lift_fit_guidance.md](segment_lift_fit_guidance.md).
 
-Fusion4DAL describes an offline pipeline that fuses multi-modal detectors
-(camera + LiDAR) with 4D (spatial + temporal) aggregation for auto-labeling.
-It is the architectural blueprint for how our detector ensemble results are
-fused before being handed to tracking.
+### Depth Anything V2 (arxiv 2406.09414)
+Drives the monocular-depth pseudo-LiDAR pathway in **`perception_2d`** (depth
+inference + caching) and **`proposal_generation`** (pseudo-LiDAR lift + SLF
+`L_depth` term).
+
+DA V2 Large predicts per-pixel relative depth which we rescale to metric via
+LiDAR overlap, then lift inside each SAM2 mask into a dense pseudo-LiDAR cloud
+that densifies SLF's fitting evidence (especially valuable for distant
+objects and vertical surfaces).
+
+See [depth_anything_guidance.md](depth_anything_guidance.md).
+
+### 3DAL + DetZero (arxiv 2103.05073, arxiv 2306.06023)
+Drives the multi-frame aggregation step inside **`label_refinement`**, before
+LabelFormer.
+
+Once `tracking` has produced coarse tracks, all dynamic LiDAR points from all
+frames of a track are transformed into the object's body frame and
+accumulated. Pairwise ICP between consecutive frame slices removes residual
+pose noise. The resulting dense per-track cloud feeds an AggregateEncoder
+that runs alongside LabelFormer's per-frame encoder.
+
+See [body_frame_aggregation_guidance.md](body_frame_aggregation_guidance.md).
 
 ### LabelFormer (arxiv 2311.01444)
-Drives **`label_refinement`**.
+Drives the model side of **`label_refinement`**.
 
 LabelFormer refines noisy initial boxes at the trajectory level:
 - Per-frame encoder: embed the LiDAR points inside each frame's box crop
+- **Aggregate encoder** (this pipeline's addition): embed the body-frame
+  aggregated cloud once per track
 - Temporal self-attention: reason over all frames of a track simultaneously
-- Decoder: output refined size (W, L, H) and per-frame pose (x, y, z, θ)
+- Decoder: output refined size (W, L, H) once per track and per-frame pose
+  (x, y, z, θ)
+
+See [labelformer_guidance.md](labelformer_guidance.md).
+
+### Cross-modal uncertainty
+Cross-cutting bookkeeping across **`proposal_generation`** (compute) and
+**`label_refinement`** (consume).
+
+Each proposal records per-stage diagnostic signals
+(`n_detectors_agreeing`, `slf_dice_loss`, `slf_depth_chamfer`,
+`lidar_density_in_box`, etc.) and a combined `uncertainty ∈ [0, 1]`.
+`label_refinement` uses this as a soft weight in its pose and size heads.
+
+See [cross_modal_uncertainty_guidance.md](cross_modal_uncertainty_guidance.md).
 
 ---
 
@@ -98,47 +147,85 @@ lidar_preprocessing   reads: sweeps, poses, calibration
 
 perception_2d         reads: frames, lidar_proc_index, world/*.npz, calibration
   └─ per-chunk/
-       ├─ detections_2d.parquet      (per-frame box + class + confidence)
+       ├─ detections_2d.parquet      (per-frame box + class + confidence; ensemble of GroundingDINO + YOLO-World)
        ├─ masks_2d/                  (per-detection SAM2 masks, camera-aligned)
-       └─ tracklets_2d.parquet       (DEVA temporal associations across frames)
+       ├─ tracklets_2d.parquet       (DEVA temporal associations across frames)
+       ├─ depth_2d/<cam>/<seq>.npy   (Depth Anything V2 metric depth per camera frame, fp16)
+       └─ depth_index.parquet        (per-frame scale/shift from LiDAR alignment + diagnostics)
 
-proposal_generation   reads: world/*.npz, masks_2d, detections_2d, ground.npz, calibration
+proposal_generation   reads: world/*.npz, dynamic_map.npz, masks_2d, detections_2d,
+                              depth_2d/, depth_index, ground.npz, calibration,
+                              MODELS_ROOT/shape_priors/*.npz, MODELS_ROOT/lidar_detectors/*.pth
   └─ per-chunk/
-       ├─ proposals.parquet          (3D box proposals: center, size, heading, score, source)
+       ├─ proposals.parquet          (3D box proposals: center, size, heading, score, provenance,
+       │                              n_detectors_agreeing, slf_*_loss, *_chamfer, lidar_density_in_box,
+       │                              uncertainty)
        └─ proposal_masks/            (projected 2D mask used during SLF fitting)
 
-tracking              reads: proposals, tracklets_2d, world/*.npz
+tracking              reads: proposals, tracklets_2d, world/*.npz, dino_features
   └─ per-bag/
-       └─ tracks.parquet             (track_id, chunk_id, sweep_id, box params, class)
+       ├─ tracks_forward.parquet     (forward-pass tracks before merge)
+       ├─ tracks_backward.parquet    (backward-pass tracks before merge)
+       └─ tracks.parquet             (final merged tracks: direction column tags forward/backward/merged;
+                                      merged_from column lists predecessor track_ids)
 
-label_refinement      reads: tracks, world/*.npz, dynamic_masks
+label_refinement      reads: tracks, world/*.npz, dynamic_masks, proposals.parquet (for uncertainty)
   └─ per-bag/
-       └─ refined_labels.parquet     (track_id, per-frame refined box + confidence)
+       ├─ aggregated_tracks/<track>.npz   (body-frame aggregated cloud per track + pose_history)
+       ├─ aggregated_tracks_index.parquet (n_frames, n_points_aggregated, aggregation_method per track)
+       └─ refined_labels.parquet          (track_id, per-frame refined box + confidence)
 ```
 
 ---
 
 ## Implementation priority order
 
-1. **`perception_2d`** — unblocks everything downstream
-   - SAM2 mask generation per camera (text/box prompts via GroundingDINO)
-   - DEVA temporal propagation across frames
-   - DINOv2 per-detection embedding for ReID downstream
+Now sequenced into eight phases per the approved accuracy-upgrade plan:
 
-2. **`proposal_generation`** — once 2D masks exist
-   - LiDAR detector (CenterPoint or similar) on aggregated static/dynamic points
-   - SLF: lift 2D masks into 3D using ground plane from `ground.npz`
-   - Fuse LiDAR proposals + SLF proposals (NMS or learned fusion)
+0. **Research alignment docs** (this file + 4 paper-specific guides) — design
+   reference for everything below.
 
-3. **`tracking`** — once proposals exist
-   - 3D Kalman filter on proposals across chunks
-   - Masklet association using DINOv2 embeddings from `perception_2d`
-   - Output: full-bag `tracks.parquet`
+1. **Shared infrastructure** — schemas, artifact_store helpers, geometry
+   `body_frame.py`, watod `MODELS_ROOT` + `fetch-models`, Docker dependency
+   updates, compose volume mounts.
 
-4. **`label_refinement`** — once tracking is done
-   - Crop per-track LiDAR points using dynamic masks + track boxes
-   - Run LabelFormer trajectory-level self-attention
-   - Output: `refined_labels.parquet` (the final auto-labels)
+2. **`perception_2d` refactor** — already implemented; extend with:
+   - YOLO-World detector branch alongside GroundingDINO (parallel detection,
+     IoU merge)
+   - Depth Anything V2 metric depth per camera frame, cached as fp16 NPY
+   - Per-frame scale/shift fit against overlapping LiDAR
+
+3. **Shape-prior build script** — one-time job that voxelizes ShapeNetCore
+   vehicles into SDFs, runs PCA, saves `shape_prior_<class>.npz` to
+   `MODELS_ROOT`. Bootstrap pedestrian/cyclist priors from public box
+   statistics.
+
+4. **`proposal_generation` implementation** — once perception_2d artifacts
+   and shape priors exist:
+   - MS3D++ detector ensemble (CenterPoint + DSVT + FSDv2 via OpenPCDet)
+   - Pseudo-LiDAR lift from DA depth maps inside SAM2 masks
+   - SLF Adam fitter with L_mask + L_lidar + L_ground + L_depth
+   - Ensemble ↔ SLF fusion + cross-modal uncertainty bookkeeping
+
+5. **`tracking` implementation** — once proposals exist:
+   - 3D Kalman filter per object (constant velocity + per-class noise)
+   - Hungarian association (3D IoU + DINOv2 ReID cosine + class penalty)
+   - Forward and backward passes; merge by Hungarian at track endpoints
+   - Output `tracks.parquet` with `direction` and `merged_from` provenance
+
+6. **`label_refinement` implementation** — once tracking is done:
+   - Per-track body-frame aggregation (3DAL/DetZero) with ICP correction
+     between consecutive frame slices
+   - Two-encoder LabelFormer (frame encoder + aggregate encoder) feeding a
+     transformer; size head shared per track, pose head per frame
+   - Output `refined_labels.parquet` (the final auto-labels)
+
+7. **Top-level docs + diagram + CLAUDE.md + component_versions bumps** —
+   reflect the new pipeline shape, model conventions, and gotchas.
+
+8. **End-to-end verification** — fetch models, run all six stages on a real
+   bag, spot-check artifacts, run baseline comparison (ensemble off vs.
+   ensemble on).
 
 ---
 
