@@ -406,6 +406,65 @@ MASKLET_SCHEMA = pa.schema(
 
 
 # ---------------------------------------------------------------------------
+# perception_2d — per-camera-frame monocular depth (Depth Anything V2).
+# ---------------------------------------------------------------------------
+
+
+class DepthFrameRow(BaseModel):
+    """One row per (cam_id, camera_seq) pointing at a saved depth map NPY.
+
+    Depth Anything V2 emits *relative* depth; (scale, shift) align it to
+    metric scale via overlapping LiDAR returns (see
+    docs/research/depth_anything_guidance.md).  Downstream consumers in
+    proposal_generation apply `z_metric = scale * depth + shift`.
+
+    scale_method records how (scale, shift) was determined:
+      "lidar_aligned" — RANSAC fit against overlapping LiDAR (the usual case)
+      "metric_native" — model already emits metric depth, scale=1, shift=0
+      "uncalibrated"  — insufficient overlap, downstream should skip depth term
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    bag_id: str
+    chunk_id: str
+    cam_id: str
+    camera_seq: int
+    depth_path: str
+    model_name: str
+    height: int
+    width: int
+    scale: float = 1.0
+    shift: float = 0.0
+    scale_method: str = "lidar_aligned"
+    residual_rmse: Optional[float] = None
+    n_overlap_pts: Optional[int] = None
+    valid: bool = True
+    drop_reason: Optional[str] = None
+
+
+DEPTH_INDEX_SCHEMA = pa.schema(
+    [
+        pa.field("bag_id", pa.string()),
+        pa.field("chunk_id", pa.string()),
+        pa.field("cam_id", pa.string()),
+        pa.field("camera_seq", pa.int64()),
+        pa.field("depth_path", pa.string()),
+        pa.field("model_name", pa.string()),
+        pa.field("height", pa.int64()),
+        pa.field("width", pa.int64()),
+        pa.field("scale", pa.float64()),
+        pa.field("shift", pa.float64()),
+        pa.field("scale_method", pa.string()),
+        pa.field("residual_rmse", pa.float64()),
+        pa.field("n_overlap_pts", pa.int64()),
+        pa.field("valid", pa.bool_()),
+        pa.field("drop_reason", pa.string()),
+    ]
+)
+
+
+# ---------------------------------------------------------------------------
 # proposal_generation — 3D box proposals (one per LiDAR sweep × object).
 # ---------------------------------------------------------------------------
 
@@ -415,6 +474,13 @@ class ProposalRow(BaseModel):
 
     supporting_cam_ids and supporting_masklet_ids are JSON-encoded lists.
     provenance identifies the source: "lidar_detector", "slf", or "fused".
+
+    The diagnostic columns (n_detectors_agreeing, slf_*_loss/chamfer,
+    lidar_density_in_box, da_pixels_in_mask, uncertainty) are the
+    cross-modal uncertainty signals defined in
+    docs/research/cross_modal_uncertainty_guidance.md.  They are populated
+    by proposal_generation and consumed as soft weights by label_refinement.
+    Optional so legacy producers can still write rows.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -437,6 +503,22 @@ class ProposalRow(BaseModel):
     supporting_cam_ids: str = "[]"        # JSON list[str] of cam_id
     supporting_masklet_ids: str = "[]"    # JSON list[str] of masklet_id
 
+    # MS3D++ ensemble bookkeeping.
+    n_detectors_agreeing: Optional[int] = None
+    ensemble_score_var: Optional[float] = None
+
+    # SLF fitter convergence diagnostics.
+    slf_dice_loss: Optional[float] = None
+    slf_lidar_chamfer: Optional[float] = None
+    slf_depth_chamfer: Optional[float] = None
+
+    # Raw evidence signals.
+    lidar_density_in_box: Optional[float] = None  # points / m³
+    da_pixels_in_mask: Optional[int] = None       # DA pseudo-LiDAR pixel count
+
+    # Combined uncertainty in [0, 1] (0 = high confidence, 1 = low).
+    uncertainty: Optional[float] = None
+
 
 PROPOSAL_SCHEMA = pa.schema(
     [
@@ -457,6 +539,14 @@ PROPOSAL_SCHEMA = pa.schema(
         pa.field("lidar_point_count", pa.int64()),
         pa.field("supporting_cam_ids", pa.string()),
         pa.field("supporting_masklet_ids", pa.string()),
+        pa.field("n_detectors_agreeing", pa.int64()),
+        pa.field("ensemble_score_var", pa.float64()),
+        pa.field("slf_dice_loss", pa.float64()),
+        pa.field("slf_lidar_chamfer", pa.float64()),
+        pa.field("slf_depth_chamfer", pa.float64()),
+        pa.field("lidar_density_in_box", pa.float64()),
+        pa.field("da_pixels_in_mask", pa.int64()),
+        pa.field("uncertainty", pa.float64()),
     ]
 )
 
@@ -486,7 +576,12 @@ def decode_int_list(s: str) -> list[int]:
 class TrackRow(BaseModel):
     """One row per (track_id, sweep_id) in tracks.parquet.
 
-    supporting_cam_ids and supporting_masklet_ids are JSON-encoded lists.
+    supporting_cam_ids, supporting_masklet_ids, and merged_from are
+    JSON-encoded lists.
+
+    DetZero-style bidirectional tracking writes both `direction` (which pass
+    produced the row) and `merged_from` (list of upstream track_ids that
+    were joined at an endpoint, if any).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -507,6 +602,8 @@ class TrackRow(BaseModel):
     supporting_cam_ids: str = "[]"      # JSON list[str]
     supporting_masklet_ids: str = "[]"  # JSON list[str]
     dino_feature_path: Optional[str] = None
+    direction: str = "forward"          # "forward" | "backward" | "merged"
+    merged_from: str = "[]"             # JSON list[str] of predecessor track_ids
 
 
 TRACK_SCHEMA = pa.schema(
@@ -527,6 +624,8 @@ TRACK_SCHEMA = pa.schema(
         pa.field("supporting_cam_ids", pa.string()),
         pa.field("supporting_masklet_ids", pa.string()),
         pa.field("dino_feature_path", pa.string()),
+        pa.field("direction", pa.string()),
+        pa.field("merged_from", pa.string()),
     ]
 )
 
@@ -582,5 +681,54 @@ REFINED_TRACK_SCHEMA = pa.schema(
         pa.field("residual_silhouette", pa.float64()),
         pa.field("residual_lidar_fit", pa.float64()),
         pa.field("residual_smoothness", pa.float64()),
+    ]
+)
+
+
+# ---------------------------------------------------------------------------
+# label_refinement — per-track body-frame aggregated cloud (3DAL / DetZero).
+# ---------------------------------------------------------------------------
+
+
+class AggregatedTrackRow(BaseModel):
+    """One row per track summarising the body-frame aggregated cloud written
+    by label_refinement's aggregation step.
+
+    The actual point cloud lives in the NPZ at `points_path`; this row is
+    the index entry consumed by LabelFormer's batch loader.
+
+    aggregation_method records the path taken:
+      "naive"          — concat-only, no ICP correction
+      "icp_corrected"  — DetZero geometric refining applied
+      "empty"          — no dynamic points inside the track's enlarged box
+      "high_pose_jitter" — upstream tracker confidence was too low to trust
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    track_id: str
+    bag_id: str
+    cls: str
+    n_frames: int
+    n_points_aggregated: int
+    points_path: str            # URI to aggregated_tracks/<track>.npz
+    aggregation_method: str
+    voxel_size_m: float
+    icp_corrected: bool = False
+    pose_jitter_m: Optional[float] = None  # diagnostic: how much ICP moved frames
+
+
+AGGREGATED_TRACK_SCHEMA = pa.schema(
+    [
+        pa.field("track_id", pa.string()),
+        pa.field("bag_id", pa.string()),
+        pa.field("cls", pa.string()),
+        pa.field("n_frames", pa.int64()),
+        pa.field("n_points_aggregated", pa.int64()),
+        pa.field("points_path", pa.string()),
+        pa.field("aggregation_method", pa.string()),
+        pa.field("voxel_size_m", pa.float64()),
+        pa.field("icp_corrected", pa.bool_()),
+        pa.field("pose_jitter_m", pa.float64()),
     ]
 )
