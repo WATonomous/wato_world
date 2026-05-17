@@ -1,13 +1,18 @@
 """perception_2d pipeline orchestrator.
 
 Per-chunk steps (mirrors the lidar_preprocessing chunk-parallel pattern):
-  A. For each camera, detect objects per frame (GroundingDINO).
-  B. For each camera, segment detected objects (SAM2) with optional LiDAR
-     cross-modal point prompts (SAM4D-style).
-  C. For each camera, track masks across frames (IoU tracker + DINOv2 embeds).
-  D. Cross-camera merge: assign global_object_id by 3D proximity of centroid
-     back-projections (uses project_points from wato_common.geometry).
-  E. Write detections_2d.parquet and tracklets_2d.parquet.
+  A.   For each camera, detect objects per frame (GroundingDINO + optional
+       YOLO-World ensemble per detector_ensemble_guidance.md).
+  B.   For each camera, segment detected objects (SAM2) with optional LiDAR
+       cross-modal point prompts (SAM4D-style).
+  B.5. For each camera frame, run Depth Anything V2 + LiDAR scale alignment;
+       persist fp16 depth maps under depth_2d/<cam>/*.npy and an index
+       parquet (depth_index.parquet) holding per-frame (scale, shift) for
+       downstream pseudo-LiDAR lifting in proposal_generation.
+  C.   For each camera, track masks across frames (IoU tracker + DINOv2 embeds).
+  D.   Cross-camera merge: assign global_object_id by 3D proximity of centroid
+       back-projections (uses project_points from wato_common.geometry).
+  E.   Write detections_2d.parquet, tracklets_2d.parquet, depth_index.parquet.
 """
 
 from __future__ import annotations
@@ -22,6 +27,9 @@ import numpy as np
 
 from wato_common.artifact_store import (
     chunks_index_path,
+    depth_2d_dir,
+    depth_2d_path,
+    depth_index_path,
     detections_2d_path,
     ensure_local_dir,
     local_path,
@@ -30,10 +38,25 @@ from wato_common.artifact_store import (
 )
 from wato_common.geometry import unflatten_se3
 from wato_common.io.parquet_io import read_rows, write_table
-from wato_common.schemas import MASKLET_SCHEMA, MaskletRow, encode_int_list, encode_str_list
-from wato_perception_2d.config import ComponentConfig
+from wato_common.schemas import (
+    DEPTH_INDEX_SCHEMA,
+    MASKLET_SCHEMA,
+    DepthFrameRow,
+    MaskletRow,
+    encode_int_list,
+    encode_str_list,
+)
+from wato_perception_2d.config import ComponentConfig, DetectorEntry
 from wato_perception_2d.cross_cam_merge import merge_cross_camera
-from wato_perception_2d.detector import GroundingDINODetector
+from wato_perception_2d.depth_anything import (
+    DepthAnythingV2Estimator,
+    align_depth_to_lidar,
+)
+from wato_perception_2d.detector import (
+    DetectorBase,
+    DetectorEnsemble,
+    GroundingDINODetector,
+)
 from wato_perception_2d.io import (
     CameraFrameInfo,
     CalibrationInfo,
@@ -44,6 +67,7 @@ from wato_perception_2d.io import (
 )
 from wato_perception_2d.segmenter import SAM2Segmenter
 from wato_perception_2d.tracker_2d import Masklet, Tracker2D
+from wato_perception_2d.yolo_world import YOLOWorldDetector
 
 log = logging.getLogger(__name__)
 
@@ -92,12 +116,55 @@ def _chunk_complete(bag_id: str, chunk_id: str) -> bool:
     )
 
 
+def _build_detector(cfg: ComponentConfig) -> DetectorBase:
+    """Build the detector to use for this run.
+
+    If `cfg.detectors` is non-empty, instantiate each entry and wrap in a
+    DetectorEnsemble.  Otherwise fall back to the legacy single-detector
+    behaviour driven by `cfg.detector`.  This keeps existing pipeline.yamls
+    that predate the ensemble feature working unchanged.
+    """
+    if cfg.detectors:
+        instances: list[DetectorBase] = []
+        for entry in cfg.detectors:
+            if not entry.enabled:
+                continue
+            instances.append(_instantiate_detector(entry.name, entry.checkpoint))
+        if not instances:
+            raise ValueError(
+                "cfg.detectors is set but no entries are enabled — "
+                "either enable at least one or clear `detectors` to use the legacy path."
+            )
+        if len(instances) == 1:
+            return instances[0]
+        return DetectorEnsemble(instances, iou_threshold=cfg.detector_ensemble_iou)
+    # Legacy single-detector path.
+    return _instantiate_detector(cfg.detector, checkpoint=None)
+
+
+def _instantiate_detector(name: str, checkpoint: Optional[str]) -> DetectorBase:
+    """Dispatch a detector adapter by canonical name."""
+    if name == "grounding_dino":
+        model_id = checkpoint or "IDEA-Research/grounding-dino-tiny"
+        return GroundingDINODetector(model_id=model_id, device=None)
+    if name == "yolo_world":
+        # checkpoint is a filename within MODELS_ROOT/yolo_world/; None lets
+        # the adapter use its DEFAULT_FILENAME.
+        from wato_common.artifact_store import detector_checkpoint_path
+        ckpt_path = (
+            detector_checkpoint_path("yolo_world", checkpoint) if checkpoint else None
+        )
+        return YOLOWorldDetector(checkpoint_path=ckpt_path, device=None)
+    raise ValueError(f"unknown detector name: {name!r}")
+
+
 def _process_chunk(
     cfg: ComponentConfig,
     bag_id: str,
     chunk_id: str,
-    detector: GroundingDINODetector,
+    detector: DetectorBase,
     segmenter: SAM2Segmenter,
+    depth_estimator: Optional[DepthAnythingV2Estimator],
 ) -> None:
     """Run steps A–E for one chunk."""
     log.info("perception_2d: chunk %s", chunk_id)
@@ -121,6 +188,7 @@ def _process_chunk(
         frames_by_cam[cam_id].sort(key=lambda f: f.camera_seq)
 
     all_masklets: list[Masklet] = []
+    depth_rows: list[dict] = []
 
     for cam_id, cam_frames in frames_by_cam.items():
         calib = calibration.get(cam_id)
@@ -143,20 +211,26 @@ def _process_chunk(
                 continue
             H, W = image.shape[:2]
 
-            # SAM4D cross-modal: project LiDAR dynamic points as SAM2 prompts.
-            lidar_prompts = None
-            if cfg.use_lidar_prompts and frame.valid_pose and frame.world_T_ego_flat:
+            # Compute cam_T_world once per frame; used by both LiDAR prompts
+            # and depth scale alignment.
+            cam_T_world: Optional[np.ndarray] = None
+            lidar_pts: Optional[np.ndarray] = None
+            if frame.valid_pose and frame.world_T_ego_flat:
                 world_T_ego = unflatten_se3(frame.world_T_ego_flat)
                 from wato_common.geometry import invert_se3
                 ego_T_cam = calib.ego_T_cam
                 cam_T_ego = invert_se3(ego_T_cam)
                 cam_T_world = cam_T_ego @ invert_se3(world_T_ego)
                 lidar_pts = load_dynamic_lidar_points(bag_id, chunk_id, frame.sweep_id)
+
+            # SAM4D cross-modal: project LiDAR dynamic points as SAM2 prompts.
+            lidar_prompts = None
+            if cfg.use_lidar_prompts and cam_T_world is not None and lidar_pts is not None:
                 lidar_prompts = _project_lidar_prompts(
                     lidar_pts, calib.K, cam_T_world, cfg.lidar_prompt_max_points
                 )
 
-            # Step A: detect.
+            # Step A: detect (single detector or ensemble).
             detections = detector.detect(
                 image, text_prompts, box_threshold=cfg.detector_score_threshold
             )
@@ -166,6 +240,22 @@ def _process_chunk(
 
             # Step B: segment.
             seg_detections = segmenter.segment(image, detections, lidar_prompts)
+
+            # Step B.5: depth (Depth Anything V2 + LiDAR-aligned metric scale).
+            if depth_estimator is not None and cfg.depth_estimator.enabled:
+                _process_depth(
+                    cfg=cfg,
+                    depth_estimator=depth_estimator,
+                    image=image,
+                    bag_id=bag_id,
+                    chunk_id=chunk_id,
+                    cam_id=cam_id,
+                    camera_seq=frame.camera_seq,
+                    K=calib.K,
+                    cam_T_world=cam_T_world,
+                    lidar_world_pts=lidar_pts,
+                    depth_rows=depth_rows,
+                )
 
             # Step C: track frame.
             tracker.update(frame.camera_seq, image, seg_detections)
@@ -201,7 +291,106 @@ def _process_chunk(
 
     # Step E: write output parquets.
     _write_masklets(bag_id, chunk_id, all_masklets)
-    log.info("chunk %s: wrote %d masklets", chunk_id, len(all_masklets))
+    write_table(depth_rows, DEPTH_INDEX_SCHEMA, depth_index_path(bag_id, chunk_id))
+    log.info(
+        "chunk %s: wrote %d masklets and %d depth frames",
+        chunk_id, len(all_masklets), len(depth_rows),
+    )
+
+
+def _process_depth(
+    *,
+    cfg: ComponentConfig,
+    depth_estimator: DepthAnythingV2Estimator,
+    image: np.ndarray,
+    bag_id: str,
+    chunk_id: str,
+    cam_id: str,
+    camera_seq: int,
+    K: np.ndarray,
+    cam_T_world: Optional[np.ndarray],
+    lidar_world_pts: Optional[np.ndarray],
+    depth_rows: list[dict],
+) -> None:
+    """Predict relative depth, optionally fit metric scale, save NPY + row.
+
+    Errors are isolated: any failure logs a warning and skips this frame's
+    depth artifact rather than failing the whole chunk.  The DepthFrameRow's
+    `valid=False` + `drop_reason` is reserved for clean opt-outs (e.g.
+    estimator unavailable, missing pose).  Hard errors below `valid=True` are
+    treated as "we couldn't even run the estimator" — we just don't record
+    a row so downstream consumers correctly treat the frame as no-depth.
+    """
+    try:
+        depth = depth_estimator.predict(image)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "depth_anything predict() failed for %s/%s/%d: %s",
+            chunk_id, cam_id, camera_seq, exc,
+        )
+        return
+    if depth is None:
+        # Estimator unavailable — already warned once globally.
+        return
+
+    H, W = depth.shape
+    # Persist raw relative depth.  fp16 is the storage default; the index
+    # parquet carries the (scale, shift) needed to recover metric depth.
+    save_dtype = np.float16 if cfg.depth_estimator.save_dtype == "float16" else np.float32
+    out_uri = depth_2d_path(bag_id, chunk_id, cam_id, camera_seq)
+    out_dir = os.path.dirname(local_path(out_uri))
+    os.makedirs(out_dir, exist_ok=True)
+    np.save(local_path(out_uri), depth.astype(save_dtype))
+
+    scale, shift = 1.0, 0.0
+    scale_method = "uncalibrated"
+    residual_rmse: Optional[float] = None
+    n_overlap_pts: Optional[int] = None
+
+    if (
+        cfg.depth_estimator.align_to_lidar
+        and cam_T_world is not None
+        and lidar_world_pts is not None
+        and lidar_world_pts.shape[0] > 0
+    ):
+        try:
+            result = align_depth_to_lidar(
+                depth_relative=depth,
+                lidar_world_pts=lidar_world_pts,
+                K=K,
+                cam_T_world=cam_T_world,
+                min_overlap_pts=cfg.depth_estimator.min_overlap_pts,
+                inlier_thresh_m=cfg.depth_estimator.inlier_thresh_m,
+            )
+            scale = result.scale
+            shift = result.shift
+            scale_method = result.scale_method
+            residual_rmse = result.residual_rmse
+            n_overlap_pts = result.n_overlap_pts
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "align_depth_to_lidar failed for %s/%s/%d: %s",
+                chunk_id, cam_id, camera_seq, exc,
+            )
+
+    depth_rows.append(
+        DepthFrameRow(
+            bag_id=bag_id,
+            chunk_id=chunk_id,
+            cam_id=cam_id,
+            camera_seq=camera_seq,
+            depth_path=out_uri,
+            model_name=cfg.depth_estimator.model,
+            height=int(H),
+            width=int(W),
+            scale=float(scale),
+            shift=float(shift),
+            scale_method=scale_method,
+            residual_rmse=residual_rmse,
+            n_overlap_pts=n_overlap_pts,
+            valid=True,
+        ).model_dump()
+    )
 
 
 def _masklet_to_row(mkl: Masklet) -> dict:
@@ -235,6 +424,7 @@ def _write_masklets(bag_id: str, chunk_id: str, masklets: list[Masklet]) -> None
 def _write_empty(bag_id: str, chunk_id: str) -> None:
     write_table([], MASKLET_SCHEMA, detections_2d_path(bag_id, chunk_id))
     write_table([], MASKLET_SCHEMA, tracklets_2d_path(bag_id, chunk_id))
+    write_table([], DEPTH_INDEX_SCHEMA, depth_index_path(bag_id, chunk_id))
 
 
 def run(
@@ -260,8 +450,13 @@ def run(
             raise ValueError(f"chunk_id {chunk_id!r} not found for bag {bag_id!r}")
 
     # Build models once and reuse across chunks.
-    detector = GroundingDINODetector(device=None)
+    detector = _build_detector(cfg)
     segmenter = SAM2Segmenter(checkpoint=cfg.sam2_checkpoint, device=None)
+    depth_estimator: Optional[DepthAnythingV2Estimator] = None
+    if cfg.depth_estimator.enabled:
+        depth_estimator = DepthAnythingV2Estimator(
+            model_size="large", checkpoint_path=None, device=None
+        )
 
     n_ok = n_skip = 0
     for chunk in chunks:
@@ -271,7 +466,7 @@ def run(
             n_skip += 1
             continue
         try:
-            _process_chunk(cfg, bag_id, cid, detector, segmenter)
+            _process_chunk(cfg, bag_id, cid, detector, segmenter, depth_estimator)
             n_ok += 1
         except Exception:  # noqa: BLE001
             log.exception("perception_2d: chunk %s failed", cid)

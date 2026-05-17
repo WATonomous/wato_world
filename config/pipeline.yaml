@@ -5,13 +5,45 @@
 # This file is kept temporarily for the components that haven't migrated yet.
 
 perception_2d:
-  detector: grounding_dino           # or "yolo_world"
+  # Legacy single-detector knobs (still honored when `detectors` is empty).
+  detector: grounding_dino
   detector_score_threshold: 0.25
+
+  # Optional multi-detector ensemble.  Drop both entries' `enabled: false`
+  # to fall back to the legacy single-detector path above.
+  detectors:
+    - name: grounding_dino
+      enabled: true
+      score_threshold: 0.25
+    - name: yolo_world
+      enabled: true
+      score_threshold: 0.25
+  detector_ensemble_iou: 0.6
+
+  # SAM2 segmentation (existing).
   sam2_checkpoint: sam2_hiera_large
+  use_lidar_prompts: true
+  lidar_prompt_max_points: 50
+
+  # Depth Anything V2 + LiDAR-aligned metric scale.  See
+  # docs/research/depth_anything_guidance.md.
+  depth_estimator:
+    enabled: true
+    model: depth_anything_v2_large
+    save_dtype: float16              # fp16 fits a 30s chunk in ~30 GB for 12 cams
+    align_to_lidar: true
+    min_overlap_pts: 50
+    inlier_thresh_m: 0.5
+
+  # DINOv2 ReID embeddings used by tracker_2d + downstream tracking.
   reid_features:
     model: dinov2_vitl14
     every_k_frames: 5
+
+  # 3D radius (m) for clustering cross-camera tracklets into a single
+  # global_object_id.
   cross_camera_match_radius_m: 1.5
+
   upstream_versions:
     ingest: v1
 

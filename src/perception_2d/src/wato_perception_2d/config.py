@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -16,30 +16,76 @@ class ReidConfig(BaseModel):
     every_k_frames: int = 5
 
 
+class DetectorEntry(BaseModel):
+    """One entry in the detectors list (multi-detector ensemble).
+
+    `name` is the canonical adapter identifier (must match the dispatch in
+    `pipeline.py::_build_detector`).  `checkpoint` is the filename inside
+    the model's MODELS_ROOT subdir (e.g. "yolov8l-worldv2.pt"), or null to
+    use each adapter's default.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str                                  # "grounding_dino" | "yolo_world"
+    enabled: bool = True
+    score_threshold: float = 0.25
+    checkpoint: Optional[str] = None           # adapter default if None
+
+
+class DepthEstimatorConfig(BaseModel):
+    """Depth Anything V2 settings — see docs/research/depth_anything_guidance.md."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    model: str = "depth_anything_v2_large"
+    save_dtype: str = "float16"                # what to persist in depth_2d/*.npy
+    align_to_lidar: bool = True
+    # Minimum overlapping LiDAR points required to trust the (scale, shift) fit.
+    min_overlap_pts: int = 50
+    # RANSAC inlier distance threshold in metres.
+    inlier_thresh_m: float = 0.5
+
+
 class ComponentConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    # 2D object detector backend.
+    # ------------------------------------------------------------------
+    # Detection.
+    # ------------------------------------------------------------------
+    # Legacy single-detector knobs.  Still consumed when `detectors` is empty
+    # so existing pipeline.yamls keep working.
     detector: str = "grounding_dino"
     detector_score_threshold: float = 0.25
 
-    # SAM2 checkpoint name or local path.
-    sam2_checkpoint: str = "sam2_hiera_large"
+    # Multi-detector ensemble (per detector_ensemble_guidance.md).  When
+    # this list is non-empty it supersedes the legacy `detector` field.
+    detectors: list[DetectorEntry] = Field(default_factory=list)
+    detector_ensemble_iou: float = 0.6
 
-    # Whether to project LiDAR dynamic-mask points into image space and pass
-    # them as additional SAM2 point prompts (cross-modal prompting, SAM4D-style).
+    # ------------------------------------------------------------------
+    # Segmentation.
+    # ------------------------------------------------------------------
+    sam2_checkpoint: str = "sam2_hiera_large"
     use_lidar_prompts: bool = True
     lidar_prompt_max_points: int = 50
 
-    reid_features: ReidConfig = Field(default_factory=ReidConfig)
+    # ------------------------------------------------------------------
+    # Depth (new — Depth Anything V2 + LiDAR-based metric alignment).
+    # ------------------------------------------------------------------
+    depth_estimator: DepthEstimatorConfig = Field(default_factory=DepthEstimatorConfig)
 
-    # 3D radius (metres, world frame) for clustering tracklets from different
-    # cameras into the same global_object_id.
+    # ------------------------------------------------------------------
+    # ReID + cross-camera merge (existing).
+    # ------------------------------------------------------------------
+    reid_features: ReidConfig = Field(default_factory=ReidConfig)
     cross_camera_match_radius_m: float = 1.5
 
-    # Path to the prompts YAML (read at runtime).
+    # ------------------------------------------------------------------
+    # Misc.
+    # ------------------------------------------------------------------
     prompts_path: str = "/config/prompts.yaml"
-
     upstream_versions: dict[str, str] = Field(default_factory=dict)
 
     def text_prompts(self) -> list[str]:
