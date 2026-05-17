@@ -371,6 +371,8 @@ def test_deskew_estimates_ground_in_sensor_frame(tmp_env):
     world = np.load(local_path(lidar_world_path(bag_id, chunk_id, 0)))
     assert "ground_mask" in world
     assert world["ground_mask"].sum() > 1000  # most ground points detected
+    world_xyz = np.column_stack([world["x"], world["y"], world["z"]])
+    _write_static_map_covering_all(bag_id, chunk_id, world_xyz)
 
     result = process_chunk(cfg, bag_id, chunk_id)
     assert result.status == "ok"
