@@ -233,7 +233,7 @@ def _write_static_voxel_set(
     bag_id: str, chunk_id: str, static_xyz: np.ndarray, voxel_size: float
 ):
     """Write a static_map.npz with static_voxel_keys derived from static_xyz."""
-    from wato_lidar_preprocessing.classify import _voxel_indices
+    from wato_lidar_preprocessing.voxel import voxel_indices
 
     origin = (
         np.zeros(3, dtype=np.float64)
@@ -241,7 +241,7 @@ def _write_static_voxel_set(
         else static_xyz.min(axis=0)
     )
     if static_xyz.shape[0] > 0:
-        keys = _voxel_indices(static_xyz, origin, voxel_size, chunk_id=chunk_id)
+        keys = voxel_indices(static_xyz, origin, voxel_size, chunk_id=chunk_id)
         keys = np.unique(keys)
     else:
         keys = np.empty(0, dtype=np.int64)

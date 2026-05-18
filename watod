@@ -181,11 +181,14 @@ declare -a SELECTED_SERVICES=()
 for s in "${MODULES_EXPANDED[@]}"; do
     base="${s%%:*}"
     PRE_PROFILES+=("${base}_pre")
-    ALL_PROFILES+=("${base}")
+    # ACTIVE_MODULES suffix decides which variant is active.  Adding both
+    # profiles here would make `docker compose up` create both containers
+    # for the module — only the suffixed one is actually wanted.
     if [[ "${s}" == *":dev" ]]; then
         ALL_PROFILES+=("${base}_dev")
         SELECTED_SERVICES+=("${base}_dev")
     else
+        ALL_PROFILES+=("${base}")
         SELECTED_SERVICES+=("${base}")
     fi
 done

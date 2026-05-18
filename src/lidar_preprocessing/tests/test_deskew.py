@@ -134,6 +134,11 @@ def test_static_transform_no_motion(tmp_env):
     np.testing.assert_allclose(world_data["x"], [1.0, 2.0, 3.0], atol=1e-6)
     np.testing.assert_allclose(world_data["y"], [0.0, 0.0, 0.0], atol=1e-6)
     np.testing.assert_allclose(world_data["z"], [1.0, 1.0, 1.0], atol=1e-6)
+    # Sensor origin written for log-odds ray casting.
+    assert "origin" in world_data, "world NPZ must include sensor origin"
+    assert world_data["origin"].shape == (3,)
+    # Identity pose at world origin → sensor is at world (0, 0, 0).
+    np.testing.assert_allclose(world_data["origin"], [0.0, 0.0, 0.0], atol=1e-6)
 
 
 def test_translation_applied(tmp_env):
@@ -197,6 +202,8 @@ def test_translation_applied(tmp_env):
     world_data = np.load(local_path(lidar_world_path(bag_id, chunk_id, 0)))
     np.testing.assert_allclose(world_data["x"], [11.0, 12.0], atol=1e-6)
     np.testing.assert_allclose(world_data["y"], [0.0, 0.0], atol=1e-6)
+    # Ego shifted +10 on X → sensor origin at (10, 0, 0).
+    np.testing.assert_allclose(world_data["origin"], [10.0, 0.0, 0.0], atol=1e-6)
 
 
 def test_drops_nonfinite_points(tmp_env):

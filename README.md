@@ -95,8 +95,9 @@ $EDITOR watod-config.sh
 # 3. Bring up a component.
 watod -c ingest up
 
-# 4. Run a component on a bag.
-watod run ingest my_bag
+# 4. Run a component on a bag.  The path is the in-container view of
+#    <repo>/data/bags/ — that directory is bind-mounted at /data/bags.
+watod run ingest /data/bags/<your-bag>
 
 # 5. Open a dev shell in a component container with source bind-mounted.
 watod -c perception_2d:dev up

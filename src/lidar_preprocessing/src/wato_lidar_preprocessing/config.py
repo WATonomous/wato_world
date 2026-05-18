@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -87,8 +87,27 @@ class ComponentConfig(BaseModel):
 
     # Step B — voxel classification.
     voxel_size_m: float = 0.15
+    classification_method: Literal["log_odds", "persistence"] = "log_odds"
+
+    # Persistence-counting parameters (used when classification_method="persistence").
     static_sweep_fraction: float = 0.3
     static_sweep_min: int = 5
+
+    # Log-odds ray-casting parameters (used when classification_method="log_odds").
+    l_occ: float = 0.85
+    l_free: float = 0.40
+    log_odds_clamp: float = 5.0
+    p_static_threshold: float = 0.7
+    p_dynamic_threshold: float = 0.3
+    min_observations: int = 3
+    # Voxels with fewer endpoint hits than this are free-space-only; not dynamic.
+    min_occupied_hits: int = 1
+    max_ray_length_m: float = 80.0
+    free_space_margin_voxels: float = 1.0
+    # "skip_endpoint": traverse ground rays for free-space evidence, skip l_occ at endpoint.
+    # "skip_ray": skip ground rays entirely (legacy).
+    ground_endpoint_strategy: Literal["skip_endpoint", "skip_ray"] = "skip_endpoint"
+
     cache_world_xyz_in_memory: bool = True
 
     # Step D — global static map reduce.
@@ -120,11 +139,32 @@ class ComponentConfig(BaseModel):
 
     upstream_versions: dict[str, str] = Field(default_factory=dict)
 
-    @field_validator("voxel_size_m", "global_map_voxel_size_m")
+    @field_validator("voxel_size_m", "global_map_voxel_size_m", "max_ray_length_m")
     @classmethod
     def _positive_voxel(cls, v: float) -> float:
         if v <= 0:
-            raise ValueError(f"voxel size must be > 0, got {v}")
+            raise ValueError(f"value must be > 0, got {v}")
+        return v
+
+    @field_validator("l_occ", "l_free")
+    @classmethod
+    def _positive_log_odds_param(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"log-odds weight must be > 0, got {v}")
+        return v
+
+    @field_validator("p_static_threshold", "p_dynamic_threshold")
+    @classmethod
+    def _probability_range(cls, v: float) -> float:
+        if not (0 < v < 1):
+            raise ValueError(f"probability threshold must be in (0, 1), got {v}")
+        return v
+
+    @field_validator("min_observations", "min_occupied_hits")
+    @classmethod
+    def _positive_min_obs(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"value must be >= 1, got {v}")
         return v
 
     @field_validator("static_sweep_fraction")

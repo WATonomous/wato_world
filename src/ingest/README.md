@@ -176,11 +176,17 @@ mounts and environment as the rest of the pipeline.
 watod -c ingest build
 watod -c ingest up
 
-# Run ingest end-to-end on a bag.
+# Run ingest end-to-end on a bag.  The path is the in-container view of
+# <repo>/data/bags/ — that directory is bind-mounted at /data/bags, so a
+# host path like /home/you/wato_world/data/bags/example will NOT resolve
+# inside the container.
 watod run ingest /data/bags/example
+# Equivalent flag form (both are accepted by watod-run.sh):
+watod run ingest --bag /data/bags/example
 
-# Run one chunk after chunks/index.parquet already exists.
-watod run ingest /data/bags/example chunk_000000
+# Run one chunk after chunks/index.parquet already exists.  Extra flags
+# after the bag arg are forwarded to `python -m wato_ingest run`.
+watod run ingest /data/bags/example --chunk chunk_000000
 
 # Run tests in the dev container.
 watod test ingest

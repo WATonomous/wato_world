@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import numpy as np
+from tqdm import tqdm
 
 from wato_common.artifact_store import (
     calibration_path,
@@ -323,10 +324,17 @@ def _deskew_sweep(
     # Batched: xyz_world[i] = R[i] @ xyz_lidar[i] + t[i]
     xyz_world = np.einsum("nij,nj->ni", R, xyz_lidar) + t  # (N, 3) float64
 
+    # Sensor origin in world frame at the sweep midpoint timestamp.  Using the
+    # midpoint halves the worst-case positional error compared to the sweep-start
+    # or sweep-end timestamps (e.g. 3 m/s ego × 0.1 s/2 ≈ 0.15 m error vs 0.30 m).
+    mid_idx = len(unique_ts) // 2
+    sensor_origin = world_T_lidar_u[mid_idx, :3, 3].copy()  # (3,) float64
+
     out: dict[str, np.ndarray] = {
         "x": xyz_world[:, 0],
         "y": xyz_world[:, 1],
         "z": xyz_world[:, 2],
+        "origin": sensor_origin,
     }
     if intensity is not None:
         out["intensity"] = intensity.astype(np.float32)
@@ -371,7 +379,11 @@ def process_chunk(
     results: list[DeskewResult] = []
     meta_rows: list[dict] = []
 
-    for row in sweep_rows:
+    for row in tqdm(
+        sweep_rows,
+        desc=f"deskew chunk {chunk_id}",
+        unit="sweep",
+    ):
         if not row.get("valid", True):
             continue
         lid = row["lidar_id"]

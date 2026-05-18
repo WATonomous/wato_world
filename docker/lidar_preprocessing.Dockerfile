@@ -26,7 +26,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN uv pip install --system --break-system-packages \
         pyarrow numpy scipy pydantic fsspec click pyyaml \
-        matplotlib
+        matplotlib tqdm
+
+# Numba JIT for the log-odds ray-casting classifier (Step B).  Without this
+# numba>=0.59 install, classify.process_chunk hard-fails at runtime when
+# classification_method=log_odds (the default).  Pulls llvmlite automatically.
+RUN uv pip install --system --break-system-packages 'numba>=0.59'
 
 # Open3D for point-cloud visualization (stages A, B, D in `watod viz`).
 # ~80 MB wheel; skipped gracefully at runtime if absent.
