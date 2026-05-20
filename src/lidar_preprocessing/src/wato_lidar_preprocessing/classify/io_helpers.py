@@ -82,10 +82,29 @@ def sigmoid(x: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-x.astype(np.float64)))
 
 
-def origin_from_index(meta_rows: list[dict]) -> np.ndarray | None:
+def origin_from_index(
+    meta_rows: list[dict], voxel_size: float
+) -> np.ndarray | None:
     """Compute the chunk-level world-frame origin from the parquet bbox.
 
-    Reads the per-sweep `world_xmin/ymin/zmin` columns populated by deskew.
+    Reads the per-sweep `world_xmin/ymin/zmin` columns populated by deskew
+    and snaps the bbox-min to the global voxel lattice
+    (`floor(min / voxel_size) * voxel_size`).
+
+    Snapping matters for reproducibility: without it, two chunks that
+    overlap in space pick up slightly different float64 bbox-mins and the
+    same world point quantizes to different voxel keys per chunk. Step D's
+    re-discretization at `global_map_voxel_size_m` hides the drift in the
+    aggregate output, but per-chunk artifacts (`static_voxel_keys`,
+    per-sweep dynamic masks) cease to be bit-reproducible across re-runs
+    that pick up new sweeps. Snapping to the lattice fixes that: every
+    chunk's origin lands on the same global grid, so the same world point
+    always maps to the same key.
+
+    The snap shifts the origin by at most one voxel and always lands at or
+    below the bbox min, so all points still produce nonnegative voxel
+    indices and the AXIS_RANGE budget is unchanged.
+
     Returns None if every valid row is empty (e.g. no points survived the
     nonfinite filter), in which case the caller writes an empty sentinel.
     Raises ValueError if a row is non-empty but missing bbox columns —
@@ -114,4 +133,5 @@ def origin_from_index(meta_rows: list[dict]) -> np.ndarray | None:
         zmins.append(zm)
     if not xmins:
         return None
-    return np.array([min(xmins), min(ymins), min(zmins)], dtype=np.float64)
+    raw = np.array([min(xmins), min(ymins), min(zmins)], dtype=np.float64)
+    return np.floor(raw / voxel_size) * voxel_size

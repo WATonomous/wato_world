@@ -104,6 +104,16 @@ def dynamic_mask_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
     return _join(lidar_proc_dir(bag_id, chunk_id), f"{sweep_id:06d}_dynamic_mask.npy")
 
 
+def mapmos_logit_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
+    """Per-sweep MapMOS logit sidecar; float32 array aligned to world NPZ xyz.
+
+    Missing file = MapMOS contributed nothing for this sweep (classify falls
+    through to geometry-only). Zero-length file = legitimate empty sweep.
+    Callers must branch on `is None`, not `len(...) == 0`.
+    """
+    return _join(lidar_proc_dir(bag_id, chunk_id), f"{sweep_id:06d}_mapmos_logit.npy")
+
+
 def lidar_proc_index_path(bag_id: str, chunk_id: str) -> str:
     return _join(chunk_root(bag_id, chunk_id), "lidar_proc_index.parquet")
 

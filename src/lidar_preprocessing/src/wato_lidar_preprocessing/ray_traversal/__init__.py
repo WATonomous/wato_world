@@ -9,13 +9,17 @@ from .dispatch import (
     _NUMBA_AVAILABLE,
     _NUMBA_IMPORT_ERROR,
     extract_log_odds_arrays,
+    extract_max_logit_array,
     make_log_odds_dicts,
+    make_max_logit_dict,
     update_sweep_log_odds,
 )
 
 __all__ = [
     "extract_log_odds_arrays",
+    "extract_max_logit_array",
     "make_log_odds_dicts",
+    "make_max_logit_dict",
     "update_sweep_log_odds",
     "_NUMBA_AVAILABLE",
     "_MISSING_NUMBA_MSG",

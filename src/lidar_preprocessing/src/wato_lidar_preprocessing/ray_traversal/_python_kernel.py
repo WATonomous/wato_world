@@ -18,6 +18,9 @@ import numpy as np
 from ._keys import AXIS_RANGE, SHIFT_X, SHIFT_Y
 
 
+_NEG_INF_LOGIT_PY = np.float32(-1e18)
+
+
 def _update_sweep_python(
     sweep_origin: np.ndarray,
     endpoints: np.ndarray,
@@ -32,8 +35,33 @@ def _update_sweep_python(
     l_occ: float,
     l_free: float,
     log_odds_clamp: float,
+    endpoint_priors: np.ndarray | None = None,
+    alpha: float = 0.0,
+    max_logit: dict | None = None,
+    track_max_logit: bool = False,
 ) -> None:
-    """Reference DDA. Same arithmetic as _update_sweep_numba; pure Python."""
+    """Reference DDA. Same arithmetic as _update_sweep_numba; pure Python.
+
+    The MapMOS-fusion knobs (endpoint_priors, alpha, max_logit,
+    track_max_logit) all default to "off" so existing callers (the
+    Numba/Python parity test) pass through bit-identically.
+    """
+    # Defense-in-depth tripwire (mirrors _update_sweep_numba). The python
+    # kernel accepts None for "no priors" while numba uses a zero-length
+    # array; both reach the same use_priors decision below. A non-zero
+    # length that doesn't match endpoints is the silent-disable case we're
+    # closing — almost always an off-by-one in a future filter step.
+    if endpoint_priors is not None:
+        n_priors = len(endpoint_priors)
+        n_pts = len(endpoints)
+        if n_priors != 0 and n_priors != n_pts:
+            raise ValueError(
+                f"endpoint_priors length {n_priors} must equal endpoints "
+                f"length {n_pts} or be zero"
+            )
+        use_priors = n_priors == n_pts
+    else:
+        use_priors = False
     ox = float(sweep_origin[0])
     oy = float(sweep_origin[1])
     oz = float(sweep_origin[2])
@@ -142,10 +170,22 @@ def _update_sweep_python(
 
         if not is_g and 0 <= exi < AXIS_RANGE and 0 <= eyi < AXIS_RANGE and 0 <= ezi < AXIS_RANGE:
             key = (exi << SHIFT_X) | (eyi << SHIFT_Y) | ezi
+            # MapMOS fusion (parity with _update_sweep_numba): additive
+            # per-point prior on l_occ; max_logit stores RAW prior[i].
+            if use_priors:
+                prior_i = np.float32(endpoint_priors[i])
+            else:
+                prior_i = np.float32(0.0)
             old_lo = log_odds.get(key, 0.0)
-            new_lo = np.float32(old_lo) + np.float32(l_occ)
+            new_lo = np.float32(old_lo) + np.float32(l_occ) + np.float32(alpha) * prior_i
             if new_lo > np.float32(log_odds_clamp):
                 new_lo = np.float32(log_odds_clamp)
+            elif new_lo < np.float32(-log_odds_clamp):
+                new_lo = np.float32(-log_odds_clamp)
             log_odds[key] = new_lo
             n_obs[key] = n_obs.get(key, np.int32(0)) + np.int32(1)
             n_hits[key] = n_hits.get(key, np.int32(0)) + np.int32(1)
+            if track_max_logit and use_priors and max_logit is not None:
+                old_max = max_logit.get(key, _NEG_INF_LOGIT_PY)
+                if prior_i > old_max:
+                    max_logit[key] = prior_i

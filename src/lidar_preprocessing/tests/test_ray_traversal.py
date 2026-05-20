@@ -210,3 +210,197 @@ def test_missing_numba_hard_fail_real_import(tmp_path):
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
     assert "OK" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Defense-in-depth: endpoint_priors length mismatch tripwire
+# ---------------------------------------------------------------------------
+
+
+def _length_mismatch_inputs():
+    """3 endpoints + 2 priors -> kernel must raise (off-by-one tripwire)."""
+    sweep_origin = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    chunk_origin = np.array([-1.0, -1.0, -1.0], dtype=np.float64)
+    endpoints = np.array(
+        [[5.0, 0.0, 0.0], [0.0, 5.0, 0.0], [0.0, 0.0, 5.0]], dtype=np.float64
+    )
+    # Deliberately one short -- the silent-disable case before the fix.
+    priors = np.array([1.0, -1.0], dtype=np.float32)
+    return sweep_origin, endpoints, chunk_origin, priors
+
+
+def test_python_kernel_endpoint_priors_length_mismatch_raises():
+    """The Python parity kernel must raise on a length-mismatched priors array.
+
+    Pre-fix: `use_priors = endpoint_priors is not None and len(...) == len(endpoints)`
+    silently set use_priors=False on mismatch and ran geometry-only -- exactly the
+    failure mode the tripwire closes for future Step-3 refactors.
+    """
+    from wato_lidar_preprocessing.ray_traversal._python_kernel import (
+        _update_sweep_python,
+    )
+
+    sweep_origin, endpoints, chunk_origin, priors = _length_mismatch_inputs()
+    log_odds, n_obs, n_hits = {}, {}, {}
+    max_logit: dict = {}
+
+    with pytest.raises(ValueError, match="endpoint_priors length"):
+        _update_sweep_python(
+            sweep_origin,
+            endpoints,
+            None,
+            chunk_origin,
+            voxel_size=0.15,
+            margin_voxels=1.0,
+            max_length_m=80.0,
+            log_odds=log_odds,
+            n_obs=n_obs,
+            n_hits=n_hits,
+            l_occ=0.85,
+            l_free=0.40,
+            log_odds_clamp=5.0,
+            endpoint_priors=priors,
+            alpha=1.0,
+            max_logit=max_logit,
+            track_max_logit=True,
+        )
+
+
+def test_python_kernel_zero_length_priors_still_geometry_only():
+    """Length-0 priors array is the 'no priors' sentinel; must NOT raise.
+
+    Mirrors the numba kernel's convention where the typed-array signature
+    can't accept None.
+    """
+    from wato_lidar_preprocessing.ray_traversal._python_kernel import (
+        _update_sweep_python,
+    )
+
+    sweep_origin, endpoints, chunk_origin, _ = _length_mismatch_inputs()
+    log_odds, n_obs, n_hits = {}, {}, {}
+    max_logit: dict = {}
+    empty_priors = np.empty(0, dtype=np.float32)
+
+    # No raise expected -- geometry-only path with zero-length sentinel.
+    _update_sweep_python(
+        sweep_origin,
+        endpoints,
+        None,
+        chunk_origin,
+        voxel_size=0.15,
+        margin_voxels=1.0,
+        max_length_m=80.0,
+        log_odds=log_odds,
+        n_obs=n_obs,
+        n_hits=n_hits,
+        l_occ=0.85,
+        l_free=0.40,
+        log_odds_clamp=5.0,
+        endpoint_priors=empty_priors,
+        alpha=1.0,
+        max_logit=max_logit,
+        track_max_logit=False,
+    )
+    # Sanity: at least one endpoint voxel registered an l_occ hit.
+    assert any(v > 0 for v in log_odds.values()), "endpoints should accumulate l_occ"
+
+
+@requires_numba
+def test_numba_kernel_endpoint_priors_length_mismatch_raises():
+    """Numba mirror of the Python tripwire.
+
+    Numba supports `raise` in nopython mode but not f-strings; the message
+    in the kernel is a literal, so we only match the prefix.
+    """
+    from wato_lidar_preprocessing.ray_traversal import (
+        make_log_odds_dicts,
+        make_max_logit_dict,
+        update_sweep_log_odds,
+    )
+
+    sweep_origin, endpoints, chunk_origin, priors = _length_mismatch_inputs()
+    log_odds, n_obs, n_hits = make_log_odds_dicts()
+    max_logit = make_max_logit_dict()
+
+    with pytest.raises(ValueError, match="endpoint_priors length"):
+        update_sweep_log_odds(
+            sweep_origin,
+            endpoints,
+            None,
+            chunk_origin,
+            voxel_size=0.15,
+            margin_voxels=1.0,
+            max_length_m=80.0,
+            log_odds=log_odds,
+            n_obs=n_obs,
+            n_hits=n_hits,
+            l_occ=0.85,
+            l_free=0.40,
+            log_odds_clamp=5.0,
+            endpoint_priors=priors,
+            alpha=1.0,
+            max_logit=max_logit,
+        )
+
+
+def test_import_emits_no_warning_when_numba_missing():
+    """Importing the package without numba must NOT log a warning.
+
+    Pre-fix: dispatch.py warned at module load, polluting any tooling
+    (ground, viz, deskew) that imports the package for non-log-odds work.
+    Post-fix: silent at import; warning/raise happens only on first
+    _require_numba() call.
+
+    Skipped if subprocess invocation fails for environmental reasons.
+    """
+    script = textwrap.dedent(
+        """
+        import sys
+        import io
+        import logging
+
+        # Capture root-logger output to stderr-like buffer BEFORE imports.
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        handler.setLevel(logging.WARNING)
+        logging.getLogger().addHandler(handler)
+        logging.getLogger().setLevel(logging.DEBUG)
+
+        # Block numba so dispatch.py falls into the unavailable branch.
+        sys.modules['numba'] = None
+        sys.modules['numba.types'] = None
+        sys.modules['numba.typed'] = None
+
+        from wato_lidar_preprocessing.ray_traversal import _NUMBA_AVAILABLE
+        assert _NUMBA_AVAILABLE is False
+
+        handler.flush()
+        captured = buf.getvalue()
+        # The import path must not log a WARNING-level message about numba.
+        if 'numba unavailable' in captured.lower() or 'numba is missing' in captured.lower():
+            print('FAIL: import emitted a warning:\\n' + captured)
+            sys.exit(2)
+        print('OK')
+        sys.exit(0)
+        """
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            env={
+                "PYTHONPATH": "src/common/src:src/lidar_preprocessing/src",
+                "PATH": "/usr/bin:/bin",
+            },
+            cwd=".",
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        pytest.skip(f"subprocess unsupported: {e}")
+
+    assert result.returncode == 0, (
+        f"subprocess failed (rc={result.returncode}):\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert "OK" in result.stdout

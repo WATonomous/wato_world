@@ -36,10 +36,14 @@ MODULES_DIR="${WATO_WORLD_DIR}/modules"
 # ---------------------------------------------------------------------------
 ALL_MODULES=(ingest perception_2d lidar_preprocessing proposal_generation tracking label_refinement open_vocab_discovery student_training)
 
+# lidar_preprocessing was moved to the CUDA base when MapMOS deps (torch +
+# MinkowskiEngine) became a hard dep of the unified image. The geometry-only
+# code paths inside it don't actually use the GPU at runtime, but the image
+# itself needs the CUDA base to build.
 base_flavor_for() {
     case "$1" in
-        ingest|lidar_preprocessing) echo "cpu" ;;
-        perception_2d|proposal_generation|tracking|label_refinement|open_vocab_discovery|student_training) echo "cuda" ;;
+        ingest) echo "cpu" ;;
+        lidar_preprocessing|perception_2d|proposal_generation|tracking|label_refinement|open_vocab_discovery|student_training) echo "cuda" ;;
         *) echo "" ;;
     esac
 }

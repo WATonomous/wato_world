@@ -34,7 +34,7 @@ from wato_common.artifact_store import (
 )
 from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.schemas import CHUNK_SUMMARY_SCHEMA, ChunkSummaryRow
-from wato_lidar_preprocessing import classify, deskew, ground
+from wato_lidar_preprocessing import classify, deskew, ground, mapmos
 from wato_lidar_preprocessing.config import ComponentConfig
 
 log = logging.getLogger(__name__)
@@ -116,12 +116,18 @@ def _process_one_chunk(
     cfg: ComponentConfig,
     bag_id: str,
     chunk_id: str,
+    prev_chunk_id: str | None = None,
 ) -> tuple[str, bool, str]:
-    """Run A→B→C for a single chunk.  Returns (chunk_id, ok, error_msg).
+    """Run A→A2→B→C for a single chunk.  Returns (chunk_id, ok, error_msg).
 
     Per-chunk input validation lives inside the try/except so that a chunk
     with partial ingest artifacts surfaces a clear error message AND the
     other chunks keep running.
+
+    Step A2 (MapMOS) only runs when cfg.mapmos.enabled. Step A2 is between
+    deskew and classify: it produces sidecar logit files that classify
+    reads (or falls through to geometry-only when absent — plan §pipeline
+    placement).
 
     On failure, error_msg includes the formatted traceback so it survives
     the worker -> parent boundary in ProcessPoolExecutor.
@@ -131,6 +137,10 @@ def _process_one_chunk(
 
         log.info("=== chunk %s: step A — deskew ===", chunk_id)
         deskew.process_chunk(cfg, bag_id, chunk_id)
+
+        if cfg.mapmos.enabled:
+            log.info("=== chunk %s: step A2 — mapmos ===", chunk_id)
+            mapmos.process_chunk(cfg, bag_id, chunk_id, prev_chunk_id=prev_chunk_id)
 
         log.info("=== chunk %s: step B — classify ===", chunk_id)
         classify_result = classify.process_chunk(cfg, bag_id, chunk_id)
@@ -175,6 +185,18 @@ def run(
         )
 
     chunk_rows = read_rows(chunks_idx)
+
+    # Build the chunk_id -> prev_chunk_id map from the FULL chunks index
+    # (before any filter), sorted by chunk_id. mapmos.process_chunk uses
+    # the previous chunk's lidar_proc_index to pad short history at the
+    # boundary; gracefully handles None / missing index (plan #8).
+    all_chunk_ids_sorted = sorted(r["chunk_id"] for r in chunk_rows)
+    prev_chunk_map: dict[str, str | None] = {}
+    for i, cid_sorted in enumerate(all_chunk_ids_sorted):
+        prev_chunk_map[cid_sorted] = (
+            all_chunk_ids_sorted[i - 1] if i > 0 else None
+        )
+
     if chunk_id:
         chunk_rows = [r for r in chunk_rows if r["chunk_id"] == chunk_id]
         if not chunk_rows:
@@ -210,7 +232,9 @@ def run(
 
     if workers <= 1:
         for cid in pending:
-            _, ok, err = _process_one_chunk(cfg, bag_id, cid)
+            _, ok, err = _process_one_chunk(
+                cfg, bag_id, cid, prev_chunk_id=prev_chunk_map.get(cid)
+            )
             if ok:
                 n_ok += 1
             else:
@@ -219,7 +243,9 @@ def run(
         log.info("running %d chunks across %d workers", n_total, workers)
         with ProcessPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(_process_one_chunk, cfg, bag_id, cid): cid
+                pool.submit(
+                    _process_one_chunk, cfg, bag_id, cid, prev_chunk_map.get(cid)
+                ): cid
                 for cid in pending
             }
             for fut in as_completed(futures):

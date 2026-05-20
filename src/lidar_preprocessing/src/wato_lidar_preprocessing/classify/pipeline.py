@@ -171,7 +171,7 @@ def process_chunk(
     else:
         cache_xyz = bool(cfg.cache_world_xyz_in_memory)
 
-    origin = origin_from_index(meta_rows)
+    origin = origin_from_index(meta_rows, cfg.voxel_size_m)
     if origin is None:
         return _write_empty_outputs(bag_id, chunk_id, cfg.voxel_size_m)
 
@@ -186,12 +186,12 @@ def process_chunk(
             ground_mask_cache,
             sweep_keys,
             frame_keys,
-            (unique_keys, lo_vals, n_obs_vals, n_hits_vals),
+            (unique_keys, lo_vals, n_obs_vals, n_hits_vals, max_logit_vals),
         ) = build_log_odds_grid(
-            meta_rows, cfg, origin, chunk_id, cache_xyz=cache_xyz
+            meta_rows, cfg, origin, chunk_id, cache_xyz=cache_xyz, bag_id=bag_id
         )
         static_arr, not_dynamic_arr, diag = classify_from_log_odds(
-            unique_keys, lo_vals, n_obs_vals, n_hits_vals, cfg
+            unique_keys, lo_vals, n_obs_vals, n_hits_vals, cfg, max_logit_vals
         )
     else:
         (
@@ -273,6 +273,7 @@ def process_chunk(
                 n_points_ground=int(row.get("n_points_ground") or 0),
                 world_path=row["world_path"],
                 dynamic_mask_path=result.mask_uri,
+                mapmos_logit_path=row.get("mapmos_logit_path"),
                 has_intensity=bool(row.get("has_intensity", False)),
                 deskewed=bool(row.get("deskewed", False)),
                 valid=True,
@@ -321,7 +322,8 @@ def process_chunk(
         log.info(
             "chunk %s: static=%d dynamic=%d "
             "(log_odds: %d touched, %d evidenced, "
-            "%d under-evidenced-with-hits, %d free-only)",
+            "%d under-evidenced-with-hits, %d free-only, "
+            "%d ambiguous, %d confident-dynamic-voxels)",
             chunk_id,
             total_static,
             total_dynamic,
@@ -329,6 +331,8 @@ def process_chunk(
             diag.get("n_evidenced", 0),
             diag.get("n_under_evidenced_with_hits", 0),
             diag.get("n_free_only", 0),
+            diag.get("n_ambiguous", 0),
+            diag.get("n_confident_dynamic", 0),
         )
     else:
         log.info(
@@ -393,6 +397,7 @@ def _invalid_meta_row(row: dict, sweep_id: int) -> dict:
         n_points_ground=int(row.get("n_points_ground") or 0),
         world_path=row.get("world_path", ""),
         dynamic_mask_path="",
+        mapmos_logit_path=row.get("mapmos_logit_path"),
         has_intensity=bool(row.get("has_intensity", False)),
         deskewed=bool(row.get("deskewed", False)),
         valid=False,

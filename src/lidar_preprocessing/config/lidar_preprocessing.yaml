@@ -11,15 +11,60 @@ lidar_preprocessing:
   l_occ: 0.85
   l_free: 0.40
   log_odds_clamp: 5.0      # clamp prevents ossification after long history
-  p_static_threshold: 0.70  # sigmoid(log_odds) >= this → static
-  p_dynamic_threshold: 0.30 # sigmoid(log_odds) < this → dynamic (if evidenced)
-  min_observations: 3       # voxels with fewer obs stay "unknown"
-  min_occupied_hits: 1      # voxels with n_hits < this are free-space-only, not dynamic
+  # Three-band classifier on evidenced + hit voxels:
+  #   p_occ >= p_static_threshold              → confident static
+  #   p_dynamic_threshold < p_occ < p_static_threshold → ambiguous (NOT dynamic)
+  #   p_occ <= p_dynamic_threshold             → confident dynamic
+  # Ambiguous voxels route to not_dynamic_arr so they don't become phantom
+  # moving-object proposals downstream.  Validator requires p_dyn < p_static.
+  p_static_threshold: 0.70
+  p_dynamic_threshold: 0.15  # lowered from 0.30 — requires much stronger free-space dominance before labeling dynamic
+  min_observations: 5        # raised from 3 — more sweeps required before a voxel can be labeled dynamic
+  min_occupied_hits: 2       # raised from 1 — requires ≥2 endpoint hits to be callable as dynamic (filters stray canopy returns)
   max_ray_length_m: 80.0    # beyond this range, noise dominates
   free_space_margin_voxels: 1.0  # stop carving N voxels before endpoint
   # "skip_endpoint": traverse ground rays (free-space evidence) but skip l_occ at endpoint.
   # "skip_ray": skip ground rays entirely (legacy, use for A/B comparison).
   ground_endpoint_strategy: skip_endpoint
+
+  # -----------------------------------------------------------------
+  # Tuning guide: vegetation / false-dynamic artefacts
+  # -----------------------------------------------------------------
+  # Trees and bushes appear in the dynamic map because sparse canopy
+  # voxels accumulate many l_free traversals (rays pass through gaps)
+  # with only occasional endpoint hits, pushing p_occ below the
+  # dynamic threshold even though the object never moves.
+  #
+  # If you still see static vegetation in the dynamic cloud, tighten
+  # these four knobs in order of impact:
+  #
+  #   1. p_dynamic_threshold (currently 0.15)
+  #      Lower = harder to be labeled dynamic. Try 0.10 if vegetation
+  #      persists. Do not go below 0.05 or true moving objects will
+  #      be missed. Raise toward 0.30 if dynamic objects are being
+  #      missed (not enough dynamic points on cars/pedestrians).
+  #
+  #   2. min_occupied_hits (currently 2)
+  #      A voxel needs at least this many endpoint hits before it can
+  #      ever be called dynamic. Raise to 3 if single stray canopy
+  #      returns are still triggering dynamic. High values suppress
+  #      thin objects (cyclists, pedestrians) — keep ≤ 3.
+  #
+  #   3. min_observations (currently 5)
+  #      Voxels seen in fewer sweeps than this stay "under-evidenced"
+  #      and are excluded from the dynamic bucket (unless MapMOS
+  #      rescues them). Raise to 8–10 for long chunks with many
+  #      sweeps. Too high → real moving objects seen briefly (a car
+  #      that enters and exits the scene) won't accumulate enough
+  #      evidence and get labelled neither static nor dynamic.
+  #
+  #   4. mapmos.fusion.under_evidenced_logit_threshold (currently 3.5)
+  #      Raw logit MapMOS must exceed to rescue an under-evidenced
+  #      voxel into the dynamic bucket. Raise if MapMOS is pulling
+  #      vegetation into dynamic via the rescue path. Lower if fast-
+  #      moving objects that don't accumulate enough sweeps are being
+  #      missed.
+  # -----------------------------------------------------------------
 
   # Persistence-counting parameters (active when classification_method=persistence).
   # Voxel is classified static if seen in at least this fraction of chunk sweeps.
@@ -73,6 +118,54 @@ lidar_preprocessing:
   frame_sync:
     canonical_lidar: null
     tolerance_ms: 25.0
+
+  # ---------------------------------------------------------------------
+  # MapMOS — third evidence source (learned moving-object segmentation).
+  # Disabled by default. Geometry-only classify path is bit-identical to
+  # today when `mapmos.enabled: false`. See docs/research/pipeline_overview.md
+  # for the integration plan + non-negotiables.
+  # ---------------------------------------------------------------------
+  mapmos:
+    enabled: true
+
+    weights_path: "/data/models/mapmos/mapmos.ckpt"
+    # Range filter applied at inference time, relative to ego position.
+    # Matches PRBonn defaults (config/config.py: max_range_mos=50, min_range_mos=0).
+    max_range_m: 50.0
+    min_range_m: 0.0
+    device: "cuda"                  # falls back to cpu with warning if unavailable
+
+    # NOTE: MapMOS does NOT take a fixed N-past-sweeps window. Past context
+    # comes from a running VoxelHashMap accumulator (see Step 3 design).
+    # Previously-planned `n_past_scans` and `sweep_period_s` were removed —
+    # they encoded the wrong convention. Time channel inside the model is
+    # the integer scan_index, normalized internally to a [1,2] feature.
+
+    fusion:
+      # Only "per_point_prior" is implemented today; field exists so future
+      # alternatives (per-voxel mean, override-only) can land without breaking
+      # the config schema.
+      mode: "per_point_prior"
+
+      # NOTE: alpha=0.0 means MapMOS runs but contributes NOTHING to
+      # classification. Ships at 0.0 so flipping enabled=true is bit-safe
+      # (the regression gate verifies static/dynamic counts are identical).
+      # Set to a tuned value (start with 1.5) ONLY AFTER verifying inference
+      # is correct: real bimodal logits, sensor-frame transform sane, no
+      # extrinsic mismatch on first valid sweep.
+      alpha: 1.0
+
+      # Clamp applied to raw sidecar logits at the read boundary; warns on
+      # overshoot (model-blowup signal).
+      logit_clamp: 10.0
+
+      # Under-evidenced rescue: when True AND a voxel's RAW max MapMOS
+      # logit crosses under_evidenced_logit_threshold, the voxel drops out
+      # of not_dynamic_arr (its points get the dynamic label) even though
+      # n_obs < min_observations. Threshold is on RAW logits — independent
+      # of alpha, so re-tuning fusion doesn't move the rescue boundary.
+      apply_to_under_evidenced: true
+      under_evidenced_logit_threshold: 3.5   # raised from 2.0 — logit 3.5 ≈ p_moving > 0.97; more selective rescue
 
   upstream_versions:
     ingest: "0.1.0"

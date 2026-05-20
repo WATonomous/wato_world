@@ -21,6 +21,13 @@ services:
               capabilities: [gpu]
   perception_2d_dev: *gpu-defaults
 
+  # lidar_preprocessing runs MapMOS / MinkowskiEngine inference on GPU
+  # when cfg.mapmos.enabled. Geometry-only paths don't actually need the
+  # GPU but the image is unified, so we always layer in the nvidia
+  # runtime when GPU_AVAILABLE=true.
+  lidar_preprocessing: *gpu-defaults
+  lidar_preprocessing_dev: *gpu-defaults
+
   proposal_generation: *gpu-defaults
   proposal_generation_dev: *gpu-defaults
 

@@ -150,6 +150,9 @@ services:
       - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
     volumes:
       - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      # MapMOS pretrained checkpoint (and future SAM/DINOv2 weights)
+      # downloaded to the host via scripts/fetch_mapmos_weights.sh.
+      - ${WATO_WORLD_DIR}/data/models:/data/models:ro
       - ${WATO_WORLD_DIR}/config:/config:ro
 
   # =====================================================================

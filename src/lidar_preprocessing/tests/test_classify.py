@@ -583,3 +583,200 @@ def test_skip_ray_ground_not_dynamic(tmp_env):
     assert not mask[0], (
         "ground point in skip_ray mode must not be labeled dynamic (bug fix #4)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Three-band semantics (p_dynamic_threshold wired in)
+# ---------------------------------------------------------------------------
+
+
+def test_log_odds_ambiguous_band_routes_to_not_dynamic():
+    """Voxels in the ambiguous middle band must NOT be labeled dynamic.
+
+    Pre-fix `p_dynamic_threshold` was defined + validated but never read by
+    classify_from_log_odds, so any evidenced + hit voxel with
+    p_occ < p_static_threshold fell straight into the dynamic bucket — the
+    middle band (0.30 <= p_occ < 0.70) silently became phantom dynamic.
+
+    This test calls classify_from_log_odds directly with hand-rigged log-odds
+    so we don't have to reverse-engineer the kernel to land in the middle band.
+
+    Voxels:
+      0: lo=3.0   → p_occ ≈ 0.953 → confident static
+      1: lo=0.5   → p_occ ≈ 0.622 → AMBIGUOUS (0.30 < 0.622 < 0.70)
+      2: lo=0.0   → p_occ = 0.500 → AMBIGUOUS
+      3: lo=-2.0  → p_occ ≈ 0.119 → confident dynamic
+      4: lo=0.0, n_hits=0           → free-only
+    All four hit voxels are evidenced (n_obs >= 3, n_hits >= 1).
+    """
+    from wato_lidar_preprocessing.classify.log_odds import classify_from_log_odds
+
+    unique_keys = np.array([0, 1, 2, 3, 4], dtype=np.int64)
+    lo_vals = np.array([3.0, 0.5, 0.0, -2.0, 0.0], dtype=np.float32)
+    n_obs_vals = np.array([10, 10, 10, 10, 10], dtype=np.int32)
+    n_hits_vals = np.array([10, 10, 10, 10, 0], dtype=np.int32)
+
+    cfg = ComponentConfig(
+        classification_method="log_odds",
+        p_static_threshold=0.70,
+        p_dynamic_threshold=0.30,
+        min_observations=3,
+        min_occupied_hits=1,
+    )
+    static_arr, not_dynamic_arr, diag = classify_from_log_odds(
+        unique_keys, lo_vals, n_obs_vals, n_hits_vals, cfg
+    )
+
+    # Voxel 0 is the only confident-static.
+    np.testing.assert_array_equal(static_arr, np.array([0], dtype=np.int64))
+
+    # Voxels 0, 1, 2, 4 all route to not_dynamic (static + ambiguous + free-only).
+    # Voxel 3 is the ONLY one missing → confident dynamic.
+    np.testing.assert_array_equal(
+        not_dynamic_arr, np.array([0, 1, 2, 4], dtype=np.int64)
+    )
+
+    assert diag["n_ambiguous"] == 2, (
+        f"voxels 1 and 2 must land in the ambiguous bucket, got {diag['n_ambiguous']}"
+    )
+    assert diag["n_confident_dynamic"] == 1, (
+        f"only voxel 3 should clear the confident-dynamic gate, "
+        f"got {diag['n_confident_dynamic']}"
+    )
+    assert diag["n_free_only"] == 1
+    assert diag["n_under_evidenced_with_hits"] == 0
+
+
+def test_config_rejects_inverted_thresholds():
+    """Cross-field validator: p_dynamic_threshold must be < p_static_threshold.
+
+    Without this guard a typo (`p_static_threshold: 0.30`) silently inverts
+    the bands — every evidenced + hit voxel becomes "ambiguous" and nothing
+    is dynamic.
+    """
+    with pytest.raises(ValueError, match="p_dynamic_threshold"):
+        ComponentConfig(p_static_threshold=0.30, p_dynamic_threshold=0.50)
+
+    # Equality is also disallowed (zero-width ambiguous band collapses
+    # the three-way decision back to two).
+    with pytest.raises(ValueError, match="p_dynamic_threshold"):
+        ComponentConfig(p_static_threshold=0.50, p_dynamic_threshold=0.50)
+
+
+# ---------------------------------------------------------------------------
+# Origin snapping for cross-chunk reproducibility
+# ---------------------------------------------------------------------------
+
+
+def test_origin_from_index_snaps_to_voxel_lattice():
+    """Two chunks with overlapping bboxes must agree on voxel keys.
+
+    Pre-fix the chunk origin was the literal float64 bbox-min, so two
+    chunks whose mins differ by a fractional voxel quantized the same
+    world point to different keys. Post-fix the origin snaps to
+    `floor(min / voxel_size) * voxel_size`, so every chunk's grid sits on
+    a single global lattice and the same world point always lands in the
+    same cell.
+    """
+    from wato_lidar_preprocessing.classify.io_helpers import origin_from_index
+    from wato_lidar_preprocessing.voxel import voxel_indices
+
+    voxel_size = 0.15
+    # Chunk A's bbox min is well below the shared point.
+    rows_a = [{"valid": True, "world_xmin": 1.234, "world_ymin": 2.567, "world_zmin": 0.5}]
+    # Chunk B's bbox min sits a fractional voxel away — pre-fix this is
+    # what made the same point quantize to a different key.
+    rows_b = [{"valid": True, "world_xmin": 1.300, "world_ymin": 2.600, "world_zmin": 0.55}]
+
+    origin_a = origin_from_index(rows_a, voxel_size)
+    origin_b = origin_from_index(rows_b, voxel_size)
+
+    # Snap contract: origin lands on the lattice (i.e. is a multiple of voxel_size).
+    for o in (origin_a, origin_b):
+        snapped = np.floor(o / voxel_size) * voxel_size
+        np.testing.assert_allclose(o, snapped, atol=1e-9)
+        # And origin is at or below the bbox-min on every axis.
+        assert (o <= np.array([1.234, 2.567, 0.5]) + 1e-9).all()
+
+    # Two chunks share the same global lattice, so the SAME world point
+    # produces identical voxel keys.
+    shared_world_point = np.array([[2.0, 3.0, 1.0]])
+    key_a = voxel_indices(shared_world_point, origin_a, voxel_size)
+    key_b = voxel_indices(shared_world_point, origin_b, voxel_size)
+    assert key_a[0] == key_b[0], (
+        f"shared world point produced different keys across chunks: "
+        f"{key_a[0]} vs {key_b[0]} (origins {origin_a} vs {origin_b}) — "
+        "chunk origins are not lattice-aligned"
+    )
+
+
+def test_origin_from_index_handles_negative_bbox():
+    """Snap math works for negative-coordinate bboxes (floor rounds toward -inf)."""
+    from wato_lidar_preprocessing.classify.io_helpers import origin_from_index
+
+    voxel_size = 0.15
+    rows = [{"valid": True, "world_xmin": -5.234, "world_ymin": -0.05, "world_zmin": 0.0}]
+    origin = origin_from_index(rows, voxel_size)
+
+    # floor(-5.234 / 0.15) = -35 -> -5.25 (below bbox-min, good).
+    # floor(-0.05  / 0.15) = -1  -> -0.15 (below bbox-min, good).
+    # floor( 0.0   / 0.15) =  0  ->  0.0  (exactly on lattice).
+    np.testing.assert_allclose(origin, np.array([-5.25, -0.15, 0.0]), atol=1e-9)
+    assert (origin <= np.array([-5.234, -0.05, 0.0]) + 1e-9).all()
+
+
+# ---------------------------------------------------------------------------
+# Missing sweep_origin -> hard fail (not silent dynamic-only)
+# ---------------------------------------------------------------------------
+
+
+def test_missing_sweep_origin_raises_value_error(tmp_env):
+    """Pre-fix a valid sweep with no 'origin' in its world NPZ was logged as a
+    warning and skipped during ray traversal, BUT its sweep_keys array was
+    already appended. Pass 2's searchsorted then missed every key from that
+    sweep -> mask=True for every point -> the whole sweep was silently
+    relabeled as dynamic in dynamic_map.npz.
+
+    Post-fix: build_log_odds_grid raises ValueError that names the chunk +
+    sweep + world NPZ path, plus the remediation (re-run deskew).
+
+    Numba-required because build_log_odds_grid allocates typed dicts before
+    reaching the per-sweep loop where the check fires; pytest skips this in
+    environments where numba is unavailable.
+    """
+    from wato_lidar_preprocessing.ray_traversal import _NUMBA_AVAILABLE
+
+    if not _NUMBA_AVAILABLE:
+        pytest.skip("numba unavailable")
+
+    bag_id, chunk_id = "bag_no_origin", "chunk0"
+    xyz = np.array([[5.0, 0.0, 0.0]])
+    # Deliberately omit `origin=` so the world NPZ has no 'origin' key.
+    _write_world_sweep(bag_id, chunk_id, 0, xyz)
+    _write_proc_index(bag_id, chunk_id, [0], xyz_per_sweep=[xyz])
+
+    cfg = ComponentConfig(classification_method="log_odds", min_observations=1)
+
+    with pytest.raises(ValueError, match="missing the 'origin' field"):
+        process_chunk(cfg, bag_id, chunk_id)
+
+
+def test_missing_origin_persistence_path_unaffected(tmp_env):
+    """Persistence classification doesn't call build_log_odds_grid, so a
+    missing origin must NOT block the persistence path.
+
+    This guards against an over-eager future refactor that moves the
+    origin-required check up into common pipeline code.
+    """
+    bag_id, chunk_id = "bag_no_origin_persistence", "chunk0"
+    xyz = np.array([[5.0, 0.0, 0.0]])
+    _write_world_sweep(bag_id, chunk_id, 0, xyz)  # no origin
+    _write_proc_index(bag_id, chunk_id, [0], xyz_per_sweep=[xyz])
+
+    cfg = ComponentConfig(
+        classification_method="persistence",
+        static_sweep_fraction=0.1,
+        static_sweep_min=1,
+    )
+    # Persistence path doesn't need origin at all; this must complete.
+    process_chunk(cfg, bag_id, chunk_id)

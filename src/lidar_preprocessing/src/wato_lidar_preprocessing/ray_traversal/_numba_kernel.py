@@ -15,6 +15,13 @@ import numba
 from ._keys import AXIS_RANGE, SHIFT_X, SHIFT_Y
 
 
+# Sentinel "no value yet" floor for max_logit. Numba typed dicts hold
+# float32 so a regular -inf works; we use a large negative literal for
+# parity with the Python kernel where `float('-inf')` is also fine but
+# this stays scrutable next to `log_odds_clamp` of order single digits.
+_NEG_INF_LOGIT = numba.float32(-1e18)
+
+
 @numba.njit(cache=True)
 def _update_sweep_numba(
     ox: float, oy: float, oz: float,
@@ -30,13 +37,40 @@ def _update_sweep_numba(
     l_occ: float,
     l_free: float,
     log_odds_clamp: float,
+    endpoint_priors: np.ndarray,  # (N,) float32 OR shape (0,) for "no priors"
+    alpha: float,
+    max_logit: numba.typed.Dict,  # int64 -> float32 (raw MapMOS logit max per voxel)
+    track_max_logit: bool,
 ) -> None:
     """Update log_odds, n_obs, n_hits for one sweep's rays.
 
     Canonical Amanatides-Woo init: derive t_max per axis from frac (position
     within current voxel), which is sign-symmetric and easier to audit than
     the (cx+1)*size - ox formulation.
+
+    MapMOS fusion (plan §step 1 / step 4): when `endpoint_priors.shape[0] ==
+    endpoints.shape[0]`, the endpoint update is `+= l_occ + alpha *
+    prior[i]` (the free-space update is unchanged). When `track_max_logit`,
+    the RAW prior[i] is also maxed into `max_logit[key]` — raw, not
+    alpha-scaled, so re-tuning alpha never moves the under-evidenced rescue
+    boundary. When `endpoint_priors.shape[0] != endpoints.shape[0]` OR
+    alpha is 0, the additive term collapses and the path is bit-identical
+    to the no-MapMOS run (regression invariant verified by the Step 1 gate).
     """
+    # Defense-in-depth tripwire (mirrors the same check in _update_sweep_python).
+    # _load_and_validate_logits validates length at the read boundary today,
+    # but any future filter that drops endpoints without dropping priors in
+    # lockstep would silently disable MapMOS fusion for that sweep — the
+    # signal is per-point, so a single missing entry has nowhere to go.
+    # Numba's nopython mode supports `raise` but not f-strings; the literal
+    # message is the tripwire — find the call site with traceback.
+    n_priors = endpoint_priors.shape[0]
+    n_pts = endpoints.shape[0]
+    if n_priors != 0 and n_priors != n_pts:
+        raise ValueError(
+            "endpoint_priors length must equal endpoints length or be zero"
+        )
+    use_priors = n_priors == n_pts
     INF = 1e18
     for i in range(endpoints.shape[0]):
         ex = endpoints[i, 0]
@@ -151,13 +185,29 @@ def _update_sweep_numba(
             and ezi >= 0 and ezi < AXIS_RANGE
         ):
             key = (exi << SHIFT_X) | (eyi << SHIFT_Y) | ezi
+            # MapMOS fusion: pull this point's raw logit (0.0 when priors
+            # are absent or alpha=0; the additive term then collapses).
+            if use_priors:
+                prior_i = endpoint_priors[i]
+            else:
+                prior_i = numba.float32(0.0)
             old_lo = log_odds.get(key, numba.float32(0.0))
-            new_lo = old_lo + numba.float32(l_occ)
+            new_lo = old_lo + numba.float32(l_occ) + numba.float32(alpha) * prior_i
             if new_lo > numba.float32(log_odds_clamp):
                 new_lo = numba.float32(log_odds_clamp)
+            elif new_lo < numba.float32(-log_odds_clamp):
+                new_lo = numba.float32(-log_odds_clamp)
             log_odds[key] = new_lo
             n_obs[key] = n_obs.get(key, numba.int32(0)) + numba.int32(1)
             n_hits[key] = n_hits.get(key, numba.int32(0)) + numba.int32(1)
+            # Track the RAW max logit per voxel (plan non-negotiable #4,
+            # #18): the under-evidenced rescue threshold runs against this
+            # value, independent of alpha. Negative logits matter (a
+            # voxel whose only logit was -0.5 must record -0.5, not 0.0).
+            if track_max_logit and use_priors:
+                old_max = max_logit.get(key, _NEG_INF_LOGIT)
+                if prior_i > old_max:
+                    max_logit[key] = prior_i
 
 
 @numba.njit(cache=True)
@@ -185,3 +235,25 @@ def _extract_arrays_numba(
         n_obs_out[i] = n_obs.get(k, numba.int32(0))
         n_hits_out[i] = n_hits.get(k, numba.int32(0))
         i += 1
+
+
+@numba.njit(cache=True)
+def _extract_max_logit_numba(
+    unique_keys: np.ndarray,
+    max_logit: numba.typed.Dict,
+    out: np.ndarray,
+) -> None:
+    """Fill `out[i] = max_logit.get(unique_keys[i], -inf)` inside Numba.
+
+    Mirrors _extract_arrays_numba: stays inside the JIT boundary so every
+    typed-dict lookup is a Numba primitive instead of crossing into Python.
+    On real chunks unique_keys can be in the 10^6 range; the Python-side
+    loop this replaces paid one boundary crossing per lookup.
+
+    `out` is pre-filled with the sentinel by the caller so we only have to
+    write entries that exist in the dict.
+    """
+    for i in range(unique_keys.shape[0]):
+        k = unique_keys[i]
+        if k in max_logit:
+            out[i] = max_logit[k]

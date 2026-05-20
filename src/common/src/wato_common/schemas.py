@@ -254,6 +254,10 @@ class ProcessedSweepMeta(BaseModel):
     n_points_ground: int = 0
     world_path: str
     dynamic_mask_path: str
+    # MapMOS sidecar path, populated when cfg.mapmos.enabled and inference
+    # produced a logit file for this sweep. Optional: missing/null = no
+    # MapMOS contribution (classify falls through to geometry-only).
+    mapmos_logit_path: Optional[str] = None
     has_intensity: bool
     deskewed: bool
     valid: bool = True
@@ -285,6 +289,7 @@ PROCESSED_SWEEPS_SCHEMA = pa.schema(
         pa.field("n_points_ground", pa.int64()),
         pa.field("world_path", pa.string()),
         pa.field("dynamic_mask_path", pa.string()),
+        pa.field("mapmos_logit_path", pa.string()),
         pa.field("has_intensity", pa.bool_()),
         pa.field("deskewed", pa.bool_()),
         pa.field("valid", pa.bool_()),

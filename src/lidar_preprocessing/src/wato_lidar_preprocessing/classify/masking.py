@@ -65,14 +65,27 @@ def apply_classification_to_sweep(
         is_not_dynamic = np.zeros(n, dtype=bool)
     mask = ~is_not_dynamic  # True == dynamic, length == n_total
 
-    # BUG FIX #4: in skip_ray mode, ground voxels were never carved into
-    # log_odds, so they have no entry in not_dynamic_arr and end up in the
-    # dynamic bucket above. Force them False here. No-op in skip_endpoint
-    # mode where ground voxels go into free_only_arr already; applied as a
-    # defensive safety belt under skip_ray semantics.
+    # Defensive ground filter: voxel-level static/dynamic decisions don't
+    # perfectly respect per-point ground status, so a per-point belt is
+    # needed in BOTH endpoint strategies.
+    #
+    # skip_ray   — ground voxels never carved into log_odds at all, so they
+    #              have no entry in not_dynamic_arr and would otherwise end
+    #              up in the dynamic bucket above.
+    # skip_endpoint — the ground voxel itself isn't hit by the ground point
+    #              (endpoint skipped), but ANOTHER point landing in the same
+    #              voxel (e.g. a passing car bumper that happens to share
+    #              the ground voxel) does fire +l_occ. The voxel then has
+    #              n_hits>0 + low p_occ + many observations, and falls
+    #              through every not_dynamic gate — getting labeled dynamic
+    #              and dragging the ground point with it.
+    #
+    # Patchwork-detected ground is never dynamic by definition, so force
+    # mask=False at those points regardless of voxel-level decision. Only
+    # the log-odds path needs this: the persistence path makes per-point
+    # decisions and doesn't have the mixed-voxel issue.
     if (
         cfg.classification_method == "log_odds"
-        and cfg.ground_endpoint_strategy == "skip_ray"
         and ground_mask_cache_i is not None
     ):
         mask &= ~ground_mask_cache_i

@@ -12,6 +12,16 @@ data/models/*
 !data/artifacts/.gitkeep
 !data/models/.gitkeep
 
+# Pre-fetched wheels — pulled by scripts/prefetch_torch_wheels.sh, COPYd into
+# the lidar_preprocessing deps image. ~2.3 GB; do not commit.
+docker/wheels/**/*.whl
+
+# Pre-cloned git sources — populated by scripts/prefetch_git_sources.sh,
+# COPYd into the lidar_preprocessing deps image. Avoids flaky github clones
+# during the Docker build. Tracked .gitkeep files survive.
+docker/sources/*
+!docker/sources/.gitkeep
+
 # Python
 __pycache__/
 *.py[cod]
