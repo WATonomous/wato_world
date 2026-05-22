@@ -39,7 +39,7 @@ def apply_classification_to_sweep(
     bag_id: str,
     chunk_id: str,
     any_intensity: bool,
-    mf_mos_mask: np.ndarray | None = None,
+    mf_mos_dynamic_arr: np.ndarray | None = None,
 ) -> SweepMaskResult:
     """Compute dynamic mask for one sweep, save it, return per-sweep stats.
 
@@ -47,9 +47,10 @@ def apply_classification_to_sweep(
     saved mask length matches the downstream xyz array — that's the
     contract proposal_generation and the occupancy export depend on.
 
-    `mf_mos_mask` is an optional (n_points,) bool array from the MF-MOS
-    learned classifier.  When provided and fusion_mode is not "independent",
-    it overrides or augments the voxel-based dynamic mask.
+    `mf_mos_dynamic_arr` is an optional sorted int64 array of voxel keys
+    that MF-MOS voted dynamic (aggregated across sweeps in Pass 1).  When
+    provided, the fusion is done via searchsorted lookup — the same pattern
+    as `not_dynamic_arr` — so it is composable with the AW classifier.
     """
     n = keys.shape[0]
     has_intensity = bool(row.get("has_intensity", False))
@@ -96,12 +97,15 @@ def apply_classification_to_sweep(
         is_static = np.zeros(n, dtype=bool)
         n_static = 0
 
-    # MF-MOS fusion: override the per-point dynamic label with the learned mask.
-    if mf_mos_mask is not None and cfg.mf_mos.fusion_mode != "independent":
+    # MF-MOS voxel-level fusion via searchsorted (same pattern as not_dynamic_arr).
+    if mf_mos_dynamic_arr is not None and mf_mos_dynamic_arr.size > 0:
+        pos = np.searchsorted(mf_mos_dynamic_arr, keys)
+        pos = np.clip(pos, 0, mf_mos_dynamic_arr.size - 1)
+        is_mf_mos_dyn = mf_mos_dynamic_arr[pos] == keys
         if cfg.mf_mos.fusion_mode == "union":
-            mask = mask | mf_mos_mask
+            mask = mask | is_mf_mos_dyn
         else:  # mfmos_only
-            mask = mf_mos_mask.copy()
+            mask = is_mf_mos_dyn
         n_dyn = int(mask.sum())
         # A point fusion-labelled dynamic can't remain in the static cloud.
         is_static = is_static & ~mask

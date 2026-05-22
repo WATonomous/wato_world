@@ -31,7 +31,7 @@ export ACTIVE_MODULES="lidar_preprocessing:dev"
 ############################## ADVANCED CONFIGURATIONS ##############################
 ## Set to "true" if the host has an NVIDIA GPU + nvidia-container-toolkit.
 ## DEFAULT = "false"
-export GPU_AVAILABLE="true"
+export GPU_AVAILABLE="false"
 
 ## Install Claude Code in dev containers. Set to "false" to skip.
 ## DEFAULT = "false"

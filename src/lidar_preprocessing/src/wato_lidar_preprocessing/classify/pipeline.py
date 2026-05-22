@@ -24,7 +24,6 @@ from wato_common.artifact_store import (
     ensure_local_dir,
     lidar_proc_dir,
     lidar_proc_index_path,
-    lidar_sweep_path,
     local_path,
     static_map_path,
 )
@@ -36,6 +35,7 @@ from wato_lidar_preprocessing.voxel import voxel_indices
 from .io_helpers import (
     cache_byte_budget,
     estimate_cache_bytes,
+    load_mf_mos_world_mask,
     load_world_xyz_intensity,
     origin_from_index,
 )
@@ -81,75 +81,6 @@ def _write_empty_outputs(
     )
     return ClassifyResult(0, 0, out_uri)
 
-
-def _load_mf_mos_world_mask(
-    bag_id: str,
-    chunk_id: str,
-    row: dict,
-    n_world: int,
-    filter_nonfinite: bool,
-) -> np.ndarray | None:
-    """Load an MF-MOS raw-length mask and align it to world-frame length.
-
-    MF-MOS masks are (n_raw,) bool aligned to the raw lidar NPZ.  Deskew
-    applies a nonfinite filter, so n_world <= n_raw.  We re-apply the same
-    filter here so the mask can be fused with the (n_world,) voxel mask.
-
-    Returns None if the mask is unavailable or can't be loaded.
-    """
-    mf_path = row.get("mf_mos_mask_path")
-    if not mf_path:
-        return None
-    try:
-        mf_raw = np.load(local_path(mf_path))
-    except Exception as exc:  # noqa: BLE001
-        log.warning("could not load mf_mos mask %s: %s", mf_path, exc)
-        return None
-
-    n_raw = mf_raw.shape[0]
-    if n_raw == n_world:
-        return mf_raw  # common case: no NaN/inf points were dropped
-
-    if n_raw < n_world:
-        log.warning(
-            "sweep %s: mf_mos mask len %d < world len %d — fusion skipped for this sweep",
-            row.get("sweep_id"),
-            n_raw,
-            n_world,
-        )
-        return None
-
-    # n_raw > n_world: re-apply the nonfinite filter to get world-aligned mask.
-    raw_uri = lidar_sweep_path(
-        bag_id,
-        chunk_id,
-        str(row.get("lidar_id", "")),
-        int(row.get("sweep_id", 0)),
-    )
-    try:
-        raw = np.load(local_path(raw_uri))
-    except Exception as exc:  # noqa: BLE001
-        log.warning("could not load raw sweep for mf_mos fusion alignment: %s", exc)
-        return None
-
-    x_r = raw["x"].astype(np.float64)
-    y_r = raw["y"].astype(np.float64)
-    z_r = raw["z"].astype(np.float64)
-    if filter_nonfinite:
-        finite = np.isfinite(x_r) & np.isfinite(y_r) & np.isfinite(z_r)
-    else:
-        finite = np.ones(n_raw, dtype=bool)
-
-    mf_world = mf_raw[finite]
-    if mf_world.shape[0] != n_world:
-        log.warning(
-            "sweep %s: mf_mos world-aligned len %d != world len %d — fusion skipped",
-            row.get("sweep_id"),
-            mf_world.shape[0],
-            n_world,
-        )
-        return None
-    return mf_world
 
 
 def _run_pass_1_persistence(
@@ -257,12 +188,14 @@ def process_chunk(
             ground_mask_cache,
             sweep_keys,
             frame_keys,
-            (unique_keys, lo_vals, n_obs_vals, n_hits_vals),
+            (unique_keys, lo_vals, n_obs_vals, n_hits_vals, mf_mos_votes_arr, n_sweep_hits_arr),
         ) = build_log_odds_grid(
-            meta_rows, cfg, origin, chunk_id, cache_xyz=cache_xyz
+            meta_rows, cfg, origin, chunk_id, cache_xyz=cache_xyz, bag_id=bag_id
         )
-        static_arr, not_dynamic_arr, diag = classify_from_log_odds(
-            unique_keys, lo_vals, n_obs_vals, n_hits_vals, cfg
+        static_arr, not_dynamic_arr, mf_mos_dynamic_arr, diag = classify_from_log_odds(
+            unique_keys, lo_vals, n_obs_vals, n_hits_vals, cfg,
+            mf_mos_votes_arr=mf_mos_votes_arr,
+            n_sweep_hits_arr=n_sweep_hits_arr,
         )
     else:
         (
@@ -277,6 +210,7 @@ def process_chunk(
         static_arr, not_dynamic_arr, threshold = classify_persistence(
             sweep_keys, len(meta_rows), cfg
         )
+        mf_mos_dynamic_arr = None
         unique_keys = np.empty(0, dtype=np.int64)
         lo_vals = np.empty(0, dtype=np.float32)
         n_obs_vals = np.empty(0, dtype=np.int32)
@@ -292,10 +226,6 @@ def process_chunk(
     total_dynamic = 0
     updated_meta: list[dict] = []
 
-    use_mf_mos_fusion = (
-        cfg.mf_mos.enabled and cfg.mf_mos.fusion_mode != "independent"
-    )
-
     for i, (row, keys) in enumerate(
         tqdm(
             zip(meta_rows, sweep_keys),
@@ -309,12 +239,21 @@ def process_chunk(
             updated_meta.append(_invalid_meta_row(row, sweep_id))
             continue
 
-        # Load MF-MOS mask when fusion is active and points exist.
-        mf_mos_mask = None
-        if use_mf_mos_fusion and keys.shape[0] > 0:
-            mf_mos_mask = _load_mf_mos_world_mask(
+        # log_odds: mf_mos_dynamic_arr is pre-computed chunk-wide from voxel votes.
+        # persistence: load per-sweep mask and build a sweep-local dynamic array —
+        # same semantics as the old per-point OR, but through the shared searchsorted path.
+        sweep_mf_mos_dynamic_arr = mf_mos_dynamic_arr
+        if (
+            not use_log_odds
+            and cfg.mf_mos.enabled
+            and cfg.mf_mos.fusion_mode != "independent"
+            and keys.shape[0] > 0
+        ):
+            mf_mask = load_mf_mos_world_mask(
                 bag_id, chunk_id, row, keys.shape[0], cfg.filter_nonfinite_points
             )
+            if mf_mask is not None:
+                sweep_mf_mos_dynamic_arr = np.sort(np.unique(keys[mf_mask]))
 
         result = apply_classification_to_sweep(
             row,
@@ -329,7 +268,7 @@ def process_chunk(
             bag_id,
             chunk_id,
             any_intensity,
-            mf_mos_mask=mf_mos_mask,
+            mf_mos_dynamic_arr=sweep_mf_mos_dynamic_arr,
         )
         total_static += result.n_static
         total_dynamic += result.n_dynamic

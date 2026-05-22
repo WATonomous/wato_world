@@ -62,7 +62,3 @@ RUN uv pip install --system --break-system-packages \
         "torch>=2.7,<3" \
     && uv pip install --system --break-system-packages \
         filelock sympy networkx jinja2 typing-extensions
-
-# MF-MOS runtime deps (numba + tqdm already installed above).
-RUN uv pip install --system --break-system-packages \
-        pytorch-lightning pyquaternion easydict

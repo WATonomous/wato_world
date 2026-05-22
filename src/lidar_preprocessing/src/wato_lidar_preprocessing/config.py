@@ -179,6 +179,11 @@ class ComponentConfig(BaseModel):
 
     # Step A.5 — MF-MOS learned moving-object segmentation.
     mf_mos: MFMosParams = MFMosParams()
+    # Voxel-level MF-MOS vote aggregation thresholds.
+    # A voxel is considered MF-MOS-dynamic if it received at least
+    # min_mf_mos_votes votes AND the vote fraction >= mf_mos_vote_fraction_threshold.
+    mf_mos_vote_fraction_threshold: float = 0.5
+    min_mf_mos_votes: int = 1
 
     # SAM4D/MinkUNet alignment: export binary voxel occupancy alongside
     # static_map.npz.  Includes ALL occupied voxels (static + dynamic), not
@@ -221,6 +226,13 @@ class ComponentConfig(BaseModel):
     def _positive_min_obs(cls, v: int) -> int:
         if v < 1:
             raise ValueError(f"value must be >= 1, got {v}")
+        return v
+
+    @field_validator("min_mf_mos_votes")
+    @classmethod
+    def _positive_min_mf_mos_votes(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"min_mf_mos_votes must be >= 1, got {v}")
         return v
 
     @field_validator("static_sweep_fraction")

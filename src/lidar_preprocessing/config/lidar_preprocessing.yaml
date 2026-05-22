@@ -97,3 +97,8 @@ lidar_preprocessing:
     save_scores: false              # also write _mf_mos_score.npy float32
     fusion_mode: independent        # independent | union | mfmos_only
     max_pose_gap_ms: 200
+
+  # Voxel-level MF-MOS vote aggregation thresholds (active when fusion_mode != independent).
+  # A voxel is MF-MOS-dynamic if votes >= min_mf_mos_votes AND vote_fraction >= threshold.
+  mf_mos_vote_fraction_threshold: 0.5
+  min_mf_mos_votes: 1

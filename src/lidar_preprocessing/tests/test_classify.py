@@ -13,6 +13,7 @@ from wato_common.artifact_store import (
     lidar_proc_index_path,
     lidar_world_path,
     local_path,
+    mf_mos_mask_path,
     static_map_path,
     voxel_occupancy_path,
 )
@@ -577,4 +578,140 @@ def test_skip_ray_ground_not_dynamic(tmp_env):
     # Contract 2: the ground point at index 0 must be False (bug fix #4).
     assert not mask[0], (
         "ground point in skip_ray mode must not be labeled dynamic (bug fix #4)"
+    )
+
+
+def _write_mf_mos_mask(
+    bag_id: str, chunk_id: str, sweep_id: int, mask: np.ndarray
+) -> str:
+    """Write a MF-MOS bool mask .npy and return the URI."""
+    uri = mf_mos_mask_path(bag_id, chunk_id, sweep_id)
+    path = local_path(uri)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    np.save(path, mask.astype(bool))
+    return uri
+
+
+def _proc_row_mf_mos(
+    bag_id: str,
+    chunk_id: str,
+    sweep_id: int,
+    xyz: np.ndarray,
+    mf_mos_mask_uri: str | None = None,
+) -> dict:
+    """Variant of _proc_row that includes mf_mos_mask_path."""
+    row = _proc_row(bag_id, chunk_id, sweep_id, xyz)
+    row["mf_mos_mask_path"] = mf_mos_mask_uri
+    return row
+
+
+def test_voxel_vote_fusion_requires_min_votes(tmp_env):
+    """A single-sweep MF-MOS vote is insufficient when min_mf_mos_votes=2.
+
+    One sweep, one point, MF-MOS flags it moving.  With min_mf_mos_votes=2,
+    a single vote is below the threshold → no mf_mos_dynamic_arr entry →
+    voxel must not be labeled dynamic.
+    """
+    bag_id, chunk_id = "bag_vote_min", "chunk0"
+    xyz = np.array([[5.0, 0.0, 0.0]])
+    sensor_origin = np.array([-1.0, 0.0, 0.0])
+
+    _write_world_sweep(bag_id, chunk_id, 0, xyz, origin=sensor_origin)
+    mf_uri = _write_mf_mos_mask(bag_id, chunk_id, 0, np.array([True]))
+
+    row = _proc_row_mf_mos(bag_id, chunk_id, 0, xyz, mf_uri)
+    write_table([row], PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
+
+    cfg = ComponentConfig(
+        classification_method="log_odds",
+        min_observations=3,
+        min_occupied_hits=1,
+        min_mf_mos_votes=2,
+        mf_mos_vote_fraction_threshold=0.5,
+        mf_mos={"enabled": True, "fusion_mode": "union"},
+    )
+    result = process_chunk(cfg, bag_id, chunk_id)
+
+    assert result.n_dynamic == 0, (
+        "single-sweep vote below min_mf_mos_votes=2 must not produce dynamic points"
+    )
+    mask = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
+    assert not mask[0], "point in below-threshold-vote voxel must be mask=False"
+
+
+def test_voxel_vote_fusion_union_threshold(tmp_env):
+    """MF-MOS votes meeting threshold override AW static in union mode.
+
+    Five sweeps hit the same voxel; 3 of 5 MF-MOS masks flag it moving
+    (vote_fraction = 0.6 >= 0.5, votes = 3 >= 1).  AW sees 5 hits with
+    min_observations=3 → confident static.  Union mode must override: all
+    5 sweep points become dynamic, none static.
+    """
+    bag_id, chunk_id = "bag_vote_union", "chunk0"
+    xyz = np.array([[5.0, 0.0, 0.0]])
+    sensor_origin = np.array([-1.0, 0.0, 0.0])
+    n_sweeps = 5
+    mf_flags = [True, True, True, False, False]
+
+    rows = []
+    for i in range(n_sweeps):
+        _write_world_sweep(bag_id, chunk_id, i, xyz, origin=sensor_origin)
+        mf_uri = _write_mf_mos_mask(bag_id, chunk_id, i, np.array([mf_flags[i]]))
+        rows.append(_proc_row_mf_mos(bag_id, chunk_id, i, xyz, mf_uri))
+    write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
+
+    cfg = ComponentConfig(
+        classification_method="log_odds",
+        l_occ=0.85,
+        l_free=0.40,
+        min_observations=3,
+        min_occupied_hits=1,
+        min_mf_mos_votes=1,
+        mf_mos_vote_fraction_threshold=0.5,
+        mf_mos={"enabled": True, "fusion_mode": "union"},
+    )
+    result = process_chunk(cfg, bag_id, chunk_id)
+
+    assert result.n_dynamic == n_sweeps, (
+        f"all {n_sweeps} points must be dynamic via MF-MOS union; got {result.n_dynamic}"
+    )
+    assert result.n_static == 0, (
+        "voxel in mf_mos_dynamic_arr must be removed from static cloud"
+    )
+
+
+def test_voxel_vote_fusion_independent_mode_no_effect(tmp_env):
+    """fusion_mode=independent: MF-MOS votes have no effect on AW classification.
+
+    Same five-sweep setup as test_voxel_vote_fusion_union_threshold, but with
+    fusion_mode=independent.  Vote accumulation is skipped entirely → AW result
+    stands alone → confident-static voxel → n_dynamic == 0.
+    """
+    bag_id, chunk_id = "bag_vote_indep", "chunk0"
+    xyz = np.array([[5.0, 0.0, 0.0]])
+    sensor_origin = np.array([-1.0, 0.0, 0.0])
+    n_sweeps = 5
+    mf_flags = [True, True, True, False, False]
+
+    rows = []
+    for i in range(n_sweeps):
+        _write_world_sweep(bag_id, chunk_id, i, xyz, origin=sensor_origin)
+        mf_uri = _write_mf_mos_mask(bag_id, chunk_id, i, np.array([mf_flags[i]]))
+        rows.append(_proc_row_mf_mos(bag_id, chunk_id, i, xyz, mf_uri))
+    write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
+
+    cfg = ComponentConfig(
+        classification_method="log_odds",
+        l_occ=0.85,
+        l_free=0.40,
+        min_observations=3,
+        min_occupied_hits=1,
+        min_mf_mos_votes=1,
+        mf_mos_vote_fraction_threshold=0.5,
+        mf_mos={"enabled": True, "fusion_mode": "independent"},
+    )
+    result = process_chunk(cfg, bag_id, chunk_id)
+
+    assert result.n_dynamic == 0, (
+        "independent fusion_mode must not apply MF-MOS votes to AW classification"
     )
