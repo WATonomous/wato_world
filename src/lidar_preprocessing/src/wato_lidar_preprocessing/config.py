@@ -79,6 +79,60 @@ class PatchworkParams(BaseModel):
         }
 
 
+class MFMosParams(BaseModel):
+    """MF-MOS moving-object segmentation parameters.
+
+    Runs as step A.5 (between deskew and classify) when enabled is True.
+    Requires a CUDA-capable GPU; set device="cpu" only for tiny smoke tests.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    checkpoint_path: str = "/data/models/mf_mos/mf_mos_semantic_kitti.pt"
+    arch_config: str = "/data/models/mf_mos/arch_cfg.yaml"
+    data_config: str = "/data/models/mf_mos/data_cfg.yaml"
+    residual_steps: list[int] = Field(default_factory=lambda: [1, 2, 4, 8])
+    range_image_h: int = 32
+    range_image_w: int = 1024
+    fov_up_deg: float = 10.0
+    fov_down_deg: float = -30.0
+    device: str = "cuda"
+    batch_size: int = 1
+    score_threshold: float = 0.5
+    save_scores: bool = False
+    # independent: both masks written side-by-side, downstream chooses.
+    # union: classify accumulators (static_map/dynamic_map) use voxel | mf_mos.
+    # mfmos_only: classify accumulators use mf_mos mask only.
+    # Per-sweep _dynamic_mask.npy always keeps the voxel-only mask.
+    fusion_mode: str = "independent"
+    max_pose_gap_ms: float = 200.0
+
+    @field_validator("residual_steps")
+    @classmethod
+    def _residuals_positive(cls, v: list[int]) -> list[int]:
+        if any(k <= 0 for k in v):
+            raise ValueError(f"residual_steps must all be > 0, got {v}")
+        if len(v) != len(set(v)):
+            raise ValueError(f"residual_steps must be unique, got {v}")
+        return sorted(v)
+
+    @field_validator("fusion_mode")
+    @classmethod
+    def _fusion_mode_valid(cls, v: str) -> str:
+        valid = {"independent", "union", "mfmos_only"}
+        if v not in valid:
+            raise ValueError(f"fusion_mode must be one of {valid}, got {v!r}")
+        return v
+
+    @field_validator("score_threshold")
+    @classmethod
+    def _threshold_range(cls, v: float) -> float:
+        if not (0.0 <= v <= 1.0):
+            raise ValueError(f"score_threshold must be in [0, 1], got {v}")
+        return v
+
+
 class ComponentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -104,6 +158,9 @@ class ComponentConfig(BaseModel):
 
     # Multi-lidar frame grouping (SAM4D alignment).
     frame_sync: FrameSyncParams = FrameSyncParams()
+
+    # Step A.5 — MF-MOS learned moving-object segmentation.
+    mf_mos: MFMosParams = MFMosParams()
 
     # SAM4D/MinkUNet alignment: export binary voxel occupancy alongside
     # static_map.npz.  Includes ALL occupied voxels (static + dynamic), not

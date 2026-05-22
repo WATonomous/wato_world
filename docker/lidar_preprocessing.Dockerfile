@@ -6,7 +6,7 @@
 # (build / deploy / develop) is composed by docker/template.Dockerfile.
 
 # syntax=docker/dockerfile:1.6
-ARG BASE_IMAGE=ghcr.io/watonomous/wato_world/base:cpu-ubuntu24.04
+ARG BASE_IMAGE=ghcr.io/watonomous/wato_world/base:cuda12.8.1-cudnn-runtime-ubuntu24.04
 
 # ---------------------------------------------------------------------------
 FROM ${BASE_IMAGE} AS source
@@ -16,11 +16,15 @@ COPY src/lidar_preprocessing /ws/src/lidar_preprocessing
 
 # ---------------------------------------------------------------------------
 FROM ${BASE_IMAGE} AS dependencies
+# Torch + CUDA wheels are large (>700 MB); extend the uv download timeout.
+ENV UV_HTTP_TIMEOUT=2000
 # libeigen3-dev  — required by pypatchworkpp C++ build
 # libegl1 libgl1 — required by Open3D's OffscreenRenderer (headless EGL)
+# libglib2.0-0 libsm6 libxext6 libxrender1 — required by OpenCV / Open3D headless
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgomp1 libeigen3-dev \
         libegl1 libgl1 \
+        libglib2.0-0 libsm6 libxext6 libxrender1 \
     && apt-get -qq autoremove -y && apt-get -qq clean \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc/* /usr/share/man/*
 
@@ -35,3 +39,14 @@ RUN uv pip install --system --break-system-packages open3d
 # Patchwork++ Python bindings (v1.0.4 matches the monorepo's pinned tag).
 # Requires libeigen3-dev (added above) and cmake (present in base image).
 RUN uv pip install --system --break-system-packages pypatchworkpp==1.0.4
+
+# PyTorch matched to CUDA 12.8 base.
+# When mf_mos.enabled: false (default) torch is never imported at runtime.
+RUN uv pip install --system --break-system-packages \
+        --extra-index-url https://download.pytorch.org/whl/cu128 \
+        --index-strategy unsafe-best-match \
+        "torch>=2.4,<2.7"
+
+# MF-MOS runtime deps.
+RUN uv pip install --system --break-system-packages \
+        pytorch-lightning numba pyquaternion easydict tqdm

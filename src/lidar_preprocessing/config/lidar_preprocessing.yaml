@@ -55,3 +55,25 @@ lidar_preprocessing:
 
   upstream_versions:
     ingest: "0.1.0"
+
+  # Step A.5 — MF-MOS learned moving-object segmentation.
+  # Disabled by default; outputs are independent of the voxel-occupancy classifier.
+  # Set enabled: true and provide pretrained weights to activate.
+  # Download weights from https://github.com/SCNU-RISLAB/MF-MOS/releases and
+  # place at /data/models/mf_mos/ (mounted via docker-compose.yaml).
+  mf_mos:
+    enabled: false
+    checkpoint_path: /data/models/mf_mos/mf_mos_semantic_kitti.pt
+    arch_config:   /data/models/mf_mos/arch_cfg.yaml
+    data_config:   /data/models/mf_mos/data_cfg.yaml
+    residual_steps: [1, 2, 4, 8]   # past-sweep offsets for residual channels
+    range_image_h: 32               # NuScenes 32-beam; set to 64 for KITTI
+    range_image_w: 1024
+    fov_up_deg:    10.0             # NuScenes defaults; KITTI uses 3.0 / -25.0
+    fov_down_deg: -30.0
+    device: cuda                    # set to "cpu" for tiny smoke tests
+    batch_size: 1
+    score_threshold: 0.5
+    save_scores: false              # also write _mf_mos_score.npy float32
+    fusion_mode: independent        # independent | union | mfmos_only
+    max_pose_gap_ms: 200

@@ -1,0 +1,580 @@
+"""Step A.5 — MF-MOS learned moving-object segmentation.
+
+Range-image-based deep MOS as an additional dynamic-point signal alongside
+the voxel classifier (classify.py).  Runs between deskew (which writes raw
+sweep NPZs and the lidar_proc_index parquet) and classify (which produces
+the voxel-based dynamic mask).
+
+Outputs per sweep (when cfg.mf_mos.enabled is True):
+  chunks/<chunk_id>/lidar_proc/<sweep_id:06d>_mf_mos_mask.npy   (n_raw,) bool
+  chunks/<chunk_id>/lidar_proc/<sweep_id:06d>_mf_mos_score.npy  (n_raw,) float32 [opt]
+
+Mask is True = moving (matches the polarity of _dynamic_mask.npy from classify).
+Length equals the RAW sweep length (before deskew's nonfinite filter), so
+downstream consumers loading the raw lidar NPZ get index-aligned arrays.
+
+Skipped sweeps (valid=False, pose gap, empty cloud) write no file and leave
+mf_mos_mask_path=None in the index.  When cfg.mf_mos.enabled is False the
+entire step is a no-op.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+import numpy as np
+
+from wato_common.artifact_store import (
+    ensure_local_dir,
+    lidar_proc_dir,
+    lidar_proc_index_path,
+    lidar_sweeps_path,
+    local_path,
+    mf_mos_mask_path,
+    mf_mos_score_path,
+)
+from wato_common.geometry import PoseSample, batch_interpolate_poses
+from wato_common.io.parquet_io import read_rows, write_table
+from wato_common.schemas import PROCESSED_SWEEPS_SCHEMA
+from wato_lidar_preprocessing._inputs import load_ego_T_lidar_dict, load_pose_samples
+from wato_lidar_preprocessing.config import ComponentConfig, MFMosParams
+
+if TYPE_CHECKING:
+    from wato_lidar_preprocessing._mf_mos_runtime import MFMosModel
+
+log = logging.getLogger(__name__)
+
+# Module-level model cache keyed by (checkpoint_path, arch_cfg, data_cfg, device).
+_MODEL_CACHE: dict[tuple[str, str, str, str], "MFMosModel"] = {}
+
+
+# ---------------------------------------------------------------------------
+# Result dataclass
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MFMosResult:
+    n_sweeps_processed: int = 0
+    n_sweeps_skipped_disabled: int = 0
+    n_sweeps_skipped_invalid: int = 0
+    n_sweeps_skipped_pose: int = 0
+    n_sweeps_skipped_empty: int = 0
+    n_sweeps_skipped_inference_error: int = 0
+    n_points_moving: int = 0
+    n_points_total: int = 0
+    skip_reasons: list[tuple[int, str]] = field(default_factory=list)
+
+    @property
+    def n_skipped(self) -> int:
+        return (
+            self.n_sweeps_skipped_invalid
+            + self.n_sweeps_skipped_pose
+            + self.n_sweeps_skipped_empty
+            + self.n_sweeps_skipped_inference_error
+        )
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def process_chunk(
+    cfg: ComponentConfig,
+    bag_id: str,
+    chunk_id: str,
+) -> MFMosResult:
+    """Run MF-MOS for every valid sweep in a chunk.
+
+    No-op (writes nothing, returns zero result) when cfg.mf_mos.enabled is False.
+    """
+    params = cfg.mf_mos
+
+    if not params.enabled:
+        meta_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
+        n = sum(1 for r in meta_rows if r.get("valid", True) is not False)
+        return MFMosResult(n_sweeps_skipped_disabled=n)
+
+    sweep_rows = read_rows(lidar_sweeps_path(bag_id, chunk_id))
+    meta_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
+    meta_by_sid: dict[int, dict] = {int(r["sweep_id"]): r for r in meta_rows}
+
+    pose_samples = load_pose_samples(bag_id, chunk_id)
+    if not pose_samples:
+        log.warning("chunk %s: no valid poses; MF-MOS skipped for entire chunk", chunk_id)
+        return MFMosResult()
+
+    lidar_ids = {
+        r["lidar_id"] for r in sweep_rows if r.get("valid", True) is not False
+    }
+    ego_T_lidar_by_id = load_ego_T_lidar_dict(bag_id, lidar_ids)
+
+    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
+
+    model = _load_model(params)
+    max_gap_ns = int(params.max_pose_gap_ms * 1_000_000)
+
+    # Group valid sweep rows by lidar_id, sorted by timestamp, to build the
+    # sliding window of past sweeps used for residual computation.
+    rows_by_lidar: dict[str, list[dict]] = {}
+    for r in sweep_rows:
+        if r.get("valid", True) is False:
+            continue
+        rows_by_lidar.setdefault(r["lidar_id"], []).append(r)
+    for rows in rows_by_lidar.values():
+        rows.sort(key=lambda r: int(r["header_timestamp_ns"]))
+
+    result = MFMosResult()
+    max_k = max(params.residual_steps) if params.residual_steps else 0
+
+    for lid, lid_rows in rows_by_lidar.items():
+        if lid not in ego_T_lidar_by_id:
+            log.warning("lidar %s: no calibration; skipping MF-MOS for its sweeps", lid)
+            for r in lid_rows:
+                result.n_sweeps_skipped_invalid += 1
+                result.skip_reasons.append(
+                    (int(r["sweep_id"]), f"no calibration for lidar {lid}")
+                )
+            continue
+
+        ego_T_lidar = ego_T_lidar_by_id[lid]
+
+        # Sliding window: list of (header_ts_ns, xyz_raw_float32) for last max_k sweeps.
+        past_window: list[tuple[int, np.ndarray]] = []
+
+        for s_idx, row in enumerate(lid_rows):
+            sid = int(row["sweep_id"])
+            raw_path = row["lidar_path"]
+            cur_ts = int(row["header_timestamp_ns"])
+
+            try:
+                raw_data = np.load(local_path(raw_path))
+                x_r = raw_data["x"].astype(np.float32)
+                y_r = raw_data["y"].astype(np.float32)
+                z_r = raw_data["z"].astype(np.float32)
+                n_raw = x_r.shape[0]
+                intensity_r = (
+                    raw_data["intensity"].astype(np.float32)
+                    if "intensity" in raw_data.files
+                    else None
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("sweep %d: failed to load raw NPZ (%s); writing zero mask", sid, exc)
+                _write_zero_mask(bag_id, chunk_id, sid, 0, params.save_scores)
+                _record_meta_path(meta_by_sid, sid, None)
+                result.n_sweeps_skipped_invalid += 1
+                result.skip_reasons.append((sid, f"raw load: {exc}"))
+                continue
+
+            if n_raw == 0:
+                np.save(
+                    local_path(mf_mos_mask_path(bag_id, chunk_id, sid)),
+                    np.zeros(0, dtype=bool),
+                )
+                if params.save_scores:
+                    np.save(
+                        local_path(mf_mos_score_path(bag_id, chunk_id, sid)),
+                        np.zeros(0, dtype=np.float32),
+                    )
+                _record_meta_path(meta_by_sid, sid, mf_mos_mask_path(bag_id, chunk_id, sid))
+                result.n_sweeps_skipped_empty += 1
+                past_window = (past_window + [(cur_ts, np.empty((0, 3), dtype=np.float32))])[-max_k:]
+                continue
+
+            # Compute finite mask — same filter deskew applies.
+            if cfg.filter_nonfinite_points:
+                finite = np.isfinite(x_r) & np.isfinite(y_r) & np.isfinite(z_r)
+            else:
+                finite = np.ones(n_raw, dtype=bool)
+            xyz_cur = np.stack([x_r[finite], y_r[finite], z_r[finite]], axis=1)
+            intensity_cur = intensity_r[finite] if intensity_r is not None else None
+            n_finite = xyz_cur.shape[0]
+
+            # Interpolate current pose.
+            try:
+                pose_cur = _interpolate_pose(pose_samples, cur_ts, max_gap_ns)
+            except _PoseGapError as exc:
+                log.warning("sweep %d: %s; MF-MOS writing zero mask", sid, exc)
+                _write_zero_mask(bag_id, chunk_id, sid, n_raw, params.save_scores)
+                _record_meta_path(meta_by_sid, sid, mf_mos_mask_path(bag_id, chunk_id, sid))
+                result.n_sweeps_skipped_pose += 1
+                result.skip_reasons.append((sid, str(exc)))
+                past_window = (past_window + [(cur_ts, xyz_cur)])[-max_k:]
+                continue
+
+            # Range-project current scan.
+            range_img, pixel_to_point_idx, point_to_pixel = _range_project(
+                xyz_cur,
+                intensity_cur,
+                params.range_image_h,
+                params.range_image_w,
+                params.fov_up_deg,
+                params.fov_down_deg,
+            )
+
+            # Build residual images — one per configured step.
+            residuals: list[np.ndarray] = []
+            for k in params.residual_steps:
+                j = s_idx - k
+                if j < 0 or j >= len(past_window):
+                    residuals.append(
+                        np.zeros(
+                            (params.range_image_h, params.range_image_w), dtype=np.float32
+                        )
+                    )
+                    continue
+                past_ts, past_xyz = past_window[j]
+                if abs(cur_ts - past_ts) > max_gap_ns or past_xyz.shape[0] == 0:
+                    residuals.append(
+                        np.zeros(
+                            (params.range_image_h, params.range_image_w), dtype=np.float32
+                        )
+                    )
+                    continue
+                try:
+                    pose_past = _interpolate_pose(pose_samples, past_ts, max_gap_ns)
+                except _PoseGapError:
+                    residuals.append(
+                        np.zeros(
+                            (params.range_image_h, params.range_image_w), dtype=np.float32
+                        )
+                    )
+                    continue
+                residuals.append(
+                    _compute_residual(
+                        xyz_cur,
+                        past_xyz,
+                        pose_cur,
+                        pose_past,
+                        ego_T_lidar,
+                        params.range_image_h,
+                        params.range_image_w,
+                        params.fov_up_deg,
+                        params.fov_down_deg,
+                        range_img[0],
+                    )
+                )
+
+            # Inference.
+            try:
+                score_img = model.infer(
+                    range_image=range_img, residual_images=residuals
+                )  # (H, W) float32
+            except Exception as exc:  # noqa: BLE001
+                log.exception("sweep %d: MF-MOS inference failed; writing zero mask", sid)
+                _write_zero_mask(bag_id, chunk_id, sid, n_raw, params.save_scores)
+                _record_meta_path(meta_by_sid, sid, mf_mos_mask_path(bag_id, chunk_id, sid))
+                result.n_sweeps_skipped_inference_error += 1
+                result.skip_reasons.append((sid, f"infer: {type(exc).__name__}: {exc}"))
+                past_window = (past_window + [(cur_ts, xyz_cur)])[-max_k:]
+                continue
+
+            # Threshold + unproject → (n_finite,) bool
+            pixel_mask = score_img >= params.score_threshold
+            mf_finite_mask = _unproject_mask(pixel_mask, point_to_pixel, n_finite)
+
+            # Expand to n_raw length: NaN/inf points are False (not moving).
+            full_mask = np.zeros(n_raw, dtype=bool)
+            full_mask[finite] = mf_finite_mask
+
+            assert full_mask.shape == (n_raw,), (
+                f"mf_mos mask len {full_mask.shape} != raw sweep len {n_raw} for sweep {sid}"
+            )
+
+            np.save(local_path(mf_mos_mask_path(bag_id, chunk_id, sid)), full_mask)
+
+            if params.save_scores:
+                mf_finite_scores = _unproject_scores(score_img, point_to_pixel, n_finite)
+                full_scores = np.zeros(n_raw, dtype=np.float32)
+                full_scores[finite] = mf_finite_scores
+                np.save(
+                    local_path(mf_mos_score_path(bag_id, chunk_id, sid)), full_scores
+                )
+
+            _record_meta_path(meta_by_sid, sid, mf_mos_mask_path(bag_id, chunk_id, sid))
+            result.n_sweeps_processed += 1
+            result.n_points_total += n_raw
+            result.n_points_moving += int(full_mask.sum())
+
+            past_window = (past_window + [(cur_ts, xyz_cur)])[-max_k:]
+
+    # Rewrite lidar_proc_index.parquet with mf_mos_mask_path populated.
+    updated = [meta_by_sid[int(r["sweep_id"])] for r in meta_rows]
+    write_table(updated, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
+
+    log.info(
+        "chunk %s: mf_mos processed=%d skipped(invalid=%d pose=%d empty=%d infer=%d) "
+        "moving=%d/%d",
+        chunk_id,
+        result.n_sweeps_processed,
+        result.n_sweeps_skipped_invalid,
+        result.n_sweeps_skipped_pose,
+        result.n_sweeps_skipped_empty,
+        result.n_sweeps_skipped_inference_error,
+        result.n_points_moving,
+        result.n_points_total,
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers — exported for tests
+# ---------------------------------------------------------------------------
+
+
+def _load_model(params: MFMosParams) -> "MFMosModel":
+    """Lazy load + cache the model.  torch is imported inside _mf_mos_runtime."""
+    key = (params.checkpoint_path, params.arch_config, params.data_config, params.device)
+    if key not in _MODEL_CACHE:
+        from wato_lidar_preprocessing._mf_mos_runtime import MFMosModel  # noqa: PLC0415
+
+        _MODEL_CACHE[key] = MFMosModel(
+            checkpoint_path=params.checkpoint_path,
+            arch_cfg=params.arch_config,
+            data_cfg=params.data_config,
+            device=params.device,
+        )
+    return _MODEL_CACHE[key]
+
+
+def _range_project(
+    points_xyz_sensor: np.ndarray,
+    intensity: np.ndarray | None,
+    h: int,
+    w: int,
+    fov_up_deg: float,
+    fov_down_deg: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Spherical range-image projection.
+
+    Args:
+        points_xyz_sensor: (N, 3) float32, sensor frame.
+        intensity: (N,) float32 or None.
+        h, w: output image dimensions.
+        fov_up_deg, fov_down_deg: vertical field of view (fov_down is negative).
+
+    Returns:
+        range_image: (5, H, W) float32, channels [range, x, y, z, intensity].
+            Empty pixels have range=-1.0 and xyz/intensity=0.0.
+        pixel_to_point_idx: (H, W) int32. Index of the closest-range point that
+            won each pixel; -1 for empty pixels.
+        point_to_pixel: (N, 2) int32, [row, col] for each input point.
+            [-1, -1] for points outside the FOV or with zero/NaN range.
+    """
+    n = points_xyz_sensor.shape[0]
+
+    range_image = np.full((5, h, w), 0.0, dtype=np.float32)
+    range_image[0] = -1.0  # sentinel for empty pixels in range channel
+    pixel_to_point_idx = np.full((h, w), -1, dtype=np.int32)
+    point_to_pixel = np.full((n, 2), -1, dtype=np.int32)
+
+    if n == 0:
+        return range_image, pixel_to_point_idx, point_to_pixel
+
+    x = points_xyz_sensor[:, 0].astype(np.float64)
+    y = points_xyz_sensor[:, 1].astype(np.float64)
+    z = points_xyz_sensor[:, 2].astype(np.float64)
+    r = np.sqrt(x**2 + y**2 + z**2)
+
+    valid = r > 1e-6
+    r_safe = np.where(valid, r, 1.0)
+
+    yaw = -np.arctan2(y, x)
+    pitch = np.arcsin(np.clip(z / r_safe, -1.0, 1.0))
+
+    fov_up = np.deg2rad(fov_up_deg)
+    fov_down = np.deg2rad(fov_down_deg)
+    fov = fov_up - fov_down  # total vertical FOV (positive)
+
+    proj_x = 0.5 * (yaw / np.pi + 1.0)          # [0, 1]
+    proj_y = 1.0 - (pitch - fov_down) / fov       # [0, 1] top=0
+
+    col = np.clip(np.floor(proj_x * w).astype(np.int32), 0, w - 1)
+    row = np.clip(np.floor(proj_y * h).astype(np.int32), 0, h - 1)
+
+    # Mark points outside vertical FOV or at zero range.
+    in_fov = valid & (proj_y >= 0.0) & (proj_y <= 1.0)
+
+    # Closest-range wins: sort by descending range so closer overwrites.
+    order = np.argsort(r)[::-1]
+    col_s = col[order]
+    row_s = row[order]
+    r_s = r[order].astype(np.float32)
+    x_s = x[order].astype(np.float32)
+    y_s = y[order].astype(np.float32)
+    z_s = z[order].astype(np.float32)
+    infov_s = in_fov[order]
+
+    # Write pixels.  Only in-FOV points with positive range are written.
+    write_mask = infov_s
+    range_image[0][row_s[write_mask], col_s[write_mask]] = r_s[write_mask]
+    range_image[1][row_s[write_mask], col_s[write_mask]] = x_s[write_mask]
+    range_image[2][row_s[write_mask], col_s[write_mask]] = y_s[write_mask]
+    range_image[3][row_s[write_mask], col_s[write_mask]] = z_s[write_mask]
+
+    written_orig_idx = order[write_mask]
+    pixel_to_point_idx[row_s[write_mask], col_s[write_mask]] = written_orig_idx.astype(np.int32)
+
+    if intensity is not None:
+        intens_s = intensity[order].astype(np.float32)
+        range_image[4][row_s[write_mask], col_s[write_mask]] = intens_s[write_mask]
+
+    # point_to_pixel: for each input point (in original index order), record
+    # the pixel it wrote to.  Points that overwrote a closer point are still
+    # recorded even though pixel_to_point_idx doesn't point back to them.
+    row_orig = np.full(n, -1, dtype=np.int32)
+    col_orig = np.full(n, -1, dtype=np.int32)
+    in_fov_idx = np.where(in_fov)[0]
+    row_orig[in_fov_idx] = row[in_fov_idx]
+    col_orig[in_fov_idx] = col[in_fov_idx]
+    point_to_pixel[:, 0] = row_orig
+    point_to_pixel[:, 1] = col_orig
+
+    return range_image, pixel_to_point_idx, point_to_pixel
+
+
+def _compute_residual(
+    current_xyz_sensor: np.ndarray,
+    past_xyz_sensor: np.ndarray,
+    world_T_ego_current: np.ndarray,
+    world_T_ego_past: np.ndarray,
+    ego_T_lidar: np.ndarray,
+    h: int,
+    w: int,
+    fov_up_deg: float,
+    fov_down_deg: float,
+    current_range_channel: np.ndarray,
+) -> np.ndarray:
+    """Project past scan into current sensor frame and return |current - past| range image.
+
+    Args:
+        current_xyz_sensor: (N_cur, 3) float32, current scan in sensor frame.
+        past_xyz_sensor: (N_past, 3) float32, past scan in sensor frame.
+        world_T_ego_current: (4, 4) float64, current ego pose in world frame.
+        world_T_ego_past: (4, 4) float64, past ego pose in world frame.
+        ego_T_lidar: (4, 4) float64, lidar extrinsic.
+        h, w, fov_up_deg, fov_down_deg: projection parameters.
+        current_range_channel: (H, W) float32, range channel from current scan projection.
+
+    Returns:
+        residual: (H, W) float32 — |range_current - range_past_in_current_frame|.
+            Zero where either scan has no return in a pixel.
+    """
+    if past_xyz_sensor.shape[0] == 0:
+        return np.zeros((h, w), dtype=np.float32)
+
+    # Rigid transform: past sensor frame → world → current sensor frame.
+    lidar_T_ego = np.linalg.inv(ego_T_lidar)
+    cur_lidar_T_past_lidar = (
+        lidar_T_ego
+        @ np.linalg.inv(world_T_ego_current)
+        @ world_T_ego_past
+        @ ego_T_lidar
+    )
+    R = cur_lidar_T_past_lidar[:3, :3].astype(np.float32)
+    t = cur_lidar_T_past_lidar[:3, 3].astype(np.float32)
+    past_in_current = (R @ past_xyz_sensor.T).T + t  # (N_past, 3) float32
+
+    past_range_img, _, _ = _range_project(
+        past_in_current, None, h, w, fov_up_deg, fov_down_deg
+    )
+    past_range = past_range_img[0]  # (H, W)
+
+    # Residual is non-zero only where BOTH scans have valid returns.
+    valid = (current_range_channel >= 0.0) & (past_range >= 0.0)
+    residual = np.zeros((h, w), dtype=np.float32)
+    residual[valid] = np.abs(current_range_channel[valid] - past_range[valid])
+    return residual
+
+
+def _unproject_mask(
+    pixel_mask: np.ndarray,
+    point_to_pixel: np.ndarray,
+    n_points: int,
+) -> np.ndarray:
+    """Map (H, W) bool pixel mask back to (N,) per-point bool.
+
+    Points outside the FOV (point_to_pixel == -1) default to False (not moving).
+    """
+    out = np.zeros(n_points, dtype=bool)
+    in_image = (point_to_pixel[:, 0] >= 0) & (point_to_pixel[:, 1] >= 0)
+    idx_h = point_to_pixel[in_image, 0]
+    idx_w = point_to_pixel[in_image, 1]
+    out[in_image] = pixel_mask[idx_h, idx_w]
+    return out
+
+
+def _unproject_scores(
+    score_image: np.ndarray,
+    point_to_pixel: np.ndarray,
+    n_points: int,
+) -> np.ndarray:
+    """Map (H, W) float32 score image back to (N,) float32 per-point scores.
+
+    Points outside the FOV default to 0.0.
+    """
+    out = np.zeros(n_points, dtype=np.float32)
+    in_image = (point_to_pixel[:, 0] >= 0) & (point_to_pixel[:, 1] >= 0)
+    idx_h = point_to_pixel[in_image, 0]
+    idx_w = point_to_pixel[in_image, 1]
+    out[in_image] = score_image[idx_h, idx_w]
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
+
+class _PoseGapError(RuntimeError):
+    pass
+
+
+def _interpolate_pose(
+    samples: list[PoseSample],
+    ts_ns: int,
+    max_gap_ns: int,
+) -> np.ndarray:
+    """Return (4,4) world_T_ego at ts_ns, or raise _PoseGapError if the gap exceeds max_gap_ns."""
+    try:
+        poses = batch_interpolate_poses(samples, np.array([ts_ns], dtype=np.int64))
+    except Exception as exc:
+        raise _PoseGapError(f"pose interp at t={ts_ns}: {exc}") from exc
+    closest_gap = min(abs(s.timestamp_ns - ts_ns) for s in samples)
+    if closest_gap > max_gap_ns:
+        raise _PoseGapError(
+            f"pose gap {closest_gap / 1_000_000:.0f} ms > "
+            f"{max_gap_ns / 1_000_000:.0f} ms at t={ts_ns}"
+        )
+    return poses[0]
+
+
+def _write_zero_mask(
+    bag_id: str,
+    chunk_id: str,
+    sweep_id: int,
+    n_raw: int,
+    save_scores: bool,
+) -> None:
+    np.save(
+        local_path(mf_mos_mask_path(bag_id, chunk_id, sweep_id)),
+        np.zeros(n_raw, dtype=bool),
+    )
+    if save_scores:
+        np.save(
+            local_path(mf_mos_score_path(bag_id, chunk_id, sweep_id)),
+            np.zeros(n_raw, dtype=np.float32),
+        )
+
+
+def _record_meta_path(
+    meta_by_sid: dict[int, dict],
+    sweep_id: int,
+    path: str | None,
+) -> None:
+    """Update the in-memory meta dict for a sweep with the mf_mos_mask_path."""
+    if sweep_id in meta_by_sid:
+        meta_by_sid[sweep_id]["mf_mos_mask_path"] = path

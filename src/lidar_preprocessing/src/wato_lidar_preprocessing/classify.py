@@ -26,7 +26,9 @@ from wato_common.artifact_store import (
     ensure_local_dir,
     lidar_proc_dir,
     lidar_proc_index_path,
+    lidar_sweep_path,
     local_path,
+    mf_mos_mask_path as _mf_mos_mask_path,
     static_map_path,
     voxel_occupancy_frame_path,
     voxel_occupancy_path,
@@ -201,6 +203,76 @@ def _origin_from_index(meta_rows: list[dict]) -> np.ndarray | None:
     return np.array([min(xmins), min(ymins), min(zmins)], dtype=np.float64)
 
 
+def _load_mf_mos_world_mask(
+    bag_id: str,
+    chunk_id: str,
+    row: dict,
+    n_world: int,
+    filter_nonfinite: bool,
+) -> np.ndarray | None:
+    """Load an MF-MOS raw-length mask and filter it to world-frame length.
+
+    MF-MOS masks are (n_raw,) bool aligned to the raw lidar NPZ.  Deskew
+    applies a nonfinite filter, so n_world <= n_raw.  We re-apply the same
+    filter here so the mask can be OR'd with the (n_world,) voxel mask.
+
+    Returns None if the mask is unavailable or can't be loaded.
+    """
+    mf_path = row.get("mf_mos_mask_path")
+    if not mf_path:
+        return None
+    try:
+        mf_raw = np.load(local_path(mf_path))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not load mf_mos mask %s: %s", mf_path, exc)
+        return None
+
+    n_raw = mf_raw.shape[0]
+    if n_raw == n_world:
+        return mf_raw  # common case: no NaN/inf points were dropped
+
+    if n_raw < n_world:
+        log.warning(
+            "sweep %s: mf_mos mask len %d < world len %d — fusion skipped for this sweep",
+            row.get("sweep_id"),
+            n_raw,
+            n_world,
+        )
+        return None
+
+    # n_raw > n_world: apply the nonfinite filter to get world-aligned mask.
+    raw_uri = lidar_sweep_path(
+        bag_id,
+        chunk_id,
+        str(row.get("lidar_id", "")),
+        int(row.get("sweep_id", 0)),
+    )
+    try:
+        raw = np.load(local_path(raw_uri))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not load raw sweep for mf_mos fusion alignment: %s", exc)
+        return None
+
+    x_r = raw["x"].astype(np.float64)
+    y_r = raw["y"].astype(np.float64)
+    z_r = raw["z"].astype(np.float64)
+    if filter_nonfinite:
+        finite = np.isfinite(x_r) & np.isfinite(y_r) & np.isfinite(z_r)
+    else:
+        finite = np.ones(n_raw, dtype=bool)
+
+    mf_world = mf_raw[finite]
+    if mf_world.shape[0] != n_world:
+        log.warning(
+            "sweep %s: mf_mos world-aligned len %d != world len %d — fusion skipped",
+            row.get("sweep_id"),
+            mf_world.shape[0],
+            n_world,
+        )
+        return None
+    return mf_world
+
+
 def _estimate_cache_bytes(meta_rows: list[dict]) -> int:
     """Estimate the in-memory size of (xyz float64 + intensity float32) caches."""
     total_pts = 0
@@ -342,6 +414,7 @@ def process_chunk(
                     world_zmin=row.get("world_zmin"),
                     world_zmax=row.get("world_zmax"),
                     frame_id=row.get("frame_id"),
+                    mf_mos_mask_path=row.get("mf_mos_mask_path"),
                 ).model_dump()
             )
             continue
@@ -364,8 +437,30 @@ def process_chunk(
             n_dyn_s = int(mask.sum())
             n_static_s = n - n_dyn_s
 
+        # _dynamic_mask.npy always records the voxel-only signal for debugging.
         dyn_uri = dynamic_mask_path(bag_id, chunk_id, sweep_id)
         np.save(local_path(dyn_uri), mask)
+
+        # Fusion: compute accumulator_mask used for static/dynamic point clouds.
+        # When fusion_mode is "independent" (default), accumulator_mask == mask
+        # and the block below is a no-op; classify is byte-identical to its
+        # pre-MF-MOS behaviour.
+        accumulator_mask = mask
+        if (
+            n > 0
+            and cfg.mf_mos.enabled
+            and cfg.mf_mos.fusion_mode != "independent"
+        ):
+            mf_world = _load_mf_mos_world_mask(
+                bag_id, chunk_id, row, n, cfg.filter_nonfinite_points
+            )
+            if mf_world is not None:
+                if cfg.mf_mos.fusion_mode == "union":
+                    accumulator_mask = mask | mf_world
+                elif cfg.mf_mos.fusion_mode == "mfmos_only":
+                    accumulator_mask = mf_world
+                n_dyn_s = int(accumulator_mask.sum())
+                n_static_s = n - n_dyn_s
 
         total_static += n_static_s
         total_dynamic += n_dyn_s
@@ -378,7 +473,7 @@ def process_chunk(
                 intensity = cached_intensity
             else:
                 xyz, intensity = _load_world_xyz_intensity(row["world_path"])
-            static_mask = ~mask
+            static_mask = ~accumulator_mask
 
             if n_static_s > 0:
                 static_xyz_chunks.append(xyz[static_mask])
@@ -393,14 +488,16 @@ def process_chunk(
                         )
 
             if n_dyn_s > 0:
-                dyn_xyz_chunks.append(xyz[mask])
+                dyn_xyz_chunks.append(xyz[accumulator_mask])
                 # sweep_id-per-point lets downstream recover temporal origin
                 # without iterating lidar_proc_index.  int32 is enough for any
                 # realistic chunk (32 k sweeps).
                 dyn_sweep_id_chunks.append(np.full(n_dyn_s, sweep_id, dtype=np.int32))
                 if any_intensity:
                     if has_intensity and intensity is not None:
-                        dyn_intensity_chunks.append(intensity[mask].astype(np.float32))
+                        dyn_intensity_chunks.append(
+                            intensity[accumulator_mask].astype(np.float32)
+                        )
                     else:
                         dyn_intensity_chunks.append(np.zeros(n_dyn_s, dtype=np.float32))
 
@@ -428,6 +525,7 @@ def process_chunk(
                 world_zmin=row.get("world_zmin"),
                 world_zmax=row.get("world_zmax"),
                 frame_id=row.get("frame_id"),
+                mf_mos_mask_path=row.get("mf_mos_mask_path"),
             ).model_dump()
         )
 

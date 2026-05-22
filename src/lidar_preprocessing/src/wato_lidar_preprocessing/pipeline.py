@@ -34,7 +34,7 @@ from wato_common.artifact_store import (
 )
 from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.schemas import CHUNK_SUMMARY_SCHEMA, ChunkSummaryRow
-from wato_lidar_preprocessing import classify, deskew, ground
+from wato_lidar_preprocessing import classify, deskew, ground, mf_mos as mf_mos_step
 from wato_lidar_preprocessing.config import ComponentConfig
 
 log = logging.getLogger(__name__)
@@ -45,6 +45,7 @@ def _write_chunk_summary(
     chunk_id: str,
     classify_result: classify.ClassifyResult,
     ground_result: ground.GroundResult,
+    mf_mos_result: mf_mos_step.MFMosResult | None = None,
 ) -> None:
     """Aggregate the per-sweep parquet + classify/ground results into one row.
 
@@ -75,6 +76,9 @@ def _write_chunk_summary(
         cache_auto_disabled=classify_result.cache_auto_disabled,
         estimated_cache_bytes=classify_result.estimated_cache_bytes,
         ground_status=ground_result.status,
+        mf_mos_n_processed=mf_mos_result.n_sweeps_processed if mf_mos_result else None,
+        mf_mos_n_skipped=mf_mos_result.n_skipped if mf_mos_result else None,
+        mf_mos_n_points_moving=mf_mos_result.n_points_moving if mf_mos_result else None,
     )
     write_table(
         [summary.model_dump()],
@@ -132,6 +136,15 @@ def _process_one_chunk(
         log.info("=== chunk %s: step A — deskew ===", chunk_id)
         deskew.process_chunk(cfg, bag_id, chunk_id)
 
+        # Step A.5 — MF-MOS (no-op when cfg.mf_mos.enabled is False).
+        # Runs before classify so classify can optionally fuse both signals.
+        log.info(
+            "=== chunk %s: step A.5 — mf_mos (enabled=%s) ===",
+            chunk_id,
+            cfg.mf_mos.enabled,
+        )
+        mf_mos_result = mf_mos_step.process_chunk(cfg, bag_id, chunk_id)
+
         log.info("=== chunk %s: step B — classify ===", chunk_id)
         classify_result = classify.process_chunk(cfg, bag_id, chunk_id)
 
@@ -142,7 +155,7 @@ def _process_one_chunk(
         # downstream stages can find pathological chunks (cache disabled,
         # zero ground returns, lots of invalid sweeps) without iterating
         # lidar_proc_index.
-        _write_chunk_summary(bag_id, chunk_id, classify_result, ground_result)
+        _write_chunk_summary(bag_id, chunk_id, classify_result, ground_result, mf_mos_result)
         return (chunk_id, True, "")
     except Exception as exc:  # noqa: BLE001 — one chunk failing must not stop the rest
         log.exception("chunk %s failed", chunk_id)
