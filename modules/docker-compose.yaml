@@ -124,6 +124,15 @@ services:
     profiles: ["lidar_preprocessing_pre"]
     build:
       context: ..
+      # Expose the prefetched torch wheels and ML-source clones as named
+      # build contexts. The Dockerfile bind-mounts them read-only via
+      # `--mount=type=bind,from=<name>` instead of COPYing — keeps the
+      # 2.5 GB of CUDA wheels out of both the main build context and the
+      # image layer history. See docker/lidar_preprocessing.Dockerfile.
+      additional_contexts:
+        torch_wheels: ../docker/wheels/torch
+        mink_src: ../docker/sources/MinkowskiEngine
+        mapmos_src: ../docker/sources/MapMOS
       dockerfile: docker/lidar_preprocessing.Dockerfile
       target: dependencies
       cache_from:

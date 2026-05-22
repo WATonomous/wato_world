@@ -1,0 +1,28 @@
+# Large host-side caches that are exposed to specific build stages via
+# `additional_contexts` in modules/docker-compose.yaml (see the
+# lidar_preprocessing_deps service) and bind-mounted with
+# `--mount=type=bind,from=<name>` inside the Dockerfile. Excluding them
+# from the main build context keeps every component's `docker build` from
+# shipping ~2.5 GB of CUDA wheels to the daemon on every invocation.
+docker/wheels/
+docker/sources/
+
+# Local artifacts and model caches — large, host-mounted at runtime, never
+# needed at build time.
+data/
+
+# Python / editor noise.
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+.venv/
+**/*.egg-info/
+
+# Git internals — Dockerfiles never need them.
+.git/
+.github/
+
+# Local dev configs that shouldn't bake into images.
+watod-config.local.sh
