@@ -26,6 +26,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.ndimage import distance_transform_edt
 from scipy.stats import binned_statistic_2d
+from tqdm import tqdm
 
 from wato_common.artifact_store import (
     ground_path,
@@ -218,7 +219,11 @@ def process_chunk(
         bag_id, chunk_id
     )
 
-    for row in meta_rows:
+    for row in tqdm(
+        meta_rows,
+        desc=f"ground chunk {chunk_id}",
+        unit="sweep",
+    ):
         # parquet stores missing columns as None — treat that as valid=True;
         # only skip when an upstream stage explicitly marked the row invalid.
         if row.get("valid") is False:

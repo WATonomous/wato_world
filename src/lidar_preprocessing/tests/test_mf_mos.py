@@ -32,7 +32,7 @@ from wato_common.schemas import (
     POSES_SCHEMA,
     PROCESSED_SWEEPS_SCHEMA,
 )
-from wato_lidar_preprocessing import mf_mos as mf_mos_mod
+from wato_lidar_preprocessing.mf_mos import _core as mf_mos_mod
 from wato_lidar_preprocessing.classify import process_chunk as classify_chunk
 from wato_lidar_preprocessing.config import ComponentConfig, MFMosParams
 from wato_lidar_preprocessing.mf_mos import (
@@ -265,7 +265,7 @@ def test_residual_zero_for_static_scene():
     ri, _, _ = _range_project(xyz, None, H, W, FOV_UP, FOV_DOWN)
     identity = np.eye(4, dtype=np.float64)
     residual = _compute_residual(
-        xyz, xyz, identity, identity, identity, H, W, FOV_UP, FOV_DOWN, ri[0]
+        xyz, identity, identity, identity, H, W, FOV_UP, FOV_DOWN, ri[0]
     )
     valid = ri[0] >= 0
     assert np.allclose(residual[valid], 0.0, atol=1e-4)
@@ -283,7 +283,7 @@ def test_residual_nonzero_for_moving_object():
     ri_cur, _, _ = _range_project(cur, None, H, W, FOV_UP, FOV_DOWN)
     identity = np.eye(4, dtype=np.float64)
     residual = _compute_residual(
-        cur, past, identity, identity, identity, H, W, FOV_UP, FOV_DOWN, ri_cur[0]
+        past, identity, identity, identity, H, W, FOV_UP, FOV_DOWN, ri_cur[0]
     )
     assert residual.max() > 0.1
 
@@ -497,6 +497,7 @@ def test_fusion_independent_preserves_voxel_mask(tmp_env):
     cfg = ComponentConfig(
         static_sweep_fraction=0.3,
         static_sweep_min=2,
+        classification_method="persistence",
         mf_mos=MFMosParams(enabled=True, fusion_mode="independent"),
     )
     classify_chunk(cfg, bag_id, chunk_id)
@@ -526,6 +527,7 @@ def test_fusion_union_ors_signals(tmp_env):
     cfg = ComponentConfig(
         static_sweep_fraction=0.3,
         static_sweep_min=2,
+        classification_method="persistence",
         mf_mos=MFMosParams(enabled=True, fusion_mode="union"),
     )
     classify_chunk(cfg, bag_id, chunk_id)

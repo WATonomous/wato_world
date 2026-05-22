@@ -1,6 +1,27 @@
 lidar_preprocessing:
   # Step B — voxel static/dynamic classification.
   voxel_size_m: 0.15
+
+  # Classification method: "log_odds" (Bayesian ray-casting) or "persistence"
+  # (legacy sweep-count threshold).  Use "persistence" for A/B comparison.
+  classification_method: log_odds
+
+  # Log-odds ray-casting parameters (active when classification_method=log_odds).
+  # l_occ < l_free keeps statics from being carved by their own through-rays.
+  l_occ: 0.85
+  l_free: 0.40
+  log_odds_clamp: 5.0      # clamp prevents ossification after long history
+  p_static_threshold: 0.70  # sigmoid(log_odds) >= this → static
+  p_dynamic_threshold: 0.30 # sigmoid(log_odds) < this → dynamic (if evidenced)
+  min_observations: 3       # voxels with fewer obs stay "unknown"
+  min_occupied_hits: 1      # voxels with n_hits < this are free-space-only, not dynamic
+  max_ray_length_m: 80.0    # beyond this range, noise dominates
+  free_space_margin_voxels: 1.0  # stop carving N voxels before endpoint
+  # "skip_endpoint": traverse ground rays (free-space evidence) but skip l_occ at endpoint.
+  # "skip_ray": skip ground rays entirely (legacy, use for A/B comparison).
+  ground_endpoint_strategy: skip_endpoint
+
+  # Persistence-counting parameters (active when classification_method=persistence).
   # Voxel is classified static if seen in at least this fraction of chunk sweeps.
   static_sweep_fraction: 0.30
   # Minimum sweep count regardless of fraction (avoids over-classifying short chunks).
@@ -72,7 +93,6 @@ lidar_preprocessing:
     fov_up_deg:    10.0             # NuScenes defaults; KITTI uses 3.0 / -25.0
     fov_down_deg: -30.0
     device: cuda                    # set to "cpu" for tiny smoke tests
-    batch_size: 1
     score_threshold: 0.5
     save_scores: false              # also write _mf_mos_score.npy float32
     fusion_mode: independent        # independent | union | mfmos_only

@@ -42,7 +42,7 @@ from wato_lidar_preprocessing._inputs import load_ego_T_lidar_dict, load_pose_sa
 from wato_lidar_preprocessing.config import ComponentConfig, MFMosParams
 
 if TYPE_CHECKING:
-    from wato_lidar_preprocessing._mf_mos_runtime import MFMosModel
+    from ._runtime import MFMosModel
 
 log = logging.getLogger(__name__)
 
@@ -162,8 +162,7 @@ def process_chunk(
                     else None
                 )
             except Exception as exc:  # noqa: BLE001
-                log.warning("sweep %d: failed to load raw NPZ (%s); writing zero mask", sid, exc)
-                _write_zero_mask(bag_id, chunk_id, sid, 0, params.save_scores)
+                log.warning("sweep %d: failed to load raw NPZ (%s); skipping MF-MOS", sid, exc)
                 _record_meta_path(meta_by_sid, sid, None)
                 result.n_sweeps_skipped_invalid += 1
                 result.skip_reasons.append((sid, f"raw load: {exc}"))
@@ -218,8 +217,8 @@ def process_chunk(
             # Build residual images — one per configured step.
             residuals: list[np.ndarray] = []
             for k in params.residual_steps:
-                j = s_idx - k
-                if j < 0 or j >= len(past_window):
+                j = len(past_window) - k
+                if j < 0:
                     residuals.append(
                         np.zeros(
                             (params.range_image_h, params.range_image_w), dtype=np.float32
@@ -245,7 +244,6 @@ def process_chunk(
                     continue
                 residuals.append(
                     _compute_residual(
-                        xyz_cur,
                         past_xyz,
                         pose_cur,
                         pose_past,
@@ -326,10 +324,10 @@ def process_chunk(
 
 
 def _load_model(params: MFMosParams) -> "MFMosModel":
-    """Lazy load + cache the model.  torch is imported inside _mf_mos_runtime."""
+    """Lazy load + cache the model.  torch is imported inside _runtime."""
     key = (params.checkpoint_path, params.arch_config, params.data_config, params.device)
     if key not in _MODEL_CACHE:
-        from wato_lidar_preprocessing._mf_mos_runtime import MFMosModel  # noqa: PLC0415
+        from ._runtime import MFMosModel  # noqa: PLC0415
 
         _MODEL_CACHE[key] = MFMosModel(
             checkpoint_path=params.checkpoint_path,
@@ -437,7 +435,6 @@ def _range_project(
 
 
 def _compute_residual(
-    current_xyz_sensor: np.ndarray,
     past_xyz_sensor: np.ndarray,
     world_T_ego_current: np.ndarray,
     world_T_ego_past: np.ndarray,
@@ -451,7 +448,6 @@ def _compute_residual(
     """Project past scan into current sensor frame and return |current - past| range image.
 
     Args:
-        current_xyz_sensor: (N_cur, 3) float32, current scan in sensor frame.
         past_xyz_sensor: (N_past, 3) float32, past scan in sensor frame.
         world_T_ego_current: (4, 4) float64, current ego pose in world frame.
         world_T_ego_past: (4, 4) float64, past ego pose in world frame.

@@ -77,6 +77,8 @@ class MFMosModel:
         self.n_input_scans: int = int(sensor["n_input_scans"])
         self.img_means: list[float] = sensor["img_means"]  # 5 values
         self.img_stds: list[float] = sensor["img_stds"]    # 5 values
+        self.res_mean: float = float(sensor.get("res_mean", 0.0))
+        self.res_std: float = float(sensor.get("res_std", 1.0))
 
         self.device = torch.device(device)
 
@@ -105,7 +107,7 @@ class MFMosModel:
 
         # Load weights — strict=False to tolerate minor arch divergences.
         log.info("Loading MF-MOS checkpoint from %s", checkpoint_path)
-        state = torch.load(checkpoint_path, map_location="cpu")
+        state = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         # Checkpoints may be plain state dicts or wrapped in a dict.
         if isinstance(state, dict) and "state_dict" in state:
             state = state["state_dict"]
@@ -169,6 +171,7 @@ class MFMosModel:
                     np.zeros((H_sensor, W_sensor), dtype=np.float32)
                 )
         res_stack = np.stack(padded_residuals, axis=0)  # (n_res, H, W)
+        res_stack = (res_stack - self.res_mean) / (self.res_std + 1e-8)
 
         # Concatenate to (5 + n_res, H_sensor, W_sensor) then add batch dim.
         x_np = np.concatenate([norm_ri, res_stack], axis=0)  # (5+n_res, H, W)

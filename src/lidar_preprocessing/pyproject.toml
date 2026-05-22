@@ -8,8 +8,10 @@ dependencies = [
     "click>=8",
     "pyyaml>=6",
     "pydantic>=2",
+    "numba>=0.59",
     "open3d>=0.17",
     "matplotlib>=3.7",
+    "tqdm>=4.65",
 ]
 
 [project.scripts]
