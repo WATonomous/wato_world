@@ -42,10 +42,14 @@ RUN uv pip install --system --break-system-packages pypatchworkpp==1.0.4
 
 # PyTorch matched to CUDA 12.8 base.
 # When mf_mos.enabled: false (default) torch is never imported at runtime.
-RUN uv pip install --system --break-system-packages \
-        --extra-index-url https://download.pytorch.org/whl/cu128 \
-        --index-strategy unsafe-best-match \
-        "torch>=2.4,<2.7"
+# Use pip (not uv) here: pip retries on connection resets; uv does not.
+# Use --index-url (not --extra-index-url) so the cu128 index is primary:
+# torch+cu128 is a self-contained wheel — no separate nvidia-* downloads from pypi.nvidia.com.
+RUN python3 -m pip install --no-cache-dir --break-system-packages \
+        --retries 10 \
+        --timeout 300 \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        "torch>=2.7,<3"
 
 # MF-MOS runtime deps.
 RUN uv pip install --system --break-system-packages \
