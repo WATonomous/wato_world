@@ -1102,3 +1102,97 @@ def test_cache_disabled_must_still_apply_ground_filter(tmp_env):
         f"ground_mask when cache_xyz is True, and masking.py never re-reads "
         f"it from disk."
     )
+
+
+def test_min_occupied_hits_filters_below_threshold(tmp_env):
+    """BUG: min_occupied_hits>1 leaks single-hit voxels into dynamic_map.npz.
+
+    Documented semantics (config.py:209 + lidar_preprocessing.yaml:28):
+        "voxels with n_hits < this are free-space-only, not dynamic"
+
+    Actual implementation (log_odds.py:233):
+        free_only_mask = n_hits_vals == 0
+
+    With min_occupied_hits>1, voxels with 0 < n_hits < min_occupied_hits fall
+    into a classification hole:
+      - has_hits = (n_hits >= min_occupied_hits) = False
+      - free_only_mask = (n_hits == 0) = False        ← BUG
+      - static_mask, under_with_hits, ambiguous all gate on has_hits → False
+    None of the not_dynamic buckets claim the voxel, so it falls through to
+    DYNAMIC by default.
+
+    This is the root cause of the NuScenes "buildings/trees as dynamic" leak:
+    the user can't tune min_occupied_hits upward to require multiple confirming
+    hits before classifying a sparse-structure voxel dynamic, because raising
+    it just moves voxels from "under_evidenced_with_hits" (safe, not dynamic)
+    into the hole (unsafe, dynamic).
+
+    Setup mirrors a tree-branch / building-edge voxel: 1 sweep deposits l_occ
+    at the voxel, 12 other sweeps cast through-rays past it (carves). With
+    min_occupied_hits=3, the voxel has n_hits=1 < 3, so per the documented
+    semantics it should be free-space-only → not dynamic.
+
+    Post-fix: free_only_mask = (n_hits < cfg.min_occupied_hits) so n_hits=1
+    when min_occupied_hits=3 routes into not_dynamic_arr.
+    """
+    bag_id, chunk_id = "bag_min_hits_hole", "chunk0"
+    # Voxel of interest: a single hit at (5, 0, 0) from sweep 0.
+    hit_pt = np.array([[5.0, 0.0, 0.0]])
+    # Carving sweeps: their endpoints are beyond the hit voxel so their rays
+    # pass through it. 12 carves ensure log_odds = 1.20 - 12*0.25 = -1.80 →
+    # p_occ ≈ 0.14 < p_dynamic_threshold=0.30, putting the voxel in the
+    # implicit-dynamic bucket if the min_occupied_hits gate doesn't catch it.
+    beyond_pt = np.array([[10.0, 0.0, 0.0]])
+    sensor_origin = np.array([-1.0, 0.0, 0.0])
+
+    rows_xyz: list[np.ndarray] = []
+    _write_world_sweep(bag_id, chunk_id, 0, hit_pt, origin=sensor_origin)
+    rows_xyz.append(hit_pt)
+    n_carves = 12
+    for j in range(n_carves):
+        sid = j + 1
+        _write_world_sweep(bag_id, chunk_id, sid, beyond_pt, origin=sensor_origin)
+        rows_xyz.append(beyond_pt)
+    _write_proc_index(
+        bag_id,
+        chunk_id,
+        list(range(1 + n_carves)),
+        xyz_per_sweep=rows_xyz,
+    )
+
+    cfg = ComponentConfig(
+        classification_method="log_odds",
+        ground_endpoint_strategy="skip_endpoint",
+        l_occ=1.20,
+        l_free=0.25,
+        log_odds_clamp=50.0,
+        voxel_size_m=0.25,
+        free_space_margin_voxels=2.0,
+        max_ray_length_m=50.0,
+        min_observations=3,
+        # The knob under test: raising it must filter low-hit voxels out of
+        # dynamic per the documented semantics.
+        min_occupied_hits=3,
+        p_static_threshold=0.70,
+        p_dynamic_threshold=0.30,
+    )
+    process_chunk(cfg, bag_id, chunk_id)
+
+    dyn = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
+    is_hit_pt = np.all(np.isclose(dyn["xyz"], hit_pt[0]), axis=1)
+    assert not is_hit_pt.any(), (
+        f"voxel with n_hits=1 < min_occupied_hits=3 must be filtered out of "
+        f"dynamic_map.npz per the documented free-space-only semantics; "
+        f"found it {int(is_hit_pt.sum())} time(s). log_odds.py:233 uses "
+        f"`n_hits == 0` instead of `n_hits < cfg.min_occupied_hits`, creating "
+        f"a classification hole for voxels with 0 < n_hits < min_occupied_hits "
+        f"that falls through to the implicit dynamic bucket."
+    )
+
+    # The hit point itself shouldn't be in dynamic_map either (its own voxel
+    # only has n_hits=1, below threshold).
+    mask0 = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
+    assert not mask0[0], (
+        "single-hit point at min_occupied_hits=3 must have mask=False "
+        "(its voxel is below the occupancy threshold)."
+    )

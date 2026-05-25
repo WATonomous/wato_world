@@ -131,6 +131,25 @@ def process_chunk(
     max_k = max(params.residual_steps) if params.residual_steps else 0
 
     for lid, lid_rows in rows_by_lidar.items():
+        # Per-LiDAR allowlist: the configured fov_up/fov_down and image H/W
+        # are global, so running MF-MOS on a LiDAR with a different mount
+        # geometry projects into a non-KITTI-like range image and the model
+        # mispredicts. Filter here BEFORE the calibration check so allowlist
+        # rejections don't pollute n_sweeps_skipped_invalid (which is for
+        # genuine pipeline failures, not configured opt-outs).
+        if params.lidar_id_allowlist is not None and lid not in params.lidar_id_allowlist:
+            log.info(
+                "lidar %s: not in mf_mos.lidar_id_allowlist=%s; skipping its %d sweeps",
+                lid,
+                params.lidar_id_allowlist,
+                len(lid_rows),
+            )
+            for r in lid_rows:
+                # Mark these as disabled-style skips so the result reflects
+                # "deliberately not run" vs. "tried and failed".
+                result.n_sweeps_skipped_disabled += 1
+            continue
+
         if lid not in ego_T_lidar_by_id:
             log.warning("lidar %s: no calibration; skipping MF-MOS for its sweeps", lid)
             for r in lid_rows:
@@ -514,6 +533,25 @@ def _unproject_mask(
     """Map (H, W) bool pixel mask back to (N,) per-point bool.
 
     Points outside the FOV (point_to_pixel == -1) default to False (not moving).
+
+    Range-image occlusion caveat (inherited from MF-MOS itself):
+        Every in-FOV point inherits the label of its projected pixel,
+        INCLUDING points that lost the closest-range tiebreak in
+        _range_project. If a static building sits directly behind a moving
+        vehicle and both fall on the same range-image pixels, the building's
+        points get the vehicle's label even though only the vehicle was
+        actually used to compute the pixel's score. This is intrinsic to
+        any range-image-based MOS pipeline and is shared by the upstream
+        MF-MOS evaluation code.
+
+        Impact is bounded here because mf_mos is fused as a per-voxel vote
+        alongside the geometric log-odds classifier: an occluded static
+        only flips a voxel dynamic when MF-MOS reaches
+        min_mf_mos_votes + mf_mos_vote_fraction_threshold, and by then the
+        voxel is typically being repeatedly observed so log-odds carving
+        evidence will dominate. Worth knowing when investigating static
+        structure that appears in the dynamic cloud immediately behind a
+        confirmed mover.
     """
     out = np.zeros(n_points, dtype=bool)
     in_image = (point_to_pixel[:, 0] >= 0) & (point_to_pixel[:, 1] >= 0)

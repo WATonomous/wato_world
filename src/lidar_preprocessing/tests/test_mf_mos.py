@@ -329,6 +329,61 @@ def test_process_chunk_disabled_writes_nothing(tmp_env):
     assert result.n_sweeps_skipped_disabled == 1
 
 
+def test_process_chunk_lidar_id_allowlist_skips_others(tmp_env, monkeypatch):
+    """LiDARs not in mf_mos.lidar_id_allowlist are skipped wholesale.
+
+    The fov_up/fov_down/range_image_h/w params are global, so running MF-MOS
+    on a LiDAR with a different mount geometry would project sweeps into a
+    range image that doesn't resemble KITTI training data. Allowlist gives
+    the user a knob to restrict inference to validated LiDARs without
+    disabling MF-MOS entirely.
+
+    Setup: single sweep on LIDAR_TOP, allowlist=["lidar_cc"] (LIDAR_TOP not
+    listed). Expected: no mask file is written, n_sweeps_skipped_disabled
+    counts the rejection (not skipped_invalid, since this is a deliberate
+    opt-out — not a pipeline failure).
+    """
+    monkeypatch.setattr(mf_mos_mod, "_load_model", _stub_load_model)
+
+    bag_id, chunk_id = "bag_allowlist", "chunk0"
+    xyz = _make_in_fov_points(4)
+    _write_calibration(bag_id)
+    _write_poses(bag_id, chunk_id, [0, 1_000_000_000])
+    _write_lidar_sweeps(bag_id, chunk_id, [(0, xyz)])
+    _write_proc_index(bag_id, chunk_id, [0])
+
+    # LIDAR_TOP is not in the allowlist — should be skipped entirely.
+    cfg = _enabled_cfg(lidar_id_allowlist=["lidar_cc"])
+    result = process_chunk(cfg, bag_id, chunk_id)
+
+    assert result.n_sweeps_processed == 0
+    assert result.n_sweeps_skipped_disabled == 1
+    proc_dir = local_path(lidar_proc_dir(bag_id, chunk_id))
+    mask_files = [f for f in os.listdir(proc_dir) if "mf_mos_mask" in f]
+    assert mask_files == [], (
+        f"allowlisted-out LiDAR must write no mask files; got {mask_files}"
+    )
+
+
+def test_process_chunk_lidar_id_allowlist_none_runs_all(tmp_env, monkeypatch):
+    """lidar_id_allowlist=None (default) runs MF-MOS on every LiDAR seen."""
+    monkeypatch.setattr(mf_mos_mod, "_load_model", _stub_load_model)
+
+    bag_id, chunk_id = "bag_allowlist_none", "chunk0"
+    xyz = _make_in_fov_points(4)
+    _write_calibration(bag_id)
+    _write_poses(bag_id, chunk_id, [0, 1_000_000_000])
+    _write_lidar_sweeps(bag_id, chunk_id, [(0, xyz)])
+    _write_proc_index(bag_id, chunk_id, [0])
+
+    cfg = _enabled_cfg()  # lidar_id_allowlist defaults to None
+    assert cfg.mf_mos.lidar_id_allowlist is None
+    result = process_chunk(cfg, bag_id, chunk_id)
+
+    assert result.n_sweeps_processed == 1
+    assert result.n_sweeps_skipped_disabled == 0
+
+
 def test_process_chunk_first_sweep_pads_zero_residuals(tmp_env, monkeypatch):
     """First sweep (no past scans) → zero residuals → stub outputs all-False mask."""
     monkeypatch.setattr(mf_mos_mod, "_load_model", _stub_load_model)

@@ -32,8 +32,16 @@ def _update_sweep_python(
     l_occ: float,
     l_free: float,
     log_odds_clamp: float,
+    r_max: float = 200.0,
+    use_range_weight: bool = False,
 ) -> None:
-    """Reference DDA. Same arithmetic as _update_sweep_numba; pure Python."""
+    """Reference DDA. Same arithmetic as _update_sweep_numba; pure Python.
+
+    r_max / use_range_weight default to (200.0, False) so existing callers
+    that don't pass them get bit-identical behaviour to the pre-feature
+    kernel. The Numba kernel makes these required positional args because
+    Numba can't elide keyword defaults at JIT time.
+    """
     ox = float(sweep_origin[0])
     oy = float(sweep_origin[1])
     oz = float(sweep_origin[2])
@@ -54,6 +62,13 @@ def _update_sweep_python(
         length = math.sqrt(dx * dx + dy * dy + dz * dz)
         if length < 1e-9 or length > max_length_m:
             continue
+
+        if use_range_weight:
+            r_star_endpoint = r_max / length
+            if r_star_endpoint > 1.0:
+                r_star_endpoint = 1.0
+        else:
+            r_star_endpoint = 1.0
 
         inv_len = 1.0 / length
         dxn = dx * inv_len
@@ -116,25 +131,35 @@ def _update_sweep_python(
             if t_max_x <= t_max_y and t_max_x <= t_max_z:
                 if t_max_x >= stop_t:
                     break
+                t_entry = t_max_x
                 cx += sx
                 t_max_x += t_delta_x
             elif t_max_y <= t_max_z:
                 if t_max_y >= stop_t:
                     break
+                t_entry = t_max_y
                 cy += sy
                 t_max_y += t_delta_y
             else:
                 if t_max_z >= stop_t:
                     break
+                t_entry = t_max_z
                 cz += sz
                 t_max_z += t_delta_z
 
             if not (0 <= cx < AXIS_RANGE and 0 <= cy < AXIS_RANGE and 0 <= cz < AXIS_RANGE):
                 continue
 
+            if use_range_weight:
+                r_star_t = r_max / t_entry
+                if r_star_t > 1.0:
+                    r_star_t = 1.0
+            else:
+                r_star_t = 1.0
+
             key = (cx << SHIFT_X) | (cy << SHIFT_Y) | cz
             old_lo = log_odds.get(key, 0.0)
-            new_lo = np.float32(old_lo) - np.float32(l_free)
+            new_lo = np.float32(old_lo) - np.float32(l_free * r_star_t)
             if new_lo < np.float32(-log_odds_clamp):
                 new_lo = np.float32(-log_odds_clamp)
             log_odds[key] = new_lo
@@ -143,7 +168,7 @@ def _update_sweep_python(
         if not is_g and 0 <= exi < AXIS_RANGE and 0 <= eyi < AXIS_RANGE and 0 <= ezi < AXIS_RANGE:
             key = (exi << SHIFT_X) | (eyi << SHIFT_Y) | ezi
             old_lo = log_odds.get(key, 0.0)
-            new_lo = np.float32(old_lo) + np.float32(l_occ)
+            new_lo = np.float32(old_lo) + np.float32(l_occ * r_star_endpoint)
             if new_lo > np.float32(log_odds_clamp):
                 new_lo = np.float32(log_odds_clamp)
             log_odds[key] = new_lo

@@ -172,6 +172,8 @@ def build_log_odds_grid(
                 cfg.l_occ,
                 cfg.l_free,
                 cfg.log_odds_clamp,
+                r_max=cfg.r_max_credibility_m,
+                use_range_weight=cfg.use_range_weighted_log_odds,
             )
 
     unique_keys, lo_vals, n_obs_vals, n_hits_vals = extract_log_odds_arrays(
@@ -228,9 +230,18 @@ def classify_from_log_odds(
     static_mask = evidenced & has_hits & (p_occ >= cfg.p_static_threshold)
     static_arr = unique_keys[static_mask]
 
-    # Free-only: voxels only ever traversed (no endpoint hit).  Any point
-    # landing here is ground noise and must not be labeled dynamic.
-    free_only_mask = n_hits_vals == 0
+    # Free-space-only: voxels whose endpoint-hit count is below
+    # min_occupied_hits — too few hits to confidently call them occupied,
+    # regardless of how negative log_odds got.  At min_occupied_hits=1 this
+    # collapses to the historical `n_hits == 0` predicate (pure free-space).
+    # At >1 it also catches "sparse-surface" voxels (one stray return on a
+    # tree branch / building edge surrounded by many through-rays); without
+    # this gate, those voxels fall into a classification hole — has_hits is
+    # False so they miss static/under/ambiguous, but free_only_mask used to
+    # require n_hits==0 so they missed that too, falling through to dynamic.
+    # That made min_occupied_hits actively counterproductive for filtering
+    # NuScenes-style false positives on textured statics.
+    free_only_mask = n_hits_vals < cfg.min_occupied_hits
     free_only_arr = unique_keys[free_only_mask]
 
     # BUG FIX #2: voxels with hits but too few observations get the benefit

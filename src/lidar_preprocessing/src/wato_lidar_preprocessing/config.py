@@ -114,6 +114,15 @@ class MFMosParams(BaseModel):
     # channel lands in [0, 1] like KITTI remission. NuScenes intensity is
     # uint8 [0, 255] → 255.0. Set to 1.0 for sensors that already produce [0, 1].
     intensity_scale: float = 255.0
+    # Per-LiDAR allowlist. The configured fov_up_deg / fov_down_deg / image
+    # H/W are global — running them on a LiDAR whose mount/geometry differs
+    # significantly (e.g. corner-mounted lidar_ne / lidar_nw vs. center
+    # lidar_cc) projects each sweep into a range image that no longer
+    # resembles KITTI training data, so MF-MOS predictions on those LiDARs
+    # are unreliable. None = no restriction (run on every LiDAR seen in the
+    # chunk). To restrict, list lidar_ids: e.g. ["lidar_cc"] runs only the
+    # center LiDAR.
+    lidar_id_allowlist: Optional[list[str]] = None
 
     @field_validator("residual_steps")
     @classmethod
@@ -207,8 +216,25 @@ class ComponentConfig(BaseModel):
     min_observations: int = 3
     # Voxels with fewer endpoint hits than this are free-space-only; not dynamic.
     min_occupied_hits: int = 1
-    max_ray_length_m: float = 80.0
+    # Default raised 80 → 200 m to pair with range-credibility weighting.
+    # With use_range_weighted_log_odds=False, long rays still contribute full
+    # weight, so users who want the historical "drop noisy distant evidence"
+    # behaviour should set this back down to 50–80 m in yaml.
+    max_ray_length_m: float = 200.0
     free_space_margin_voxels: float = 1.0
+    # Range-credibility weighting (UniLiPs r*_j extension, Option B):
+    #   when use_range_weighted_log_odds=True, every log-odds update is
+    #   multiplied by min(1, r_max_credibility_m / d), where d is the
+    #   distance from the sensor to that update site:
+    #     - endpoint  (l_occ):  d = sweep ray length
+    #     - traversed (l_free): d = parametric distance to that voxel's
+    #                              near edge along the ray
+    #   This down-weights endpoints AND distant carving while leaving
+    #   near-field carving at full weight on long rays (the principled
+    #   extension of UniLiPs Eq. 2 to ray-traversal log-odds).
+    # Opt-in (default False) so existing pipelines reproduce exactly.
+    use_range_weighted_log_odds: bool = False
+    r_max_credibility_m: float = 200.0
     # "skip_endpoint": traverse ground rays for free-space evidence, skip l_occ at endpoint.
     # "skip_ray": skip ground rays entirely (legacy).
     ground_endpoint_strategy: Literal["skip_endpoint", "skip_ray"] = "skip_endpoint"
@@ -271,6 +297,13 @@ class ComponentConfig(BaseModel):
     def _positive_log_odds_param(cls, v: float) -> float:
         if v <= 0:
             raise ValueError(f"log-odds weight must be > 0, got {v}")
+        return v
+
+    @field_validator("r_max_credibility_m")
+    @classmethod
+    def _positive_r_max(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"r_max_credibility_m must be > 0, got {v}")
         return v
 
     @field_validator("p_static_threshold", "p_dynamic_threshold")

@@ -30,12 +30,22 @@ def _update_sweep_numba(
     l_occ: float,
     l_free: float,
     log_odds_clamp: float,
+    r_max: float,
+    use_range_weight: bool,
 ) -> None:
     """Update log_odds, n_obs, n_hits for one sweep's rays.
 
     Canonical Amanatides-Woo init: derive t_max per axis from frac (position
     within current voxel), which is sign-symmetric and easier to audit than
     the (cx+1)*size - ox formulation.
+
+    Range-credibility weighting (UniLiPs r*_j, Option B per-voxel extension)
+    is active when use_range_weight is True: the endpoint l_occ update is
+    multiplied by min(1, r_max/length), and each traversed voxel's l_free
+    update is multiplied by min(1, r_max/t_entry), where t_entry is the
+    parametric distance at which the ray enters that voxel. When False,
+    both factors collapse to 1.0 and behaviour is bit-identical to the
+    pre-feature kernel.
     """
     INF = 1e18
     for i in range(endpoints.shape[0]):
@@ -50,6 +60,16 @@ def _update_sweep_numba(
 
         if length < 1e-9 or length > max_length_m:
             continue
+
+        # r*_j for the endpoint. Computed in float64; the f32 cast happens
+        # at the update site so the multiply ordering matches the python
+        # parity kernel (l_occ * r_star, then cast).
+        if use_range_weight:
+            r_star_endpoint = r_max / length
+            if r_star_endpoint > 1.0:
+                r_star_endpoint = 1.0
+        else:
+            r_star_endpoint = 1.0
 
         inv_len = 1.0 / length
         dxn = dx * inv_len
@@ -112,20 +132,28 @@ def _update_sweep_numba(
         stop_t = length - margin_voxels * voxel_size
 
         # Traverse free-space voxels (sensor-origin voxel is never emitted).
+        # t_entry is captured before incrementing t_max_<axis> so it is the
+        # parametric distance at which the ray enters the new voxel — exactly
+        # what r*_t needs (and bounded > 0 because the sensor-origin voxel is
+        # never emitted, so the first emitted t_entry is the first boundary
+        # crossing, which is strictly positive).
         while True:
             if t_max_x <= t_max_y and t_max_x <= t_max_z:
                 if t_max_x >= stop_t:
                     break
+                t_entry = t_max_x
                 cx += sx
                 t_max_x += t_delta_x
             elif t_max_y <= t_max_z:
                 if t_max_y >= stop_t:
                     break
+                t_entry = t_max_y
                 cy += sy
                 t_max_y += t_delta_y
             else:
                 if t_max_z >= stop_t:
                     break
+                t_entry = t_max_z
                 cz += sz
                 t_max_z += t_delta_z
 
@@ -136,9 +164,16 @@ def _update_sweep_numba(
             ):
                 continue
 
+            if use_range_weight:
+                r_star_t = r_max / t_entry
+                if r_star_t > 1.0:
+                    r_star_t = 1.0
+            else:
+                r_star_t = 1.0
+
             key = (cx << SHIFT_X) | (cy << SHIFT_Y) | cz
             old_lo = log_odds.get(key, numba.float32(0.0))
-            new_lo = old_lo - numba.float32(l_free)
+            new_lo = old_lo - numba.float32(l_free * r_star_t)
             if new_lo < numba.float32(-log_odds_clamp):
                 new_lo = numba.float32(-log_odds_clamp)
             log_odds[key] = new_lo
@@ -152,7 +187,7 @@ def _update_sweep_numba(
         ):
             key = (exi << SHIFT_X) | (eyi << SHIFT_Y) | ezi
             old_lo = log_odds.get(key, numba.float32(0.0))
-            new_lo = old_lo + numba.float32(l_occ)
+            new_lo = old_lo + numba.float32(l_occ * r_star_endpoint)
             if new_lo > numba.float32(log_odds_clamp):
                 new_lo = numba.float32(log_odds_clamp)
             log_odds[key] = new_lo

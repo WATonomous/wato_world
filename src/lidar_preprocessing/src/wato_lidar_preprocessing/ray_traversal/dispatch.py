@@ -87,7 +87,16 @@ def update_sweep_log_odds(
     l_occ: float,
     l_free: float,
     log_odds_clamp: float,
+    r_max: float = 200.0,
+    use_range_weight: bool = False,
 ) -> None:
+    """Plumb a single sweep through the Numba DDA kernel.
+
+    r_max / use_range_weight are keyword-only with safe defaults so existing
+    callers (and tests that predate the range-weighting feature) keep
+    bit-identical behaviour without modification. classify/log_odds.py
+    forwards the live ComponentConfig values when they are configured.
+    """
     _require_numba()
     if is_ground is None:
         ig = np.zeros(len(endpoints), dtype=np.bool_)
@@ -111,6 +120,8 @@ def update_sweep_log_odds(
         float(l_occ),
         float(l_free),
         float(log_odds_clamp),
+        float(r_max),
+        bool(use_range_weight),
     )
 
 
