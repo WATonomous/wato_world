@@ -79,6 +79,19 @@ def main(log_level: str) -> None:
         "across multiple machines — run 'reduce' manually once all chunks are done."
     ),
 )
+@click.option(
+    "--two-pass/--no-two-pass",
+    "two_pass",
+    default=True,
+    help=(
+        "Enabled by default: run classification twice — pass 1 builds a rough "
+        "static map, then reduce builds the bag-level global_static_map.npz, "
+        "then pass 2 re-classifies every chunk using that map as a per-sweep "
+        "KDTree prior (UniLiPs IWU).  Roughly doubles wall time but improves "
+        "static recall on long-range structure sparsely observed in any single "
+        "chunk.  Use --no-two-pass for the legacy single-pass behavior."
+    ),
+)
 def run_cmd(
     bag_id: str,
     chunk_id: str | None,
@@ -86,11 +99,22 @@ def run_cmd(
     force: bool,
     workers: int,
     auto_reduce: bool,
+    two_pass: bool,
 ) -> None:
     """Run deskew → classify → ground for all chunks (or one chunk) of a bag."""
     bag_id = _resolve_bag_id(bag_id)
     cfg = load_config(config_path)
-    run_pipeline(cfg, bag_id=bag_id, chunk_id=chunk_id, force=force, workers=workers)
+    run_pipeline(
+        cfg,
+        bag_id=bag_id,
+        chunk_id=chunk_id,
+        force=force,
+        workers=workers,
+        two_pass=two_pass,
+    )
+    # In two-pass mode, run() already built one global_static_map.npz to seed
+    # pass 2.  We re-run it here so the final on-disk global map reflects the
+    # improved pass-2 per-chunk static_map.npz files, not the pass-1 ones.
     if auto_reduce and chunk_id is None:
         log.info("auto-reduce: building global_static_map.npz + global_ground.npz ...")
         static_out = reduce_static_map(bag_id, cfg)

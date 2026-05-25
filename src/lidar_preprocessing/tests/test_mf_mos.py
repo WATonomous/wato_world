@@ -496,6 +496,18 @@ def _write_world_sweep(bag_id: str, chunk_id: str, sweep_id: int, xyz: np.ndarra
     np.savez_compressed(path, x=xyz[:, 0], y=xyz[:, 1], z=xyz[:, 2])
 
 
+def _write_world_sweep_with_origin(
+    bag_id: str, chunk_id: str, sweep_id: int, xyz: np.ndarray, origin: np.ndarray
+) -> None:
+    """Write a world NPZ including the `origin` field required by the log_odds path."""
+    path = local_path(lidar_world_path(bag_id, chunk_id, sweep_id))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    np.savez_compressed(
+        path, x=xyz[:, 0], y=xyz[:, 1], z=xyz[:, 2],
+        origin=origin.astype(np.float64),
+    )
+
+
 def _write_mf_mask(bag_id: str, chunk_id: str, sweep_id: int, mask: np.ndarray) -> str:
     uri = mf_mos_mask_path(bag_id, chunk_id, sweep_id)
     ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
@@ -591,6 +603,84 @@ def test_fusion_union_ors_signals(tmp_env):
     assert dmap["xyz"].shape[0] > 0, "at least one point should be in dynamic_map"
     assert pytest.approx(float(dmap["xyz"][:, 0].min()), abs=0.01) == 1.0, (
         "point at x=1.0 (MF-MOS moving) should be in dynamic_map"
+    )
+
+
+def test_fusion_union_log_odds_path(tmp_env):
+    """fusion_mode='union' with log_odds: a voxel static by ray-casting but voted dynamic
+    by MF-MOS across enough sweeps must appear in dynamic_map.
+
+    This is the production code path (log_odds + voxel-level vote aggregation in Pass 1,
+    classify_from_log_odds, then masking.py).  The persistence-mode tests above don't
+    exercise it.
+
+    Setup: 8 sweeps, sensor at origin, single static point at (5, 0, 0).
+      - log_odds after 8 hits: ~6.8 → p_occ ≈ 0.999 → classified static.
+      - MF-MOS mask: True for that point in every sweep → 8/8 votes → passes thresholds.
+      - Expected: union mode fuses the MF-MOS vote and the point lands in dynamic_map.
+    """
+    bag_id, chunk_id = "bag_fus_union_lo", "chunk0"
+    n_sweeps = 8
+    sensor_origin = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    # Three distinct points; only point 0 (5, 0, 0) is flagged by MF-MOS.
+    static_xyz = np.array([[5.0, 0.0, 0.0], [5.0, 1.0, 0.0], [5.0, -1.0, 0.0]])
+
+    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
+    rows = []
+    for i in range(n_sweeps):
+        _write_world_sweep_with_origin(bag_id, chunk_id, i, static_xyz, sensor_origin)
+        mf_uri = _write_mf_mask(bag_id, chunk_id, i, np.array([True, False, False]))
+        rows.append(_proc_row_with_mask(bag_id, chunk_id, i, static_xyz, mf_uri))
+    write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
+
+    cfg = ComponentConfig(
+        classification_method="log_odds",
+        min_mf_mos_votes=3,
+        mf_mos_vote_fraction_threshold=0.5,
+        mf_mos=MFMosParams(enabled=True, fusion_mode="union"),
+    )
+    classify_chunk(cfg, bag_id, chunk_id)
+
+    dmap = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
+    assert dmap["xyz"].shape[0] > 0, (
+        "union mode: MF-MOS-voted point in a log_odds-static voxel must appear in dynamic_map"
+    )
+    xs, ys = dmap["xyz"][:, 0], dmap["xyz"][:, 1]
+    assert any(abs(x - 5.0) < 0.01 and abs(y) < 0.01 for x, y in zip(xs, ys)), (
+        "point at (5.0, 0.0) must be in dynamic_map (MF-MOS union flipped it from static)"
+    )
+
+
+def test_fusion_independent_log_odds_path(tmp_env):
+    """fusion_mode='independent' with log_odds: MF-MOS all-dynamic vote must NOT override
+    the voxel classifier.  This is the negative control for test_fusion_union_log_odds_path.
+    """
+    bag_id, chunk_id = "bag_fus_ind_lo", "chunk0"
+    n_sweeps = 8
+    sensor_origin = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    static_xyz = np.array([[5.0, 0.0, 0.0], [5.0, 1.0, 0.0], [5.0, -1.0, 0.0]])
+
+    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
+    rows = []
+    for i in range(n_sweeps):
+        _write_world_sweep_with_origin(bag_id, chunk_id, i, static_xyz, sensor_origin)
+        mf_uri = _write_mf_mask(bag_id, chunk_id, i, np.ones(3, dtype=bool))
+        rows.append(_proc_row_with_mask(bag_id, chunk_id, i, static_xyz, mf_uri))
+    write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
+
+    cfg = ComponentConfig(
+        classification_method="log_odds",
+        min_mf_mos_votes=3,
+        mf_mos_vote_fraction_threshold=0.5,
+        mf_mos=MFMosParams(enabled=True, fusion_mode="independent"),
+    )
+    classify_chunk(cfg, bag_id, chunk_id)
+
+    smap = np.load(local_path(static_map_path(bag_id, chunk_id)))
+    dmap = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
+    assert smap["xyz"].shape[0] > 0, "log_odds should classify repeatedly-seen points as static"
+    assert dmap["xyz"].shape[0] == 0, (
+        "independent mode: MF-MOS all-dynamic vote must not override log_odds static label"
     )
 
 

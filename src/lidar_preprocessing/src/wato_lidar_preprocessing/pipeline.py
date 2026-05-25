@@ -18,6 +18,7 @@ Features:
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import traceback
@@ -36,6 +37,7 @@ from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.schemas import CHUNK_SUMMARY_SCHEMA, ChunkSummaryRow
 from wato_lidar_preprocessing import classify, deskew, ground, mf_mos as mf_mos_step
 from wato_lidar_preprocessing.config import ComponentConfig
+from wato_lidar_preprocessing.reduce import reduce_static_map
 
 log = logging.getLogger(__name__)
 
@@ -163,6 +165,103 @@ def _process_one_chunk(
         return (chunk_id, False, f"{type(exc).__name__}: {exc}\n{tb}")
 
 
+def _pass2_chunk_worker(
+    chunk_id: str,
+    cfg: ComponentConfig,
+    bag_id: str,
+    global_map_path: str,
+) -> classify.ClassifyResult:
+    """Module-level worker for ProcessPoolExecutor.
+
+    Local closures are not picklable so cannot be sent to subprocesses; this
+    function must stay at module scope.  Each worker builds its own
+    GlobalMapPrior from the on-disk path to avoid pickling a large cKDTree
+    across the process-pool pipe.
+    """
+    prior = classify.GlobalMapPrior.from_npz(
+        global_map_path,
+        match_radius_m=cfg.global_map_match_radius_m,
+        r_max_credibility_m=cfg.r_max_credibility_m,
+    )
+    return classify.process_chunk(cfg, bag_id, chunk_id, global_map_prior=prior)
+
+
+def _run_classify_pass2(
+    cfg: ComponentConfig,
+    bag_id: str,
+    chunk_id: str | None,
+    workers: int,
+    global_map_path: str,
+) -> None:
+    """Re-run classify (only) on every chunk with the global map as a prior.
+
+    Pass 2 deliberately skips deskew, mf_mos, and ground — their outputs are
+    already on disk and don't depend on the global map.  It rewrites
+    static_map.npz / dynamic_map.npz / lidar_proc_index for each chunk.
+    """
+    chunk_rows = read_rows(chunks_index_path(bag_id))
+    if chunk_id:
+        log.warning(
+            "two-pass mode with --chunk %s: global map was built from a single chunk only. "
+            "Run without --chunk to use the full bag map as prior.",
+            chunk_id,
+        )
+        chunk_rows = [r for r in chunk_rows if r["chunk_id"] == chunk_id]
+
+    n_total = len(chunk_rows)
+    n_ok = 0
+    failures: list[tuple[str, str]] = []
+
+    if workers <= 1:
+        # Single-worker path: build the KDTree once and reuse across all chunks
+        # in this process.  Avoids rebuilding a million-point KDTree N times.
+        prior = classify.GlobalMapPrior.from_npz(
+            global_map_path,
+            match_radius_m=cfg.global_map_match_radius_m,
+            r_max_credibility_m=cfg.r_max_credibility_m,
+        )
+        for row in chunk_rows:
+            cid = row["chunk_id"]
+            try:
+                classify.process_chunk(cfg, bag_id, cid, global_map_prior=prior)
+                n_ok += 1
+            except Exception as exc:  # noqa: BLE001 — one chunk failing must not stop the rest
+                log.exception("pass 2 chunk %s failed", cid)
+                failures.append((cid, f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"))
+    else:
+        # Multi-worker path: each worker builds its own KDTree from disk path.
+        # Pickling cKDTree across the pool pipe per chunk is slower than
+        # building from the on-disk path inside each worker process.
+        worker = functools.partial(
+            _pass2_chunk_worker,
+            cfg=cfg,
+            bag_id=bag_id,
+            global_map_path=global_map_path,
+        )
+        log.info("pass 2: running %d chunks across %d workers", n_total, workers)
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futs = {pool.submit(worker, r["chunk_id"]): r["chunk_id"] for r in chunk_rows}
+            for fut in as_completed(futs):
+                cid = futs[fut]
+                try:
+                    fut.result()
+                    n_ok += 1
+                except Exception as exc:  # noqa: BLE001
+                    log.exception("pass 2 chunk %s failed", cid)
+                    failures.append((cid, f"{type(exc).__name__}: {exc}"))
+
+    log.info(
+        "two-pass mode: pass 2 complete for bag %s: %d/%d chunks succeeded",
+        bag_id,
+        n_ok,
+        n_total,
+    )
+    if failures:
+        log.warning("pass 2 failed chunks:")
+        for cid, err in failures:
+            log.warning("--- chunk %s ---\n%s", cid, err)
+
+
 def run(
     cfg: ComponentConfig,
     *,
@@ -170,6 +269,7 @@ def run(
     chunk_id: str | None = None,
     force: bool = False,
     workers: int = 1,
+    two_pass: bool = True,
 ) -> None:
     """Process all chunks (or one) for a bag.
 
@@ -179,6 +279,12 @@ def run(
         chunk_id: optional single-chunk filter.
         force: re-process chunks whose ground.npz already exists.
         workers: number of concurrent worker processes (>=1).
+        two_pass: defaults to True.  After pass 1 completes, builds the
+            bag-level global_static_map.npz via reduce_static_map and re-runs
+            classify (only) on every chunk with that map as a per-sweep KDTree
+            prior (UniLiPs IWU).  Roughly doubles wall time but improves static
+            recall on long-range structure sparsely observed in any one chunk.
+            Set False for the legacy single-pass behavior.
     """
     chunks_idx = chunks_index_path(bag_id)
     if not os.path.exists(local_path(chunks_idx)):
@@ -258,6 +364,18 @@ def run(
         raise RuntimeError(
             f"lidar_preprocessing: all {n_total} chunks failed for bag {bag_id!r}"
         )
+
+    if two_pass:
+        log.info(
+            "two-pass mode: building bag-level global_static_map.npz from pass-1 results"
+        )
+        global_map_uri = reduce_static_map(bag_id, cfg)
+        global_map_path_str = local_path(global_map_uri)
+        log.info(
+            "two-pass mode: starting pass 2 (classify only, global map prior at %s)",
+            global_map_path_str,
+        )
+        _run_classify_pass2(cfg, bag_id, chunk_id, workers, global_map_path_str)
 
 
 __all__ = ["run", "_chunk_complete", "_process_one_chunk"]

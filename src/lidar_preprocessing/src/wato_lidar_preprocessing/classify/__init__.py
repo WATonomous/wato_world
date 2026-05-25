@@ -6,6 +6,7 @@ Public surface mirrors the old monolithic classify.py: external callers
 
 from wato_lidar_preprocessing.voxel import VoxelOverflowError
 
+from .global_map_prior import GlobalMapPrior
 from .pipeline import ClassifyResult, process_chunk
 
-__all__ = ["process_chunk", "ClassifyResult", "VoxelOverflowError"]
+__all__ = ["process_chunk", "ClassifyResult", "VoxelOverflowError", "GlobalMapPrior"]

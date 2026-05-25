@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
@@ -10,6 +11,8 @@ from wato_common.artifact_store import dynamic_mask_path, local_path
 from wato_lidar_preprocessing.config import ComponentConfig
 
 from .io_helpers import load_world_xyz_intensity
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -114,6 +117,7 @@ def apply_classification_to_sweep(
 
     # MF-MOS voxel-level fusion via searchsorted (same pattern as not_dynamic_arr).
     if mf_mos_dynamic_arr is not None and mf_mos_dynamic_arr.size > 0:
+        n_dyn_before_mf = n_dyn
         pos = np.searchsorted(mf_mos_dynamic_arr, keys)
         pos = np.clip(pos, 0, mf_mos_dynamic_arr.size - 1)
         is_mf_mos_dyn = mf_mos_dynamic_arr[pos] == keys
@@ -128,6 +132,15 @@ def apply_classification_to_sweep(
         if ground_mask_cache_i is not None:
             mask &= ~ground_mask_cache_i
         n_dyn = int(mask.sum())
+        log.debug(
+            "sweep %s mf_mos union: %d pts matched mf_mos voxels, "
+            "%d pts flipped to dynamic (n_dyn %d→%d)",
+            row.get("sweep_id"),
+            int(is_mf_mos_dyn.sum()),
+            n_dyn - n_dyn_before_mf,
+            n_dyn_before_mf,
+            n_dyn,
+        )
         # A point fusion-labelled dynamic can't remain in the static cloud.
         is_static = is_static & ~mask
         n_static = int(is_static.sum())

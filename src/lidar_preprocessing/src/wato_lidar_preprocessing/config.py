@@ -244,6 +244,27 @@ class ComponentConfig(BaseModel):
     # Step D — global static map reduce.
     global_map_voxel_size_m: float = 0.30
 
+    # Two-pass global map prior (UniLiPs IWU).  Activated by the --two-pass CLI
+    # flag, which runs pass 1 (current single-pass), then reduce, then pass 2
+    # using the global_static_map.npz as a per-sweep KDTree prior.
+    #
+    # Match radius for the global static map KDTree query.  Should be ≥
+    # global_map_voxel_size_m — reduce.py snaps points to voxel centres, so
+    # the worst-case offset from any original point to its representative is
+    # voxel_size × √3/2 (≈ 0.26 m at 0.30 m voxel).  If global_map_voxel_size_m
+    # is increased without also increasing this, boundary points fail to match
+    # and the prior silently stops working for them.
+    global_map_match_radius_m: float = 0.30
+    # Per-sweep log-odds boost for map-matched endpoints.  This accumulates
+    # across every sweep that hits the same voxel, so the effective total
+    # boost is l_occ_global_map * r_star * n_sweeps_hitting_voxel.  At 20 Hz
+    # over a 30-second chunk that's up to 600 increments — keep this at ~1-5%
+    # of l_occ so the prior nudges without overriding real geometric evidence.
+    # At the default 0.03 a voxel seen in every sweep of a 30-second chunk
+    # accumulates ~0.9 boost (< 2 × l_occ), which is meaningful but still
+    # requires real n_hits to pass the has_hits gate into static_arr.
+    l_occ_global_map: float = 0.03
+
     # Per-point timestamp unit stored by ingest's t_offset_us field.
     # Velodyne "t" field is in seconds; some lidars use microseconds.
     # Options: "seconds" | "microseconds" | "nanoseconds"

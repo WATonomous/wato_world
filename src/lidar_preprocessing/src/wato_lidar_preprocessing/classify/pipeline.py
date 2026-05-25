@@ -32,6 +32,7 @@ from wato_common.schemas import PROCESSED_SWEEPS_SCHEMA, ProcessedSweepMeta
 from wato_lidar_preprocessing.config import ComponentConfig
 from wato_lidar_preprocessing.voxel import voxel_indices
 
+from .global_map_prior import GlobalMapPrior
 from .io_helpers import (
     cache_byte_budget,
     estimate_cache_bytes,
@@ -152,8 +153,17 @@ def process_chunk(
     cfg: ComponentConfig,
     bag_id: str,
     chunk_id: str,
+    *,
+    global_map_prior: GlobalMapPrior | None = None,
 ) -> ClassifyResult:
-    """Classify all world-frame sweeps in a chunk as static or dynamic."""
+    """Classify all world-frame sweeps in a chunk as static or dynamic.
+
+    Args:
+        global_map_prior: optional bag-level static map prior (two-pass mode).
+            When set, every sweep gets a credibility-weighted log-odds boost
+            for endpoints within match_radius_m of a known static surface.
+            Only used by the log-odds path; the persistence path ignores it.
+    """
     meta_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
     if not meta_rows:
         log.warning(
@@ -199,7 +209,13 @@ def process_chunk(
             frame_keys,
             (unique_keys, lo_vals, n_obs_vals, n_hits_vals, mf_mos_votes_arr, n_sweep_hits_arr),
         ) = build_log_odds_grid(
-            meta_rows, cfg, origin, chunk_id, cache_xyz=cache_xyz, bag_id=bag_id
+            meta_rows,
+            cfg,
+            origin,
+            chunk_id,
+            cache_xyz=cache_xyz,
+            bag_id=bag_id,
+            global_map_prior=global_map_prior,
         )
         static_arr, not_dynamic_arr, mf_mos_dynamic_arr, diag = classify_from_log_odds(
             unique_keys, lo_vals, n_obs_vals, n_hits_vals, cfg,
@@ -207,6 +223,12 @@ def process_chunk(
             n_sweep_hits_arr=n_sweep_hits_arr,
         )
     else:
+        if global_map_prior is not None:
+            log.warning(
+                "chunk %s: global_map_prior provided but classification_method="
+                "'persistence' ignores it (prior is log-odds-only).  No-op.",
+                chunk_id,
+            )
         (
             xyz_cache,
             intensity_cache,

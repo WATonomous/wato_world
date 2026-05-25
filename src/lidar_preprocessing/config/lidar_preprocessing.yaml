@@ -25,14 +25,21 @@ lidar_preprocessing:
   p_static_threshold: 0.70  # sigmoid(log_odds) >= this → static
   p_dynamic_threshold: 0.30 # sigmoid(log_odds) < this → dynamic (if evidenced)
   min_observations: 3       # voxels with fewer obs stay "unknown"
-  min_occupied_hits: 1      # voxels with n_hits < this are free-space-only, not dynamic
+  # Raised 1 → 2: a single stray return on a building edge / tree branch
+  # surrounded by through-rays could pass the dynamic gate (1 hit, many
+  # carves → low p_occ).  Requiring 2 real hits sends those sparse-return
+  # voxels to free_only (mask=False) instead of leaking into the dynamic
+  # cloud.  Real moving vehicles deposit multiple hits per sweep so this
+  # doesn't suppress them.
+  min_occupied_hits: 2
   # Distant rays accumulate noise (beam crosstalk, mixed pixels, pose error
-  # leverage); capping at 50m avoids low-quality far rays carving statics.
-  # If you enable use_range_weighted_log_odds below, raise this to ~200 so
-  # the weighting actually has long rays to down-weight — at 50m max, every
-  # accepted ray has r*_j == 1.0 (the multiplier is a no-op) because no
-  # endpoint can exceed r_max_credibility_m=200.
-  max_ray_length_m: 50.0
+  # leverage), but capping too low makes use_range_weighted_log_odds inert:
+  # with cap=50m and r_max_credibility_m=200, every accepted ray has
+  # r*_j = min(1, 200/d) = 1.0, so range weighting is a no-op.  Raised to
+  # 150m so distant carving actually gets down-weighted while near-field
+  # rays keep full strength.  Beyond ~150m NuScenes 32-beam returns are
+  # too noisy to trust regardless.
+  max_ray_length_m: 150.0
   # Stop carving 2 voxels (was 1) before the endpoint so a sweep's own ray
   # can't carve its own immediate-neighbor voxels — protects building/tree
   # surfaces against same-sweep near-endpoint through-ray noise.
@@ -152,7 +159,7 @@ lidar_preprocessing:
     # the KITTI-pretrained model produces low-confidence false positives
     # on NuScenes textured surfaces (brick walls, tree canopies).
     score_threshold: 0.7
-    save_scores: false              # also write _mf_mos_score.npy float32
+    save_scores: true              # also write _mf_mos_score.npy float32
     fusion_mode: union         # independent | union | mfmos_only
     max_pose_gap_ms: 200
 

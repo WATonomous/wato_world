@@ -26,9 +26,39 @@ from wato_lidar_preprocessing.ray_traversal import (
 )
 from wato_lidar_preprocessing.voxel import voxel_indices
 
+from .global_map_prior import GlobalMapPrior
 from .io_helpers import load_mf_mos_world_mask, load_world_full, sigmoid
 
 log = logging.getLogger(__name__)
+
+
+def _apply_global_map_boost(
+    hit_keys: np.ndarray,
+    hit_r_star: np.ndarray,
+    l_occ_boost: float,
+    clamp: float,
+    log_odds_dict,
+) -> None:
+    """Add per-sweep log-odds boost for endpoints matched in the global static map.
+
+    Only touches log_odds_dict — never n_hits_dict or n_obs_dict.  n_hits must
+    come from real sweep endpoints so the has_hits gate (min_occupied_hits)
+    is not bypassed by a synthetic prior, otherwise voxels the current chunk
+    never actually observed could be promoted to static_arr.
+
+    For each unique voxel key that any sweep point fell in, applies the max
+    r_star across the sweep's hits (taking the most-credible match) and adds
+    l_occ_boost * max_r_star to that voxel's log-odds, then clamps.
+    """
+    if hit_keys.size == 0:
+        return
+    unique_keys, inv = np.unique(hit_keys, return_inverse=True)
+    max_r_star = np.zeros(len(unique_keys), dtype=np.float32)
+    np.maximum.at(max_r_star, inv, hit_r_star)
+    for k, rs in zip(unique_keys.tolist(), max_r_star.tolist()):
+        boost = l_occ_boost * float(rs)
+        old = log_odds_dict.get(k, np.float32(0.0))
+        log_odds_dict[k] = np.float32(min(float(old) + boost, clamp))
 
 
 def build_log_odds_grid(
@@ -40,6 +70,7 @@ def build_log_odds_grid(
     cache_xyz: bool,
     cache_intensity: bool = True,
     bag_id: str | None = None,
+    global_map_prior: GlobalMapPrior | None = None,
 ) -> tuple[
     list[np.ndarray | None],
     list[np.ndarray | None],
@@ -53,6 +84,14 @@ def build_log_odds_grid(
     Loads each sweep once, populates the typed-dict log_odds accumulators
     via ray_traversal, builds sweep_keys for Pass 2, and (optionally) caches
     xyz/intensity/ground_mask in memory so Pass 2 doesn't re-read the NPZs.
+
+    Args:
+        global_map_prior: optional GlobalMapPrior built from a bag-level
+            global_static_map.npz.  When provided (two-pass mode), each sweep's
+            endpoints get a credibility-weighted log-odds boost where they fall
+            within match_radius_m of the global map (UniLiPs IWU Eq. 2-3).
+            The boost touches only log_odds — n_hits stays backed by real
+            sweep returns so the has_hits gate is not bypassed.
 
     Returns:
         xyz_cache:           per-sweep xyz arrays (or None if not cached)
@@ -176,6 +215,23 @@ def build_log_odds_grid(
                 use_range_weight=cfg.use_range_weighted_log_odds,
             )
 
+        # UniLiPs IWU boost (two-pass mode).  Applied AFTER update_sweep_log_odds
+        # so it adds to whatever the normal ray-traversal already wrote.  Uses
+        # the full sweep xyz / keys (not just endpoints_arr) — ground voxels
+        # that get boosted are filtered later by the ground mask in masking.py.
+        # The sweep_origin-is-None branch above already hard-raises, so this
+        # block is unreachable with a None origin.
+        if global_map_prior is not None and xyz.shape[0] > 0:
+            map_hit, r_star = global_map_prior.query_sweep(xyz, sweep_origin)
+            if map_hit.any():
+                _apply_global_map_boost(
+                    keys[map_hit],
+                    r_star[map_hit],
+                    cfg.l_occ_global_map,
+                    cfg.log_odds_clamp,
+                    log_odds_dict,
+                )
+
     unique_keys, lo_vals, n_obs_vals, n_hits_vals = extract_log_odds_arrays(
         log_odds_dict, n_obs_dict, n_hits_dict
     )
@@ -292,6 +348,15 @@ def classify_from_log_odds(
             vote_fraction >= cfg.mf_mos_vote_fraction_threshold
         )
         mf_mos_dynamic_arr = np.sort(unique_keys[mf_mos_mask])
+        log.info(
+            "mf_mos vote aggregation: %d voxels with votes, %d pass thresholds "
+            "(min_votes=%d, fraction>=%.2f) → %d mf_mos-dynamic voxels",
+            int((mf_mos_votes_arr > 0).sum()),
+            int(mf_mos_mask.sum()),
+            cfg.min_mf_mos_votes,
+            cfg.mf_mos_vote_fraction_threshold,
+            mf_mos_dynamic_arr.size,
+        )
 
     diag = {
         "n_evidenced": int(evidenced.sum()),
