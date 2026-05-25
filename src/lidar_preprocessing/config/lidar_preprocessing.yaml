@@ -1,22 +1,38 @@
 lidar_preprocessing:
   # Step B — voxel static/dynamic classification.
-  voxel_size_m: 0.15
+  # Voxel size bumped 0.15 → 0.25: 32-beam NuScenes at 50m has ~0.17°/beam
+  # angular footprint, so 0.15m voxels straddle beam boundaries and pose
+  # drift carved them through. 0.25m is more robust without hurting
+  # spatial fidelity for typical objects.
+  voxel_size_m: 0.25
 
   # Classification method: "log_odds" (Bayesian ray-casting) or "persistence"
   # (legacy sweep-count threshold).  Use "persistence" for A/B comparison.
   classification_method: log_odds
 
   # Log-odds ray-casting parameters (active when classification_method=log_odds).
-  # l_occ < l_free keeps statics from being carved by their own through-rays.
-  l_occ: 0.85
-  l_free: 0.40
-  log_odds_clamp: 5.0      # clamp prevents ossification after long history
+  # l_occ > l_free so a single endpoint hit outweighs a few through-ray carves.
+  # The ratio is what protects statics from pose-drift carving: with l_occ=1.20
+  # and l_free=0.25, 1 hit survives ~5 carves (vs ~2 at the pre-fix 0.85/0.40).
+  l_occ: 1.20
+  l_free: 0.25
+  # Symmetric clamp on log_odds (±value).  Raised 5.0 → 50.0 because clamp=5
+  # with l_occ=1.20 caps at the +5 ceiling after only ~4 hits — additional
+  # hits add nothing while carves keep subtracting, so well-observed walls
+  # would still get classified dynamic after a moderate number of through-
+  # rays.  50.0 gives well-observed voxels ~40+ hits of headroom.
+  log_odds_clamp: 50.0
   p_static_threshold: 0.70  # sigmoid(log_odds) >= this → static
   p_dynamic_threshold: 0.30 # sigmoid(log_odds) < this → dynamic (if evidenced)
   min_observations: 3       # voxels with fewer obs stay "unknown"
   min_occupied_hits: 1      # voxels with n_hits < this are free-space-only, not dynamic
-  max_ray_length_m: 80.0    # beyond this range, noise dominates
-  free_space_margin_voxels: 1.0  # stop carving N voxels before endpoint
+  # Distant rays accumulate noise (beam crosstalk, mixed pixels, pose error
+  # leverage); capping at 50m avoids low-quality far rays carving statics.
+  max_ray_length_m: 50.0
+  # Stop carving 2 voxels (was 1) before the endpoint so a sweep's own ray
+  # can't carve its own immediate-neighbor voxels — protects building/tree
+  # surfaces against same-sweep near-endpoint through-ray noise.
+  free_space_margin_voxels: 2.0
   # "skip_endpoint": traverse ground rays (free-space evidence) but skip l_occ at endpoint.
   # "skip_ray": skip ground rays entirely (legacy, use for A/B comparison).
   ground_endpoint_strategy: skip_endpoint
@@ -34,6 +50,21 @@ lidar_preprocessing:
   # Velodyne "t" field is seconds; adjust if using a different LiDAR.
   # Options: "seconds" | "microseconds" | "nanoseconds"
   point_time_unit: "seconds"
+
+  # Step A rolling-shutter compensation.  NuScenes bags don't include a
+  # per-point timestamp in PointCloud2 — without compensation, every point
+  # in a sweep gets the header pose, producing ~25cm of intra-sweep smear
+  # at 7 m/s ego speed (wider than 0.25m voxel → static surfaces spread
+  # across multiple voxels and end up classified dynamic).  When raw NPZ
+  # lacks t_offset_us, deskew synthesizes per-point times from azimuth.
+  synthesize_per_point_times: true
+  # NuScenes uses Velodyne HDL-32E at 20 Hz → 50ms per rotation.
+  lidar_sweep_duration_ms: 50.0
+  # "auto" detects per sweep from the data (compares phi[0] to phi[~200]).
+  # NuScenes LIDAR_TOP actually scans CW (azimuth decreases) in the lidar
+  # frame — the previous "ccw" default produced reversed timing, which is
+  # why the smear bug didn't visibly improve after enabling synthesis.
+  lidar_rotation_dir: auto
 
   # Step C — Patchwork++ ground segmentation.
   # Parameters match wato_monorepo perception/patchwork/patchwork/config/params.yaml.
@@ -57,6 +88,13 @@ lidar_preprocessing:
   # Useful for QA/visualization but NOT what SAM4D's MinkUNet encoder consumes
   # directly — MinkUNet needs per-frame voxels (see save_per_frame_voxel_occupancy).
   save_voxel_occupancy: true
+
+  # Export voxel_diag.npz: per-voxel log_odds/n_obs/n_hits/classification for
+  # EVERY classified voxel (including carved ones with log_odds < 0 that
+  # voxel_occupancy.npz filters out).  Powers the viz's p_occ color mode for
+  # the dynamic cloud — lets you tell threshold-edge leakage (p_occ ≈ 0.30,
+  # yellow) from deep-carving leakage (p_occ < 0.10, dark red).
+  save_voxel_diagnostics: true
 
   # Export one voxel_occupancy_frame_NNNN.npz per frame_id in each chunk.
   # This IS what perception_2d feeds to SAM4D's MinkUNet encoder: each file
@@ -83,22 +121,33 @@ lidar_preprocessing:
   # Download weights from https://github.com/SCNU-RISLAB/MF-MOS/releases and
   # place at /data/models/mf_mos/ (mounted via docker-compose.yaml).
   mf_mos:
-    enabled: false
+    enabled: true
     checkpoint_path: /data/models/mf_mos/mf_mos_semantic_kitti.pt
     arch_config:   /data/models/mf_mos/arch_cfg.yaml
     data_config:   /data/models/mf_mos/data_cfg.yaml
-    residual_steps: [1, 2, 4, 8]   # past-sweep offsets for residual channels
+    # 8 consecutive sweep deltas — matches the KITTI-trained checkpoint
+    # (n_input_scans=8). For NuScenes (20 Hz) we double the offsets so the
+    # per-channel motion magnitude matches KITTI's 10 Hz training data:
+    # 8 × 50 ms = 400 ms ≈ KITTI's 4 × 100 ms equivalent envelope.
+    residual_steps: [2, 4, 6, 8, 10, 12, 14, 16]
     range_image_h: 32               # NuScenes 32-beam; set to 64 for KITTI
     range_image_w: 1024
     fov_up_deg:    10.0             # NuScenes defaults; KITTI uses 3.0 / -25.0
     fov_down_deg: -30.0
     device: cuda                    # set to "cpu" for tiny smoke tests
-    score_threshold: 0.5
+    # Per-pixel MF-MOS sigmoid threshold.  Raised from 0.5 → 0.7 because
+    # the KITTI-pretrained model produces low-confidence false positives
+    # on NuScenes textured surfaces (brick walls, tree canopies).
+    score_threshold: 0.7
     save_scores: false              # also write _mf_mos_score.npy float32
-    fusion_mode: independent        # independent | union | mfmos_only
+    fusion_mode: independent         # independent | union | mfmos_only
     max_pose_gap_ms: 200
 
   # Voxel-level MF-MOS vote aggregation thresholds (active when fusion_mode != independent).
   # A voxel is MF-MOS-dynamic if votes >= min_mf_mos_votes AND vote_fraction >= threshold.
-  mf_mos_vote_fraction_threshold: 0.5
-  min_mf_mos_votes: 1
+  # Tightened (0.5 → 0.7 fraction, 1 → 3 min votes) to suppress single-sweep
+  # false positives that were leaking buildings/trees into dynamic_map.npz.
+  # Requires majority agreement (3+ sweeps, ≥70% of observing sweeps) before
+  # a voxel is fused as MF-MOS-dynamic.
+  mf_mos_vote_fraction_threshold: 0.7
+  min_mf_mos_votes: 3

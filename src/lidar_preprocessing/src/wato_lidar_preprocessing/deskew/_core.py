@@ -66,14 +66,33 @@ _load_pose_samples = load_pose_samples
 _load_ego_T_lidar = load_ego_T_lidar
 
 
-def _make_patchwork(params: PatchworkParams) -> Optional[Any]:
-    """Lazy-import + construct one Patchwork++ instance, or return None."""
+def _make_patchwork(
+    params: PatchworkParams, *, required: bool = True
+) -> Optional[Any]:
+    """Lazy-import + construct one Patchwork++ instance.
+
+    Raises ImportError when ``required=True`` (default) and pypatchworkpp
+    isn't installed.  Without Patchwork, ground extraction is skipped and
+    ground points pollute both static_map.npz and dynamic_map.npz — set
+    ``require_patchwork: false`` in lidar_preprocessing.yaml only if you
+    knowingly accept that pollution.
+    """
     try:
         import pypatchworkpp  # type: ignore[import]
-    except ImportError:
+    except ImportError as exc:
+        if required:
+            raise ImportError(
+                "pypatchworkpp is required for per-sweep ground extraction. "
+                "Without it, ground points pollute both static_map.npz and "
+                "dynamic_map.npz. Install via "
+                "'uv pip install pypatchworkpp==1.0.4'. If you really need "
+                "to run without ground extraction, set 'require_patchwork: "
+                "false' in lidar_preprocessing.yaml."
+            ) from exc
         log.warning(
-            "pypatchworkpp not installed — per-sweep ground extraction skipped. "
-            "Install via: uv pip install pypatchworkpp==1.0.4"
+            "pypatchworkpp not installed and require_patchwork=False — "
+            "per-sweep ground extraction skipped. Ground points WILL "
+            "pollute static_map.npz and dynamic_map.npz."
         )
         return None
     p = pypatchworkpp.Parameters()
@@ -203,6 +222,69 @@ def _assign_frame_ids(
         r["frame_id"] = int(best) if best >= 0 else None
 
 
+def _synthesize_t_offset_ns_from_azimuth(
+    xyz_lidar: np.ndarray,
+    sweep_duration_ns: float,
+    rotation_dir: str = "auto",
+) -> np.ndarray:
+    """Compute per-point time offsets [ns] from azimuth for a rotating LiDAR.
+
+    Each point's azimuth (atan2(y, x)) determines when within the sweep it
+    was fired, assuming uniform angular velocity.  Sweep start is anchored
+    at ``phi_start = phi[0]`` — the raw NPZ preserves the bag's point
+    order, which is firing order for standard rosbag conversions, so the
+    first point fired (the start of the sweep) is xyz_lidar[0].  This is
+    critical: NuScenes LIDAR_TOP starts scanning at the back of the
+    vehicle (azimuth ≈ -π), NOT azimuth = 0.
+
+    Args:
+        xyz_lidar: (N, 3) float — points in sensor frame, in firing order.
+        sweep_duration_ns: full rotation duration in nanoseconds.
+        rotation_dir: "ccw" / "cw" / "auto" (default: detect by comparing
+            phi[0] to phi[~200] to see whether azimuth increased or
+            decreased over the first ~200 returns).
+
+    Returns:
+        (N,) float64 — per-point offsets in nanoseconds, in
+        [0, sweep_duration_ns).  offset[0] == 0 (first point fired at
+        header_timestamp).
+    """
+    n = xyz_lidar.shape[0]
+    if n == 0:
+        return np.zeros(0, dtype=np.float64)
+
+    phi = np.arctan2(xyz_lidar[:, 1], xyz_lidar[:, 0])  # (-π, π]
+    phi_start = phi[0]
+
+    if rotation_dir == "auto":
+        # Probe past the same-shot block (32-beam LiDARs emit 32 returns
+        # per shot at the same azimuth, so we need to skip at least one
+        # full shot to see a meaningful azimuth delta).  200 returns ≈ 6
+        # shots, plenty to read the sign.  When the cloud has <200
+        # returns we fall back to comparing first-vs-last.
+        probe = min(200, n - 1)
+        if probe < 1:
+            rotation_dir = "ccw"  # arbitrary; can't tell from 1 point
+        else:
+            delta_ccw = (phi[probe] - phi_start) % (2.0 * np.pi)
+            # delta_ccw < π → azimuth went up over those 200 returns → CCW.
+            # delta_ccw > π → azimuth went down (wrapped) → CW.
+            rotation_dir = "ccw" if delta_ccw < np.pi else "cw"
+
+    if rotation_dir == "ccw":
+        # delta along CCW direction from phi_start, wrapped to [0, 2π).
+        delta = (phi - phi_start) % (2.0 * np.pi)
+    elif rotation_dir == "cw":
+        # delta along CW direction from phi_start, wrapped to [0, 2π).
+        delta = (phi_start - phi) % (2.0 * np.pi)
+    else:
+        raise ValueError(
+            f"rotation_dir must be 'ccw', 'cw', or 'auto'; got {rotation_dir!r}"
+        )
+    frac = delta / (2.0 * np.pi)
+    return (frac * sweep_duration_ns).astype(np.float64)
+
+
 def _deskew_sweep(
     *,
     raw_path: str,
@@ -213,6 +295,10 @@ def _deskew_sweep(
     ego_T_lidar: np.ndarray,
     filter_nonfinite: bool,
     pw: Optional[Any],
+    synthesize_per_point_times: bool = False,
+    sweep_duration_ns: float = 0.0,
+    rotation_dir: str = "ccw",
+    allow_uncompensated_motion: bool = False,
 ) -> dict[str, np.ndarray]:
     """Transform one sweep from sensor frame to world frame (float64 xyz).
 
@@ -262,8 +348,31 @@ def _deskew_sweep(
                 "mis-configured for this lidar."
             )
         t_ns = header_timestamp_ns + offset_ns
-    else:
+    elif synthesize_per_point_times and n > 0 and sweep_duration_ns > 0:
+        # No per-point timestamps in the raw NPZ — synthesize from azimuth.
+        # Without this, all points in the sweep share the header pose, which
+        # produces ~ego_speed × sweep_duration / 2 of intra-sweep position
+        # smear and spreads statics across multiple voxels (the
+        # "buildings-as-dynamic" leak).
+        offset_ns = _synthesize_t_offset_ns_from_azimuth(
+            xyz_lidar, sweep_duration_ns, rotation_dir
+        )
+        t_ns = header_timestamp_ns + offset_ns
+    elif n == 0 or allow_uncompensated_motion:
+        # Empty sweep is trivially safe; user-explicit opt-out skips comp.
         t_ns = np.full(n, float(header_timestamp_ns), dtype=np.float64)
+    else:
+        # Refuse to silently degrade — this case used to produce a 25cm-
+        # smear-per-sweep bug that classified buildings as dynamic.
+        raise ValueError(
+            "deskew has no way to compensate intra-sweep ego motion: the raw "
+            "NPZ has no per-point timestamps AND synthesize_per_point_times "
+            "is False. Either (a) re-ingest with a bag that has per-point "
+            "times, (b) set synthesize_per_point_times: true to synthesize "
+            "from azimuth (recommended for rotating LiDARs), or (c) set "
+            "allow_uncompensated_motion: true if you accept that statics "
+            "will be smeared across voxels and may leak into dynamic_map.npz."
+        )
 
     # Unique timestamps to avoid redundant interpolation.
     unique_ts, inv = np.unique(t_ns.astype(np.int64), return_inverse=True)
@@ -331,7 +440,7 @@ def process_chunk(
             log.error("lidar %s: %s", lid, exc)
 
     # One Patchwork++ instance per chunk (re-used across sweeps).
-    pw = _make_patchwork(cfg.patchwork)
+    pw = _make_patchwork(cfg.patchwork, required=cfg.require_patchwork)
 
     results: list[DeskewResult] = []
     meta_rows: list[dict] = []
@@ -363,6 +472,10 @@ def process_chunk(
                 ego_T_lidar=ego_T_lidar,
                 filter_nonfinite=cfg.filter_nonfinite_points,
                 pw=pw,
+                synthesize_per_point_times=cfg.synthesize_per_point_times,
+                sweep_duration_ns=cfg.lidar_sweep_duration_ms * 1_000_000.0,
+                rotation_dir=cfg.lidar_rotation_dir,
+                allow_uncompensated_motion=cfg.allow_uncompensated_motion,
             )
         except Exception as exc:  # noqa: BLE001 — record failure, keep going
             log.exception("sweep %d deskew failed", sweep_id)

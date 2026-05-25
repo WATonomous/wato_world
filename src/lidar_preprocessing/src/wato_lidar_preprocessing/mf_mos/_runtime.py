@@ -107,10 +107,14 @@ class MFMosModel:
 
         # Load weights — strict=False to tolerate minor arch divergences.
         log.info("Loading MF-MOS checkpoint from %s", checkpoint_path)
-        state = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         # Checkpoints may be plain state dicts or wrapped in a dict.
         if isinstance(state, dict) and "state_dict" in state:
             state = state["state_dict"]
+        # Upstream checkpoint was saved from a DataParallel-wrapped model,
+        # so every key is prefixed with "module.". Strip it before loading.
+        if state and all(k.startswith("module.") for k in state.keys()):
+            state = {k[len("module."):]: v for k, v in state.items()}
         missing, unexpected = self._model.load_state_dict(state, strict=False)
         if missing:
             log.warning("MF-MOS checkpoint missing keys: %s", missing[:5])

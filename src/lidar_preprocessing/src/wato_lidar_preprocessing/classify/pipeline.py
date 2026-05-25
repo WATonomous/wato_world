@@ -36,12 +36,14 @@ from .io_helpers import (
     cache_byte_budget,
     estimate_cache_bytes,
     load_mf_mos_world_mask,
+    load_world_full,
     load_world_xyz_intensity,
     origin_from_index,
 )
 from .log_odds import build_log_odds_grid, classify_from_log_odds
 from .masking import apply_classification_to_sweep
 from .occupancy_export import (
+    write_chunk_voxel_diagnostics,
     write_chunk_voxel_occupancy,
     write_per_frame_voxel_occupancy,
 )
@@ -101,12 +103,13 @@ def _run_pass_1_persistence(
 
     Returns the same 5-tuple shape as build_log_odds_grid (minus the log-odds
     arrays) so pipeline.process_chunk treats the two paths uniformly.
-    ground_mask_cache is always all-None for persistence — bug fix #4 only
-    applies to the log-odds path.
+    ground_mask_cache is populated even when cache_xyz is False — masking.py
+    needs it to keep ground points out of dynamic_map.npz, and it's only
+    1 bit per point so size is a non-issue.
     """
     xyz_cache: list[np.ndarray | None] = []
     intensity_cache: list[np.ndarray | None] = []
-    ground_mask_cache: list[np.ndarray | None] = [None] * len(meta_rows)
+    ground_mask_cache: list[np.ndarray | None] = []
     sweep_keys: list[np.ndarray] = []
     frame_keys: dict[int, list[np.ndarray]] = {}
 
@@ -118,13 +121,18 @@ def _run_pass_1_persistence(
         if row.get("valid") is False:
             xyz_cache.append(None)
             intensity_cache.append(None)
+            ground_mask_cache.append(None)
             sweep_keys.append(np.empty(0, dtype=np.int64))
             continue
 
-        xyz, intensity = load_world_xyz_intensity(row["world_path"])
+        # load_world_full also returns sensor_origin (unused in persistence)
+        # so we discard it.  Switching from load_world_xyz_intensity is the
+        # only way to get ground_mask without a second NPZ read.
+        xyz, intensity, _origin, ground_mask = load_world_full(row["world_path"])
         if xyz.shape[0] == 0:
             xyz_cache.append(xyz if cache_xyz else None)
             intensity_cache.append(intensity if cache_xyz else None)
+            ground_mask_cache.append(ground_mask)
             sweep_keys.append(np.empty(0, dtype=np.int64))
             continue
 
@@ -132,6 +140,7 @@ def _run_pass_1_persistence(
         sweep_keys.append(keys)
         xyz_cache.append(xyz if cache_xyz else None)
         intensity_cache.append(intensity if cache_xyz else None)
+        ground_mask_cache.append(ground_mask)
         fid = row.get("frame_id")
         if fid is not None:
             frame_keys.setdefault(int(fid), []).append(keys)
@@ -344,13 +353,14 @@ def process_chunk(
         log.info(
             "chunk %s: static=%d dynamic=%d "
             "(log_odds: %d touched, %d evidenced, "
-            "%d under-evidenced-with-hits, %d free-only)",
+            "%d under-evidenced-with-hits, %d ambiguous, %d free-only)",
             chunk_id,
             total_static,
             total_dynamic,
             unique_keys.size,
             diag.get("n_evidenced", 0),
             diag.get("n_under_evidenced_with_hits", 0),
+            diag.get("n_ambiguous", 0),
             diag.get("n_free_only", 0),
         )
     else:
@@ -391,6 +401,27 @@ def process_chunk(
     if cfg.save_per_frame_voxel_occupancy and frame_keys:
         write_per_frame_voxel_occupancy(
             bag_id, chunk_id, frame_keys, cfg.voxel_size_m, origin
+        )
+
+    # Per-voxel diagnostics: full log_odds/n_obs/n_hits/classification for
+    # every voxel, including carved (log_odds < 0) ones that
+    # voxel_occupancy.npz filters out.  Powers the viz's p_occ color mode
+    # for the dynamic cloud.  log_odds path only — persistence doesn't
+    # produce per-voxel log_odds.
+    if cfg.save_voxel_diagnostics and use_log_odds and unique_keys.size > 0:
+        write_chunk_voxel_diagnostics(
+            bag_id,
+            chunk_id,
+            unique_keys,
+            lo_vals,
+            n_obs_vals,
+            n_hits_vals,
+            cfg.voxel_size_m,
+            origin,
+            p_static_threshold=cfg.p_static_threshold,
+            p_dynamic_threshold=cfg.p_dynamic_threshold,
+            min_observations=cfg.min_observations,
+            min_occupied_hits=cfg.min_occupied_hits,
         )
 
     return ClassifyResult(

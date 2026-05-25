@@ -190,6 +190,11 @@ def process_chunk(
                 finite = np.ones(n_raw, dtype=bool)
             xyz_cur = np.stack([x_r[finite], y_r[finite], z_r[finite]], axis=1)
             intensity_cur = intensity_r[finite] if intensity_r is not None else None
+            # Scale intensity to [0, 1] to match KITTI remission. NuScenes raw
+            # intensity is [0, 255]; without this rescale the model's
+            # img_means/img_stds normalization sends it ~1000× out of range.
+            if intensity_cur is not None and params.intensity_scale != 1.0:
+                intensity_cur = intensity_cur / np.float32(params.intensity_scale)
             n_finite = xyz_cur.shape[0]
 
             # Interpolate current pose.
@@ -212,6 +217,8 @@ def process_chunk(
                 params.range_image_w,
                 params.fov_up_deg,
                 params.fov_down_deg,
+                min_range_m=params.min_range_m,
+                max_range_m=params.max_range_m,
             )
 
             # Build residual images — one per configured step.
@@ -253,6 +260,8 @@ def process_chunk(
                         params.fov_up_deg,
                         params.fov_down_deg,
                         range_img[0],
+                        min_range_m=params.min_range_m,
+                        max_range_m=params.max_range_m,
                     )
                 )
 
@@ -345,6 +354,8 @@ def _range_project(
     w: int,
     fov_up_deg: float,
     fov_down_deg: float,
+    min_range_m: float = 0.0,
+    max_range_m: float = float("inf"),
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Spherical range-image projection.
 
@@ -377,8 +388,8 @@ def _range_project(
     z = points_xyz_sensor[:, 2].astype(np.float64)
     r = np.sqrt(x**2 + y**2 + z**2)
 
-    valid = r > 1e-6
-    r_safe = np.where(valid, r, 1.0)
+    valid = (r >= min_range_m) & (r <= max_range_m)
+    r_safe = np.where(r > 1e-6, r, 1.0)
 
     yaw = -np.arctan2(y, x)
     pitch = np.arcsin(np.clip(z / r_safe, -1.0, 1.0))
@@ -444,20 +455,15 @@ def _compute_residual(
     fov_up_deg: float,
     fov_down_deg: float,
     current_range_channel: np.ndarray,
+    min_range_m: float = 0.0,
+    max_range_m: float = float("inf"),
 ) -> np.ndarray:
-    """Project past scan into current sensor frame and return |current - past| range image.
+    """Project past scan into current sensor frame and return normalized range residual.
 
-    Args:
-        past_xyz_sensor: (N_past, 3) float32, past scan in sensor frame.
-        world_T_ego_current: (4, 4) float64, current ego pose in world frame.
-        world_T_ego_past: (4, 4) float64, past ego pose in world frame.
-        ego_T_lidar: (4, 4) float64, lidar extrinsic.
-        h, w, fov_up_deg, fov_down_deg: projection parameters.
-        current_range_channel: (H, W) float32, range channel from current scan projection.
-
-    Returns:
-        residual: (H, W) float32 — |range_current - range_past_in_current_frame|.
-            Zero where either scan has no return in a pixel.
+    Matches the upstream MF-MOS preprocessing (utils/gen_residual_images.py with
+    `normalize: True`): residual = |range_cur - range_past_in_cur| / range_cur,
+    valid only where BOTH scans have returns within [min_range, max_range].
+    Zero elsewhere — same sentinel as the training data.
     """
     if past_xyz_sensor.shape[0] == 0:
         return np.zeros((h, w), dtype=np.float32)
@@ -475,14 +481,28 @@ def _compute_residual(
     past_in_current = (R @ past_xyz_sensor.T).T + t  # (N_past, 3) float32
 
     past_range_img, _, _ = _range_project(
-        past_in_current, None, h, w, fov_up_deg, fov_down_deg
+        past_in_current,
+        None,
+        h,
+        w,
+        fov_up_deg,
+        fov_down_deg,
+        min_range_m=min_range_m,
+        max_range_m=max_range_m,
     )
     past_range = past_range_img[0]  # (H, W)
 
-    # Residual is non-zero only where BOTH scans have valid returns.
-    valid = (current_range_channel >= 0.0) & (past_range >= 0.0)
+    valid = (
+        (current_range_channel >= min_range_m)
+        & (current_range_channel <= max_range_m)
+        & (past_range >= min_range_m)
+        & (past_range <= max_range_m)
+    )
     residual = np.zeros((h, w), dtype=np.float32)
-    residual[valid] = np.abs(current_range_channel[valid] - past_range[valid])
+    residual[valid] = (
+        np.abs(current_range_channel[valid] - past_range[valid])
+        / current_range_channel[valid]
+    )
     return residual
 
 

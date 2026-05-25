@@ -106,6 +106,14 @@ class MFMosParams(BaseModel):
     # Per-sweep _dynamic_mask.npy always keeps the voxel-only mask.
     fusion_mode: str = "independent"
     max_pose_gap_ms: float = 200.0
+    # Range gating — match the training preprocessing
+    # (data_preparing.yaml: min_range=2.0, max_range=50.0).
+    min_range_m: float = 2.0
+    max_range_m: float = 50.0
+    # Intensity scale: divide raw intensity by this before projection so the
+    # channel lands in [0, 1] like KITTI remission. NuScenes intensity is
+    # uint8 [0, 255] → 255.0. Set to 1.0 for sensors that already produce [0, 1].
+    intensity_scale: float = 255.0
 
     @field_validator("residual_steps")
     @classmethod
@@ -138,6 +146,42 @@ class ComponentConfig(BaseModel):
     # Step A — deskew filter.
     filter_nonfinite_points: bool = True
 
+    # Step A — rolling-shutter motion compensation.
+    # When a raw sweep NPZ has no per-point timestamp field (t_offset_us),
+    # deskew falls back to using the header timestamp for all points,
+    # which leaves intra-sweep ego motion uncompensated.  For a 20 Hz
+    # NuScenes LiDAR at 7 m/s, that's ~25 cm of position smear per sweep
+    # — wider than typical voxel sizes — which spreads statics across
+    # multiple voxels and causes the "buildings leak into dynamic_map.npz"
+    # symptom.  With this enabled, deskew synthesizes per-point times from
+    # each point's azimuth (atan2(y, x)) assuming uniform rotation.
+    synthesize_per_point_times: bool = True
+    # Sweep duration in milliseconds.  Velodyne HDL-32E default is 10 Hz
+    # (100 ms); NuScenes uses the same hardware at 20 Hz (50 ms).
+    lidar_sweep_duration_ms: float = 100.0
+    # Rotation direction.  "auto" (default) detects from the data by
+    # comparing the first and ~200th point's azimuths.  Force "ccw" or
+    # "cw" only if auto-detect picks wrong (e.g., very short sweeps).
+    # Note: NuScenes LIDAR_TOP scans CW (azimuth decreases with time)
+    # in the lidar frame, contrary to the common "Velodyne is CCW"
+    # assumption — the auto-detect handles both.
+    lidar_rotation_dir: Literal["ccw", "cw", "auto"] = "auto"
+
+    # Strictness flags: if a critical input is missing, the pipeline raises
+    # by default instead of silently degrading.  Each flag is an explicit
+    # opt-out for users who understand the consequences.
+    #
+    # require_patchwork: when True (default), deskew raises if pypatchworkpp
+    # is not importable.  Without Patchwork, per-sweep ground extraction is
+    # skipped, ground points pollute static_map.npz AND dynamic_map.npz.
+    require_patchwork: bool = True
+    #
+    # allow_uncompensated_motion: when False (default), deskew raises if a
+    # sweep has no per-point timestamps AND synthesize_per_point_times is
+    # False.  Without intra-sweep motion compensation, statics smear across
+    # voxels and leak into dynamic_map.npz (the "buildings as dynamic" bug).
+    allow_uncompensated_motion: bool = False
+
     # Step B — voxel classification.
     voxel_size_m: float = 0.15
     classification_method: Literal["log_odds", "persistence"] = "log_odds"
@@ -149,7 +193,15 @@ class ComponentConfig(BaseModel):
     # Log-odds ray-casting parameters (used when classification_method="log_odds").
     l_occ: float = 0.85
     l_free: float = 0.40
-    log_odds_clamp: float = 5.0
+    # Symmetric clamp on log_odds (±value).  Must be MUCH larger than l_occ
+    # so well-observed statics can build a healthy margin against carving:
+    # at clamp=5.0 with l_occ=1.20, the +5 ceiling is reached after only
+    # ~4 hits — every additional hit is wasted, but carves keep subtracting
+    # at -l_free each, so a heavily-observed wall + a moderate number of
+    # through-rays drops below 0 and gets classified dynamic.  50.0 gives
+    # well-observed voxels ~40+ hits of "headroom" before clamping, which
+    # is enough to survive realistic pose-drift / occlusion carving.
+    log_odds_clamp: float = 50.0
     p_static_threshold: float = 0.7
     p_dynamic_threshold: float = 0.3
     min_observations: int = 3
@@ -189,6 +241,13 @@ class ComponentConfig(BaseModel):
     # static_map.npz.  Includes ALL occupied voxels (static + dynamic), not
     # just static ones — that's what the MinkUNet encoder consumes.
     save_voxel_occupancy: bool = True
+
+    # Debugging: also export voxel_diag.npz with per-voxel log_odds, n_obs,
+    # n_hits, and classification label for EVERY classified voxel (including
+    # carved ones with log_odds < 0 that voxel_occupancy.npz filters out).
+    # Powers the viz's p_occ color mode for the dynamic cloud.  Adds a few
+    # MB per chunk; safe to leave on during development.
+    save_voxel_diagnostics: bool = False
 
     # Per-frame voxel occupancy for SAM4D's MinkUNet encoder.  When true,
     # writes one voxel_occupancy_frame_NNNN.npz per frame_id in the chunk

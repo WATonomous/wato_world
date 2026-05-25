@@ -99,7 +99,7 @@ def build_log_odds_grid(
         if xyz.shape[0] == 0:
             xyz_cache.append(xyz if cache_xyz else None)
             intensity_cache.append(intensity if cache_xyz and cache_intensity else None)
-            ground_mask_cache.append(ground_mask if cache_xyz else None)
+            ground_mask_cache.append(ground_mask)
             sweep_keys.append(np.empty(0, dtype=np.int64))
             continue
 
@@ -110,7 +110,12 @@ def build_log_odds_grid(
         sweep_keys.append(keys)
         xyz_cache.append(xyz if cache_xyz else None)
         intensity_cache.append(intensity if cache_xyz and cache_intensity else None)
-        ground_mask_cache.append(ground_mask if cache_xyz else None)
+        # Always cache ground_mask — it's 1 bit per point (a few MB even on
+        # the biggest chunks).  Dropping it when cache_xyz=False made the
+        # ground filter at masking.py silently no-op on large chunks where
+        # the cache auto-disabled, leaking ground points into both static
+        # and dynamic clouds.
+        ground_mask_cache.append(ground_mask)
 
         fid = row.get("frame_id")
         if fid is not None:
@@ -127,14 +132,17 @@ def build_log_odds_grid(
                     mf_mos_votes[int(k)] = mf_mos_votes.get(int(k), 0) + 1
 
         if sweep_origin is None:
-            log.warning(
-                "chunk %s sweep %s: world NPZ missing 'origin' — "
-                "ray traversal skipped; re-run deskew or use "
-                "classification_method=persistence",
-                chunk_id,
-                row.get("sweep_id"),
+            # Artifact corruption — deskew should always write `origin`.
+            # Silently skipping leaves the sweep's voxels with no log-odds
+            # entries, so the sweep's points fall through to dynamic-by-
+            # default in masking.py.  Hard-fail instead.
+            raise ValueError(
+                f"chunk {chunk_id} sweep {row.get('sweep_id')}: world NPZ "
+                f"missing 'origin' field. This shouldn't happen in normal "
+                f"flow — re-run deskew on this chunk to regenerate the "
+                f"artifact. (Continuing silently was the cause of the "
+                f"sweep-pose-fallback bug; we no longer accept this case.)"
             )
-            continue
 
         if cfg.ground_endpoint_strategy == "skip_endpoint":
             # Traverse all rays; skip +l_occ at ground endpoints so air
@@ -208,6 +216,7 @@ def classify_from_log_odds(
         return empty, empty, None, {
             "n_evidenced": 0,
             "n_under_evidenced_with_hits": 0,
+            "n_ambiguous": 0,
             "n_free_only": 0,
         }
 
@@ -230,8 +239,26 @@ def classify_from_log_odds(
     under_evidenced_with_hits_mask = (~evidenced) & has_hits
     under_arr = unique_keys[under_evidenced_with_hits_mask]
 
-    # not_dynamic_arr is the union of (static + free_only + under-with-hits).
-    parts = [a for a in (static_arr, free_only_arr, under_arr) if a.size > 0]
+    # Ambiguous: evidenced + has_hits but p_occ is in the band
+    # [p_dynamic_threshold, p_static_threshold) — carving evidence and hit
+    # evidence are roughly balanced.  Pre-fix this bucket fell through to
+    # the implicit dynamic class (p_dynamic_threshold was configured but
+    # never consulted), which leaked textured statics — brick walls, tree
+    # canopies, sparse foliage — into dynamic_map.npz whenever through-ray
+    # beam noise carved their voxels.  Routing to not_dynamic_arr (same
+    # treatment as under-evidenced-with-hits) means only voxels with
+    # confident carving (p_occ < p_dynamic_threshold AND has hits) end up
+    # dynamic.
+    ambiguous_mask = (
+        evidenced
+        & has_hits
+        & (p_occ < cfg.p_static_threshold)
+        & (p_occ >= cfg.p_dynamic_threshold)
+    )
+    ambiguous_arr = unique_keys[ambiguous_mask]
+
+    # not_dynamic_arr is the union of (static + free_only + under-with-hits + ambiguous).
+    parts = [a for a in (static_arr, free_only_arr, under_arr, ambiguous_arr) if a.size > 0]
     if not parts:
         not_dynamic_arr = np.empty(0, dtype=np.int64)
     elif len(parts) == 1:
@@ -258,6 +285,7 @@ def classify_from_log_odds(
     diag = {
         "n_evidenced": int(evidenced.sum()),
         "n_under_evidenced_with_hits": int(under_evidenced_with_hits_mask.sum()),
+        "n_ambiguous": int(ambiguous_mask.sum()),
         "n_free_only": int(free_only_mask.sum()),
     }
     return static_arr, not_dynamic_arr, mf_mos_dynamic_arr, diag

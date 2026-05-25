@@ -19,6 +19,7 @@ from wato_common.artifact_store import (
     lidar_world_path,
     local_path,
     static_map_path,
+    voxel_diag_path,
 )
 from wato_common.io.parquet_io import read_rows
 
@@ -71,6 +72,26 @@ def load_global_ground(bag_id: str) -> dict[str, np.ndarray]:
     scope.  Produced by `wato_lidar_preprocessing reduce`.
     """
     return dict(np.load(local_path(global_ground_path(bag_id))))
+
+
+def load_voxel_diag(bag_id: str, chunk_id: str) -> dict[str, np.ndarray]:
+    """Load per-voxel diagnostics NPZ (full classification stats).
+
+    Schema:
+      keys           int64 (N,)     — packed voxel keys
+      coords         int32 (N, 3)   — unpacked voxel indices
+      origin         float64 (3,)   — chunk-level world-frame origin
+      voxel_size     float32
+      log_odds       float32 (N,)
+      p_occ          float32 (N,)   — sigmoid(log_odds)
+      n_obs          int32 (N,)
+      n_hits         int32 (N,)
+      classification int8 (N,)      — CLASS_* codes from occupancy_export
+
+    Only written when cfg.save_voxel_diagnostics is True; otherwise raises
+    FileNotFoundError.
+    """
+    return dict(np.load(local_path(voxel_diag_path(bag_id, chunk_id))))
 
 
 def load_proc_index(bag_id: str, chunk_id: str) -> list[dict]:

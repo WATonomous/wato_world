@@ -159,6 +159,18 @@ def voxel_occupancy_frame_path(bag_id: str, chunk_id: str, frame_id: int) -> str
     )
 
 
+def voxel_diag_path(bag_id: str, chunk_id: str) -> str:
+    """Per-voxel diagnostics for classify (log_odds, n_obs, n_hits, classification).
+
+    Unlike voxel_occupancy.npz (which filters to log_odds >= 0 for MinkUNet),
+    voxel_diag.npz includes ALL classified voxels — INCLUDING carved
+    (log_odds < 0) ones — so the viz can color dynamic points by their
+    voxel's p_occ to triage threshold-edge leakage vs deep-carving leakage.
+    Only written when cfg.save_voxel_diagnostics is True.
+    """
+    return _join(chunk_root(bag_id, chunk_id), "voxel_diag.npz")
+
+
 # ---------------------------------------------------------------------------
 # perception_2d artifacts.
 # ---------------------------------------------------------------------------

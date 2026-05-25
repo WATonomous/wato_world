@@ -233,7 +233,7 @@ def _write_static_voxel_set(
     bag_id: str, chunk_id: str, static_xyz: np.ndarray, voxel_size: float
 ):
     """Write a static_map.npz with static_voxel_keys derived from static_xyz."""
-    from wato_lidar_preprocessing.classify import _voxel_indices
+    from wato_lidar_preprocessing.voxel import voxel_indices as _voxel_indices
 
     origin = (
         np.zeros(3, dtype=np.float64)
