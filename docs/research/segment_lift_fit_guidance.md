@@ -86,19 +86,22 @@ fitted SDF surface.  With three Velodynes (center + NE + NW):
 
 ## Gaps and what to do
 
-### 1. SAM3 masks from perception_2d (prerequisite)
+### 1. lifted_labels from semantic_lifting (prerequisite)
 
-SLF Stage 1 is SAM.  `proposal_generation` must receive per-camera, per-object
-2D masks from `perception_2d`.  The contract is:
+SLF Stage 1 is per-point LiDAR labeling.  `proposal_generation` receives
+per-LiDAR-point instance labels from `semantic_lifting`, not raw 2D masks.
+The contract is:
 
 ```
-masks_2d/<chunk_id>/<cam_id>/<frame_seq>/<detection_id>.png  (binary mask)
-detections_2d.parquet  (bbox, class, score, cam_id, frame_seq, detection_id)
+lifted_labels/<sweep_id>.npz    (point_indices, instance_ids, classes, confidences)
+lifted_stats.parquet            (per-sweep coverage statistics)
 ```
 
-`proposal_generation` reads these and groups detections by 3D candidate
-position (using LiDAR-projected depth to get an approximate world location
-for each 2D detection).
+`semantic_lifting` consumes `perception_2d`'s `masks_2d/` and `depth_2d/`
+artifacts, runs the UniLiPs Eq.1 occlusion test, and outputs per-LiDAR-point
+labels with cross-camera confidence.  `proposal_generation` reads these and
+groups LiDAR points by `instance_id` to form per-instance point clouds for
+the SLF silhouette-fit stage.
 
 ### 2. Vehicle shape prior (PCA over 3D meshes)
 

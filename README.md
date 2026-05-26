@@ -19,7 +19,11 @@ flowchart TD
     end
 
     subgraph perception_2d["perception_2d  ·  GPU"]
-        P2["GroundingDINO + SAM 3\nDEVA temporal tracking\nDINOv2 embeddings\ncross-camera merge"]
+        P2["Florence-2 + SAM 3.1\nDepth Anything V2\nSAM 3.1 video tracker\nDINOv2 embeddings\ncross-camera merge"]
+    end
+
+    subgraph semantic_lifting["semantic_lifting  ·  CPU"]
+        SL["UniLiPs Eq.1 occlusion test\ncross-camera vote accumulation\nper-point instance labels"]
     end
 
     subgraph proposal_gen["proposal_generation  ·  GPU"]
@@ -45,8 +49,11 @@ flowchart TD
     BAG --> ingest
     ingest -- "frame_index · camera_frames\ncalibration" --> perception_2d
     ingest -- "frame_index · lidar_sweeps · poses" --> lidar_prep
+    lidar_prep -- "preprocessed sweeps · ground mesh" --> perception_2d
+    lidar_prep -- "preprocessed sweeps · ground mesh" --> semantic_lifting
+    perception_2d -- "masks_2d · depth_2d · tracklets_2d" --> semantic_lifting
+    semantic_lifting -- "lifted_labels · DINOv2 embeddings" --> proposal_gen
     lidar_prep -- "preprocessed sweeps · ground mesh" --> proposal_gen
-    perception_2d -- "2D masks · DINOv2 embeddings" --> proposal_gen
     proposal_gen -- "3D proposals" --> tracking
     tracking -- "3D tracks" --> label_ref
     tracking -- "rare-class track candidates" --> ovd
@@ -112,7 +119,8 @@ watod down all
 | Component | Purpose | Image base | GPU |
 |---|---|---|---|
 | `ingest` | Decode rosbag → frames + lidar + poses + frame_index | CPU | no |
-| `perception_2d` | GroundingDINO + SAM 3 + DEVA + DINOv2 + x-cam merge | CUDA | yes |
+| `perception_2d` | Florence-2 + SAM 3.1 + Depth Anything V2 + DINOv2 + x-cam merge | CUDA | yes |
+| `semantic_lifting` | Occlusion-aware 2D→3D label lifting (UniLiPs Eq.1) | CPU | no |
 | `lidar_preprocessing` | Motion comp, static/dynamic split, ground mesh | CPU | no |
 | `proposal_generation` | LiDAR detector + Segment-Lift-Fit + fusion | CUDA | yes |
 | `tracking` | 3D Kalman + masklet association + DINOv2 ReID | CUDA | yes (light) |

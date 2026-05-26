@@ -108,6 +108,51 @@ services:
       - ${WATO_WORLD_DIR}/config:/config:ro
 
   # =====================================================================
+  # semantic_lifting
+  # =====================================================================
+  semantic_lifting_source:
+    profiles: ["semantic_lifting_pre"]
+    build:
+      context: ..
+      dockerfile: docker/semantic_lifting.Dockerfile
+      target: source
+      cache_from:
+        - "${SEMANTIC_LIFTING_IMAGE}:source_${TAG}"
+    image: "${SEMANTIC_LIFTING_IMAGE}:source_${TAG}"
+
+  semantic_lifting_deps:
+    profiles: ["semantic_lifting_pre"]
+    build:
+      context: ..
+      dockerfile: docker/semantic_lifting.Dockerfile
+      target: dependencies
+      cache_from:
+        - "${SEMANTIC_LIFTING_IMAGE}:deps_${TAG}"
+    image: "${SEMANTIC_LIFTING_IMAGE}:deps_${TAG}"
+
+  semantic_lifting:
+    profiles: ["semantic_lifting"]
+    init: true
+    user: "${SETUID}:${SETGID}"
+    build:
+      context: ..
+      dockerfile: docker/template.Dockerfile
+      target: deploy
+      args:
+        MODULE_SOURCE: "${SEMANTIC_LIFTING_IMAGE}:source_${TAG}"
+        MODULE_DEPS: "${SEMANTIC_LIFTING_IMAGE}:deps_${TAG}"
+        COMPONENT_PACKAGE_DIR: semantic_lifting
+        COMPONENT_PACKAGE: wato_semantic_lifting
+      cache_from:
+        - "${SEMANTIC_LIFTING_IMAGE}:${TAG}"
+    image: "${SEMANTIC_LIFTING_IMAGE}:${TAG}"
+    environment:
+      - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
+    volumes:
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/config:/config:ro
+
+  # =====================================================================
   # lidar_preprocessing
   # =====================================================================
   lidar_preprocessing_source:

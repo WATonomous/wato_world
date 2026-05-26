@@ -1,0 +1,39 @@
+discovery:
+  model: "microsoft/Florence-2-large-ft"
+  task: "<DENSE_REGION_CAPTION>"
+  min_confidence: 0.3
+
+segmentation:
+  model: "sam3.1"
+  checkpoint: "facebook/sam3.1"
+  min_score: 0.5
+  object_only: true
+
+phrase_dedup:
+  synonym_clip_threshold: 0.85
+  nms_3d_radius_m: 1.0
+  nms_2d_iou: 0.5
+
+tracker:
+  backend: "sam3"
+  deva_model: "deva-vit-l"
+
+depth:
+  enabled: true
+  model: "depth-anything-v2-large"
+  min_lidar_anchors: 30
+  ransac_n_iter: 200
+  ransac_inlier_threshold_m: 0.5
+  use_static_anchors_only: true
+  fallback_window: 5
+  sky_mask_top_fraction: 0.3
+  output_dtype: "float16"
+
+reid:
+  model: "dinov2_vitl14"
+  every_k_frames: 5
+
+cross_cam:
+  match_radius_m: 1.5
+
+prompts_path: "/config/prompts.yaml"

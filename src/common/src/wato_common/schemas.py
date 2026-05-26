@@ -387,6 +387,12 @@ class MaskletRow(BaseModel):
     mask_path: str  # path to directory of per-frame mask PNG files
     dino_feature_path: Optional[str] = None  # DINOv2 embedding NPZ
     global_object_id: Optional[str] = None  # cross-camera identity
+    # v2 fields (Florence-2 + SAM3)
+    raw_phrase: str = ""          # Florence-2 noun phrase before coarsening
+    sam3_score: float = 0.0       # SAM3 presence-token score
+    discovery_score: float = 0.0  # Florence-2 confidence
+    centroid_depth_m: float = 0.0 # metric depth at mask centroid (used for cross-cam merge)
+    tracker_backend: str = "sam3" # "sam3" or "deva"
 
 
 MASKLET_SCHEMA = pa.schema(
@@ -401,6 +407,90 @@ MASKLET_SCHEMA = pa.schema(
         pa.field("mask_path", pa.string()),
         pa.field("dino_feature_path", pa.string()),
         pa.field("global_object_id", pa.string()),
+        pa.field("raw_phrase", pa.string()),
+        pa.field("sam3_score", pa.float64()),
+        pa.field("discovery_score", pa.float64()),
+        pa.field("centroid_depth_m", pa.float64()),
+        pa.field("tracker_backend", pa.string()),
+    ]
+)
+
+
+# ---------------------------------------------------------------------------
+# perception_2d v2 — depth branch (Depth Anything V2 + LiDAR affine align).
+# ---------------------------------------------------------------------------
+
+
+class DepthFrameRow(BaseModel):
+    """Per-frame metadata for the depth_2d artifact (the actual arrays live in npz).
+
+    fit_status: 0=ok, 1=fell back to prior-frame affine, 2=fit failed entirely.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    bag_id: str
+    chunk_id: str
+    cam_id: str
+    frame_seq: int
+    affine_a: float   # scale: d_lidar = a * d_da + b
+    affine_b: float   # offset
+    n_anchors: int    # (d_lidar, d_da) pairs before RANSAC
+    n_inliers: int    # RANSAC inliers
+    rmse_inliers_m: float
+    fit_status: int
+
+
+DEPTH_FRAME_SCHEMA = pa.schema(
+    [
+        pa.field("bag_id", pa.string()),
+        pa.field("chunk_id", pa.string()),
+        pa.field("cam_id", pa.string()),
+        pa.field("frame_seq", pa.int64()),
+        pa.field("affine_a", pa.float64()),
+        pa.field("affine_b", pa.float64()),
+        pa.field("n_anchors", pa.int64()),
+        pa.field("n_inliers", pa.int64()),
+        pa.field("rmse_inliers_m", pa.float64()),
+        pa.field("fit_status", pa.int32()),
+    ]
+)
+
+
+# ---------------------------------------------------------------------------
+# semantic_lifting — per-sweep diagnostics (actual labels in npz).
+# ---------------------------------------------------------------------------
+
+
+class LiftedStatsRow(BaseModel):
+    """One row per sweep in lifted_stats.parquet."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sweep_id: str
+    bag_id: str
+    chunk_id: str
+    n_points_total: int
+    n_points_labeled: int
+    n_points_in_any_mask: int
+    n_points_failed_visibility: int
+    n_points_disagreement: int
+    mean_confidence_labeled: float
+    n_cameras_used: int
+
+
+LIFTED_STATS_SCHEMA = pa.schema(
+    [
+        pa.field("sweep_id", pa.string()),
+        pa.field("bag_id", pa.string()),
+        pa.field("chunk_id", pa.string()),
+        pa.field("n_points_total", pa.int64()),
+        pa.field("n_points_labeled", pa.int64()),
+        pa.field("n_points_in_any_mask", pa.int64()),
+        pa.field("n_points_failed_visibility", pa.int64()),
+        pa.field("n_points_disagreement", pa.int64()),
+        pa.field("mean_confidence_labeled", pa.float64()),
+        pa.field("n_cameras_used", pa.int64()),
     ]
 )
 

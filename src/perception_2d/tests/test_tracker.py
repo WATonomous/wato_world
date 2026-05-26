@@ -8,7 +8,6 @@ import numpy as np
 import pytest
 from PIL import Image as PILImage
 
-from wato_perception_2d.detector import Detection
 from wato_perception_2d.segmenter import SegmentedDetection
 from wato_perception_2d.tracker_2d import Tracker2D
 
@@ -19,16 +18,22 @@ def _mask(H: int, W: int, x1: int, y1: int, x2: int, y2: int) -> np.ndarray:
     return m
 
 
-def _det(x1, y1, x2, y2, cls="car", score=0.9):
-    return Detection(
-        bbox_xyxy=np.array([x1, y1, x2, y2], dtype=np.float32),
-        class_name=cls,
-        score=score,
+def _sd(
+    mask: np.ndarray,
+    x1: float = 0,
+    y1: float = 0,
+    x2: float = 10,
+    y2: float = 10,
+    cls: str = "car",
+    score: float = 0.9,
+) -> SegmentedDetection:
+    return SegmentedDetection(
+        phrase=cls,
+        rough_box=(x1, y1, x2, y2),
+        mask=mask,
+        sam3_score=score,
+        discovery_score=1.0,
     )
-
-
-def _sd(mask, x1=0, y1=0, x2=10, y2=10, cls="car", score=0.9):
-    return SegmentedDetection(detection=_det(x1, y1, x2, y2, cls, score), mask=mask)
 
 
 def test_single_detection_creates_one_masklet(tmp_path):
@@ -68,22 +73,20 @@ def test_non_overlapping_masks_are_separate_tracks(tmp_path):
     """Two masks with zero IoU → two separate masklets."""
     tracker = Tracker2D("bag0", "chunk0", "cam_front", str(tmp_path))
     img = np.zeros((100, 100, 3), dtype=np.uint8)
-    m_a = _mask(100, 100, 0, 0, 10, 10)  # top-left
+    m_a = _mask(100, 100, 0, 0, 10, 10)    # top-left
     m_b = _mask(100, 100, 80, 80, 99, 99)  # bottom-right, no overlap
 
-    # Both detections appear in the same frame.
     tracker.update(0, img, [_sd(m_a), _sd(m_b)])
     masklets = tracker.finalize()
 
     assert len(masklets) == 2
-    assert len({m.masklet_id for m in masklets}) == 2  # distinct IDs
+    assert len({m.masklet_id for m in masklets}) == 2
 
 
 def test_gap_closes_track_after_max_gap_frames(tmp_path):
     """
     Detection at frame 0, then 4 empty frames.
     MAX_GAP_FRAMES=3, so the track closes during the empty period.
-    finalize() returns 1 closed masklet, no active tracks re-emitted.
     """
     tracker = Tracker2D("bag0", "chunk0", "cam_front", str(tmp_path))
     img = np.zeros((100, 100, 3), dtype=np.uint8)
@@ -100,9 +103,7 @@ def test_gap_closes_track_after_max_gap_frames(tmp_path):
 
 
 def test_track_survives_within_max_gap(tmp_path):
-    """
-    Detection at 0, gap of 2 frames, detection at 3 → same tracklet (gap ≤ MAX_GAP_FRAMES=3).
-    """
+    """Detection at 0, gap of 2 frames, detection at 3 → same tracklet."""
     tracker = Tracker2D("bag0", "chunk0", "cam_front", str(tmp_path))
     img = np.zeros((100, 100, 3), dtype=np.uint8)
     m = _mask(100, 100, 10, 10, 40, 40)
@@ -111,7 +112,7 @@ def test_track_survives_within_max_gap(tmp_path):
     tracker.update(0, img, [sd])
     tracker.update(1, img, [])
     tracker.update(2, img, [])
-    tracker.update(3, img, [sd])  # within gap tolerance
+    tracker.update(3, img, [sd])
     masklets = tracker.finalize()
 
     assert len(masklets) == 1
@@ -150,7 +151,7 @@ def test_masklet_id_in_path(tmp_path):
 
 
 def test_two_cameras_independent_tracks(tmp_path):
-    """Tracker instances are per-camera; IDs should never collide."""
+    """Tracker instances are per-camera; cam_ids must not collide."""
     img = np.zeros((100, 100, 3), dtype=np.uint8)
     m = _mask(100, 100, 10, 10, 40, 40)
 
@@ -166,5 +167,3 @@ def test_two_cameras_independent_tracks(tmp_path):
 
     assert m1[0].cam_id == "cam_front"
     assert m2[0].cam_id == "cam_back"
-    # UUIDs are independent — collision is astronomically unlikely but let's verify cam_id.
-    assert m1[0].cam_id != m2[0].cam_id

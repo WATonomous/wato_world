@@ -29,7 +29,8 @@ multi-view shape fitting and multi-LiDAR point density.
 ```
 ingest             ← bags + calibration + poses + chunk index
 lidar_preprocessing← SAM4D preprocessing, static/dynamic split, ground plane
-perception_2d      ← SAM4D camera encoding + 2D mask generation (SAM3/DEVA)
+perception_2d      ← Florence-2 + SAM 3.1 text-prompted segmentation + DA-V2 depth + DINOv2 ReID
+semantic_lifting   ← occlusion-aware 2D→3D label lifting (UniLiPs Eq.1)
 proposal_generation← Segment-Lift-and-Fit, Fusion4DAL LiDAR detector ensemble
 tracking           ← Fusion4DAL 4D tracking + SAM4D temporal memory
 label_refinement   ← LabelFormer trajectory refinement
@@ -98,11 +99,17 @@ lidar_preprocessing   reads: sweeps, poses, calibration
 
 perception_2d         reads: frames, lidar_proc_index, world/*.npz, calibration
   └─ per-chunk/
-       ├─ detections_2d.parquet      (per-frame box + class + confidence)
+       ├─ detections_2d.parquet      (per-frame phrase + class + SAM3 score)
+       ├─ tracklets_2d.parquet       (SAM3.1 temporal associations across frames)
        ├─ masks_2d/                  (per-detection SAM3 masks, camera-aligned)
-       └─ tracklets_2d.parquet       (DEVA temporal associations across frames)
+       └─ depth_2d/<cam>/<frame>.npz (Depth Anything V2 + LiDAR affine-scaled metric depth)
 
-proposal_generation   reads: world/*.npz, masks_2d, detections_2d, ground.npz, calibration
+semantic_lifting      reads: world/*.npz, masks_2d, tracklets_2d, depth_2d, calibration
+  └─ per-chunk/
+       ├─ lifted_labels/<sweep_id>.npz (per-point instance_id, class, confidence)
+       └─ lifted_stats.parquet         (per-sweep lifting statistics)
+
+proposal_generation   reads: world/*.npz, lifted_labels, ground.npz, calibration
   └─ per-chunk/
        ├─ proposals.parquet          (3D box proposals: center, size, heading, score, source)
        └─ proposal_masks/            (projected 2D mask used during SLF fitting)
@@ -121,11 +128,17 @@ label_refinement      reads: tracks, world/*.npz, dynamic_masks
 ## Implementation priority order
 
 1. **`perception_2d`** — unblocks everything downstream
-   - SAM3 mask generation per camera (text/box prompts via GroundingDINO)
-   - DEVA temporal propagation across frames
-   - DINOv2 per-detection embedding for ReID downstream
+   - Florence-2 open-vocab discovery → SAM 3.1 text-prompted segmentation
+   - Depth Anything V2 + LiDAR RANSAC affine fit → metric depth per frame
+   - SAM 3.1 Object Multiplex video tracker (IoU fallback)
+   - DINOv2 per-tracklet embedding for ReID downstream
 
-2. **`proposal_generation`** — once 2D masks exist
+2. **`semantic_lifting`** — once 2D masks + depth artifacts exist
+   - Temporal sweep↔frame matching (max 50ms offset)
+   - UniLiPs Eq.1 occlusion-aware visibility test
+   - Cross-camera vote accumulation → per-point instance labels
+
+3. **`proposal_generation`** — once lifted_labels exist
    - LiDAR detector (CenterPoint or similar) on aggregated static/dynamic points
    - SLF: lift 2D masks into 3D using ground plane from `ground.npz`
    - Fuse LiDAR proposals + SLF proposals (NMS or learned fusion)

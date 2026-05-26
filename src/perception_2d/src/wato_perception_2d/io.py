@@ -95,13 +95,18 @@ def load_calibration(bag_id: str) -> dict[str, CalibrationInfo]:
     return result
 
 
+def _load_lidar_proc_row(
+    bag_id: str, chunk_id: str, sweep_id: int
+) -> Optional[dict]:
+    proc_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
+    return next((r for r in proc_rows if int(r["sweep_id"]) == sweep_id), None)
+
+
 def load_dynamic_lidar_points(
     bag_id: str, chunk_id: str, sweep_id: int
 ) -> Optional[np.ndarray]:
     """Return (N, 3) float64 world-frame dynamic points for one sweep, or None."""
-
-    proc_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
-    row = next((r for r in proc_rows if int(r["sweep_id"]) == sweep_id), None)
+    row = _load_lidar_proc_row(bag_id, chunk_id, sweep_id)
     if row is None or row.get("valid") is False:
         return None
     world_p = local_path(str(row["world_path"]))
@@ -113,6 +118,33 @@ def load_dynamic_lidar_points(
     if mask.sum() == 0:
         return None
     xyz = np.stack([data["x"][mask], data["y"][mask], data["z"][mask]], axis=1)
+    return xyz.astype(np.float64)
+
+
+def load_static_lidar_points(
+    bag_id: str, chunk_id: str, sweep_id: int
+) -> Optional[np.ndarray]:
+    """Return (N, 3) float64 world-frame static points for one sweep, or None.
+
+    Static points are the complement of the dynamic mask — used as depth
+    alignment anchors (dynamic points introduce ~75cm error at 25ms desync).
+    """
+    row = _load_lidar_proc_row(bag_id, chunk_id, sweep_id)
+    if row is None or row.get("valid") is False:
+        return None
+    world_p = local_path(str(row["world_path"]))
+    dyn_p = local_path(str(row["dynamic_mask_path"]))
+    if not os.path.exists(world_p) or not os.path.exists(dyn_p):
+        return None
+    data = np.load(world_p)
+    dynamic_mask = np.load(dyn_p)
+    static_mask = ~dynamic_mask
+    if static_mask.sum() == 0:
+        return None
+    xyz = np.stack(
+        [data["x"][static_mask], data["y"][static_mask], data["z"][static_mask]],
+        axis=1,
+    )
     return xyz.astype(np.float64)
 
 

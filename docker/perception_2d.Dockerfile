@@ -1,6 +1,6 @@
-# Perception 2D — 2D foundation pass.
-# GroundingDINO / YOLO-World detection + SAM 3 + DEVA + DINOv2 ReID + x-cam merge.
-# Heaviest GPU component by far — budget several hundred GPU-hours per hour of bag.
+# Perception 2D v2 — Florence-2 discovery + SAM 3.1 text-prompted segmentation
+# + Depth Anything V2 + SAM 3.1 video tracker + DINOv2 ReID + x-cam merge.
+# Heaviest GPU component — budget several hundred GPU-hours per hour of bag.
 #
 # Defines `source` and `dependencies` build stages. The full image
 # (build / deploy / develop) is composed by docker/template.Dockerfile.
@@ -26,10 +26,13 @@ RUN uv pip install --system --break-system-packages \
         pyarrow numpy pydantic fsspec click pyyaml \
         zarr opencv-python-headless pillow
 
-# Heavy ML deps.  Pinned in perception_2d's pyproject.toml; uncomment when filling in.
-# RUN uv pip install --system --break-system-packages --extra-index-url \
-#         https://download.pytorch.org/whl/cu124 torch torchvision xformers
-# RUN uv pip install --system --break-system-packages \
-#         git+https://github.com/facebookresearch/sam3 \
-#         git+https://github.com/IDEA-Research/GroundingDINO \
-#         git+https://github.com/facebookresearch/dinov2
+# Heavy ML deps.
+# Licenses: Florence-2 (MIT), SAM3 ("SAM License"), DA-V2 (Apache 2.0),
+#           DINOv2 (Apache 2.0), transformers (Apache 2.0).
+RUN uv pip install --system --break-system-packages --extra-index-url \
+        https://download.pytorch.org/whl/cu124 torch torchvision
+RUN uv pip install --system --break-system-packages \
+        git+https://github.com/microsoft/Florence-2 \
+        git+https://github.com/facebookresearch/sam3 \
+        git+https://github.com/DepthAnything/Depth-Anything-V2 \
+        transformers accelerate

@@ -1,16 +1,15 @@
-"""Command-line entrypoint for perception_2d."""
+"""Command-line entrypoint for semantic_lifting."""
 
 from __future__ import annotations
 
 import click
 
-from wato_perception_2d.config import load_config
-from wato_perception_2d.pipeline import run as run_pipeline
+from wato_semantic_lifting.config import load_config
 
 
 @click.group()
 def main() -> None:
-    """2D perception pass (Florence-2 + SAM 3.1 + Depth Anything V2 + DINOv2 + x-cam merge)."""
+    """Semantic lifting — occlusion-aware LiDAR label assignment from 2D masks."""
 
 
 @main.command("run")
@@ -18,9 +17,12 @@ def main() -> None:
 @click.option(
     "--chunk", "chunk_id", default=None, help="optional chunk_id; default: all chunks."
 )
-@click.option("--config", "config_path", default="/config/perception_2d.yaml")
+@click.option(
+    "--config", "config_path", default="/config/semantic_lifting.yaml"
+)
 def run_cmd(bag_id: str, chunk_id: str | None, config_path: str) -> None:
     cfg = load_config(config_path)
+    from wato_semantic_lifting.pipeline import run as run_pipeline
     run_pipeline(cfg, bag_id=bag_id, chunk_id=chunk_id)
 
 

@@ -1,22 +1,22 @@
 """Cross-camera object identity merging.
 
 Groups masklets from different cameras that observe the same 3D object by
-back-projecting each masklet's mask centroid into world frame (using the
-depth from the nearest LiDAR return inside the mask) and clustering by 3D
-proximity.  Assigns a shared global_object_id to matched masklets.
-
-This is the "x-cam merge" step described in the perception_2d component
-docstring and is the pure-geometry foundation for cross-modal reasoning.
+back-projecting each masklet's last-frame mask centroid into world frame using
+the metric depth from the depth_2d artifact, then clustering by 3D proximity.
+Assigns a shared global_object_id to matched masklets.
 """
 
 from __future__ import annotations
 
+import collections
 import logging
+import uuid
 from typing import Optional
 
 import numpy as np
 
-from wato_common.geometry import project_points, invert_se3
+from wato_common.artifact_store import depth_2d_path, local_path
+from wato_common.geometry import invert_se3, lift_pixel_to_world
 from wato_perception_2d.io import CalibrationInfo
 from wato_perception_2d.tracker_2d import Masklet
 
@@ -31,78 +31,64 @@ def _mask_centroid_px(mask: np.ndarray) -> Optional[np.ndarray]:
     return np.array([xs.mean(), ys.mean()], dtype=np.float32)
 
 
-def _lift_to_world(
+def _load_depth_at(
+    bag_id: str,
+    chunk_id: str,
+    cam_id: str,
+    frame_seq: int,
     u: float,
     v: float,
-    depth_m: float,
-    K: np.ndarray,
-    world_T_ego: np.ndarray,
-    ego_T_cam: np.ndarray,
-) -> np.ndarray:
-    """Back-project pixel (u, v) at given depth into world frame.
+) -> Optional[float]:
+    """Read metric depth at pixel (u, v) from the depth_2d artifact.
 
-    Returns (3,) float64.
+    Returns None if the artifact is missing, fit failed (fit_status==2), or
+    depth is non-positive.
     """
-    fx, fy = K[0, 0], K[1, 1]
-    cx, cy = K[0, 2], K[1, 2]
-    x_cam = (u - cx) * depth_m / fx
-    y_cam = (v - cy) * depth_m / fy
-    z_cam = depth_m
-    pt_cam = np.array([x_cam, y_cam, z_cam, 1.0], dtype=np.float64)
-    world_T_cam = world_T_ego @ ego_T_cam
-    return (world_T_cam @ pt_cam)[:3]
+    path = local_path(depth_2d_path(bag_id, chunk_id, cam_id, frame_seq))
+    if not _os_exists(path):
+        return None
+    try:
+        data = np.load(path)
+        if int(data.get("fit_status", 2)) == 2:
+            return None
+        depth_m = data["depth_m"]
+        H, W = depth_m.shape
+        ui, vi = int(round(u)), int(round(v))
+        ui = max(0, min(ui, W - 1))
+        vi = max(0, min(vi, H - 1))
+        d = float(depth_m[vi, ui])
+        return d if d > 0 else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
-def _estimate_depth_from_lidar(
-    u: float,
-    v: float,
-    lidar_world_pts: Optional[np.ndarray],
-    K: np.ndarray,
-    cam_T_world: np.ndarray,
-    radius_px: float = 5.0,
-) -> float:
-    """Estimate depth at pixel (u, v) from nearby projected LiDAR returns.
-
-    Returns median depth of LiDAR points within `radius_px` pixels of (u, v),
-    or a fallback of 20.0 m if no close point is found.
-    """
-    fallback_depth = 20.0
-    if lidar_world_pts is None or lidar_world_pts.shape[0] == 0:
-        return fallback_depth
-    pix, valid = project_points(lidar_world_pts, K, cam_T_world)
-    if not valid.any():
-        return fallback_depth
-    pix_v = pix[valid]
-    pts_v = lidar_world_pts[valid]
-    dists = np.hypot(pix_v[:, 0] - u, pix_v[:, 1] - v)
-    close = dists < radius_px
-    if not close.any():
-        return fallback_depth
-    # Depth is the Z coordinate in camera frame.
-    cam_pts = (cam_T_world @ np.hstack([pts_v, np.ones((pts_v.shape[0], 1))]).T).T
-    return float(np.median(cam_pts[close, 2]))
+def _os_exists(path: str) -> bool:
+    import os
+    return os.path.exists(path)
 
 
 def merge_cross_camera(
     masklets: list[Masklet],
     calibration: dict[str, CalibrationInfo],
     world_T_ego_by_cam: dict[str, np.ndarray],
-    lidar_world_pts: Optional[np.ndarray] = None,
+    bag_id: str,
+    chunk_id: str,
     radius_m: float = 1.5,
 ) -> list[Masklet]:
     """Assign global_object_id to masklets visible from multiple cameras.
 
     For each masklet, lifts its last-frame mask centroid to an approximate
-    world-frame 3D position using LiDAR-assisted depth.  Then clusters
-    masklets (across cameras) whose world positions are within `radius_m` of
-    each other.  Masklets in the same cluster share a global_object_id.
+    world-frame 3D position using the depth_2d metric depth artifact.
+    Clusters masklets (across cameras) whose world positions are within
+    `radius_m` of each other.  Masklets in the same cluster share a
+    global_object_id.
 
     Args:
         masklets: all masklets from all cameras for this chunk.
         calibration: per-camera CalibrationInfo (K, ego_T_cam).
-        world_T_ego_by_cam: per-camera 4×4 world_T_ego matrix at the last
-            visible frame's timestamp.
-        lidar_world_pts: (N, 3) merged world-frame LiDAR points (optional).
+        world_T_ego_by_cam: per-camera 4×4 world_T_ego at the last valid frame.
+        bag_id: for depth_2d artifact lookup.
+        chunk_id: for depth_2d artifact lookup.
         radius_m: 3D clustering radius.
 
     Returns the same masklets list with global_object_id populated.
@@ -110,15 +96,13 @@ def merge_cross_camera(
     if not masklets:
         return masklets
 
-    # Lift each masklet's mask centroid to world frame.
     world_positions: list[Optional[np.ndarray]] = []
     for mkl in masklets:
         calib = calibration.get(mkl.cam_id)
         if calib is None or mkl.cam_id not in world_T_ego_by_cam:
             world_positions.append(None)
             continue
-        # Load the mask for the last visible frame.
-        if not mkl.mask_paths:
+        if not mkl.mask_paths or not mkl.frames_present:
             world_positions.append(None)
             continue
         try:
@@ -134,25 +118,23 @@ def merge_cross_camera(
             world_positions.append(None)
             continue
 
-        world_T_ego = world_T_ego_by_cam[mkl.cam_id]
-        ego_T_cam = calib.ego_T_cam
-        cam_T_ego = invert_se3(ego_T_cam)
-        cam_T_world = cam_T_ego @ invert_se3(world_T_ego)
-
-        depth = _estimate_depth_from_lidar(
-            float(centroid[0]),
-            float(centroid[1]),
-            lidar_world_pts,
-            calib.K,
-            cam_T_world,
+        last_frame_seq = mkl.frames_present[-1]
+        depth = _load_depth_at(
+            bag_id, chunk_id, mkl.cam_id, last_frame_seq,
+            float(centroid[0]), float(centroid[1]),
         )
-        world_pt = _lift_to_world(
+        if depth is None:
+            world_positions.append(None)
+            continue
+
+        world_T_ego = world_T_ego_by_cam[mkl.cam_id]
+        world_pt = lift_pixel_to_world(
             float(centroid[0]),
             float(centroid[1]),
             depth,
             calib.K,
             world_T_ego,
-            ego_T_cam,
+            calib.ego_T_cam,
         )
         world_positions.append(world_pt)
 
@@ -176,16 +158,14 @@ def merge_cross_camera(
             if world_positions[j] is None:
                 continue
             if masklets[i].cam_id == masklets[j].cam_id:
-                continue  # same-camera tracklets are not cross-camera duplicates
-            dist = np.linalg.norm(world_positions[i] - world_positions[j])
+                continue
+            dist = float(np.linalg.norm(world_positions[i] - world_positions[j]))
             if dist < radius_m:
                 union(i, j)
 
-    # Assign global_object_id by root.
-    from collections import defaultdict
-    import uuid
-
-    cluster_ids: dict[int, str] = defaultdict(lambda: str(uuid.uuid4())[:12])
+    cluster_ids: dict[int, str] = collections.defaultdict(
+        lambda: str(uuid.uuid4())[:12]
+    )
     for i, mkl in enumerate(masklets):
         root = find(i)
         mkl.global_object_id = cluster_ids[root]

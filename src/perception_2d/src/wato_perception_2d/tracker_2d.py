@@ -1,11 +1,12 @@
-"""Per-camera 2D temporal tracker.
+"""Per-camera 2D temporal tracker — IoU fallback backend.
 
-Associates per-frame detections into masklets (temporally consistent tracks)
-using IoU-based matching.  Extracts DINOv2 embeddings for each tracklet at
-configurable intervals for downstream cross-camera ReID.
+Associates per-frame segmented detections into masklets using IoU-based
+greedy matching.  This is the fallback tracker used when `tracker.backend`
+is set to "deva" in config; the primary tracker is SAM3Tracker in
+sam3_tracker.py.
 
-DEVA (the paper's choice for propagation) is optionally used if installed;
-IoU matching is the reliable fallback that requires no extra dependencies.
+Extracts DINOv2 embeddings for each tracklet at configurable intervals
+for downstream cross-camera ReID (shared with sam3_tracker via reid.py).
 """
 
 from __future__ import annotations
@@ -18,11 +19,10 @@ from typing import Optional
 
 import numpy as np
 
+from wato_perception_2d.reid import extract_dino_feature
 from wato_perception_2d.segmenter import SegmentedDetection
 
 log = logging.getLogger(__name__)
-
-_dino_warned = False
 
 
 @dataclass
@@ -45,53 +45,6 @@ def _iou(mask_a: np.ndarray, mask_b: np.ndarray) -> float:
     inter = (mask_a & mask_b).sum()
     union = (mask_a | mask_b).sum()
     return float(inter) / float(union) if union > 0 else 0.0
-
-
-def _extract_dino_feature(
-    image_rgb: np.ndarray,
-    mask: np.ndarray,
-    model_name: str = "dinov2_vitl14",
-    device: str = "cpu",
-) -> Optional[np.ndarray]:
-    """Extract a DINOv2 embedding for the masked region.
-
-    Returns (D,) float32 or None if torch/DINOv2 is unavailable.
-    """
-    global _dino_warned
-    try:
-        import torch
-        import torchvision.transforms as T
-        from PIL import Image as PILImage
-
-        # Crop the bounding box of the mask.
-        rows = np.any(mask, axis=1)
-        cols = np.any(mask, axis=0)
-        if not rows.any():
-            return None
-        r0, r1 = np.where(rows)[0][[0, -1]]
-        c0, c1 = np.where(cols)[0][[0, -1]]
-        crop = image_rgb[r0 : r1 + 1, c0 : c1 + 1]
-
-        model = torch.hub.load("facebookresearch/dinov2", model_name)
-        model.eval().to(device)
-
-        transform = T.Compose(
-            [
-                T.Resize(224),
-                T.CenterCrop(224),
-                T.ToTensor(),
-                T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ]
-        )
-        tensor = transform(PILImage.fromarray(crop)).unsqueeze(0).to(device)
-        with torch.no_grad():
-            feat = model(tensor)[0].cpu().numpy().astype(np.float32)
-        return feat
-    except Exception as exc:  # noqa: BLE001
-        if not _dino_warned:
-            log.warning("DINOv2 unavailable (%s) — skipping feature extraction.", exc)
-            _dino_warned = True
-        return None
 
 
 class Tracker2D:
@@ -176,7 +129,7 @@ class Tracker2D:
                 self._active[i].update(camera_seq, sd.mask, mask_path)
 
                 if self._frame_counter % self.dino_every_k == 0:
-                    feat = _extract_dino_feature(
+                    feat = extract_dino_feature(
                         image_rgb, sd.mask, self.dino_model, self.device
                     )
                     if feat is not None:
@@ -195,8 +148,8 @@ class Tracker2D:
                 bag_id=self.bag_id,
                 chunk_id=self.chunk_id,
                 cam_id=self.cam_id,
-                cls=sd.detection.class_name,
-                score=float(sd.detection.score),
+                cls=sd.phrase,
+                score=float(sd.sam3_score),
                 first_frame=camera_seq,
                 last_mask=sd.mask,
                 frames_present=[camera_seq],
