@@ -2,7 +2,7 @@
 
 Per-chunk steps (mirrors the lidar_preprocessing chunk-parallel pattern):
   A. For each camera, detect objects per frame (GroundingDINO).
-  B. For each camera, segment detected objects (SAM2) with optional LiDAR
+  B. For each camera, segment detected objects (SAM3) with optional LiDAR
      cross-modal point prompts (SAM4D-style).
   C. For each camera, track masks across frames (IoU tracker + DINOv2 embeds).
   D. Cross-camera merge: assign global_object_id by 3D proximity of centroid
@@ -39,7 +39,7 @@ from wato_perception_2d.io import (
     load_dynamic_lidar_points,
     load_frame_index,
 )
-from wato_perception_2d.segmenter import SAM2Segmenter
+from wato_perception_2d.segmenter import SAM3Segmenter
 from wato_perception_2d.tracker_2d import Masklet, Tracker2D
 
 log = logging.getLogger(__name__)
@@ -95,7 +95,7 @@ def _process_chunk(
     bag_id: str,
     chunk_id: str,
     detector: GroundingDINODetector,
-    segmenter: SAM2Segmenter,
+    segmenter: SAM3Segmenter,
 ) -> None:
     """Run steps A–E for one chunk."""
     log.info("perception_2d: chunk %s", chunk_id)
@@ -143,7 +143,7 @@ def _process_chunk(
                 continue
             H, W = image.shape[:2]
 
-            # SAM4D cross-modal: project LiDAR dynamic points as SAM2 prompts.
+            # SAM4D cross-modal: project LiDAR dynamic points as SAM3 prompts.
             lidar_prompts = None
             if cfg.use_lidar_prompts and frame.valid_pose and frame.world_T_ego_flat:
                 world_T_ego = unflatten_se3(frame.world_T_ego_flat)
@@ -265,7 +265,7 @@ def run(
 
     # Build models once and reuse across chunks.
     detector = GroundingDINODetector(device=None)
-    segmenter = SAM2Segmenter(checkpoint=cfg.sam2_checkpoint, device=None)
+    segmenter = SAM3Segmenter(checkpoint=cfg.sam3_checkpoint, device=None)
 
     n_ok = n_skip = 0
     for chunk in chunks:

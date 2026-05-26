@@ -29,7 +29,7 @@ multi-view shape fitting and multi-LiDAR point density.
 ```
 ingest             ← bags + calibration + poses + chunk index
 lidar_preprocessing← SAM4D preprocessing, static/dynamic split, ground plane
-perception_2d      ← SAM4D camera encoding + 2D mask generation (SAM2/DEVA)
+perception_2d      ← SAM4D camera encoding + 2D mask generation (SAM3/DEVA)
 proposal_generation← Segment-Lift-and-Fit, Fusion4DAL LiDAR detector ensemble
 tracking           ← Fusion4DAL 4D tracking + SAM4D temporal memory
 label_refinement   ← LabelFormer trajectory refinement
@@ -99,7 +99,7 @@ lidar_preprocessing   reads: sweeps, poses, calibration
 perception_2d         reads: frames, lidar_proc_index, world/*.npz, calibration
   └─ per-chunk/
        ├─ detections_2d.parquet      (per-frame box + class + confidence)
-       ├─ masks_2d/                  (per-detection SAM2 masks, camera-aligned)
+       ├─ masks_2d/                  (per-detection SAM3 masks, camera-aligned)
        └─ tracklets_2d.parquet       (DEVA temporal associations across frames)
 
 proposal_generation   reads: world/*.npz, masks_2d, detections_2d, ground.npz, calibration
@@ -121,7 +121,7 @@ label_refinement      reads: tracks, world/*.npz, dynamic_masks
 ## Implementation priority order
 
 1. **`perception_2d`** — unblocks everything downstream
-   - SAM2 mask generation per camera (text/box prompts via GroundingDINO)
+   - SAM3 mask generation per camera (text/box prompts via GroundingDINO)
    - DEVA temporal propagation across frames
    - DINOv2 per-detection embedding for ReID downstream
 

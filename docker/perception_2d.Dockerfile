@@ -1,5 +1,5 @@
 # Perception 2D — 2D foundation pass.
-# GroundingDINO / YOLO-World detection + SAM 2 + DEVA + DINOv2 ReID + x-cam merge.
+# GroundingDINO / YOLO-World detection + SAM 3 + DEVA + DINOv2 ReID + x-cam merge.
 # Heaviest GPU component by far — budget several hundred GPU-hours per hour of bag.
 #
 # Defines `source` and `dependencies` build stages. The full image
@@ -30,6 +30,6 @@ RUN uv pip install --system --break-system-packages \
 # RUN uv pip install --system --break-system-packages --extra-index-url \
 #         https://download.pytorch.org/whl/cu124 torch torchvision xformers
 # RUN uv pip install --system --break-system-packages \
-#         git+https://github.com/facebookresearch/sam2 \
+#         git+https://github.com/facebookresearch/sam3 \
 #         git+https://github.com/IDEA-Research/GroundingDINO \
 #         git+https://github.com/facebookresearch/dinov2

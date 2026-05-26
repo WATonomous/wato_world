@@ -86,7 +86,7 @@ fitted SDF surface.  With three Velodynes (center + NE + NW):
 
 ## Gaps and what to do
 
-### 1. SAM2 masks from perception_2d (prerequisite)
+### 1. SAM3 masks from perception_2d (prerequisite)
 
 SLF Stage 1 is SAM.  `proposal_generation` must receive per-camera, per-object
 2D masks from `perception_2d`.  The contract is:

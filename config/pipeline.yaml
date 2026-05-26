@@ -7,7 +7,7 @@
 perception_2d:
   detector: grounding_dino           # or "yolo_world"
   detector_score_threshold: 0.25
-  sam2_checkpoint: sam2_hiera_large
+  sam3_checkpoint: sam3_hiera_large
   reid_features:
     model: dinov2_vitl14
     every_k_frames: 5

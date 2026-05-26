@@ -48,7 +48,7 @@ each in its own Docker image, communicating only through artifacts on disk
 ```
 ingest             → frames + lidar sweeps + poses + frame_index
 lidar_preprocessing → motion comp, static/dynamic split, ground extraction
-perception_2d      → GroundingDINO + SAM 2 + DEVA + DINOv2 + x-cam merge
+perception_2d      → GroundingDINO + SAM 3 + DEVA + DINOv2 + x-cam merge
 proposal_generation → LiDAR detector ensemble + Segment-Lift-Fit + fusion
 tracking           → 4D tracking with masklet association + DINOv2 ReID
 label_refinement   → multimodal LabelFormer (bootstrap → learned)

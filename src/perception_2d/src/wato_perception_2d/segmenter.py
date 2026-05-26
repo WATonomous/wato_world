@@ -1,9 +1,9 @@
-"""SAM2 segmentation wrapper.
+"""SAM3 segmentation wrapper.
 
 Given per-frame bounding boxes (from detector.py) and optional LiDAR point
 prompts (cross-modal, SAM4D-style), produces per-detection binary masks.
 
-Lazy-imports sam2 so the module can be imported without it installed.
+Lazy-imports sam3 so the module can be imported without it installed.
 """
 
 from __future__ import annotations
@@ -29,19 +29,19 @@ class SegmentedDetection:
     mask: np.ndarray  # (H, W) bool
 
 
-class SAM2Segmenter:
-    """SAM2 wrapper for prompt-based segmentation.
+class SAM3Segmenter:
+    """SAM3 wrapper for prompt-based segmentation.
 
     Accepts:
     - bounding-box prompts (from GroundingDINO)
     - optional point prompts (projected LiDAR dynamic points, SAM4D cross-modal)
 
-    Falls back to filled bounding-box masks when sam2 is not installed.
+    Falls back to filled bounding-box masks when sam3 is not installed.
     """
 
     def __init__(
         self,
-        checkpoint: str = "sam2_hiera_large",
+        checkpoint: str = "sam3_hiera_large",
         device: Optional[str] = None,
     ) -> None:
         self._checkpoint = checkpoint
@@ -62,18 +62,18 @@ class SAM2Segmenter:
         if self._predictor is not None:
             return True
         try:
-            from sam2.build_sam import build_sam2
-            from sam2.sam2_image_predictor import SAM2ImagePredictor
+            from sam3.build_sam import build_sam3
+            from sam3.sam3_image_predictor import SAM3ImagePredictor
 
-            model = build_sam2(self._checkpoint, device=self._device)
-            self._predictor = SAM2ImagePredictor(model)
-            log.info("SAM2 loaded (%s) on %s", self._checkpoint, self._device)
+            model = build_sam3(self._checkpoint, device=self._device)
+            self._predictor = SAM3ImagePredictor(model)
+            log.info("SAM3 loaded (%s) on %s", self._checkpoint, self._device)
             return True
         except Exception as exc:  # noqa: BLE001
             if not _warned_missing:
                 log.warning(
-                    "SAM2 unavailable (%s) — using bbox-fill fallback masks. "
-                    "Install: pip install sam2",
+                    "SAM3 unavailable (%s) — using bbox-fill fallback masks. "
+                    "Install: pip install sam3",
                     exc,
                 )
                 _warned_missing = True
@@ -146,7 +146,7 @@ class SAM2Segmenter:
     def _bbox_fill_fallback(
         detections: list[Detection], H: int, W: int
     ) -> list[SegmentedDetection]:
-        """Fill the bounding box rectangle as the mask (used when SAM2 is absent)."""
+        """Fill the bounding box rectangle as the mask (used when SAM3 is absent)."""
         results: list[SegmentedDetection] = []
         for det in detections:
             mask = np.zeros((H, W), dtype=bool)

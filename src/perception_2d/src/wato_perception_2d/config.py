@@ -23,11 +23,11 @@ class ComponentConfig(BaseModel):
     detector: str = "grounding_dino"
     detector_score_threshold: float = 0.25
 
-    # SAM2 checkpoint name or local path.
-    sam2_checkpoint: str = "sam2_hiera_large"
+    # SAM3 checkpoint name or local path.
+    sam3_checkpoint: str = "sam3_hiera_large"
 
     # Whether to project LiDAR dynamic-mask points into image space and pass
-    # them as additional SAM2 point prompts (cross-modal prompting, SAM4D-style).
+    # them as additional SAM3 point prompts (cross-modal prompting, SAM4D-style).
     use_lidar_prompts: bool = True
     lidar_prompt_max_points: int = 50
 

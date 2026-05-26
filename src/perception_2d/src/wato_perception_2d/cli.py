@@ -10,7 +10,7 @@ from wato_perception_2d.pipeline import run as run_pipeline
 
 @click.group()
 def main() -> None:
-    """2D perception pass (GroundingDINO + SAM 2 + DEVA + DINOv2 + x-cam merge)."""
+    """2D perception pass (GroundingDINO + SAM 3 + DEVA + DINOv2 + x-cam merge)."""
 
 
 @main.command("run")

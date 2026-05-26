@@ -19,7 +19,7 @@ flowchart TD
     end
 
     subgraph perception_2d["perception_2d  ·  GPU"]
-        P2["GroundingDINO + SAM 2\nDEVA temporal tracking\nDINOv2 embeddings\ncross-camera merge"]
+        P2["GroundingDINO + SAM 3\nDEVA temporal tracking\nDINOv2 embeddings\ncross-camera merge"]
     end
 
     subgraph proposal_gen["proposal_generation  ·  GPU"]
@@ -112,7 +112,7 @@ watod down all
 | Component | Purpose | Image base | GPU |
 |---|---|---|---|
 | `ingest` | Decode rosbag → frames + lidar + poses + frame_index | CPU | no |
-| `perception_2d` | GroundingDINO + SAM 2 + DEVA + DINOv2 + x-cam merge | CUDA | yes |
+| `perception_2d` | GroundingDINO + SAM 3 + DEVA + DINOv2 + x-cam merge | CUDA | yes |
 | `lidar_preprocessing` | Motion comp, static/dynamic split, ground mesh | CPU | no |
 | `proposal_generation` | LiDAR detector + Segment-Lift-Fit + fusion | CUDA | yes |
 | `tracking` | 3D Kalman + masklet association + DINOv2 ReID | CUDA | yes (light) |

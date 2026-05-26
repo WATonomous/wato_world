@@ -11,7 +11,7 @@
 ##
 ## Possible values:
 ##   - ingest                : decode rosbags into Parquet/JSON/PNG/NPZ artifacts
-##   - perception_2d         : 2D detection + SAM 2 + DINOv2 cross-camera merge
+##   - perception_2d         : 2D detection + SAM 3 + DINOv2 cross-camera merge
 ##   - lidar_preprocessing   : motion compensation, static/dynamic split, ground extraction
 ##   - proposal_generation   : LiDAR detection ensemble + Segment-Lift-Fit + fusion
 ##   - tracking              : 4D tracking with masklet association + DINOv2 ReID
