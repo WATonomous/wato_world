@@ -1,22 +1,16 @@
 """Visualization utilities for lidar_preprocessing artifacts.
 
-Default behaviour: per chunk, open TWO separate windows — first the static
-cloud, then the dynamic cloud — each with its own debug overlays. The
-chunk-level dynamic cloud is the union of every sweep's dynamic-classified
-points, so it's coloured by sweep_id by default (turbo colormap) to make
-motion trails legible. Pass --sweep N to inspect a single sweep instead.
+Per chunk opens two windows in sequence — static (blue) then dynamic. The
+dynamic window has a sweep slider, Play/Pause, and color modes
+(uniform/p_occ/classification/n_obs/n_hits/intensity/sweep_id). Stage C
+opens a matplotlib window for the ground height/normal grids.
 
-Stage C is a matplotlib window for the 2D ground height/normal grids.
+Static / per-sweep windows use legacy Open3D VisualizerWithKeyCallback
+(1/2/3/4 view presets, R reset, +/- point size, letter keys for layer
+toggles). Dynamic window uses Open3D gui.
 
-The static / per-sweep windows use the legacy Open3D Visualizer with key
-controls (1=top-down, 2=front, 3=side, 4=isometric, R=reset, +/-=point size,
-S/D/G/E = layer toggles).  The dynamic window uses Open3D's gui framework
-and has a horizontal slider at the bottom for sweep-by-sweep scrubbing
-plus Play/Pause and mode (single / cumulative / trail) controls.
-
-For the popup to appear inside Docker, the container needs DISPLAY (and on
-WSL2, /mnt/wslg + /tmp/.X11-unix) bind-mounted in. See the
-lidar_preprocessing_dev service in modules/docker-compose.dev.yaml.
+Docker: requires DISPLAY (and on WSL2, /mnt/wslg + /tmp/.X11-unix) bind-
+mounted in — see lidar_preprocessing_dev in modules/docker-compose.dev.yaml.
 """
 
 from __future__ import annotations
@@ -112,11 +106,10 @@ _CLASS_MISSING_RGB = [0.20, 0.20, 0.20]
 
 
 def _load_voxel_diag_sorted(bag_id: str, chunk_id: str):
-    """Load voxel_diag.npz and pre-sort arrays by key for searchsorted.
+    """Load voxel_diag.npz, sorted by key for searchsorted.
 
-    Returns None when the artifact is missing (cfg.save_voxel_diagnostics
-    was False at classify time).  Callers must handle None — the diag-based
-    color modes just become unavailable.
+    Returns None when the file is missing (save_voxel_diagnostics=False);
+    callers must handle None — the diag-based color modes just disable.
     """
     from wato_lidar_preprocessing.io import load_voxel_diag
 
@@ -141,9 +134,8 @@ def _load_voxel_diag_sorted(bag_id: str, chunk_id: str):
 def _voxel_diag_per_point(xyz: np.ndarray, diag) -> dict[str, np.ndarray] | None:
     """Look up each xyz point's voxel stats from a pre-sorted voxel_diag.
 
-    Parallel arrays length == len(xyz).  Misses (voxel not in diag) get
-    NaN for floats, -1 for ints.  Voxel-key packing mirrors voxel.py so a
-    miss means the voxel really wasn't classified, not an encoding bug.
+    Returns parallel arrays of length len(xyz). Misses (voxel not in diag)
+    are NaN for floats, -1 for ints. Voxel-key packing mirrors voxel.py.
     """
     if diag is None or xyz.shape[0] == 0:
         return None
@@ -425,11 +417,6 @@ def _show(
     vis.destroy_window()
 
 
-# ---------------------------------------------------------------------------
-# Accumulated chunk views — STATIC and DYNAMIC each get their own window
-# ---------------------------------------------------------------------------
-
-
 def viz_chunk_static(bag_id: str, chunk_id: str) -> None:
     """Window 1 of 2 — static cloud (blue) with optional ego trajectory overlay.
 
@@ -527,8 +514,8 @@ def _run_sweep_slider(bag_id: str, chunk_id: str) -> None:
     sweep_id_arr = dyn["sweep_id"].astype(np.int64)
     intensity_arr = dyn.get("intensity")
 
-    # Sort once by sweep_id so we can slice contiguously per-sweep — much
-    # cheaper than boolean-masking the full array each slider tick.
+    # Sort by sweep_id so per-sweep slices are contiguous (boolean masking
+    # every slider tick is too slow for big chunks).
     order = np.argsort(sweep_id_arr, kind="stable")
     xyz = xyz[order]
     sweep_id_arr = sweep_id_arr[order]
@@ -540,18 +527,14 @@ def _run_sweep_slider(bag_id: str, chunk_id: str) -> None:
     )
     sweep_min = int(unique_sweeps.min())
     sweep_max = int(unique_sweeps.max())
-    # Map sweep_id -> (start, end) slice into the sorted arrays.
     sweep_slices: dict[int, tuple[int, int]] = {
         int(s): (int(st), int(st + c)) for s, st, c in zip(unique_sweeps, starts, counts)
     }
-    # Pre-compute the global turbo colormap over sweep_id so cumulative mode
-    # doesn't have to recompute on every slider tick.
+    # Precompute turbo colors so cumulative mode doesn't recompute per tick.
     sweep_colors_all = _value_colors(sweep_id_arr.astype(np.float64), "turbo")
 
-    # voxel_diag: per-point log_odds / p_occ / n_obs / n_hits / classification.
-    # Loaded once at viewer open so color-mode switches are zero-cost lookups.
-    # None when classify was run without save_voxel_diagnostics → the
-    # p_occ / n_obs / n_hits / classification options stay disabled.
+    # Load voxel_diag once at viewer open so color-mode switches are O(1)
+    # lookups. None → diag-based color modes stay disabled.
     diag_sorted = _load_voxel_diag_sorted(bag_id, chunk_id)
     diag_stats = _voxel_diag_per_point(xyz, diag_sorted) if diag_sorted else None
     has_diag = diag_stats is not None
@@ -582,14 +565,14 @@ def _run_sweep_slider(bag_id: str, chunk_id: str) -> None:
         n_hits_colors_all = None
         class_colors_all = None
 
-    # Scene-wide bounds so the camera can frame the whole chunk regardless of
-    # which sweep is currently shown.
+    # Scene-wide bounds so the camera frames the whole chunk regardless of
+    # which sweep is current.
     scene_min = xyz.min(axis=0)
     scene_max = xyz.max(axis=0)
     scene_center = (scene_min + scene_max) * 0.5
     scene_bbox = o3d.geometry.AxisAlignedBoundingBox(scene_min, scene_max)
 
-    # Optional static backdrop, off by default.
+    # Static backdrop is optional; off by default.
     static_xyz = None
     try:
         sx = load_static_map(bag_id, chunk_id)["xyz"]
@@ -601,9 +584,8 @@ def _run_sweep_slider(bag_id: str, chunk_id: str) -> None:
 
     ego = _ego_trajectory_lineset(bag_id, chunk_id)
 
-    # --- gui setup -----------------------------------------------------------
     app = gui.Application.instance
-    app.initialize()  # safe to call repeatedly across chunks
+    app.initialize()  # idempotent across chunks
     title = f"chunk {chunk_id} — DYNAMIC sweep slider"
     window = app.create_window(title, _WIN_W, _WIN_H)
 
@@ -641,7 +623,7 @@ def _run_sweep_slider(bag_id: str, chunk_id: str) -> None:
         scene_widget.scene.add_geometry("__ego", ego, line_mat)
         scene_widget.scene.show_geometry("__ego", False)
 
-    # --- mutable state shared by callbacks -----------------------------------
+    # Mutable state shared by all GUI callbacks.
     state = {
         "sweep": sweep_min,
         "mode": "single",  # "single" | "cumulative" | "trail"
@@ -652,12 +634,7 @@ def _run_sweep_slider(bag_id: str, chunk_id: str) -> None:
     }
 
     def _slice_color(color_by: str, lo: int, hi: int) -> np.ndarray:
-        """Resolve the per-point color array for a contiguous [lo, hi) range.
-
-        For diag-based modes (p_occ / n_obs / n_hits / classification) we
-        slice the pre-computed full-length arrays.  For sweep_id-based
-        modes we slice sweep_colors_all.  For uniform we tile red.
-        """
+        """Per-point colors for the contiguous [lo, hi) range."""
         n = hi - lo
         if color_by == "p_occ" and p_occ_colors_all is not None:
             return p_occ_colors_all[lo:hi]
@@ -683,14 +660,12 @@ def _run_sweep_slider(bag_id: str, chunk_id: str) -> None:
             lo, hi = sweep_slices[sid]
             return xyz[lo:hi], _slice_color(color_by, lo, hi)
         if mode == "cumulative":
-            # All sweeps ≤ sid.  unique_sweeps is sorted; find insertion point.
             idx = int(np.searchsorted(unique_sweeps, sid, side="right"))
             if idx == 0:
                 return np.zeros((0, 3)), None
             last_sid = int(unique_sweeps[idx - 1])
             _, hi = sweep_slices[last_sid]
-            # Cumulative defaults to sweep_id gradient (the historical view)
-            # unless the user picked another diag-based mode.
+            # Default to sweep_id gradient when the user picked "uniform".
             cb = color_by if color_by != "uniform" else "sweep_id"
             return xyz[:hi], _slice_color(cb, 0, hi)
         if mode == "trail":
@@ -720,11 +695,9 @@ def _run_sweep_slider(bag_id: str, chunk_id: str) -> None:
             scene_widget.scene.add_geometry("__dyn", pcd, dyn_mat)
         count_label.text = f"sweep {state['sweep']} / {sweep_max}  ·  {len(pts):,} pts"
 
-    # --- UI panel ------------------------------------------------------------
     em = window.theme.font_size
     panel = gui.Vert(0.5 * em, gui.Margins(em, 0.5 * em, em, 0.5 * em))
 
-    # Row 1: sweep slider + count label
     count_label = gui.Label(f"sweep {sweep_min} / {sweep_max}  ·  ... pts")
     sweep_slider = gui.Slider(gui.Slider.INT)
     sweep_slider.set_limits(sweep_min, sweep_max)
@@ -736,7 +709,6 @@ def _run_sweep_slider(bag_id: str, chunk_id: str) -> None:
 
     sweep_slider.set_on_value_changed(on_sweep)
 
-    # Row 2: prev / play / next / speed
     btn_prev = gui.Button("◀")
     btn_play = gui.Button("Play")
     btn_next = gui.Button("▶")
@@ -767,8 +739,8 @@ def _run_sweep_slider(bag_id: str, chunk_id: str) -> None:
 
     speed_slider.set_on_value_changed(on_speed)
 
-    # Play loop runs in a background thread; UI updates are dispatched back to
-    # the main thread via post_to_main_thread because the gui isn't reentrant.
+    # Play loop is a background thread; UI updates must go through
+    # post_to_main_thread because Open3D's gui isn't reentrant.
     stop_evt = threading.Event()
 
     def play_loop():
@@ -798,7 +770,6 @@ def _run_sweep_slider(bag_id: str, chunk_id: str) -> None:
     transport.add_child(speed_label)
     transport.add_child(speed_slider)
 
-    # Row 3: mode + color + overlays
     mode_label = gui.Label("mode")
     mode_combo = gui.Combobox()
     mode_combo.add_item("single sweep")
@@ -814,8 +785,7 @@ def _run_sweep_slider(bag_id: str, chunk_id: str) -> None:
 
     color_label = gui.Label("color")
     color_combo = gui.Combobox()
-    # Order: most-useful debug modes first so they're easy to find.
-    # p_occ is the headline diagnostic per the user's debugging workflow.
+    # Order = most-useful debug modes first; p_occ is the headline diagnostic.
     color_options: list[tuple[str, str]] = [("red (uniform)", "uniform")]
     if has_diag:
         color_options.append(("p_occ (carving evidence)", "p_occ"))
@@ -833,15 +803,11 @@ def _run_sweep_slider(bag_id: str, chunk_id: str) -> None:
         new_mode = color_options[idx][1]
         state["color_by"] = new_mode
         update_cloud()
-        # Log distribution stats for the diag-backed modes so the user
-        # immediately sees WHERE the dynamic points live in the p_occ band.
+        # Log p_occ distribution when the user switches to it so they can
+        # see immediately where the dynamic points sit in the band.
         if new_mode == "p_occ" and diag_stats is not None:
-            # Build the subset of p_occ matching the points currently shown.
             pts, _cols = points_for_sweep(state["sweep"])
             if len(pts):
-                # Re-derive the slice; cheaper than recomputing per-point.
-                # Just log over the full dynamic set for now — that's the
-                # only metric that's reliable across modes.
                 _log_p_occ_distribution(diag_stats["p_occ"])
 
     color_combo.set_on_selection_changed(on_color)
@@ -891,7 +857,6 @@ def _run_sweep_slider(bag_id: str, chunk_id: str) -> None:
     panel.add_child(transport)
     panel.add_child(options)
 
-    # --- layout --------------------------------------------------------------
     def on_layout(layout_context):
         r = window.content_rect
         panel_height = int(round(7.5 * em))
@@ -906,15 +871,13 @@ def _run_sweep_slider(bag_id: str, chunk_id: str) -> None:
     window.add_child(scene_widget)
     window.add_child(panel)
 
-    # Stop background play loop when the window closes.
     def on_close():
         state["playing"] = False
         stop_evt.set()
-        return True  # allow close
+        return True
 
     window.set_on_close(on_close)
 
-    # Initial render + top-down camera framing the whole chunk.
     update_cloud()
     scene_widget.setup_camera(60.0, scene_bbox, scene_center)
     scene_widget.look_at(scene_center, scene_center + np.array([0, 0, 80.0]), [0, 1, 0])
@@ -996,9 +959,7 @@ def _viz_chunk_dynamic_aggregated(bag_id: str, chunk_id: str) -> None:
     _show(geoms, title, toggle_keys=toggle, hidden_at_start=hidden)
 
 
-# ---------------------------------------------------------------------------
-# Per-sweep views — opt-in via --sweep
-# ---------------------------------------------------------------------------
+# Per-sweep views (opt-in via --sweep).
 
 
 def viz_stage_A(bag_id: str, chunk_id: str, sweep_id: int) -> None:
@@ -1062,9 +1023,7 @@ def viz_stage_B_sweep(bag_id: str, chunk_id: str, sweep_id: int) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# Stage C / D — ground grid + bag-level global map
-# ---------------------------------------------------------------------------
+# Stage C / D — ground grid + bag-level global map.
 
 
 def viz_stage_C(bag_id: str, chunk_id: str) -> None:
@@ -1127,21 +1086,7 @@ def viz_stage_D(bag_id: str) -> None:
     _show({"global_static_map": pcd}, f"global static map | bag {bag_id}")
 
 
-# Back-compat alias — viz_static_map() and viz_chunk_classified() now open
-# the static and dynamic windows back-to-back (separate windows).
-def viz_chunk_classified(bag_id: str, chunk_id: str) -> None:
-    """Open the static window, then (after it closes) the dynamic window."""
-    viz_chunk_static(bag_id, chunk_id)
-    viz_chunk_dynamic(bag_id, chunk_id)
-
-
-def viz_static_map(bag_id: str, chunk_id: str) -> None:
-    viz_chunk_classified(bag_id, chunk_id)
-
-
-# ---------------------------------------------------------------------------
-# Orchestrator
-# ---------------------------------------------------------------------------
+# Orchestrator.
 
 
 def viz_chunk(
@@ -1179,10 +1124,7 @@ def viz_chunk(
             )
 
     if sweep_id is None:
-        # Default: open static and dynamic in separate sequential windows so
-        # the two views don't visually overlap. Static comes first because
-        # it sets the spatial reference; dynamic follows with its own
-        # color-mode / overlay toggles.
+        # Static first (sets the spatial reference), then dynamic.
         if do("B") and has_o3d:
             try:
                 viz_chunk_static(bag_id, chunk_id)
@@ -1192,8 +1134,7 @@ def viz_chunk(
                 viz_chunk_dynamic(bag_id, chunk_id)
             except Exception as exc:
                 log.warning("dynamic accumulated view failed: %s", exc)
-        # Stage A doesn't have a pre-accumulated artifact, so without --sweep
-        # we just point users at the per-sweep view.
+        # Stage A is per-sweep only; without --sweep we point the user at it.
         if do("A") and not do("B"):
             log.info(
                 "stage A is per-sweep only — pass --sweep N to inspect a single deskewed sweep."

@@ -17,11 +17,14 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class SweepMaskResult:
+    """xyz/intensity slices are appended to the chunk-level static/dynamic
+    clouds by the caller. Slice fields are None when the corresponding count
+    is 0.
+    """
+
     n_static: int
     n_dynamic: int
     mask_uri: str
-    # xyz/intensity slices to be appended to the chunk-level static/dynamic
-    # clouds. May be None when n_static/n_dynamic is 0.
     static_xyz: np.ndarray | None = None
     static_intensity: np.ndarray | None = None
     dyn_xyz: np.ndarray | None = None
@@ -42,18 +45,24 @@ def apply_classification_to_sweep(
     bag_id: str,
     chunk_id: str,
     any_intensity: bool,
-    mf_mos_dynamic_arr: np.ndarray | None = None,
+    sweep_mf_mos_dynamic_arr: np.ndarray | None = None,
 ) -> SweepMaskResult:
     """Compute dynamic mask for one sweep, save it, return per-sweep stats.
 
-    `keys` is always full-length (matches xyz from the world NPZ), so the
-    saved mask length matches the downstream xyz array — that's the
-    contract proposal_generation and the occupancy export depend on.
+    `keys` is always full-length (matches xyz from the world NPZ) so the
+    saved mask is length-aligned with the downstream xyz array.
 
-    `mf_mos_dynamic_arr` is an optional sorted int64 array of voxel keys
-    that MF-MOS voted dynamic (aggregated across sweeps in Pass 1).  When
-    provided, the fusion is done via searchsorted lookup — the same pattern
-    as `not_dynamic_arr` — so it is composable with the AW classifier.
+    `sweep_mf_mos_dynamic_arr`: optional sorted int64 voxel keys MF-MOS
+    flagged dynamic FOR THIS SWEEP (built from the per-sweep mask in
+    classify/pipeline.py and optionally AND-gated against the chunk-wide
+    vote set). Fused via searchsorted, same pattern as `not_dynamic_arr`.
+
+    fusion_mode="mfmos_only" drop behaviour: a point whose voxel is
+    AW-DYNAMIC but NOT in sweep_mf_mos_dynamic_arr is dropped from both
+    static_map.npz and dynamic_map.npz (intentional — MF-MOS is treated as
+    the authoritative dynamic signal). Same drop already applies in all
+    modes for points landing in AW free_only / under_evidenced / ambiguous
+    voxels.
     """
     n = keys.shape[0]
     has_intensity = bool(row.get("has_intensity", False))
@@ -64,41 +73,29 @@ def apply_classification_to_sweep(
         np.save(local_path(dyn_uri), mask)
         return SweepMaskResult(n_static=0, n_dynamic=0, mask_uri=dyn_uri)
 
-    # not_dynamic_arr covers static voxels plus (in log_odds mode)
-    # free-only + under-evidenced-with-hits voxels.  Searchsorted is O(N log K).
+    # not_dynamic_arr covers static + free-only + under-evidenced-with-hits
+    # + ambiguous voxels (log_odds mode); static only (persistence mode).
     if not_dynamic_arr.size > 0:
         pos = np.searchsorted(not_dynamic_arr, keys)
         pos = np.clip(pos, 0, not_dynamic_arr.size - 1)
         is_not_dynamic = not_dynamic_arr[pos] == keys
     else:
         is_not_dynamic = np.zeros(n, dtype=bool)
-    mask = ~is_not_dynamic  # True == dynamic, length == n_total
+    mask = ~is_not_dynamic
 
-    # Patchwork++ per-point ground mask is authoritative: a point flagged
-    # ground in sensor frame must never end up in dynamic_map.npz.
-    #
-    # skip_ray needed this because ground rays aren't traversed at all → the
-    # endpoint voxel never enters log_odds → searchsorted yields "not found"
-    # → mask=True.
-    #
-    # skip_endpoint nominally routes ground voxels to free_only_arr, BUT
-    # only if at least one other ray ever traversed the voxel.  Sparse
-    # beams, peripheral ground returns, or any sweep whose ground voxel is
-    # only ever its own endpoint never get an entry in unique_keys, and
-    # those points fall straight through to the dynamic bucket too.
-    #
-    # Persistence mode has the same exposure: any ground voxel whose
-    # static-sweep-fraction is below threshold isn't in not_dynamic_arr
-    # either.  Applying the filter unconditionally (whenever a ground mask
-    # is available) is the simplest correct fix.
+    # Patchwork++ ground mask is authoritative: ground points must never
+    # appear in dynamic_map.npz. The not_dynamic_arr classification doesn't
+    # reliably catch them — ground voxels can fall through whenever no
+    # non-ground ray traverses them (skip_endpoint), aren't traversed at all
+    # (skip_ray), or fall below the persistence threshold.
     if ground_mask_cache_i is not None:
         mask &= ~ground_mask_cache_i
 
     n_dyn = int(mask.sum())
-    # is_static covers confident-static voxels only.  Critically NOT `~mask`:
-    # `~mask` would include free-only voxels (where ground points land in
-    # skip_endpoint mode) and under-evidenced-with-hits voxels, polluting
-    # static_map.npz with ground / low-confidence returns.
+
+    # is_static must use the static_arr lookup, NOT `~mask`: `~mask` would
+    # include free-only and under-evidenced-with-hits voxels and pollute
+    # static_map.npz with low-confidence returns.
     if static_arr.size > 0:
         pos_s = np.searchsorted(static_arr, keys)
         pos_s = np.clip(pos_s, 0, static_arr.size - 1)
@@ -108,32 +105,30 @@ def apply_classification_to_sweep(
         is_static = np.zeros(n, dtype=bool)
         n_static = 0
 
-    # Patchwork++ ground belongs in ground.npz exclusively. Without this,
-    # ground voxels — hit by every drive-over — pass the static-voxel test
-    # and pollute static_map.npz, defeating the whole ground-extraction step.
+    # Ground points belong in ground.npz only. Without this filter, road
+    # surfaces (hit by every drive-over) pass the static-voxel test and
+    # pollute static_map.npz.
     if ground_mask_cache_i is not None:
         is_static &= ~ground_mask_cache_i
         n_static = int(is_static.sum())
 
-    # MF-MOS voxel-level fusion via searchsorted (same pattern as not_dynamic_arr).
-    if mf_mos_dynamic_arr is not None and mf_mos_dynamic_arr.size > 0:
+    if sweep_mf_mos_dynamic_arr is not None and sweep_mf_mos_dynamic_arr.size > 0:
         n_dyn_before_mf = n_dyn
-        pos = np.searchsorted(mf_mos_dynamic_arr, keys)
-        pos = np.clip(pos, 0, mf_mos_dynamic_arr.size - 1)
-        is_mf_mos_dyn = mf_mos_dynamic_arr[pos] == keys
+        pos = np.searchsorted(sweep_mf_mos_dynamic_arr, keys)
+        pos = np.clip(pos, 0, sweep_mf_mos_dynamic_arr.size - 1)
+        is_mf_mos_dyn = sweep_mf_mos_dynamic_arr[pos] == keys
         if cfg.mf_mos.fusion_mode == "union":
             mask = mask | is_mf_mos_dyn
         else:  # mfmos_only
             mask = is_mf_mos_dyn
-        # Re-apply the ground filter: a non-ground moving point's vote
-        # applies to the whole voxel, so without this re-AND, union OR /
-        # mfmos_only overwrite would re-introduce co-voxel ground points
-        # that the earlier `mask &= ~ground_mask` had removed.
+        # Re-apply ground filter: an MF-MOS vote applies to the whole voxel,
+        # so without this re-AND, union/mfmos_only would re-introduce
+        # co-voxel ground points that the earlier ground filter removed.
         if ground_mask_cache_i is not None:
             mask &= ~ground_mask_cache_i
         n_dyn = int(mask.sum())
         log.debug(
-            "sweep %s mf_mos union: %d pts matched mf_mos voxels, "
+            "sweep %s mf_mos fusion: %d pts matched mf_mos voxels, "
             "%d pts flipped to dynamic (n_dyn %d→%d)",
             row.get("sweep_id"),
             int(is_mf_mos_dyn.sum()),
@@ -141,7 +136,7 @@ def apply_classification_to_sweep(
             n_dyn_before_mf,
             n_dyn,
         )
-        # A point fusion-labelled dynamic can't remain in the static cloud.
+        # A point now labelled dynamic can't also live in the static cloud.
         is_static = is_static & ~mask
         n_static = int(is_static.sum())
 

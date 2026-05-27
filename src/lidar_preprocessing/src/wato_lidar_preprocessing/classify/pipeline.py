@@ -38,7 +38,6 @@ from .io_helpers import (
     estimate_cache_bytes,
     load_mf_mos_world_mask,
     load_world_full,
-    load_world_xyz_intensity,
     origin_from_index,
 )
 from .log_odds import build_log_odds_grid, classify_from_log_odds
@@ -93,6 +92,7 @@ def _run_pass_1_persistence(
     chunk_id: str,
     *,
     cache_xyz: bool,
+    cache_intensity: bool = True,
 ) -> tuple[
     list[np.ndarray | None],
     list[np.ndarray | None],
@@ -102,11 +102,9 @@ def _run_pass_1_persistence(
 ]:
     """Pass 1 for the persistence path (no log-odds accumulators).
 
-    Returns the same 5-tuple shape as build_log_odds_grid (minus the log-odds
-    arrays) so pipeline.process_chunk treats the two paths uniformly.
-    ground_mask_cache is populated even when cache_xyz is False — masking.py
-    needs it to keep ground points out of dynamic_map.npz, and it's only
-    1 bit per point so size is a non-issue.
+    Returns the same 5-tuple shape as build_log_odds_grid minus the log-odds
+    arrays. ground_mask_cache is always populated regardless of cache_xyz —
+    masking.py needs it to keep ground out of dynamic_map.npz.
     """
     xyz_cache: list[np.ndarray | None] = []
     intensity_cache: list[np.ndarray | None] = []
@@ -126,13 +124,11 @@ def _run_pass_1_persistence(
             sweep_keys.append(np.empty(0, dtype=np.int64))
             continue
 
-        # load_world_full also returns sensor_origin (unused in persistence)
-        # so we discard it.  Switching from load_world_xyz_intensity is the
-        # only way to get ground_mask without a second NPZ read.
+        # load_world_full so we get ground_mask without a second NPZ read.
         xyz, intensity, _origin, ground_mask = load_world_full(row["world_path"])
         if xyz.shape[0] == 0:
             xyz_cache.append(xyz if cache_xyz else None)
-            intensity_cache.append(intensity if cache_xyz else None)
+            intensity_cache.append(intensity if cache_xyz and cache_intensity else None)
             ground_mask_cache.append(ground_mask)
             sweep_keys.append(np.empty(0, dtype=np.int64))
             continue
@@ -140,7 +136,7 @@ def _run_pass_1_persistence(
         keys = voxel_indices(xyz, origin, cfg.voxel_size_m, chunk_id=chunk_id)
         sweep_keys.append(keys)
         xyz_cache.append(xyz if cache_xyz else None)
-        intensity_cache.append(intensity if cache_xyz else None)
+        intensity_cache.append(intensity if cache_xyz and cache_intensity else None)
         ground_mask_cache.append(ground_mask)
         fid = row.get("frame_id")
         if fid is not None:
@@ -174,9 +170,7 @@ def process_chunk(
 
     any_intensity = any(bool(r.get("has_intensity", False)) for r in meta_rows)
 
-    # Auto-disable the in-memory cache when the chunk is too big.  The config
-    # flag stays as a force-on override; users who set it explicitly opt out
-    # of the safety net.
+    # Auto-disable the in-memory cache when the chunk is too big.
     cache_budget = cache_byte_budget()
     estimated_bytes = estimate_cache_bytes(meta_rows)
     cache_auto_disabled = False
@@ -277,16 +271,12 @@ def process_chunk(
             updated_meta.append(_invalid_meta_row(row, sweep_id))
             continue
 
-        # Both paths build a sweep-local MF-MOS dynamic voxel set from the
-        # per-sweep mask.  Using mf_mos_dynamic_arr (chunk-wide) directly
-        # bleeds dynamic labels across time: a voxel a car passed through in
-        # sweeps 100-105 would flag every static point that landed in that
-        # voxel in sweeps 1-99.
-        # When cfg.mf_mos_require_chunk_wide_vote is True (default), the
-        # sweep-local set is AND-filtered against the chunk-wide vote set to
-        # preserve cross-sweep denoising.  The persistence path has no
-        # chunk-wide votes (mf_mos_dynamic_arr is None) so the gate is a
-        # no-op there.
+        # The sweep-local MF-MOS voxel set must come from the per-sweep mask
+        # — using mf_mos_dynamic_arr (chunk-wide) directly bleeds dynamic
+        # labels across time. When mf_mos_require_chunk_wide_vote is True
+        # the per-sweep set is AND-filtered against chunk-wide votes to
+        # preserve denoising. Persistence path has no chunk-wide votes so
+        # the gate is a no-op there.
         sweep_mf_mos_dynamic_arr = None
         if (
             cfg.mf_mos.enabled
@@ -328,7 +318,7 @@ def process_chunk(
             bag_id,
             chunk_id,
             any_intensity,
-            mf_mos_dynamic_arr=sweep_mf_mos_dynamic_arr,
+            sweep_mf_mos_dynamic_arr=sweep_mf_mos_dynamic_arr,
         )
         total_static += result.n_static
         total_dynamic += result.n_dynamic
@@ -436,8 +426,7 @@ def process_chunk(
             n_hits=n_hits_vals,
         )
     elif cfg.save_voxel_occupancy:
-        # Persistence path: emit a coords-only occupancy file built from the
-        # union of all sweep_keys.
+        # Persistence path: coords-only occupancy from the union of sweep_keys.
         all_keys_parts = [k for k in sweep_keys if k.size > 0]
         if all_keys_parts:
             unique_persistence_keys = np.unique(np.concatenate(all_keys_parts))
@@ -454,11 +443,8 @@ def process_chunk(
             bag_id, chunk_id, frame_keys, cfg.voxel_size_m, origin
         )
 
-    # Per-voxel diagnostics: full log_odds/n_obs/n_hits/classification for
-    # every voxel, including carved (log_odds < 0) ones that
-    # voxel_occupancy.npz filters out.  Powers the viz's p_occ color mode
-    # for the dynamic cloud.  log_odds path only — persistence doesn't
-    # produce per-voxel log_odds.
+    # voxel_diag.npz includes carved (log_odds < 0) voxels that
+    # voxel_occupancy.npz filters out. log_odds path only.
     if cfg.save_voxel_diagnostics and use_log_odds and unique_keys.size > 0:
         write_chunk_voxel_diagnostics(
             bag_id,

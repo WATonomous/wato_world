@@ -95,15 +95,13 @@ def write_chunk_voxel_diagnostics(
     """Write voxel_diag.npz: full per-voxel diagnostics including carved voxels.
 
     `classification` is produced by classify_from_log_odds — passing it in
-    keeps the bucketing rules in exactly one place.  CLASS_* codes are
-    defined in classify/log_odds.py.
+    keeps the bucketing rules in one place. CLASS_* codes live in
+    classify/log_odds.py.
 
-    `mf_mos_dynamic_arr` (optional) is the chunk-wide set of voxel keys that
-    MF-MOS voted dynamic; when provided we add an `mf_mos_dynamic` bool
-    column so the viz can overlay which voxels the geometric classifier
-    labelled CLASS_STATIC but MF-MOS subsequently flipped — debugging the
-    "background near a car ended up dynamic" symptom relies on seeing both
-    layers, not just the final fused output.
+    `mf_mos_dynamic_arr` (optional): chunk-wide voxel keys MF-MOS voted
+    dynamic. When provided, an `mf_mos_dynamic` bool column is written so
+    the viz can overlay which voxels the geometric classifier labelled
+    CLASS_STATIC but MF-MOS subsequently flipped.
     """
     if unique_keys.size == 0:
         log.info("chunk %s: no voxels to diagnose, skipping voxel_diag.npz", chunk_id)
@@ -134,8 +132,6 @@ def write_chunk_voxel_diagnostics(
 
     np.savez_compressed(local_path(voxel_diag_path(bag_id, chunk_id)), **save_kwargs)
 
-    # CLASS_* live in classify/log_odds.py; import lazily here to keep the
-    # writer's import surface minimal.
     from .log_odds import (
         CLASS_AMBIGUOUS,
         CLASS_DYNAMIC,

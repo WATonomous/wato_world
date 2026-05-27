@@ -1,21 +1,18 @@
 """Step A.5 — MF-MOS learned moving-object segmentation.
 
 Range-image-based deep MOS as an additional dynamic-point signal alongside
-the voxel classifier (classify.py).  Runs between deskew (which writes raw
-sweep NPZs and the lidar_proc_index parquet) and classify (which produces
-the voxel-based dynamic mask).
+the voxel classifier. Runs between deskew and classify.
 
-Outputs per sweep (when cfg.mf_mos.enabled is True):
-  chunks/<chunk_id>/lidar_proc/<sweep_id:06d>_mf_mos_mask.npy   (n_raw,) bool
-  chunks/<chunk_id>/lidar_proc/<sweep_id:06d>_mf_mos_score.npy  (n_raw,) float32 [opt]
+Outputs per sweep (when cfg.mf_mos.enabled):
+  <sweep_id:06d>_mf_mos_mask.npy   (n_raw,) bool   True == moving
+  <sweep_id:06d>_mf_mos_score.npy  (n_raw,) float32 [optional]
 
-Mask is True = moving (matches the polarity of _dynamic_mask.npy from classify).
-Length equals the RAW sweep length (before deskew's nonfinite filter), so
-downstream consumers loading the raw lidar NPZ get index-aligned arrays.
+Mask length matches the RAW sweep (before deskew's nonfinite filter) so
+consumers loading raw NPZs get index-aligned arrays.
 
-Skipped sweeps (valid=False, pose gap, empty cloud) write no file and leave
-mf_mos_mask_path=None in the index.  When cfg.mf_mos.enabled is False the
-entire step is a no-op.
+Skipped sweeps (valid=False, pose gap, empty, inference error) leave
+mf_mos_mask_path=None in the index. enabled=False makes the whole step
+a no-op.
 """
 
 from __future__ import annotations
@@ -46,13 +43,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Module-level model cache keyed by (checkpoint_path, arch_cfg, data_cfg, device).
+# Cache key: (checkpoint_path, arch_cfg, data_cfg, device).
 _MODEL_CACHE: dict[tuple[str, str, str, str], "MFMosModel"] = {}
-
-
-# ---------------------------------------------------------------------------
-# Result dataclass
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -77,11 +69,6 @@ class MFMosResult:
         )
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-
 def process_chunk(
     cfg: ComponentConfig,
     bag_id: str,
@@ -89,7 +76,7 @@ def process_chunk(
 ) -> MFMosResult:
     """Run MF-MOS for every valid sweep in a chunk.
 
-    No-op (writes nothing, returns zero result) when cfg.mf_mos.enabled is False.
+    No-op when cfg.mf_mos.enabled is False.
     """
     params = cfg.mf_mos
 
@@ -117,8 +104,7 @@ def process_chunk(
     model = _load_model(params)
     max_gap_ns = int(params.max_pose_gap_ms * 1_000_000)
 
-    # Group valid sweep rows by lidar_id, sorted by timestamp, to build the
-    # sliding window of past sweeps used for residual computation.
+    # Group by lidar_id + sort by timestamp to build the residual sliding window.
     rows_by_lidar: dict[str, list[dict]] = {}
     for r in sweep_rows:
         if r.get("valid", True) is False:
@@ -131,12 +117,11 @@ def process_chunk(
     max_k = max(params.residual_steps) if params.residual_steps else 0
 
     for lid, lid_rows in rows_by_lidar.items():
-        # Per-LiDAR allowlist: the configured fov_up/fov_down and image H/W
-        # are global, so running MF-MOS on a LiDAR with a different mount
-        # geometry projects into a non-KITTI-like range image and the model
-        # mispredicts. Filter here BEFORE the calibration check so allowlist
-        # rejections don't pollute n_sweeps_skipped_invalid (which is for
-        # genuine pipeline failures, not configured opt-outs).
+        # Allowlist filter must come BEFORE the calibration check: fov_up/down
+        # and H/W are global, so running on a LiDAR with different mount
+        # geometry would project into a non-KITTI-like range image and the
+        # model mispredicts. Allowlist rejections count as disabled (not
+        # invalid) so the result reflects "deliberately skipped" vs. "failed".
         if params.lidar_id_allowlist is not None and lid not in params.lidar_id_allowlist:
             log.info(
                 "lidar %s: not in mf_mos.lidar_id_allowlist=%s; skipping its %d sweeps",
@@ -145,8 +130,6 @@ def process_chunk(
                 len(lid_rows),
             )
             for r in lid_rows:
-                # Mark these as disabled-style skips so the result reflects
-                # "deliberately not run" vs. "tried and failed".
                 result.n_sweeps_skipped_disabled += 1
             continue
 
@@ -161,10 +144,10 @@ def process_chunk(
 
         ego_T_lidar = ego_T_lidar_by_id[lid]
 
-        # Sliding window: list of (header_ts_ns, xyz_raw_float32) for last max_k sweeps.
+        # Sliding window of (header_ts_ns, xyz_raw_float32) — last max_k sweeps.
         past_window: list[tuple[int, np.ndarray]] = []
 
-        for s_idx, row in enumerate(lid_rows):
+        for row in lid_rows:
             sid = int(row["sweep_id"])
             raw_path = row["lidar_path"]
             cur_ts = int(row["header_timestamp_ns"])
@@ -202,21 +185,20 @@ def process_chunk(
                 past_window = (past_window + [(cur_ts, np.empty((0, 3), dtype=np.float32))])[-max_k:]
                 continue
 
-            # Compute finite mask — same filter deskew applies.
+            # Match deskew's nonfinite filter so the mask is index-aligned.
             if cfg.filter_nonfinite_points:
                 finite = np.isfinite(x_r) & np.isfinite(y_r) & np.isfinite(z_r)
             else:
                 finite = np.ones(n_raw, dtype=bool)
             xyz_cur = np.stack([x_r[finite], y_r[finite], z_r[finite]], axis=1)
             intensity_cur = intensity_r[finite] if intensity_r is not None else None
-            # Scale intensity to [0, 1] to match KITTI remission. NuScenes raw
-            # intensity is [0, 255]; without this rescale the model's
-            # img_means/img_stds normalization sends it ~1000× out of range.
+            # KITTI remission is [0, 1]; NuScenes raw is [0, 255]. Rescale to
+            # match training distribution — img_means/img_stds otherwise send
+            # NuScenes intensity ~1000× out of range.
             if intensity_cur is not None and params.intensity_scale != 1.0:
                 intensity_cur = intensity_cur / np.float32(params.intensity_scale)
             n_finite = xyz_cur.shape[0]
 
-            # Interpolate current pose.
             try:
                 pose_cur = _interpolate_pose(pose_samples, cur_ts, max_gap_ns)
             except _PoseGapError as exc:
@@ -228,7 +210,6 @@ def process_chunk(
                 past_window = (past_window + [(cur_ts, xyz_cur)])[-max_k:]
                 continue
 
-            # Range-project current scan.
             range_img, pixel_to_point_idx, point_to_pixel = _range_project(
                 xyz_cur,
                 intensity_cur,
@@ -240,7 +221,7 @@ def process_chunk(
                 max_range_m=params.max_range_m,
             )
 
-            # Build residual images — one per configured step.
+            # One residual per configured step (zero image when unavailable).
             residuals: list[np.ndarray] = []
             for k in params.residual_steps:
                 j = len(past_window) - k
@@ -284,7 +265,6 @@ def process_chunk(
                     )
                 )
 
-            # Inference.
             try:
                 score_img = model.infer(
                     range_image=range_img, residual_images=residuals
@@ -298,11 +278,11 @@ def process_chunk(
                 past_window = (past_window + [(cur_ts, xyz_cur)])[-max_k:]
                 continue
 
-            # Threshold + unproject → (n_finite,) bool
             pixel_mask = score_img >= params.score_threshold
             mf_finite_mask = _unproject_mask(pixel_mask, point_to_pixel, n_finite)
 
-            # Expand to n_raw length: NaN/inf points are False (not moving).
+            # Re-expand to n_raw length so the saved mask is index-aligned
+            # with the raw NPZ. NaN/inf points stay False.
             full_mask = np.zeros(n_raw, dtype=bool)
             full_mask[finite] = mf_finite_mask
 
@@ -327,7 +307,6 @@ def process_chunk(
 
             past_window = (past_window + [(cur_ts, xyz_cur)])[-max_k:]
 
-    # Rewrite lidar_proc_index.parquet with mf_mos_mask_path populated.
     updated = [meta_by_sid[int(r["sweep_id"])] for r in meta_rows]
     write_table(updated, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
 
@@ -346,13 +325,8 @@ def process_chunk(
     return result
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers — exported for tests
-# ---------------------------------------------------------------------------
-
-
 def _load_model(params: MFMosParams) -> "MFMosModel":
-    """Lazy load + cache the model.  torch is imported inside _runtime."""
+    """Lazy load + cache the model. torch is imported inside _runtime."""
     key = (params.checkpoint_path, params.arch_config, params.data_config, params.device)
     if key not in _MODEL_CACHE:
         from ._runtime import MFMosModel  # noqa: PLC0415
@@ -415,18 +389,17 @@ def _range_project(
 
     fov_up = np.deg2rad(fov_up_deg)
     fov_down = np.deg2rad(fov_down_deg)
-    fov = fov_up - fov_down  # total vertical FOV (positive)
+    fov = fov_up - fov_down
 
     proj_x = 0.5 * (yaw / np.pi + 1.0)          # [0, 1]
-    proj_y = 1.0 - (pitch - fov_down) / fov       # [0, 1] top=0
+    proj_y = 1.0 - (pitch - fov_down) / fov       # [0, 1], top=0
 
     col = np.clip(np.floor(proj_x * w).astype(np.int32), 0, w - 1)
     row = np.clip(np.floor(proj_y * h).astype(np.int32), 0, h - 1)
 
-    # Mark points outside vertical FOV or at zero range.
     in_fov = valid & (proj_y >= 0.0) & (proj_y <= 1.0)
 
-    # Closest-range wins: sort by descending range so closer overwrites.
+    # Sort descending so closer-range points overwrite farther ones.
     order = np.argsort(r)[::-1]
     col_s = col[order]
     row_s = row[order]
@@ -436,7 +409,6 @@ def _range_project(
     z_s = z[order].astype(np.float32)
     infov_s = in_fov[order]
 
-    # Write pixels.  Only in-FOV points with positive range are written.
     write_mask = infov_s
     range_image[0][row_s[write_mask], col_s[write_mask]] = r_s[write_mask]
     range_image[1][row_s[write_mask], col_s[write_mask]] = x_s[write_mask]
@@ -450,9 +422,9 @@ def _range_project(
         intens_s = intensity[order].astype(np.float32)
         range_image[4][row_s[write_mask], col_s[write_mask]] = intens_s[write_mask]
 
-    # point_to_pixel: for each input point (in original index order), record
-    # the pixel it wrote to.  Points that overwrote a closer point are still
-    # recorded even though pixel_to_point_idx doesn't point back to them.
+    # point_to_pixel records, per input point, the pixel its projection
+    # landed in. Points that lost the closest-range tiebreak are still
+    # recorded here even though pixel_to_point_idx no longer points at them.
     row_orig = np.full(n, -1, dtype=np.int32)
     col_orig = np.full(n, -1, dtype=np.int32)
     in_fov_idx = np.where(in_fov)[0]
@@ -487,7 +459,7 @@ def _compute_residual(
     if past_xyz_sensor.shape[0] == 0:
         return np.zeros((h, w), dtype=np.float32)
 
-    # Rigid transform: past sensor frame → world → current sensor frame.
+    # past sensor frame → world → current sensor frame.
     lidar_T_ego = np.linalg.inv(ego_T_lidar)
     cur_lidar_T_past_lidar = (
         lidar_T_ego
@@ -532,26 +504,14 @@ def _unproject_mask(
 ) -> np.ndarray:
     """Map (H, W) bool pixel mask back to (N,) per-point bool.
 
-    Points outside the FOV (point_to_pixel == -1) default to False (not moving).
+    Points outside the FOV (point_to_pixel == -1) default to False.
 
-    Range-image occlusion caveat (inherited from MF-MOS itself):
-        Every in-FOV point inherits the label of its projected pixel,
-        INCLUDING points that lost the closest-range tiebreak in
-        _range_project. If a static building sits directly behind a moving
-        vehicle and both fall on the same range-image pixels, the building's
-        points get the vehicle's label even though only the vehicle was
-        actually used to compute the pixel's score. This is intrinsic to
-        any range-image-based MOS pipeline and is shared by the upstream
-        MF-MOS evaluation code.
-
-        Impact is bounded here because mf_mos is fused as a per-voxel vote
-        alongside the geometric log-odds classifier: an occluded static
-        only flips a voxel dynamic when MF-MOS reaches
-        min_mf_mos_votes + mf_mos_vote_fraction_threshold, and by then the
-        voxel is typically being repeatedly observed so log-odds carving
-        evidence will dominate. Worth knowing when investigating static
-        structure that appears in the dynamic cloud immediately behind a
-        confirmed mover.
+    OCCLUSION CAVEAT: every in-FOV point inherits its pixel's label,
+    including points that lost the closest-range tiebreak. A static
+    surface directly behind a mover projecting to the same pixels will
+    inherit the mover's label. Intrinsic to range-image MOS — relevant
+    when investigating static structure showing up immediately behind a
+    confirmed mover in the dynamic cloud.
     """
     out = np.zeros(n_points, dtype=bool)
     in_image = (point_to_pixel[:, 0] >= 0) & (point_to_pixel[:, 1] >= 0)
@@ -576,11 +536,6 @@ def _unproject_scores(
     idx_w = point_to_pixel[in_image, 1]
     out[in_image] = score_image[idx_h, idx_w]
     return out
-
-
-# ---------------------------------------------------------------------------
-# Private helpers
-# ---------------------------------------------------------------------------
 
 
 class _PoseGapError(RuntimeError):
@@ -629,6 +584,5 @@ def _record_meta_path(
     sweep_id: int,
     path: str | None,
 ) -> None:
-    """Update the in-memory meta dict for a sweep with the mf_mos_mask_path."""
     if sweep_id in meta_by_sid:
         meta_by_sid[sweep_id]["mf_mos_mask_path"] = path

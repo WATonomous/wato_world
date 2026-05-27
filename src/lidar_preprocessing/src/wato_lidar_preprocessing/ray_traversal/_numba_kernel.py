@@ -1,8 +1,6 @@
 """Numba-jitted Amanatides-Woo 3D-DDA ray traversal.
 
-Imported lazily by dispatch.py only when numba is installed. Inlines the
-voxel-key packing math from _keys.py — Numba treats module-level ints as
-compile-time constants so there's no perf cost vs. hard-coding 40/20.
+Imported lazily by dispatch.py only when numba is installed.
 """
 
 from __future__ import annotations
@@ -35,17 +33,11 @@ def _update_sweep_numba(
 ) -> None:
     """Update log_odds, n_obs, n_hits for one sweep's rays.
 
-    Canonical Amanatides-Woo init: derive t_max per axis from frac (position
-    within current voxel), which is sign-symmetric and easier to audit than
-    the (cx+1)*size - ox formulation.
-
-    Range-credibility weighting (UniLiPs r*_j, Option B per-voxel extension)
-    is active when use_range_weight is True: the endpoint l_occ update is
-    multiplied by min(1, r_max/length), and each traversed voxel's l_free
-    update is multiplied by min(1, r_max/t_entry), where t_entry is the
-    parametric distance at which the ray enters that voxel. When False,
-    both factors collapse to 1.0 and behaviour is bit-identical to the
-    pre-feature kernel.
+    Range-credibility weighting (UniLiPs r*_j) is active when
+    use_range_weight is True: the endpoint l_occ update is scaled by
+    min(1, r_max/length), and each traversed voxel's l_free update is
+    scaled by min(1, r_max/t_entry) where t_entry is the parametric distance
+    at which the ray enters that voxel. When False, both factors are 1.0.
     """
     INF = 1e18
     for i in range(endpoints.shape[0]):
@@ -61,9 +53,6 @@ def _update_sweep_numba(
         if length < 1e-9 or length > max_length_m:
             continue
 
-        # r*_j for the endpoint. Computed in float64; the f32 cast happens
-        # at the update site so the multiply ordering matches the python
-        # parity kernel (l_occ * r_star, then cast).
         if use_range_weight:
             r_star_endpoint = r_max / length
             if r_star_endpoint > 1.0:
@@ -83,7 +72,7 @@ def _update_sweep_numba(
         eyi = int(math.floor((ey - coy) / voxel_size))
         ezi = int(math.floor((ez - coz) / voxel_size))
 
-        # Fractional offset of origin within its current voxel, in [0, voxel_size).
+        # frac_*: origin's offset within its current voxel, in [0, voxel_size).
         frac_x = (ox - cox) - cx * voxel_size
         frac_y = (oy - coy) - cy * voxel_size
         frac_z = (oz - coz) - cz * voxel_size
@@ -127,16 +116,13 @@ def _update_sweep_numba(
             t_delta_z = INF
             t_max_z = INF
 
-        # Stop carving margin_voxels before endpoint so the measured surface
-        # is never claimed as free space.
+        # Stop carving margin_voxels before the endpoint so the measured
+        # surface is never claimed as free space.
         stop_t = length - margin_voxels * voxel_size
 
-        # Traverse free-space voxels (sensor-origin voxel is never emitted).
-        # t_entry is captured before incrementing t_max_<axis> so it is the
-        # parametric distance at which the ray enters the new voxel — exactly
-        # what r*_t needs (and bounded > 0 because the sensor-origin voxel is
-        # never emitted, so the first emitted t_entry is the first boundary
-        # crossing, which is strictly positive).
+        # t_entry must be captured BEFORE incrementing t_max_<axis> so it's
+        # the parametric distance the ray enters the new voxel (what r*_t
+        # needs). Sensor-origin voxel is never emitted.
         while True:
             if t_max_x <= t_max_y and t_max_x <= t_max_z:
                 if t_max_x >= stop_t:
@@ -177,9 +163,9 @@ def _update_sweep_numba(
             if new_lo < numba.float32(-log_odds_clamp):
                 new_lo = numba.float32(-log_odds_clamp)
             log_odds[key] = new_lo
-            n_obs[key] = n_obs.get(key, numba.int32(0)) + numba.int32(1)
+            n_obs[key] = numba.int32(n_obs.get(key, numba.int32(0)) + numba.int32(1))
 
-        # Endpoint voxel: occupied observation (skipped for ground points).
+        # Endpoint voxel: occupied observation (skipped when is_ground).
         if not is_ground[i] and (
             exi >= 0 and exi < AXIS_RANGE
             and eyi >= 0 and eyi < AXIS_RANGE
@@ -191,8 +177,8 @@ def _update_sweep_numba(
             if new_lo > numba.float32(log_odds_clamp):
                 new_lo = numba.float32(log_odds_clamp)
             log_odds[key] = new_lo
-            n_obs[key] = n_obs.get(key, numba.int32(0)) + numba.int32(1)
-            n_hits[key] = n_hits.get(key, numba.int32(0)) + numba.int32(1)
+            n_obs[key] = numba.int32(n_obs.get(key, numba.int32(0)) + numba.int32(1))
+            n_hits[key] = numba.int32(n_hits.get(key, numba.int32(0)) + numba.int32(1))
 
 
 @numba.njit(cache=True)
@@ -203,14 +189,7 @@ def _apply_global_map_boost_numba(
     clamp: float,
     log_odds: numba.typed.Dict,   # int64 -> float32
 ) -> None:
-    """Add l_occ_boost * max_r_star[k] to log_odds[k] for each unique key, clamped.
-
-    Numba-jitted to avoid the per-key Python dict-op cost: a dense sweep can
-    produce 10k+ unique map-matched voxels, and a 30-second chunk has 600
-    sweeps, so the unjitted loop was 6M+ CPython dict ops per chunk in
-    two-pass mode.  This kernel does the same work as the previous Python
-    loop but at jitted-dict speed.
-    """
+    """Add l_occ_boost * max_r_star[k] to log_odds[k] for each unique key, clamped."""
     for i in range(unique_keys.shape[0]):
         k = unique_keys[i]
         boost = numba.float32(l_occ_boost * max_r_star[i])
@@ -234,10 +213,9 @@ def _extract_arrays_numba(
     """Fill pre-allocated arrays from the three typed dicts.
 
     INVARIANT: every key written into n_obs or n_hits is also written into
-    log_odds in the same call (see _update_sweep_numba). Iterating log_odds
-    is therefore the canonical key enumeration; n_obs/n_hits are looked up
-    by key. If a future code path increments n_obs without touching
-    log_odds, those keys would be silently dropped here.
+    log_odds in the same call. log_odds is the canonical key enumeration;
+    n_obs/n_hits are looked up by key. A code path that increments n_obs
+    without touching log_odds would silently drop those keys here.
     """
     i = 0
     for k, v in log_odds.items():

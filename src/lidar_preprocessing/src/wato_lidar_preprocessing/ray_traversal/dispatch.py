@@ -94,13 +94,7 @@ def update_sweep_log_odds(
     r_max: float = 200.0,
     use_range_weight: bool = False,
 ) -> None:
-    """Plumb a single sweep through the Numba DDA kernel.
-
-    r_max / use_range_weight are keyword-only with safe defaults so existing
-    callers (and tests that predate the range-weighting feature) keep
-    bit-identical behaviour without modification. classify/log_odds.py
-    forwards the live ComponentConfig values when they are configured.
-    """
+    """Plumb a single sweep through the Numba DDA kernel."""
     _require_numba()
     if is_ground is None:
         ig = np.zeros(len(endpoints), dtype=np.bool_)
@@ -139,16 +133,11 @@ def apply_global_map_boost(
     """UniLiPs IWU boost for endpoints matched in the global static map.
 
     For each unique voxel key the sweep hit, take the max r_star across the
-    sweep's hits (most-credible match) and add `l_occ_boost * max_r_star`
-    to that voxel's log_odds, clamped at ±clamp.
+    sweep's hits and add `l_occ_boost * max_r_star` to that voxel's
+    log_odds, clamped at ±clamp.
 
-    Only touches log_odds — never n_hits or n_obs.  n_hits must come from
-    real sweep endpoints so the has_hits gate (min_occupied_hits) is not
-    bypassed by the synthetic prior; otherwise voxels the current chunk
-    never actually observed could be promoted to static_arr.
-
-    Numba-jitted because the per-key dict update was previously a Python
-    loop costing millions of ops per chunk in two-pass mode.
+    Only touches log_odds — n_hits stays backed by real sweep returns so
+    the has_hits / min_occupied_hits gate isn't bypassed by the prior.
     """
     _require_numba()
     if hit_keys.size == 0:

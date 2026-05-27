@@ -1,187 +1,255 @@
 lidar_preprocessing:
   # Step B — voxel static/dynamic classification.
-  # Voxel size bumped 0.15 → 0.25: 32-beam NuScenes at 50m has ~0.17°/beam
-  # angular footprint, so 0.15m voxels straddle beam boundaries and pose
-  # drift carved them through. 0.25m is more robust without hurting
-  # spatial fidelity for typical objects.
+
+  # Edge length of the cubic voxels used for occupancy accumulation.
+  # Smaller → finer spatial fidelity but more sensitive to pose drift and
+  # beam spacing (voxels straddle beam boundaries → spurious carves).
+  # Larger → more robust, but small objects (pedestrians, poles) smear into
+  # neighboring voxels and lose detail.
   voxel_size_m: 0.25
 
-  # Classification method: "log_odds" (Bayesian ray-casting) or "persistence"
-  # (legacy sweep-count threshold).  Use "persistence" for A/B comparison.
+  # Classification backend.
+  # "log_odds"   → Bayesian ray-casting (recommended).
+  # "persistence" → legacy sweep-count threshold; kept for A/B comparison.
   classification_method: log_odds
 
-  # Log-odds ray-casting parameters (active when classification_method=log_odds).
-  # l_occ > l_free so a single endpoint hit outweighs a few through-ray carves.
-  # Half-step from 1.50 back toward 1.20: at l_occ=1.50 brief moving-object
-  # voxels (5-10 hits, +7.5 to +15 log-odds) needed 39-69 carves to flip
-  # dynamic, dropping the AW+MF-MOS-agree bucket by ~40%.  1.30 keeps some
-  # extra static protection (vs 1.20) without crushing real movers.
+  # Log-odds added to a voxel on each endpoint hit.
+  # Higher → static evidence accumulates faster; harder for carves to flip
+  # a hit voxel to dynamic (protects walls/trees, but brief moving-object
+  # voxels with 5-10 hits may stay static).
+  # Lower → more responsive to carves; better recall on movers but more
+  # leakage of background into the dynamic cloud.
   l_occ: 1.10
+
+  # Log-odds subtracted on each through-ray carve.
+  # Higher → free space evidence accumulates faster; aggressive carving of
+  # background, more dynamic recall, more wall leakage.
+  # Lower → conservative carving; cleaner static map but lower mover recall.
   l_free: 0.30
-  # Symmetric clamp on log_odds (±value).  Raised 5.0 → 50.0 because clamp=5
-  # with l_occ=1.20 caps at the +5 ceiling after only ~4 hits — additional
-  # hits add nothing while carves keep subtracting, so well-observed walls
-  # would still get classified dynamic after a moderate number of through-
-  # rays.  50.0 gives well-observed voxels ~40+ hits of headroom.
+
+  # Symmetric clamp on accumulated log_odds (±value).
+  # Higher → well-observed voxels build a deep "static buffer" of headroom
+  # so later carves can't flip them dynamic. Increases stability on long
+  # observations but slows recovery if a true mover later parks in that voxel.
+  # Lower → voxels saturate quickly; faster state transitions both ways.
   log_odds_clamp: 50.0
-  p_static_threshold: 0.70  # sigmoid(log_odds) >= this → static
-  p_dynamic_threshold: 0.10 # sigmoid(log_odds) < this → dynamic (if evidenced)
-  min_observations: 3       # voxels with fewer obs stay "unknown"
-  # Raised 1 → 2: a single stray return on a building edge / tree branch
-  # surrounded by through-rays could pass the dynamic gate (1 hit, many
-  # carves → low p_occ).  Requiring 2 real hits sends those sparse-return
-  # voxels to free_only (mask=False) instead of leaking into the dynamic
-  # cloud.  Real moving vehicles deposit multiple hits per sweep so this
-  # doesn't suppress them.
+
+  # sigmoid(log_odds) >= this → STATIC.
+  # Higher → stricter static gate; fewer false statics but more AMBIGUOUS.
+  p_static_threshold: 0.70
+
+  # sigmoid(log_odds) < this → DYNAMIC (if min_occupied_hits satisfied).
+  # Lower → stricter dynamic gate (only confidently-carved voxels flip);
+  # higher → more dynamic recall but more wall leakage.
+  p_dynamic_threshold: 0.10
+
+  # Voxels with fewer total observations stay UNKNOWN regardless of log_odds.
+  # Higher → suppresses noise from sparsely-sampled voxels but loses
+  # short-lived movers.  Lower → more recall, more noise.
+  min_observations: 3
+
+  # Minimum endpoint hits before a voxel may be classified DYNAMIC.
+  # Guards against single stray returns surrounded by through-rays being
+  # called dynamic.  Higher → more conservative (lose transients seen in
+  # only 1-2 sweeps); lower → more recall, more noise.
   min_occupied_hits: 1
-  # Cap on accepted ray length.  Lowered 150 → 80: NuScenes 32-beam returns
-  # past ~80m are sparse/noisy, and the long-ray free-space evidence was the
-  # dominant source of background-wall carving (median 495k traversals per
-  # near-ego voxel at 150m max).  Range weighting only attenuates beyond
-  # r_max_credibility_m, so cutting max_length is the direct lever.
+
+  # Cap on accepted ray length (metres).  Rays longer than this are dropped
+  # before traversal.
+  # Higher → more long-range free-space evidence (better far-field dynamic
+  # recall) but dominant cause of background-wall carving from noisy
+  # far-range returns.
+  # Lower → cleaner static map, weaker far-field carving.
   max_ray_length_m: 100.0
-  # Stop carving 2 voxels (was 1) before the endpoint so a sweep's own ray
-  # can't carve its own immediate-neighbor voxels — protects building/tree
-  # surfaces against same-sweep near-endpoint through-ray noise.
+
+  # Number of voxels short of the endpoint at which carving stops.
+  # Protects the surface around the hit from being carved by the same
+  # sweep's own through-ray neighbors.
+  # Higher → safer for thin surfaces (walls, foliage); too high erodes
+  # carving precision near real movers.
   free_space_margin_voxels: 2.0
-  # Range-credibility weighting (UniLiPs-inspired). Disabled by default so
-  # existing chunks reproduce bit-for-bit. To enable:
-  #   1. flip use_range_weighted_log_odds to true
-  #   2. raise max_ray_length_m above so long rays are actually accepted
-  # When on, endpoint updates and per-voxel free-space carving are scaled
-  # by min(1, r_max_credibility_m / d), where d is the sensor distance to
-  # that update site. Near-field carving on long rays keeps full weight.
+
+  # Enable range-credibility weighting of endpoint and free-space updates.
+  # When true, updates at distance d are scaled by min(1, r_max_credibility_m / d).
+  # Near-field rays keep full weight; long rays' evidence is attenuated.
+  # false → all rays contribute equally regardless of distance.
   use_range_weighted_log_odds: true
-  # Range weighting must actually engage: r_max_credibility_m must be <
-  # max_ray_length_m, otherwise r*_j = min(1, r_max/d) clamps to 1.0 for
-  # every ray (no-op).  At r_max=60 with max_ray_length=80, rays at 60m
-  # carve at full weight, rays at 80m at 0.75×.  Bumped from 30 → 60
-  # because r_max=30 attenuated the 30-80m band too aggressively, leaving
-  # distant moving-object voxels in AMBIGUOUS instead of DYNAMIC.
+
+  # Distance (metres) below which range weighting is a no-op (weight = 1).
+  # MUST be < max_ray_length_m or weighting never engages.
+  # Higher → trust long rays more (better far-field dynamic recall, more
+  # far-field noise).  Lower → aggressive attenuation past this range.
   r_max_credibility_m: 50.0
-  # "skip_endpoint": traverse ground rays (free-space evidence) but skip l_occ at endpoint.
-  # "skip_ray": skip ground rays entirely (legacy, use for A/B comparison).
+
+  # How rays whose endpoint lies on ground points are handled.
+  # "skip_endpoint" → traverse the ray for free-space evidence but don't
+  #                   add l_occ at the endpoint (ground hits aren't
+  #                   structural occupancy).
+  # "skip_ray"      → discard ground rays entirely (legacy; A/B only).
   ground_endpoint_strategy: skip_endpoint
 
   # Persistence-counting parameters (active when classification_method=persistence).
-  # Voxel is classified static if seen in at least this fraction of chunk sweeps.
+  # Fraction of chunk sweeps a voxel must be hit in to be classified static.
+  # Higher → stricter; fewer false statics, more unknowns.
   static_sweep_fraction: 0.30
-  # Minimum sweep count regardless of fraction (avoids over-classifying short chunks).
+  # Absolute floor on the sweep count, regardless of fraction.  Prevents
+  # over-classifying very short chunks where the fraction is easy to satisfy.
   static_sweep_min: 5
 
   # Step D — global static map reduce.
+  # Voxel size used when merging per-chunk static maps into the global map.
+  # Larger than voxel_size_m to absorb cross-chunk pose drift.
   global_map_voxel_size_m: 0.30
 
-  # Unit of the t_offset_us field written by ingest.
-  # Velodyne "t" field is seconds; adjust if using a different LiDAR.
+  # Unit of the per-point t_offset_us field written by ingest.
   # Options: "seconds" | "microseconds" | "nanoseconds"
+  # Velodyne "t" field is seconds; set to match your LiDAR driver.
   point_time_unit: "seconds"
 
-  # Step A rolling-shutter compensation.  NuScenes bags don't include a
-  # per-point timestamp in PointCloud2 — without compensation, every point
-  # in a sweep gets the header pose, producing ~25cm of intra-sweep smear
-  # at 7 m/s ego speed (wider than 0.25m voxel → static surfaces spread
-  # across multiple voxels and end up classified dynamic).  When raw NPZ
-  # lacks t_offset_us, deskew synthesizes per-point times from azimuth.
+  # Step A — rolling-shutter compensation (deskew).
+
+  # When raw NPZ lacks per-point timestamps, synthesize them from azimuth.
+  # true  → deskew using synthesized times (required for NuScenes; without
+  #         this, 7 m/s ego speed produces ~25cm intra-sweep smear that
+  #         spreads static surfaces across voxels and flips them dynamic).
+  # false → all points in a sweep get the header pose (fine only if your
+  #         LiDAR driver already wrote t_offset_us into the bag).
   synthesize_per_point_times: true
-  # NuScenes uses Velodyne HDL-32E at 20 Hz → 50ms per rotation.
+
+  # LiDAR rotation period (milliseconds).  Used when synthesizing per-point
+  # times.  Velodyne HDL-32E @ 20 Hz → 50 ms.  Set to match your sensor.
   lidar_sweep_duration_ms: 50.0
-  # "auto" detects per sweep from the data (compares phi[0] to phi[~200]).
-  # NuScenes LIDAR_TOP actually scans CW (azimuth decreases) in the lidar
-  # frame — the previous "ccw" default produced reversed timing, which is
-  # why the smear bug didn't visibly improve after enabling synthesis.
+
+  # Rotation direction of the LiDAR scan in its own frame.
+  # "auto" → detect per sweep from azimuth signs.
+  # "cw" / "ccw" → force direction (wrong value reverses synthesized times
+  # and undoes the smear-correction benefit).
   lidar_rotation_dir: auto
 
   # Step C — Patchwork++ ground segmentation.
-  # Parameters match wato_monorepo perception/patchwork/patchwork/config/params.yaml.
+  # Parameters mirror wato_monorepo perception/patchwork/patchwork/config/params.yaml.
   patchwork:
-    sensor_height: 1.8        # metres above ground plane
-    num_iter: 3
-    num_lpr: 20
-    num_min_pts: 10
-    th_seeds: 0.3
-    th_dist: 0.15             # ground inlier distance threshold (m)
-    th_seeds_v: 0.25
-    th_dist_v: 0.85
-    max_range: 90.0
-    min_range: 1.0
-    uprightness_thr: 0.101
-    enable_RNR: false
+    sensor_height: 1.8        # LiDAR height above the ground plane (m).
+    num_iter: 3               # Plane-fit refinement iterations per zone.
+    num_lpr: 20               # Lowest-point representatives used to seed each plane.
+    num_min_pts: 10           # Minimum points required in a zone to attempt a fit.
+    th_seeds: 0.3             # Seed-selection height threshold (m).
+    th_dist: 0.15             # Ground-inlier distance threshold (m). Higher → looser ground definition, more recall, more false ground.
+    th_seeds_v: 0.25          # Vertical-plane seed threshold (for steep zones).
+    th_dist_v: 0.85           # Vertical-plane inlier threshold (m).
+    max_range: 90.0           # Maximum radius (m) considered for ground.
+    min_range: 1.0            # Minimum radius (m) (ignores near-sensor returns).
+    uprightness_thr: 0.101    # Dot(normal, up) threshold; below this the plane is rejected as non-ground.
+    enable_RNR: false         # Reflected-noise removal.
     verbose: false
-    ground_cell_size_m: 0.25  # height-grid resolution (m) — 0.25m gives ±12.5cm ground uncertainty, acceptable for pedestrian/cyclist L_ground
+    ground_cell_size_m: 0.25  # Height-grid resolution (m). 0.25m → ±12.5cm
+                              # ground uncertainty; smaller → tighter L_ground
+                              # for short objects but noisier on sparse ground.
 
   # Export voxel_occupancy.npz (all occupied voxels, all sweeps aggregated).
-  # Useful for QA/visualization but NOT what SAM4D's MinkUNet encoder consumes
-  # directly — MinkUNet needs per-frame voxels (see save_per_frame_voxel_occupancy).
+  # For QA/visualization only — perception_2d consumes the per-frame files
+  # below, not this aggregate.
   save_voxel_occupancy: true
 
-  # Export voxel_diag.npz: per-voxel log_odds/n_obs/n_hits/classification for
-  # EVERY classified voxel (including carved ones with log_odds < 0 that
-  # voxel_occupancy.npz filters out).  Powers the viz's p_occ color mode for
-  # the dynamic cloud — lets you tell threshold-edge leakage (p_occ ≈ 0.30,
-  # yellow) from deep-carving leakage (p_occ < 0.10, dark red).
+  # Export voxel_diag.npz with per-voxel log_odds / n_obs / n_hits /
+  # classification for EVERY classified voxel (including carved ones).
+  # Required for the viz's p_occ color mode (lets you distinguish
+  # threshold-edge leakage from deep-carving leakage in the dynamic cloud).
   save_voxel_diagnostics: true
 
-  # Export one voxel_occupancy_frame_NNNN.npz per frame_id in each chunk.
-  # This IS what perception_2d feeds to SAM4D's MinkUNet encoder: each file
-  # contains the merged occupancy for all sweeps belonging to that frame
-  # (canonical + non-canonical LiDARs within tolerance_ms).
-  # Disabled by default; enable once perception_2d development starts.
+  # Export one voxel_occupancy_frame_NNNN.npz per frame_id.
+  # This is what perception_2d feeds to SAM4D's MinkUNet encoder.
+  # Disabled until perception_2d is wired up — adds ~N files per chunk.
   save_per_frame_voxel_occupancy: false
 
   # Multi-lidar frame grouping for SAM4D-style cross-modal fusion.
-  # canonical_lidar=null disables grouping (each sweep is its own frame —
-  # right for single-lidar bags like NuScenes mini).  Once the WATO 3-Velodyne
-  # rig is in use, set canonical_lidar: "lidar_cc" so ne/nw sweeps within
-  # ±tolerance_ms inherit the center lidar's frame_id.
+  # canonical_lidar: null → each sweep is its own frame (correct for
+  #   single-LiDAR bags like NuScenes mini).
+  # canonical_lidar: "lidar_cc" → non-canonical sweeps within ±tolerance_ms
+  #   inherit the center LiDAR's frame_id (used with the WATO 3-Velodyne rig).
   frame_sync:
     canonical_lidar: null
     tolerance_ms: 25.0
 
-  upstream_versions:
-    ingest: "0.1.0"
-
   # Step A.5 — MF-MOS learned moving-object segmentation.
-  # Disabled by default; outputs are independent of the voxel-occupancy classifier.
-  # Set enabled: true and provide pretrained weights to activate.
-  # Download weights from https://github.com/SCNU-RISLAB/MF-MOS/releases and
-  # place at /data/models/mf_mos/ (mounted via docker-compose.yaml).
+  # Outputs are independent of the voxel-occupancy classifier; the two are
+  # combined later via fusion_mode below.
+  # Weights: https://github.com/SCNU-RISLAB/MF-MOS/releases — drop at
+  # /data/models/mf_mos/ (mounted via docker-compose.yaml).
   mf_mos:
+    # Master switch.  false → no MF-MOS pass; fusion_mode is ignored.
     enabled: true
     checkpoint_path: /data/models/mf_mos/mf_mos_semantic_kitti.pt
     arch_config:   /data/models/mf_mos/arch_cfg.yaml
     data_config:   /data/models/mf_mos/data_cfg.yaml
-    # 8 consecutive sweep deltas — matches the KITTI-trained checkpoint
-    # (n_input_scans=8). For NuScenes (20 Hz) we double the offsets so the
-    # per-channel motion magnitude matches KITTI's 10 Hz training data:
-    # 8 × 50 ms = 400 ms ≈ KITTI's 4 × 100 ms equivalent envelope.
+
+    # Sweep-index offsets used to build the residual channels fed into the
+    # network.  Must have len == n_input_scans of the checkpoint (8 here).
+    # Larger spacing → captures slower motion / longer baselines.
+    # For NuScenes (20 Hz) we use 2× the KITTI (10 Hz) offsets so the
+    # per-channel motion magnitude matches the training distribution.
     residual_steps: [2, 4, 6, 8, 10, 12, 14, 16]
-    range_image_h: 32               # NuScenes 32-beam; set to 64 for KITTI
+
+    # Range-image dimensions fed to the network.
+    # h must match the LiDAR's beam count (NuScenes 32, KITTI 64).
+    # w controls horizontal resolution; higher → finer azimuth detail at
+    # the cost of memory and inference time.
+    range_image_h: 32
     range_image_w: 1024
-    fov_up_deg:    10.0             # NuScenes defaults; KITTI uses 3.0 / -25.0
+
+    # Vertical FoV bounds (degrees) used for spherical projection.
+    # Must match the physical LiDAR FoV; mismatches put points in the
+    # wrong rows and degrade the model output.
+    # NuScenes: 10.0 / -30.0.  KITTI: 3.0 / -25.0.
+    fov_up_deg:    10.0
     fov_down_deg: -30.0
-    device: cuda                    # set to "cpu" for tiny smoke tests
-    # Per-pixel MF-MOS sigmoid threshold.  Raised from 0.5 → 0.7 because
-    # the KITTI-pretrained model produces low-confidence false positives
-    # on NuScenes textured surfaces (brick walls, tree canopies).
+
+    # Inference device.  "cuda" for production, "cpu" for tiny smoke tests.
+    device: cuda
+
+    # Per-pixel sigmoid threshold for the MF-MOS moving-object mask.
+    # Higher → fewer false positives but loses slow/partial movers.
+    # Lower → higher recall but the KITTI-pretrained model produces
+    # false positives on NuScenes textured surfaces (brick, foliage).
     score_threshold: 0.7
-    save_scores: true              # also write _mf_mos_score.npy float32
-    fusion_mode: mfmos_only         # independent | union | mfmos_only
+
+    # Also write a float32 _mf_mos_score.npy alongside the binary mask.
+    # Useful for downstream re-thresholding without re-running inference.
+    save_scores: true
+
+    # How MF-MOS masks combine with the voxel-occupancy classifier.
+    # "independent" → MF-MOS output is exported but not fused; classifier
+    #                 alone drives static/dynamic.
+    # "union"       → a voxel is DYNAMIC if either signal flags it.
+    # "mfmos_only"  → ignore the classifier's dynamic call; use MF-MOS only.
+    fusion_mode: mfmos_only
+
+    # Maximum pose-interpolation gap (ms) when assembling residual frames.
+    # Sweeps separated by more than this skip the MF-MOS pass.
+    # Higher → more coverage at the boundaries of pose-sparse regions but
+    # uses less-accurate interpolated poses.
     max_pose_gap_ms: 200
 
-  # Voxel-level MF-MOS vote aggregation thresholds (active when fusion_mode != independent).
-  # A voxel is MF-MOS-dynamic if votes >= min_mf_mos_votes AND vote_fraction >= threshold.
-  # Tightened (0.5 → 0.7 fraction, 1 → 3 min votes) to suppress single-sweep
-  # false positives that were leaking buildings/trees into dynamic_map.npz.
-  # Requires majority agreement (3+ sweeps, ≥70% of observing sweeps) before
-  # a voxel is fused as MF-MOS-dynamic.
+  # Voxel-level MF-MOS vote aggregation (active when fusion_mode != independent).
+  # A voxel is MF-MOS-dynamic if (votes >= min_mf_mos_votes) AND
+  # (votes / observing_sweeps >= mf_mos_vote_fraction_threshold).
+
+  # Higher fraction → require stronger majority agreement across observing
+  # sweeps; suppresses transient false positives but loses briefly-seen movers.
   mf_mos_vote_fraction_threshold: 0.6
+
+  # Higher minimum vote count → require more independent confirmations;
+  # protects against single-sweep MF-MOS noise but raises the bar for
+  # transient or sparsely-sampled objects.
   min_mf_mos_votes: 4
-  # Fusion in Pass 2 always uses the per-sweep MF-MOS mask (a chunk-wide-only
-  # voxel set bleeds dynamic labels across time — a voxel a car passed through
-  # in sweeps 100-105 would flag static points in that voxel in sweeps 1-99).
-  # When true, the per-sweep mask is additionally AND-filtered against the
-  # chunk-wide vote set above to preserve denoising (single noisy MF-MOS sweep
-  # votes get suppressed).  Set false to rely purely on per-sweep MF-MOS
-  # confidence (more lenient; transient objects sampled in few sweeps survive).
+
+  # Whether the per-sweep MF-MOS mask is AND-filtered against the chunk-wide
+  # vote set above.
+  # true  → strictest; per-sweep dynamic call only fires inside voxels that
+  #         also passed the chunk-wide vote (denoises single-sweep flickers).
+  # false → trust per-sweep MF-MOS confidence directly; transients sampled
+  #         in only a few sweeps survive at the cost of more noise.
+  # Note: fusion in Pass 2 ALWAYS uses the per-sweep mask — a chunk-wide-only
+  # set would bleed dynamic labels across time (a voxel a car passed through
+  # in sweeps 100-105 would flag static points in sweeps 1-99).
   mf_mos_require_chunk_wide_vote: true

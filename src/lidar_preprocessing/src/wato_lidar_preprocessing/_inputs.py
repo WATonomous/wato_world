@@ -1,8 +1,4 @@
-"""Shared I/O helpers used by deskew and mf_mos.
-
-Centralised here so both steps load poses and calibration the same way and
-any future fix only needs to be made in one place.
-"""
+"""Shared I/O helpers used by deskew and mf_mos."""
 
 from __future__ import annotations
 
@@ -27,8 +23,8 @@ def load_pose_samples(bag_id: str, chunk_id: str) -> list[PoseSample]:
             continue
         flat = r["world_T_ego_flat"]
         T = unflatten_se3(flat)
-        # Sanity check: matrix translation must agree with the (x,y,z) columns.
-        # If they disagree the upstream writer is broken — warn but trust matrix.
+        # Matrix translation must agree with the (x,y,z) columns. Disagreement
+        # = broken upstream writer; we trust the matrix and warn.
         xyz = np.array([r["x"], r["y"], r["z"]], dtype=np.float64)
         if not np.allclose(T[:3, 3], xyz, atol=1e-6):
             log.warning(
@@ -69,10 +65,10 @@ def load_ego_T_lidar(bag_id: str, lidar_id: str) -> np.ndarray:
 def load_ego_T_lidar_dict(
     bag_id: str, lidar_ids: set[str]
 ) -> dict[str, np.ndarray]:
-    """Load ego_T_lidar for multiple lidar IDs from a single calibration.json read.
+    """Load ego_T_lidar for multiple lidar IDs from one calibration.json read.
 
-    Logs an error for any lidar_id that is missing or has an unresolved extrinsic;
-    those entries are absent from the returned dict (caller should skip those sweeps).
+    Missing / unresolved lidar_ids are logged as errors and absent from the
+    returned dict; callers should skip those sweeps.
     """
     calib_file = local_path(calibration_path(bag_id))
     with open(calib_file, "r", encoding="utf-8") as fh:

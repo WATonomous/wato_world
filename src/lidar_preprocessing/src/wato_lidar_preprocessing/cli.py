@@ -25,8 +25,8 @@ def _resolve_bag_id(value: str) -> str:
         --bag data/bags/NuScenes-v1.0-mini-scene-1100/
     """
     p = Path(value)
-    # If it looks like a path (contains a separator or the name has non-ID chars),
-    # derive the bag_id from the directory name the same way ingest does.
+    # Path-shaped input → derive bag_id from the directory name the same way
+    # ingest does (slugify non-identifier chars).
     if "/" in value or not _SLUG.sub("", p.name) == p.name:
         raw = _SLUG.sub("_", p.name).strip("_") or "bag"
         return raw
@@ -112,9 +112,8 @@ def run_cmd(
         workers=workers,
         two_pass=two_pass,
     )
-    # In two-pass mode, run() already built one global_static_map.npz to seed
-    # pass 2.  We re-run it here so the final on-disk global map reflects the
-    # improved pass-2 per-chunk static_map.npz files, not the pass-1 ones.
+    # Two-pass already built one global_static_map.npz to seed pass 2; we
+    # re-reduce here so the final on-disk map reflects pass-2 outputs.
     if auto_reduce and chunk_id is None:
         log.info("auto-reduce: building global_static_map.npz + global_ground.npz ...")
         static_out = reduce_static_map(bag_id, cfg)

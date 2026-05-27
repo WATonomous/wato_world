@@ -1,9 +1,8 @@
 """Voxel-key packing shared by classify (Step B) and ground (Step C).
 
-Both steps need to map a world-frame point to the same int64 voxel key,
-given the same `origin` and `voxel_size`.  Keeping the helpers here avoids
-a private cross-module import (ground importing _voxel_indices from
-classify) that fudges the layering.
+Both steps must produce the same int64 key for the same world-frame point
+under the same `origin` / `voxel_size`. Lives here to avoid a private
+cross-module import between classify and ground.
 """
 
 from __future__ import annotations
@@ -23,10 +22,9 @@ AXIS_RANGE = 1 << AXIS_BITS  # 1 048 576
 class VoxelOverflowError(ValueError):
     """Raised when world-frame points exceed the voxel-key bit budget.
 
-    At realistic drive lengths and voxel sizes this should never happen.  When
-    it does, the upstream world-frame coordinates are almost certainly
-    corrupted (wrong calibration sign, NaN-leaked pose, etc.) and silently
-    clipping would mark every offending point as the same voxel.
+    Should never trip at realistic drive lengths/voxel sizes. When it does,
+    upstream coordinates are corrupted (wrong calibration sign, NaN-leaked
+    pose, etc.). Silently clipping would alias every offender to the same key.
     """
 
 

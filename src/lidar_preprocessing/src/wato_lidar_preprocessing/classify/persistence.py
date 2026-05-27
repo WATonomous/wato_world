@@ -1,9 +1,9 @@
 """Legacy persistence-counting classifier (kept for A/B comparison).
 
 Counts how many distinct sweeps each voxel appears in and thresholds on
-`max(static_sweep_min, static_sweep_fraction * n_sweeps)`. Wrong with a
-moving ego (see plan: the per-voxel hit count is dominated by ego dwell
-time, not object motion), but cheap and useful as a baseline.
+`max(static_sweep_min, static_sweep_fraction * n_sweeps)`. Biased with a
+moving ego (per-voxel hit count is dominated by ego dwell time, not object
+motion), but cheap and useful as a baseline.
 """
 
 from __future__ import annotations

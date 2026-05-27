@@ -11,17 +11,13 @@ import numpy as np
 from wato_common.artifact_store import (
     dynamic_map_path,
     dynamic_mask_path,
-    global_ground_path,
     global_static_map_path,
     ground_path,
-    lidar_proc_index_path,
-    lidar_proc_summary_path,
     lidar_world_path,
     local_path,
     static_map_path,
     voxel_diag_path,
 )
-from wato_common.io.parquet_io import read_rows
 
 
 def load_world_sweep(
@@ -64,16 +60,6 @@ def load_global_static_map(bag_id: str) -> np.ndarray:
     return data["xyz"]
 
 
-def load_global_ground(bag_id: str) -> dict[str, np.ndarray]:
-    """Load the bag-level ground height grid NPZ.
-
-    Schema mirrors per-chunk ground.npz (height_grid, normal_grid, grid_origin,
-    cell_size, ground_xyz) so consumers can use a single loader regardless of
-    scope.  Produced by `wato_lidar_preprocessing reduce`.
-    """
-    return dict(np.load(local_path(global_ground_path(bag_id))))
-
-
 def load_voxel_diag(bag_id: str, chunk_id: str) -> dict[str, np.ndarray]:
     """Load per-voxel diagnostics NPZ (full classification stats).
 
@@ -92,23 +78,3 @@ def load_voxel_diag(bag_id: str, chunk_id: str) -> dict[str, np.ndarray]:
     FileNotFoundError.
     """
     return dict(np.load(local_path(voxel_diag_path(bag_id, chunk_id))))
-
-
-def load_proc_index(bag_id: str, chunk_id: str) -> list[dict]:
-    """Load the per-sweep processed sweep metadata for a chunk."""
-    return read_rows(lidar_proc_index_path(bag_id, chunk_id))
-
-
-def load_proc_summary(bag_id: str, chunk_id: str) -> dict:
-    """Load the chunk-level rollup written by the pipeline.
-
-    Single-row parquet, returned as a dict.  Raises FileNotFoundError if
-    the chunk hasn't been processed yet.
-    """
-    rows = read_rows(lidar_proc_summary_path(bag_id, chunk_id))
-    if not rows:
-        raise FileNotFoundError(
-            f"lidar_proc_summary for chunk {chunk_id!r} of bag {bag_id!r} is empty "
-            "or does not exist."
-        )
-    return rows[0]

@@ -1,20 +1,16 @@
 """Step C — Aggregate per-sweep ground masks + height-grid builder.
 
-Reads each world-frame sweep NPZ produced by Step A (deskew).  Sweeps that
-include a `ground_mask` array (Patchwork++ ran in sensor frame during deskew)
-contribute their ground points to the chunk-level ground cloud, which is then
-binned into a 2D height grid + surface-normal grid for use by downstream
-components (e.g. stage 5 box-bottom validation).
+Reads each world-frame sweep NPZ. Sweeps carrying a `ground_mask` contribute
+their ground points to the chunk-level ground cloud, which is then binned
+into a 2D height grid + surface-normal grid.
 
 Each candidate ground point is intersected against the static-voxel set
-written by Step B (classify) — points whose voxel ended up dynamic are
-dropped, which removes vehicle-underside contamination from the chunk-level
-ground cloud without changing the per-sweep design.
+from Step B (classify) — points in non-static voxels are dropped, which
+removes vehicle-underside contamination.
 
-If no sweep carries a ground mask (Patchwork++ unavailable during deskew),
-this writes a sentinel ground.npz with empty arrays + status="skipped_no_ground_mask"
-so downstream consumers can distinguish "ground unavailable" from "chunk not
-yet processed".
+When no sweep carries a ground mask (Patchwork++ unavailable upstream),
+writes a sentinel ground.npz with status="skipped_no_ground_mask" so
+downstream consumers can distinguish "unavailable" from "not yet processed".
 """
 
 from __future__ import annotations
@@ -49,21 +45,18 @@ class GroundResult:
     n_nonground: int
     ground_path: str
     status: str = "ok"  # "ok" | "skipped_no_ground_mask" | "empty"
-    n_dropped_dynamic: int = (
-        0  # ground candidates rejected by static-voxel intersection
-    )
+    n_dropped_dynamic: int = 0  # rejected by static-voxel intersection
 
 
 def _load_static_voxel_set(
     bag_id: str, chunk_id: str
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Load classify's static-voxel keys + the origin/voxel_size needed to
-    voxelise per-sweep ground points consistently.
+    """Load classify's static-voxel keys + origin/voxel_size.
 
-    Returns (sorted_keys, origin_xyz, voxel_size).  Raises FileNotFoundError
-    if static_map.npz is missing (classify hasn't run for this chunk) and
-    KeyError if the file predates the intersection feature (re-run classify
-    with --force).
+    Returns (sorted_keys, origin_xyz, voxel_size).
+    Raises FileNotFoundError if classify hasn't run; KeyError if the file
+    predates the static-voxel-keys / origin / voxel_size export (re-run
+    classify with --force).
     """
     path = local_path(static_map_path(bag_id, chunk_id))
     if not os.path.exists(path):
@@ -97,9 +90,7 @@ def _filter_by_static_voxels(
 ) -> np.ndarray:
     """Keep only rows of `xyz` whose voxel key is in `static_keys`.
 
-    Uses the same voxel_indices helper as classify, so the keys are
-    guaranteed to align.  An empty static-key array means nothing was
-    classified static and every candidate ground point is dropped.
+    Uses the same voxel_indices helper as classify so keys align bit-for-bit.
     """
     if xyz.shape[0] == 0 or static_keys.size == 0:
         return np.empty((0, 3), dtype=xyz.dtype)
@@ -148,22 +139,22 @@ def _build_height_grid(
     x_edges = x0 + np.arange(W + 1) * cell_size
     y_edges = y0 + np.arange(H + 1) * cell_size
 
-    # binned_statistic_2d returns shape (W_x, H_y); we want (H_y, W_x).
+    # binned_statistic_2d returns (W_x, H_y); transpose to (H_y, W_x).
     stat = binned_statistic_2d(
         x, y, z, statistic="median", bins=[x_edges, y_edges]
     ).statistic
     height_grid = stat.T.astype(np.float32)  # (H, W)
 
-    # Fill NaN holes by nearest populated cell (distance-transform trick).
+    # Fill NaN holes via nearest populated cell.
     nan_mask = np.isnan(height_grid)
     if nan_mask.all():
-        # Shouldn't happen given non-empty input, but guard against it.
         height_grid[:] = 0.0
     elif nan_mask.any():
         _, indices = distance_transform_edt(nan_mask, return_indices=True)
         height_grid[nan_mask] = height_grid[indices[0][nan_mask], indices[1][nan_mask]]
 
     # Surface normals via finite differences on the height grid.
+    # n = [-dh/dx, -dh/dy, 1] normalised.
     hf = height_grid.astype(np.float64)
     if H >= 2 and W >= 2:
         dh_dr, dh_dc = np.gradient(hf)
@@ -207,10 +198,8 @@ def process_chunk(
         )
 
     ground_chunks: list[np.ndarray] = []
-    # Only count points whose sweep actually carried a ground_mask — otherwise
-    # we'd inflate n_nonground with sweeps that were never classified, hiding
-    # the difference between "Patchwork said non-ground" and "no Patchwork
-    # output at all".
+    # Counted only over sweeps with a ground_mask, so n_nonground reflects
+    # "Patchwork said non-ground" rather than "Patchwork never ran".
     n_classified_pts = 0
     n_with_mask = 0
     n_dropped_dynamic = 0
@@ -224,8 +213,8 @@ def process_chunk(
         desc=f"ground chunk {chunk_id}",
         unit="sweep",
     ):
-        # parquet stores missing columns as None — treat that as valid=True;
-        # only skip when an upstream stage explicitly marked the row invalid.
+        # parquet stores missing columns as None — treat as valid=True;
+        # skip only on explicit valid=False.
         if row.get("valid") is False:
             continue
         world_path = local_path(row["world_path"])

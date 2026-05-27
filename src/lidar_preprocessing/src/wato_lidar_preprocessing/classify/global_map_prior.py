@@ -2,10 +2,10 @@
 
 Wraps a cKDTree over the bag-level global_static_map.npz so each sweep in
 pass 2 can ask "is this scan point within match_radius_m of a known static
-surface, and how credible is it?"  Per UniLiPs Eq. 2-3, the range-credibility
-weight is r*_j = min(1, r_max / ||p_j - sensor||), and the "found" boost is
-applied to the per-voxel log-odds (not n_hits — that gate must stay backed by
-real sweep returns; see _apply_global_map_boost in log_odds.py).
+surface, and how credible is it?" Range-credibility weight is
+r*_j = min(1, r_max / ||p_j - sensor||) (UniLiPs Eq. 2-3). The match-found
+boost applies to log-odds only — n_hits stays backed by real sweep returns
+so the has_hits gate isn't bypassed.
 """
 
 from __future__ import annotations
@@ -21,11 +21,9 @@ log = logging.getLogger(__name__)
 class GlobalMapPrior:
     """KDTree wrapper over global_static_map.npz.
 
-    Built once per bag (or once per worker process in pass 2) and shared
-    read-only across chunks/sweeps within a process.  The KDTree itself is
-    built lazily — if the global map is empty, no tree is constructed and
-    query_sweep returns all-False map_hit + all-ones r_star so callers can
-    pass an empty prior through without special-casing it.
+    Built once per bag (or once per worker process in pass 2). The KDTree
+    is skipped when the map is empty — query_sweep then returns all-False
+    map_hit + all-ones r_star so callers don't need to special-case it.
     """
 
     def __init__(
@@ -85,9 +83,8 @@ class GlobalMapPrior:
         """
         n = xyz.shape[0]
 
-        # r_star is computed from sensor distance regardless of tree presence,
-        # so an empty map still returns sensible weights (callers that combine
-        # the prior with other signals can rely on the shape contract).
+        # r_star is computed regardless of tree presence so callers get a
+        # well-shaped return even when the global map is empty.
         dx = xyz[:, 0] - sensor_origin[0]
         dy = xyz[:, 1] - sensor_origin[1]
         dz = xyz[:, 2] - sensor_origin[2]
@@ -101,7 +98,6 @@ class GlobalMapPrior:
         if self._tree is None or n == 0:
             return np.zeros(n, dtype=bool), r_star
 
-        # k=1 nearest-neighbour with cKDTree; workers=-1 parallelises across cores.
         dists, _ = self._tree.query(xyz, k=1, workers=-1)
         map_hit = dists <= self.match_radius_m
         return map_hit, r_star

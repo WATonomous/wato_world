@@ -1,12 +1,9 @@
 """Pure-Python parity kernel for the Numba DDA.
 
-Used ONLY by the numba/python parity test in tests/test_ray_traversal.py.
-Never imported by dispatch.py at runtime — the Python path is too slow for
-real chunks, and silent fallback to it would be operationally dangerous.
-
-Keeps the algorithmic intent legible: anyone debugging a DDA edge case can
-read the Python code as a reference, then verify the Numba kernel matches
-via the parity test.
+Used ONLY by the parity test in tests/test_ray_traversal.py. Never imported
+by dispatch.py at runtime — the Python path is too slow for real chunks.
+Kept as a readable reference for the DDA arithmetic; the parity test holds
+the Numba kernel to its semantics.
 """
 
 from __future__ import annotations
@@ -35,13 +32,7 @@ def _update_sweep_python(
     r_max: float = 200.0,
     use_range_weight: bool = False,
 ) -> None:
-    """Reference DDA. Same arithmetic as _update_sweep_numba; pure Python.
-
-    r_max / use_range_weight default to (200.0, False) so existing callers
-    that don't pass them get bit-identical behaviour to the pre-feature
-    kernel. The Numba kernel makes these required positional args because
-    Numba can't elide keyword defaults at JIT time.
-    """
+    """Reference DDA — same arithmetic as _update_sweep_numba in pure Python."""
     ox = float(sweep_origin[0])
     oy = float(sweep_origin[1])
     oz = float(sweep_origin[2])
