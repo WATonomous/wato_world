@@ -100,7 +100,7 @@ def _ego_trajectory_lineset(bag_id: str, chunk_id: str):
 
 
 # Classification → RGB mapping for voxel_diag overlay.
-# Must stay aligned with CLASS_* codes in classify/occupancy_export.py.
+# Must stay aligned with CLASS_* codes in classify/log_odds.py.
 _CLASS_COLORS: dict[int, list[float]] = {
     0: [0.30, 0.56, 0.85],   # STATIC          — blue
     1: [0.95, 0.85, 0.20],   # AMBIGUOUS       — yellow

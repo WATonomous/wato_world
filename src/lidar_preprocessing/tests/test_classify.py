@@ -675,18 +675,25 @@ def test_voxel_vote_fusion_requires_min_votes(tmp_env):
 
 
 def test_voxel_vote_fusion_union_threshold(tmp_env):
-    """MF-MOS votes meeting threshold override AW static in union mode.
+    """MF-MOS per-sweep votes flip individually-flagged sweeps in union mode.
 
     Five sweeps hit the same voxel; 3 of 5 MF-MOS masks flag it moving
-    (vote_fraction = 0.6 >= 0.5, votes = 3 >= 1).  AW sees 5 hits with
-    min_observations=3 → confident static.  Union mode must override: all
-    5 sweep points become dynamic, none static.
+    (vote_fraction = 0.6 >= 0.5, votes = 3 >= 1 → voxel is in the chunk-wide
+    vote set).  AW sees 5 hits with min_observations=3 → confident static.
+
+    Fusion in Pass 2 is per-sweep: a point flips to dynamic only if its
+    sweep's MF-MOS mask flagged it (the chunk-wide vote set acts as a
+    voxel-level credibility gate, not as a per-sweep override).  Sweeps 0-2
+    flip to dynamic; sweeps 3-4 stay static.  This is the temporal-bleed
+    fix — pre-fix, all 5 sweeps would have flipped because the chunk-wide
+    mf_mos_dynamic_arr was applied uniformly.
     """
     bag_id, chunk_id = "bag_vote_union", "chunk0"
     xyz = np.array([[5.0, 0.0, 0.0]])
     sensor_origin = np.array([-1.0, 0.0, 0.0])
     n_sweeps = 5
     mf_flags = [True, True, True, False, False]
+    n_voted_dynamic = sum(mf_flags)
 
     rows = []
     for i in range(n_sweeps):
@@ -707,11 +714,13 @@ def test_voxel_vote_fusion_union_threshold(tmp_env):
     )
     result = process_chunk(cfg, bag_id, chunk_id)
 
-    assert result.n_dynamic == n_sweeps, (
-        f"all {n_sweeps} points must be dynamic via MF-MOS union; got {result.n_dynamic}"
+    assert result.n_dynamic == n_voted_dynamic, (
+        f"only the {n_voted_dynamic} per-sweep-voted points must be dynamic; "
+        f"got {result.n_dynamic} (regression: chunk-wide vote arr bleeding across sweeps)"
     )
-    assert result.n_static == 0, (
-        "voxel in mf_mos_dynamic_arr must be removed from static cloud"
+    assert result.n_static == n_sweeps - n_voted_dynamic, (
+        f"the {n_sweeps - n_voted_dynamic} non-voted sweep points must stay "
+        f"static (AW classifier output preserved); got {result.n_static}"
     )
 
 

@@ -196,6 +196,32 @@ def _update_sweep_numba(
 
 
 @numba.njit(cache=True)
+def _apply_global_map_boost_numba(
+    unique_keys: np.ndarray,   # (M,) int64, deduped
+    max_r_star: np.ndarray,    # (M,) float32, per-key max r*
+    l_occ_boost: float,
+    clamp: float,
+    log_odds: numba.typed.Dict,   # int64 -> float32
+) -> None:
+    """Add l_occ_boost * max_r_star[k] to log_odds[k] for each unique key, clamped.
+
+    Numba-jitted to avoid the per-key Python dict-op cost: a dense sweep can
+    produce 10k+ unique map-matched voxels, and a 30-second chunk has 600
+    sweeps, so the unjitted loop was 6M+ CPython dict ops per chunk in
+    two-pass mode.  This kernel does the same work as the previous Python
+    loop but at jitted-dict speed.
+    """
+    for i in range(unique_keys.shape[0]):
+        k = unique_keys[i]
+        boost = numba.float32(l_occ_boost * max_r_star[i])
+        old = log_odds.get(k, numba.float32(0.0))
+        new_lo = old + boost
+        if new_lo > numba.float32(clamp):
+            new_lo = numba.float32(clamp)
+        log_odds[k] = new_lo
+
+
+@numba.njit(cache=True)
 def _extract_arrays_numba(
     log_odds: numba.typed.Dict,
     n_obs: numba.typed.Dict,

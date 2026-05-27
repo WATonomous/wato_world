@@ -79,15 +79,6 @@ def write_chunk_voxel_occupancy(
     )
 
 
-# Classification label codes for voxel_diag.npz.  int8 storage keeps the
-# artifact small; viz code maps these back to category names.
-CLASS_STATIC = 0
-CLASS_AMBIGUOUS = 1          # evidenced + has_hits + p_dynamic ≤ p_occ < p_static
-CLASS_UNDER_EVIDENCED = 2    # has_hits but n_obs < min_observations
-CLASS_FREE_ONLY = 3          # n_hits == 0 (only ever traversed)
-CLASS_DYNAMIC = 4            # evidenced + has_hits + p_occ < p_dynamic_threshold
-
-
 def write_chunk_voxel_diagnostics(
     bag_id: str,
     chunk_id: str,
@@ -95,57 +86,63 @@ def write_chunk_voxel_diagnostics(
     log_odds: np.ndarray,
     n_obs: np.ndarray,
     n_hits: np.ndarray,
+    classification: np.ndarray,
     voxel_size: float,
     origin: np.ndarray,
     *,
-    p_static_threshold: float,
-    p_dynamic_threshold: float,
-    min_observations: int,
-    min_occupied_hits: int,
+    mf_mos_dynamic_arr: np.ndarray | None = None,
 ) -> None:
     """Write voxel_diag.npz: full per-voxel diagnostics including carved voxels.
 
-    Unlike voxel_occupancy.npz which filters to log_odds >= 0 for MinkUNet,
-    this artifact keeps every classified voxel so the viz can colour
-    dynamic points by their voxel's p_occ.  Adds a `classification` column
-    (int8) using the CLASS_* codes so post-hoc analysis doesn't have to
-    re-derive the bucketing logic.
+    `classification` is produced by classify_from_log_odds — passing it in
+    keeps the bucketing rules in exactly one place.  CLASS_* codes are
+    defined in classify/log_odds.py.
+
+    `mf_mos_dynamic_arr` (optional) is the chunk-wide set of voxel keys that
+    MF-MOS voted dynamic; when provided we add an `mf_mos_dynamic` bool
+    column so the viz can overlay which voxels the geometric classifier
+    labelled CLASS_STATIC but MF-MOS subsequently flipped — debugging the
+    "background near a car ended up dynamic" symptom relies on seeing both
+    layers, not just the final fused output.
     """
     if unique_keys.size == 0:
         log.info("chunk %s: no voxels to diagnose, skipping voxel_diag.npz", chunk_id)
         return
 
     p_occ = sigmoid(log_odds).astype(np.float32)
-    evidenced = n_obs >= min_observations
-    has_hits = n_hits >= min_occupied_hits
-
-    classification = np.full(unique_keys.shape[0], CLASS_FREE_ONLY, dtype=np.int8)
-    # Order matters: each later assignment overrides earlier ones where
-    # masks overlap, so we go least- to most-specific.
-    classification[has_hits & ~evidenced] = CLASS_UNDER_EVIDENCED
-    classification[evidenced & has_hits & (p_occ < p_dynamic_threshold)] = CLASS_DYNAMIC
-    classification[
-        evidenced
-        & has_hits
-        & (p_occ >= p_dynamic_threshold)
-        & (p_occ < p_static_threshold)
-    ] = CLASS_AMBIGUOUS
-    classification[evidenced & has_hits & (p_occ >= p_static_threshold)] = CLASS_STATIC
 
     coords = _coords_from_keys(unique_keys)
-    np.savez_compressed(
-        local_path(voxel_diag_path(bag_id, chunk_id)),
-        keys=unique_keys.astype(np.int64),
-        coords=coords,
-        origin=np.asarray(origin, dtype=np.float64),
-        voxel_size=np.float32(voxel_size),
-        log_odds=log_odds.astype(np.float32),
-        p_occ=p_occ,
-        n_obs=n_obs.astype(np.int32),
-        n_hits=n_hits.astype(np.int32),
-        classification=classification,
-    )
+    save_kwargs: dict[str, np.ndarray] = {
+        "keys": unique_keys.astype(np.int64),
+        "coords": coords,
+        "origin": np.asarray(origin, dtype=np.float64),
+        "voxel_size": np.float32(voxel_size),
+        "log_odds": log_odds.astype(np.float32),
+        "p_occ": p_occ,
+        "n_obs": n_obs.astype(np.int32),
+        "n_hits": n_hits.astype(np.int32),
+        "classification": classification.astype(np.int8),
+    }
+    if mf_mos_dynamic_arr is not None:
+        if mf_mos_dynamic_arr.size == 0:
+            mf_mos_dyn_overlay = np.zeros(unique_keys.shape[0], dtype=bool)
+        else:
+            mf_mos_dyn_overlay = np.isin(
+                unique_keys, mf_mos_dynamic_arr, assume_unique=True
+            )
+        save_kwargs["mf_mos_dynamic"] = mf_mos_dyn_overlay
 
+    np.savez_compressed(local_path(voxel_diag_path(bag_id, chunk_id)), **save_kwargs)
+
+    # CLASS_* live in classify/log_odds.py; import lazily here to keep the
+    # writer's import surface minimal.
+    from .log_odds import (
+        CLASS_AMBIGUOUS,
+        CLASS_DYNAMIC,
+        CLASS_FREE_ONLY,
+        CLASS_STATIC,
+        CLASS_UNDER_EVIDENCED,
+    )
     n_per_class = {
         "static": int((classification == CLASS_STATIC).sum()),
         "ambiguous": int((classification == CLASS_AMBIGUOUS).sum()),
@@ -153,11 +150,15 @@ def write_chunk_voxel_diagnostics(
         "free_only": int((classification == CLASS_FREE_ONLY).sum()),
         "dynamic": int((classification == CLASS_DYNAMIC).sum()),
     }
+    extras = ""
+    if mf_mos_dynamic_arr is not None:
+        extras = f", mf_mos_dynamic={int(save_kwargs['mf_mos_dynamic'].sum())}"
     log.info(
-        "chunk %s: wrote voxel_diag.npz (%d voxels: %s)",
+        "chunk %s: wrote voxel_diag.npz (%d voxels: %s%s)",
         chunk_id,
         unique_keys.shape[0],
         ", ".join(f"{k}={v}" for k, v in n_per_class.items()),
+        extras,
     )
 
 

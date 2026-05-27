@@ -8,12 +8,14 @@ from .dispatch import (
     _MISSING_NUMBA_MSG,
     _NUMBA_AVAILABLE,
     _NUMBA_IMPORT_ERROR,
+    apply_global_map_boost,
     extract_log_odds_arrays,
     make_log_odds_dicts,
     update_sweep_log_odds,
 )
 
 __all__ = [
+    "apply_global_map_boost",
     "extract_log_odds_arrays",
     "make_log_odds_dicts",
     "update_sweep_log_odds",

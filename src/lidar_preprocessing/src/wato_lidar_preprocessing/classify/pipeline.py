@@ -217,7 +217,13 @@ def process_chunk(
             bag_id=bag_id,
             global_map_prior=global_map_prior,
         )
-        static_arr, not_dynamic_arr, mf_mos_dynamic_arr, diag = classify_from_log_odds(
+        (
+            static_arr,
+            not_dynamic_arr,
+            mf_mos_dynamic_arr,
+            classification,
+            diag,
+        ) = classify_from_log_odds(
             unique_keys, lo_vals, n_obs_vals, n_hits_vals, cfg,
             mf_mos_votes_arr=mf_mos_votes_arr,
             n_sweep_hits_arr=n_sweep_hits_arr,
@@ -246,6 +252,7 @@ def process_chunk(
         lo_vals = np.empty(0, dtype=np.float32)
         n_obs_vals = np.empty(0, dtype=np.int32)
         n_hits_vals = np.empty(0, dtype=np.int32)
+        classification = np.empty(0, dtype=np.int8)
 
     # Pass 2: per-sweep masks + accumulate static/dynamic clouds.
     static_xyz_chunks: list[np.ndarray] = []
@@ -270,13 +277,19 @@ def process_chunk(
             updated_meta.append(_invalid_meta_row(row, sweep_id))
             continue
 
-        # log_odds: mf_mos_dynamic_arr is pre-computed chunk-wide from voxel votes.
-        # persistence: load per-sweep mask and build a sweep-local dynamic array —
-        # same semantics as the old per-point OR, but through the shared searchsorted path.
-        sweep_mf_mos_dynamic_arr = mf_mos_dynamic_arr
+        # Both paths build a sweep-local MF-MOS dynamic voxel set from the
+        # per-sweep mask.  Using mf_mos_dynamic_arr (chunk-wide) directly
+        # bleeds dynamic labels across time: a voxel a car passed through in
+        # sweeps 100-105 would flag every static point that landed in that
+        # voxel in sweeps 1-99.
+        # When cfg.mf_mos_require_chunk_wide_vote is True (default), the
+        # sweep-local set is AND-filtered against the chunk-wide vote set to
+        # preserve cross-sweep denoising.  The persistence path has no
+        # chunk-wide votes (mf_mos_dynamic_arr is None) so the gate is a
+        # no-op there.
+        sweep_mf_mos_dynamic_arr = None
         if (
-            not use_log_odds
-            and cfg.mf_mos.enabled
+            cfg.mf_mos.enabled
             and cfg.mf_mos.fusion_mode != "independent"
             and keys.shape[0] > 0
         ):
@@ -284,7 +297,23 @@ def process_chunk(
                 bag_id, chunk_id, row, keys.shape[0], cfg.filter_nonfinite_points
             )
             if mf_mask is not None:
-                sweep_mf_mos_dynamic_arr = np.sort(np.unique(keys[mf_mask]))
+                sweep_keys_dyn = np.unique(keys[mf_mask])
+                if (
+                    cfg.mf_mos_require_chunk_wide_vote
+                    and mf_mos_dynamic_arr is not None
+                    and sweep_keys_dyn.size > 0
+                ):
+                    if mf_mos_dynamic_arr.size == 0:
+                        sweep_keys_dyn = np.empty(0, dtype=sweep_keys_dyn.dtype)
+                    else:
+                        sweep_keys_dyn = sweep_keys_dyn[
+                            np.isin(
+                                sweep_keys_dyn,
+                                mf_mos_dynamic_arr,
+                                assume_unique=True,
+                            )
+                        ]
+                sweep_mf_mos_dynamic_arr = np.sort(sweep_keys_dyn)
 
         result = apply_classification_to_sweep(
             row,
@@ -438,12 +467,10 @@ def process_chunk(
             lo_vals,
             n_obs_vals,
             n_hits_vals,
+            classification,
             cfg.voxel_size_m,
             origin,
-            p_static_threshold=cfg.p_static_threshold,
-            p_dynamic_threshold=cfg.p_dynamic_threshold,
-            min_observations=cfg.min_observations,
-            min_occupied_hits=cfg.min_occupied_hits,
+            mf_mos_dynamic_arr=mf_mos_dynamic_arr,
         )
 
     return ClassifyResult(

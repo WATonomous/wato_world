@@ -18,7 +18,11 @@ _NUMBA_IMPORT_ERROR: BaseException | None = None
 try:
     import numba
     import numba.types as _nbtypes
-    from ._numba_kernel import _extract_arrays_numba, _update_sweep_numba
+    from ._numba_kernel import (
+        _apply_global_map_boost_numba,
+        _extract_arrays_numba,
+        _update_sweep_numba,
+    )
 
     _NUMBA_AVAILABLE = True
 except Exception as _e:  # noqa: BLE001 — half-installed numba can raise AttributeError
@@ -122,6 +126,42 @@ def update_sweep_log_odds(
         float(log_odds_clamp),
         float(r_max),
         bool(use_range_weight),
+    )
+
+
+def apply_global_map_boost(
+    hit_keys: np.ndarray,
+    hit_r_star: np.ndarray,
+    l_occ_boost: float,
+    clamp: float,
+    log_odds,
+) -> None:
+    """UniLiPs IWU boost for endpoints matched in the global static map.
+
+    For each unique voxel key the sweep hit, take the max r_star across the
+    sweep's hits (most-credible match) and add `l_occ_boost * max_r_star`
+    to that voxel's log_odds, clamped at ±clamp.
+
+    Only touches log_odds — never n_hits or n_obs.  n_hits must come from
+    real sweep endpoints so the has_hits gate (min_occupied_hits) is not
+    bypassed by the synthetic prior; otherwise voxels the current chunk
+    never actually observed could be promoted to static_arr.
+
+    Numba-jitted because the per-key dict update was previously a Python
+    loop costing millions of ops per chunk in two-pass mode.
+    """
+    _require_numba()
+    if hit_keys.size == 0:
+        return
+    unique_keys, inv = np.unique(hit_keys, return_inverse=True)
+    max_r_star = np.zeros(len(unique_keys), dtype=np.float32)
+    np.maximum.at(max_r_star, inv, hit_r_star.astype(np.float32))
+    _apply_global_map_boost_numba(
+        unique_keys.astype(np.int64),
+        max_r_star,
+        float(l_occ_boost),
+        float(clamp),
+        log_odds,
     )
 
 

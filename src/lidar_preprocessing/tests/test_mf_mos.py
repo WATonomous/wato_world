@@ -732,3 +732,146 @@ def test_pipeline_runs_with_mf_mos_disabled_unchanged(tmp_env):
     proc_dir = local_path(lidar_proc_dir(bag_id, chunk_id))
     mf_files = [f for f in os.listdir(proc_dir) if "mf_mos" in f]
     assert mf_files == [], f"unexpected mf_mos files: {mf_files}"
+
+
+# ---------------------------------------------------------------------------
+# Group 7: temporal-bleed regression (chunk-wide vote arr applied per-sweep)
+# ---------------------------------------------------------------------------
+
+
+def test_fusion_no_temporal_bleed_log_odds(tmp_env):
+    """Per-sweep MF-MOS mask must not bleed across sweeps in the log-odds path.
+
+    Regression: classify_from_log_odds returns mf_mos_dynamic_arr aggregated
+    across the chunk (voxels passing vote thresholds at any time).  The old
+    Pass-2 code applied that chunk-wide arr to every sweep, so a voxel a car
+    passed through in one sweep would flag every static point landing in the
+    same voxel in any other sweep — a temporal shadow of the moving object.
+
+    Setup:
+      - 2 sweeps, sensor at origin, same 3 points at (5, 0, 0), (5, 1, 0),
+        (5, -1, 0).  Voxel V0 contains (5, 0, 0) in both sweeps.
+      - Sweep 0: MF-MOS flags point 0 as moving; points 1, 2 static.
+      - Sweep 1: MF-MOS flags NOTHING as moving.
+      - V0 chunk-wide: 1 vote / 2 hits = 0.5 fraction (passes default
+        thresholds: min_mf_mos_votes=1, vote_fraction>=0.5).
+
+    Before fix (mfmos_only mode): mask = is_mf_mos_dyn where is_mf_mos_dyn
+    is searchsort against chunk-wide arr; sweep 1's point 0 lands in V0,
+    flips to dynamic.  Expected: 2 dynamic points (one per sweep, same xyz).
+    After fix: sweep 1's per-sweep mask says no point is dynamic, so its
+    sweep_mf_mos_dynamic_arr is empty.  Only sweep 0's flagged point
+    survives — exactly 1 dynamic point.
+    """
+    bag_id, chunk_id = "bag_temporal_bleed", "chunk0"
+    sensor_origin = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    xyz = np.array([[5.0, 0.0, 0.0], [5.0, 1.0, 0.0], [5.0, -1.0, 0.0]])
+
+    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
+    rows = []
+    _write_world_sweep_with_origin(bag_id, chunk_id, 0, xyz, sensor_origin)
+    mf_uri_0 = _write_mf_mask(bag_id, chunk_id, 0, np.array([True, False, False]))
+    rows.append(_proc_row_with_mask(bag_id, chunk_id, 0, xyz, mf_uri_0))
+    _write_world_sweep_with_origin(bag_id, chunk_id, 1, xyz, sensor_origin)
+    mf_uri_1 = _write_mf_mask(bag_id, chunk_id, 1, np.zeros(3, dtype=bool))
+    rows.append(_proc_row_with_mask(bag_id, chunk_id, 1, xyz, mf_uri_1))
+    write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
+
+    cfg = ComponentConfig(
+        classification_method="log_odds",
+        min_observations=1,
+        min_mf_mos_votes=1,
+        mf_mos_vote_fraction_threshold=0.5,
+        mf_mos=MFMosParams(enabled=True, fusion_mode="mfmos_only"),
+    )
+    classify_chunk(cfg, bag_id, chunk_id)
+
+    dmap = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
+    assert dmap["xyz"].shape[0] == 1, (
+        f"expected 1 dynamic point (sweep 0's MF-MOS-flagged point only); "
+        f"got {dmap['xyz'].shape[0]} — chunk-wide mf_mos_dynamic_arr is "
+        f"bleeding across sweeps"
+    )
+    assert int(dmap["sweep_id"][0]) == 0, (
+        f"the surviving dynamic point must be from sweep 0 (the MF-MOS-flagged "
+        f"one); got sweep_id={int(dmap['sweep_id'][0])}"
+    )
+
+
+def test_fusion_chunk_wide_gate_disabled_log_odds(tmp_env):
+    """mf_mos_require_chunk_wide_vote=False: a voxel that fails chunk-wide
+    thresholds can still be MF-MOS-dynamic if the per-sweep mask flags it.
+
+    Setup:
+      - 4 sweeps, 1 vote across the chunk → fraction 0.25.
+      - Default thresholds (min_mf_mos_votes=2, fraction>=0.5) would reject.
+      - With chunk-wide gate disabled, the per-sweep flag in sweep 0 alone
+        is enough to flip that one point to dynamic.
+    """
+    bag_id, chunk_id = "bag_chunkwide_gate_off", "chunk0"
+    sensor_origin = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    xyz = np.array([[5.0, 0.0, 0.0], [5.0, 1.0, 0.0]])
+
+    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
+    rows = []
+    for i in range(4):
+        _write_world_sweep_with_origin(bag_id, chunk_id, i, xyz, sensor_origin)
+        mask = np.array([True, False]) if i == 0 else np.zeros(2, dtype=bool)
+        mf_uri = _write_mf_mask(bag_id, chunk_id, i, mask)
+        rows.append(_proc_row_with_mask(bag_id, chunk_id, i, xyz, mf_uri))
+    write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
+
+    cfg = ComponentConfig(
+        classification_method="log_odds",
+        min_observations=1,
+        min_mf_mos_votes=2,
+        mf_mos_vote_fraction_threshold=0.5,
+        mf_mos_require_chunk_wide_vote=False,
+        mf_mos=MFMosParams(enabled=True, fusion_mode="mfmos_only"),
+    )
+    classify_chunk(cfg, bag_id, chunk_id)
+
+    dmap = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
+    assert dmap["xyz"].shape[0] == 1, (
+        f"gate disabled: expected 1 dynamic point from sweep 0's per-sweep flag; "
+        f"got {dmap['xyz'].shape[0]}"
+    )
+    assert int(dmap["sweep_id"][0]) == 0
+
+
+def test_fusion_chunk_wide_gate_enabled_suppresses_undervoted(tmp_env):
+    """mf_mos_require_chunk_wide_vote=True (default): a per-sweep MF-MOS flag
+    that doesn't pass the chunk-wide vote thresholds is suppressed.
+
+    Same setup as test_fusion_chunk_wide_gate_disabled_log_odds, but with the
+    gate enabled (default) → 1/4 vote ratio fails the 0.5 fraction threshold
+    → mf_mos_dynamic_arr empty → no dynamic points.
+    """
+    bag_id, chunk_id = "bag_chunkwide_gate_on", "chunk0"
+    sensor_origin = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    xyz = np.array([[5.0, 0.0, 0.0], [5.0, 1.0, 0.0]])
+
+    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
+    rows = []
+    for i in range(4):
+        _write_world_sweep_with_origin(bag_id, chunk_id, i, xyz, sensor_origin)
+        mask = np.array([True, False]) if i == 0 else np.zeros(2, dtype=bool)
+        mf_uri = _write_mf_mask(bag_id, chunk_id, i, mask)
+        rows.append(_proc_row_with_mask(bag_id, chunk_id, i, xyz, mf_uri))
+    write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
+
+    cfg = ComponentConfig(
+        classification_method="log_odds",
+        min_observations=1,
+        min_mf_mos_votes=2,
+        mf_mos_vote_fraction_threshold=0.5,
+        # mf_mos_require_chunk_wide_vote defaults to True.
+        mf_mos=MFMosParams(enabled=True, fusion_mode="mfmos_only"),
+    )
+    classify_chunk(cfg, bag_id, chunk_id)
+
+    dmap = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
+    assert dmap["xyz"].shape[0] == 0, (
+        f"gate enabled with 1/4 vote ratio (fails 0.5 fraction): expected 0 "
+        f"dynamic points; got {dmap['xyz'].shape[0]}"
+    )

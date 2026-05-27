@@ -283,6 +283,15 @@ class ComponentConfig(BaseModel):
     # min_mf_mos_votes votes AND the vote fraction >= mf_mos_vote_fraction_threshold.
     mf_mos_vote_fraction_threshold: float = 0.5
     min_mf_mos_votes: int = 1
+    # When True, a sweep point is fused as MF-MOS-dynamic only if (a) the per-sweep
+    # MF-MOS mask flagged it AND (b) its voxel also passed the chunk-wide vote
+    # thresholds above.  When False, only (a) is required.  The chunk-wide gate
+    # preserves cross-sweep denoising; the per-sweep mask prevents the
+    # chunk-wide voxel set from bleeding dynamic labels across time (a voxel a
+    # car passed through in sweeps 100-105 must not flag static points landing
+    # in that voxel during sweeps 1-99).  Log-odds path only; the persistence
+    # path doesn't compute chunk-wide votes so this knob is a no-op there.
+    mf_mos_require_chunk_wide_vote: bool = True
 
     # SAM4D/MinkUNet alignment: export binary voxel occupancy alongside
     # static_map.npz.  Includes ALL occupied voxels (static + dynamic), not

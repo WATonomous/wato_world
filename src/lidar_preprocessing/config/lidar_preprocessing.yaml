@@ -12,10 +12,12 @@ lidar_preprocessing:
 
   # Log-odds ray-casting parameters (active when classification_method=log_odds).
   # l_occ > l_free so a single endpoint hit outweighs a few through-ray carves.
-  # The ratio is what protects statics from pose-drift carving: with l_occ=1.20
-  # and l_free=0.25, 1 hit survives ~5 carves (vs ~2 at the pre-fix 0.85/0.40).
-  l_occ: 1.20
-  l_free: 0.25
+  # Half-step from 1.50 back toward 1.20: at l_occ=1.50 brief moving-object
+  # voxels (5-10 hits, +7.5 to +15 log-odds) needed 39-69 carves to flip
+  # dynamic, dropping the AW+MF-MOS-agree bucket by ~40%.  1.30 keeps some
+  # extra static protection (vs 1.20) without crushing real movers.
+  l_occ: 1.10
+  l_free: 0.30
   # Symmetric clamp on log_odds (±value).  Raised 5.0 → 50.0 because clamp=5
   # with l_occ=1.20 caps at the +5 ceiling after only ~4 hits — additional
   # hits add nothing while carves keep subtracting, so well-observed walls
@@ -23,7 +25,7 @@ lidar_preprocessing:
   # rays.  50.0 gives well-observed voxels ~40+ hits of headroom.
   log_odds_clamp: 50.0
   p_static_threshold: 0.70  # sigmoid(log_odds) >= this → static
-  p_dynamic_threshold: 0.30 # sigmoid(log_odds) < this → dynamic (if evidenced)
+  p_dynamic_threshold: 0.10 # sigmoid(log_odds) < this → dynamic (if evidenced)
   min_observations: 3       # voxels with fewer obs stay "unknown"
   # Raised 1 → 2: a single stray return on a building edge / tree branch
   # surrounded by through-rays could pass the dynamic gate (1 hit, many
@@ -31,15 +33,13 @@ lidar_preprocessing:
   # voxels to free_only (mask=False) instead of leaking into the dynamic
   # cloud.  Real moving vehicles deposit multiple hits per sweep so this
   # doesn't suppress them.
-  min_occupied_hits: 2
-  # Distant rays accumulate noise (beam crosstalk, mixed pixels, pose error
-  # leverage), but capping too low makes use_range_weighted_log_odds inert:
-  # with cap=50m and r_max_credibility_m=200, every accepted ray has
-  # r*_j = min(1, 200/d) = 1.0, so range weighting is a no-op.  Raised to
-  # 150m so distant carving actually gets down-weighted while near-field
-  # rays keep full strength.  Beyond ~150m NuScenes 32-beam returns are
-  # too noisy to trust regardless.
-  max_ray_length_m: 150.0
+  min_occupied_hits: 1
+  # Cap on accepted ray length.  Lowered 150 → 80: NuScenes 32-beam returns
+  # past ~80m are sparse/noisy, and the long-ray free-space evidence was the
+  # dominant source of background-wall carving (median 495k traversals per
+  # near-ego voxel at 150m max).  Range weighting only attenuates beyond
+  # r_max_credibility_m, so cutting max_length is the direct lever.
+  max_ray_length_m: 100.0
   # Stop carving 2 voxels (was 1) before the endpoint so a sweep's own ray
   # can't carve its own immediate-neighbor voxels — protects building/tree
   # surfaces against same-sweep near-endpoint through-ray noise.
@@ -52,7 +52,13 @@ lidar_preprocessing:
   # by min(1, r_max_credibility_m / d), where d is the sensor distance to
   # that update site. Near-field carving on long rays keeps full weight.
   use_range_weighted_log_odds: true
-  r_max_credibility_m: 200.0
+  # Range weighting must actually engage: r_max_credibility_m must be <
+  # max_ray_length_m, otherwise r*_j = min(1, r_max/d) clamps to 1.0 for
+  # every ray (no-op).  At r_max=60 with max_ray_length=80, rays at 60m
+  # carve at full weight, rays at 80m at 0.75×.  Bumped from 30 → 60
+  # because r_max=30 attenuated the 30-80m band too aggressively, leaving
+  # distant moving-object voxels in AMBIGUOUS instead of DYNAMIC.
+  r_max_credibility_m: 50.0
   # "skip_endpoint": traverse ground rays (free-space evidence) but skip l_occ at endpoint.
   # "skip_ray": skip ground rays entirely (legacy, use for A/B comparison).
   ground_endpoint_strategy: skip_endpoint
@@ -160,7 +166,7 @@ lidar_preprocessing:
     # on NuScenes textured surfaces (brick walls, tree canopies).
     score_threshold: 0.7
     save_scores: true              # also write _mf_mos_score.npy float32
-    fusion_mode: union         # independent | union | mfmos_only
+    fusion_mode: mfmos_only         # independent | union | mfmos_only
     max_pose_gap_ms: 200
 
   # Voxel-level MF-MOS vote aggregation thresholds (active when fusion_mode != independent).
@@ -169,5 +175,13 @@ lidar_preprocessing:
   # false positives that were leaking buildings/trees into dynamic_map.npz.
   # Requires majority agreement (3+ sweeps, ≥70% of observing sweeps) before
   # a voxel is fused as MF-MOS-dynamic.
-  mf_mos_vote_fraction_threshold: 0.7
-  min_mf_mos_votes: 3
+  mf_mos_vote_fraction_threshold: 0.6
+  min_mf_mos_votes: 4
+  # Fusion in Pass 2 always uses the per-sweep MF-MOS mask (a chunk-wide-only
+  # voxel set bleeds dynamic labels across time — a voxel a car passed through
+  # in sweeps 100-105 would flag static points in that voxel in sweeps 1-99).
+  # When true, the per-sweep mask is additionally AND-filtered against the
+  # chunk-wide vote set above to preserve denoising (single noisy MF-MOS sweep
+  # votes get suppressed).  Set false to rely purely on per-sweep MF-MOS
+  # confidence (more lenient; transient objects sampled in few sweeps survive).
+  mf_mos_require_chunk_wide_vote: true

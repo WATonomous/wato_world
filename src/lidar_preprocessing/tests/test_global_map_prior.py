@@ -25,11 +25,12 @@ from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.schemas import PROCESSED_SWEEPS_SCHEMA
 from wato_lidar_preprocessing.classify import GlobalMapPrior, process_chunk
 from wato_lidar_preprocessing.classify.io_helpers import origin_from_index
-from wato_lidar_preprocessing.classify.log_odds import (
-    _apply_global_map_boost,
-    build_log_odds_grid,
-)
+from wato_lidar_preprocessing.classify.log_odds import build_log_odds_grid
 from wato_lidar_preprocessing.config import ComponentConfig
+from wato_lidar_preprocessing.ray_traversal import (
+    apply_global_map_boost,
+    make_log_odds_dicts,
+)
 from wato_lidar_preprocessing.voxel import voxel_indices
 
 
@@ -164,22 +165,19 @@ def test_global_map_prior_r_star_attenuates_past_r_max():
 
 
 # ---------------------------------------------------------------------------
-# 3. _apply_global_map_boost: only mutates log_odds_dict (never n_hits)
+# 3. apply_global_map_boost: only mutates log_odds (never n_obs / n_hits)
 # ---------------------------------------------------------------------------
 
 
 def test_apply_global_map_boost_injects_log_odds_only():
-    """Boost adds to log_odds_dict.  n_hits / n_obs must NOT be touched.
+    """Boost adds to log_odds.  n_obs / n_hits dicts must NOT be touched.
 
     Bypassing n_hits via a synthetic prior would let voxels the current chunk
     never observed pass the has_hits gate in classify_from_log_odds — the prior
     is allowed to nudge p_occ up, but real sweep returns must back the
     voxel before it can become static.
     """
-    log_odds: dict[int, np.float32] = {}
-    n_hits: dict[int, np.int32] = {}
-    n_obs: dict[int, np.int32] = {}
-
+    log_odds, n_obs, n_hits = make_log_odds_dicts()
     # Pre-seed a voxel so we can verify additive (not overwrite) behaviour.
     log_odds[42] = np.float32(0.2)
 
@@ -188,7 +186,7 @@ def test_apply_global_map_boost_injects_log_odds_only():
     l_occ_boost = 0.10
     clamp = 50.0
 
-    _apply_global_map_boost(hit_keys, hit_r_star, l_occ_boost, clamp, log_odds)
+    apply_global_map_boost(hit_keys, hit_r_star, l_occ_boost, clamp, log_odds)
 
     # Voxel 42: max r_star across its two hits is 0.8 → boost = 0.1 * 0.8 = 0.08.
     #          Previous lo = 0.2 → new lo = 0.28.
@@ -199,30 +197,33 @@ def test_apply_global_map_boost_injects_log_odds_only():
     np.testing.assert_allclose(float(log_odds[100]), 0.10 * 0.25, atol=1e-6)
 
     # n_hits / n_obs must be untouched — this is the safety contract.
-    assert n_hits == {}, "boost must not increment n_hits (bypasses has_hits gate)"
-    assert n_obs == {}, "boost must not increment n_obs"
+    assert len(n_hits) == 0, "boost must not increment n_hits (bypasses has_hits gate)"
+    assert len(n_obs) == 0, "boost must not increment n_obs"
 
 
 def test_apply_global_map_boost_respects_clamp():
     """Boost saturates at log_odds_clamp, doesn't overshoot."""
-    log_odds: dict[int, np.float32] = {1: np.float32(49.5)}
+    log_odds, _, _ = make_log_odds_dicts()
+    log_odds[1] = np.float32(49.5)
     hit_keys = np.array([1], dtype=np.int64)
     hit_r_star = np.array([1.0], dtype=np.float32)
-    _apply_global_map_boost(hit_keys, hit_r_star, l_occ_boost=2.0, clamp=50.0, log_odds_dict=log_odds)
+    apply_global_map_boost(hit_keys, hit_r_star, l_occ_boost=2.0, clamp=50.0, log_odds=log_odds)
     # 49.5 + 2.0 = 51.5 → clamped to 50.0.
     assert float(log_odds[1]) == pytest.approx(50.0)
 
 
 def test_apply_global_map_boost_empty_hits_is_noop():
-    log_odds: dict[int, np.float32] = {5: np.float32(1.0)}
-    _apply_global_map_boost(
+    log_odds, _, _ = make_log_odds_dicts()
+    log_odds[5] = np.float32(1.0)
+    apply_global_map_boost(
         np.empty(0, dtype=np.int64),
         np.empty(0, dtype=np.float32),
         l_occ_boost=0.5,
         clamp=50.0,
-        log_odds_dict=log_odds,
+        log_odds=log_odds,
     )
-    assert dict(log_odds) == {5: pytest.approx(1.0)}
+    assert float(log_odds[5]) == pytest.approx(1.0)
+    assert len(log_odds) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -304,4 +305,89 @@ def test_build_log_odds_grid_with_prior_increases_lo(tmp_env):
     # r_star = min(1, 200/1) = 1.0.  So 3 × 0.10 × 1.0 = 0.30 added.
     np.testing.assert_allclose(
         float(lo_p[idx_p]) - baseline_lo, 3 * 0.10, atol=1e-5
+    )
+
+
+def _write_world_sweep_with_ground(
+    bag_id: str,
+    chunk_id: str,
+    sweep_id: int,
+    xyz: np.ndarray,
+    ground_mask: np.ndarray,
+    *,
+    origin: np.ndarray,
+) -> None:
+    path = local_path(lidar_world_path(bag_id, chunk_id, sweep_id))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    np.savez_compressed(
+        path,
+        x=xyz[:, 0],
+        y=xyz[:, 1],
+        z=xyz[:, 2],
+        origin=np.asarray(origin, dtype=np.float64),
+        ground_mask=ground_mask.astype(bool),
+    )
+
+
+def test_iwu_boost_excludes_ground_points(tmp_env):
+    """Ground points are filtered from the IWU boost query.
+
+    Regression: the boost previously used the full sweep xyz, so a ground
+    voxel matching the global static map got a phantom log_odds entry with
+    no n_obs / n_hits backing.  Harmless for correctness (free_only →
+    not_dynamic_arr) but it inflated unique_keys.
+
+    Geometry: non-ground endpoint sits on the +x axis at (10, 0, 0); ground
+    endpoint is at (0, 5, 0).  In skip_ray mode the ground ray is never
+    traversed, and the non-ground ray (sensor at origin) goes along +x and
+    doesn't touch the ground voxel at vy≈33.  So ground voxel only enters
+    the dict if the boost is querying it — which is exactly the bug.
+    """
+    bag_id, chunk_id = "bag_iwu_ground", "chunk0"
+    chunk_origin = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    xyz = np.array([[10.0, 0.0, 0.0], [0.0, 5.0, 0.0]])
+    ground = np.array([False, True])
+
+    for sid in range(2):
+        _write_world_sweep_with_ground(
+            bag_id, chunk_id, sid, xyz, ground, origin=chunk_origin
+        )
+    rows = [_proc_row(bag_id, chunk_id, sid, xyz) for sid in range(2)]
+    write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
+
+    cfg = ComponentConfig(
+        classification_method="log_odds",
+        voxel_size_m=0.15,
+        ground_endpoint_strategy="skip_ray",
+        l_occ_global_map=0.10,
+    )
+    meta_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
+    origin = origin_from_index(meta_rows)
+    prior = GlobalMapPrior(xyz, match_radius_m=0.30, r_max_credibility_m=200.0)
+
+    *_, lo_arrays = build_log_odds_grid(
+        meta_rows, cfg, origin, chunk_id,
+        cache_xyz=False, bag_id=bag_id, global_map_prior=prior,
+    )
+    keys, lo_vals, _n_obs, n_hits, *_ = lo_arrays
+
+    non_ground_key = int(voxel_indices(xyz[0:1], origin, cfg.voxel_size_m)[0])
+    ground_key = int(voxel_indices(xyz[1:2], origin, cfg.voxel_size_m)[0])
+
+    # Non-ground voxel must be present with both traversal hits and boost.
+    ng_idx = np.searchsorted(keys, non_ground_key)
+    assert ng_idx < len(keys) and keys[ng_idx] == non_ground_key, (
+        "non-ground voxel must appear in unique_keys"
+    )
+    assert int(n_hits[ng_idx]) == 2, "non-ground voxel got both sweep hits"
+    assert float(lo_vals[ng_idx]) > 0, "non-ground voxel should have positive log_odds"
+
+    # Ground voxel must NOT be in unique_keys: skip_ray skips its ray, the
+    # non-ground ray doesn't traverse it, and the boost no longer queries
+    # it.  Pre-fix, the boost created a phantom entry.
+    gnd_idx = np.searchsorted(keys, ground_key)
+    found_ground = gnd_idx < len(keys) and keys[gnd_idx] == ground_key
+    assert not found_ground, (
+        f"ground voxel (key={ground_key}) leaked into unique_keys via IWU "
+        f"boost — Bug 4 regression"
     )
