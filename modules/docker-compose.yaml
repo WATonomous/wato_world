@@ -102,6 +102,11 @@ services:
     environment:
       - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
       - MODELS_ROOT=${MODELS_ROOT}
+      # Point HuggingFace + torch.hub at the pre-fetched models tree
+      # (populated on the host by src/perception_2d/scripts/fetch_models.py).
+      - HF_HOME=/data/models/hf
+      - TORCH_HOME=/data/models/torch_hub
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-0}
     volumes:
       - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
       - ${WATO_WORLD_DIR}/data/models:/data/models:ro

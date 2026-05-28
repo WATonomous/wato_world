@@ -59,6 +59,12 @@ ARG CLAUDE_CODE=false
 # user's home with the default bashrc/profile so `tmux`/`exec` shells get
 # history-search, prompt, and PATH out of the box. Mirrors
 # wato_monorepo/docker/template.Dockerfile.
+#
+# chown uses numeric ${USER_UID}:${USER_GID} rather than the monorepo's
+# ${USERNAME}:${USERNAME} on purpose: macOS hosts have GID 20 (staff), which
+# collides with Ubuntu's existing `dialout` group, so the groupadd above is
+# skipped and no group named ${USERNAME} ever exists. Numeric IDs resolve
+# regardless. Don't "re-align" this to the monorepo's by-name form.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN existing_user=$(getent passwd ${USER_UID} | cut -d: -f1 || true) \
  && if [ -n "$existing_user" ]; then userdel -r "$existing_user" 2>/dev/null || true; fi \
@@ -70,7 +76,7 @@ RUN existing_user=$(getent passwd ${USER_UID} | cut -d: -f1 || true) \
  && chmod 0440 /etc/sudoers.d/${USERNAME} \
  && cp /etc/skel/.bashrc /home/${USERNAME}/.bashrc \
  && cp /etc/skel/.profile /home/${USERNAME}/.profile \
- && chown ${USERNAME}:${USERNAME} /home/${USERNAME}/.bashrc /home/${USERNAME}/.profile \
+ && chown ${USER_UID}:${USER_GID} /home/${USERNAME}/.bashrc /home/${USERNAME}/.profile \
  && apt-get -qq autoremove -y && apt-get -qq clean \
  && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc/* /usr/share/man/*
 
@@ -79,7 +85,7 @@ RUN uv pip install --system --break-system-packages pytest pytest-cov ruff black
 # Hand /ws to the dev user so pytest can write __pycache__, ruff its cache,
 # etc. without permission errors. Mirrors the chown step in
 # wato_monorepo/docker/template.Dockerfile.
-RUN chown -R ${USERNAME}:${USERNAME} /ws
+RUN chown -R ${USER_UID}:${USER_GID} /ws
 
 # Optional: Claude Code CLI in the dev image.
 RUN if [ "${CLAUDE_CODE}" = "true" ]; then \
