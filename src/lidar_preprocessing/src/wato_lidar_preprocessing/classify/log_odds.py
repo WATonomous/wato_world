@@ -32,10 +32,10 @@ log = logging.getLogger(__name__)
 # Classification codes written to voxel_diag.npz.
 # viz.py's _CLASS_COLORS keys must stay aligned with these values.
 CLASS_STATIC = 0
-CLASS_AMBIGUOUS = 1          # evidenced + has_hits + p_dynamic ≤ p_occ < p_static
-CLASS_UNDER_EVIDENCED = 2    # has_hits but n_obs < min_observations
-CLASS_FREE_ONLY = 3          # n_hits < min_occupied_hits
-CLASS_DYNAMIC = 4            # evidenced + has_hits + p_occ < p_dynamic_threshold
+CLASS_AMBIGUOUS = 1  # evidenced + has_hits + p_dynamic ≤ p_occ < p_static
+CLASS_UNDER_EVIDENCED = 2  # has_hits but n_obs < min_observations
+CLASS_FREE_ONLY = 3  # n_hits < min_occupied_hits
+CLASS_DYNAMIC = 4  # evidenced + has_hits + p_occ < p_dynamic_threshold
 
 
 def build_log_odds_grid(
@@ -211,7 +211,14 @@ def build_log_odds_grid(
         ground_mask_cache,
         sweep_keys,
         frame_keys,
-        (unique_keys, lo_vals, n_obs_vals, n_hits_vals, mf_mos_votes_arr, n_sweep_hits_arr),
+        (
+            unique_keys,
+            lo_vals,
+            n_obs_vals,
+            n_hits_vals,
+            mf_mos_votes_arr,
+            n_sweep_hits_arr,
+        ),
     )
 
 
@@ -238,12 +245,18 @@ def classify_from_log_odds(
     """
     if unique_keys.size == 0:
         empty = np.empty(0, dtype=np.int64)
-        return empty, empty, None, np.empty(0, dtype=np.int8), {
-            "n_evidenced": 0,
-            "n_under_evidenced_with_hits": 0,
-            "n_ambiguous": 0,
-            "n_free_only": 0,
-        }
+        return (
+            empty,
+            empty,
+            None,
+            np.empty(0, dtype=np.int8),
+            {
+                "n_evidenced": 0,
+                "n_under_evidenced_with_hits": 0,
+                "n_ambiguous": 0,
+                "n_free_only": 0,
+            },
+        )
 
     p_occ = sigmoid(lo_vals)
     evidenced = n_obs_vals >= cfg.min_observations
@@ -266,7 +279,9 @@ def classify_from_log_odds(
     )
     ambiguous_arr = unique_keys[ambiguous_mask]
 
-    parts = [a for a in (static_arr, free_only_arr, under_arr, ambiguous_arr) if a.size > 0]
+    parts = [
+        a for a in (static_arr, free_only_arr, under_arr, ambiguous_arr) if a.size > 0
+    ]
     if not parts:
         not_dynamic_arr = np.empty(0, dtype=np.int64)
     elif len(parts) == 1:

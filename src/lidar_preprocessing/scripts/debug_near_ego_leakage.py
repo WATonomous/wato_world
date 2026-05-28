@@ -4,6 +4,7 @@ Usage (inside lidar_preprocessing_dev container):
     python -m wato_lidar_preprocessing.scripts.debug_near_ego_leakage \
         <bag_id> <chunk_id> [--radius-m 15] [--sample-sweeps 20]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -42,12 +43,11 @@ def main() -> None:
     cls = diag["classification"]
     p_occ = diag["p_occ"]
     n_obs = diag["n_obs"]
-    n_hits = diag["n_hits"]
     diag_origin = diag["origin"]
     voxel_size = float(diag["voxel_size"])
 
     print(f"voxel_diag: {keys_diag.size} voxels, voxel_size={voxel_size:.3f}m")
-    print(f"  per-class totals (whole chunk):")
+    print("  per-class totals (whole chunk):")
     for code, name in CLASS_NAMES.items():
         print(f"    {name:35s} {int((cls == code).sum()):>10d}")
     print()
@@ -105,8 +105,10 @@ def main() -> None:
         if is_dynamic.any():
             n_obs_dynamic.extend(n_obs[found_pos[is_dynamic]].tolist())
 
-    print(f"== near-ego leakage breakdown ==")
-    print(f"  total suspect points (dynamic & within {args.radius_m:.0f}m): {suspect_total}")
+    print("== near-ego leakage breakdown ==")
+    print(
+        f"  total suspect points (dynamic & within {args.radius_m:.0f}m): {suspect_total}"
+    )
     if suspect_total == 0:
         return
     for code, name in CLASS_NAMES.items():
@@ -114,19 +116,27 @@ def main() -> None:
         pct = 100.0 * n / suspect_total
         print(f"    {name:35s} {n:>8d}  ({pct:5.1f}%)")
     pct_ft = 100.0 * fallthrough_total / suspect_total
-    print(f"    {'NOT-IN-KEYS (fall-through)':35s} {fallthrough_total:>8d}  ({pct_ft:5.1f}%)")
+    print(
+        f"    {'NOT-IN-KEYS (fall-through)':35s} {fallthrough_total:>8d}  ({pct_ft:5.1f}%)"
+    )
     print()
 
     if p_occ_static_flips:
         arr = np.asarray(p_occ_static_flips)
-        print(f"  STATIC-bucket flips ({len(arr)} pts): p_occ "
-              f"min={arr.min():.3f} median={np.median(arr):.3f} max={arr.max():.3f}")
-        print(f"    -> these are voxels AW called static but MF-MOS / fusion flipped to dynamic")
+        print(
+            f"  STATIC-bucket flips ({len(arr)} pts): p_occ "
+            f"min={arr.min():.3f} median={np.median(arr):.3f} max={arr.max():.3f}"
+        )
+        print(
+            "    -> these are voxels AW called static but MF-MOS / fusion flipped to dynamic"
+        )
     if n_obs_dynamic:
         arr = np.asarray(n_obs_dynamic, dtype=np.float64)
-        print(f"  DYNAMIC-bucket pts  ({len(arr):d}): n_obs "
-              f"min={int(arr.min())} median={int(np.median(arr))} max={int(arr.max())}")
-        print(f"    -> if median n_obs is low, raising min_observations may help")
+        print(
+            f"  DYNAMIC-bucket pts  ({len(arr):d}): n_obs "
+            f"min={int(arr.min())} median={int(np.median(arr))} max={int(arr.max())}"
+        )
+        print("    -> if median n_obs is low, raising min_observations may help")
 
 
 if __name__ == "__main__":

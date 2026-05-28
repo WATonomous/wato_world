@@ -138,7 +138,9 @@ def _update_sweep_python(
                 cz += sz
                 t_max_z += t_delta_z
 
-            if not (0 <= cx < AXIS_RANGE and 0 <= cy < AXIS_RANGE and 0 <= cz < AXIS_RANGE):
+            if not (
+                0 <= cx < AXIS_RANGE and 0 <= cy < AXIS_RANGE and 0 <= cz < AXIS_RANGE
+            ):
                 continue
 
             if use_range_weight:
@@ -156,7 +158,12 @@ def _update_sweep_python(
             log_odds[key] = new_lo
             n_obs[key] = n_obs.get(key, np.int32(0)) + np.int32(1)
 
-        if not is_g and 0 <= exi < AXIS_RANGE and 0 <= eyi < AXIS_RANGE and 0 <= ezi < AXIS_RANGE:
+        if (
+            not is_g
+            and 0 <= exi < AXIS_RANGE
+            and 0 <= eyi < AXIS_RANGE
+            and 0 <= ezi < AXIS_RANGE
+        ):
             key = (exi << SHIFT_X) | (eyi << SHIFT_Y) | ezi
             old_lo = log_odds.get(key, 0.0)
             new_lo = np.float32(old_lo) + np.float32(l_occ * r_star_endpoint)

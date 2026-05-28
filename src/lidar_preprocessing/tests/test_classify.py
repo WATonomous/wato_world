@@ -111,7 +111,9 @@ def test_all_sweeps_present_classified_static(tmp_env):
     )
 
     cfg = ComponentConfig(
-        static_sweep_fraction=0.3, static_sweep_min=2, classification_method="persistence"
+        static_sweep_fraction=0.3,
+        static_sweep_min=2,
+        classification_method="persistence",
     )
     result = process_chunk(cfg, bag_id, chunk_id)
 
@@ -153,7 +155,9 @@ def test_single_sweep_classified_dynamic(tmp_env):
     )
 
     cfg = ComponentConfig(
-        static_sweep_fraction=0.3, static_sweep_min=2, classification_method="persistence"
+        static_sweep_fraction=0.3,
+        static_sweep_min=2,
+        classification_method="persistence",
     )
     process_chunk(cfg, bag_id, chunk_id)
 
@@ -189,7 +193,9 @@ def test_dynamic_map_aggregates_across_sweeps(tmp_env):
     )
 
     cfg = ComponentConfig(
-        static_sweep_fraction=0.5, static_sweep_min=2, classification_method="persistence"
+        static_sweep_fraction=0.5,
+        static_sweep_min=2,
+        classification_method="persistence",
     )
     process_chunk(cfg, bag_id, chunk_id)
 
@@ -248,7 +254,9 @@ def test_intensity_backfilled_when_first_sweep_lacks_it(tmp_env):
     write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
 
     cfg = ComponentConfig(
-        static_sweep_fraction=0.3, static_sweep_min=2, classification_method="persistence"
+        static_sweep_fraction=0.3,
+        static_sweep_min=2,
+        classification_method="persistence",
     )
     process_chunk(cfg, bag_id, chunk_id)
 
@@ -288,7 +296,9 @@ def test_static_map_written(tmp_env):
     _write_proc_index(bag_id, chunk_id, list(range(5)), xyz_per_sweep=[xyz] * 5)
 
     cfg = ComponentConfig(
-        static_sweep_fraction=0.1, static_sweep_min=1, classification_method="persistence"
+        static_sweep_fraction=0.1,
+        static_sweep_min=1,
+        classification_method="persistence",
     )
     process_chunk(cfg, bag_id, chunk_id)
 
@@ -394,7 +404,9 @@ def test_log_odds_free_only_voxel_not_dynamic(tmp_env):
     ground_mask1 = np.array([True])
 
     _write_world_sweep(bag_id, chunk_id, 0, xyz0, origin=origin_v)
-    _write_world_sweep(bag_id, chunk_id, 1, xyz1, origin=origin_v, ground_mask=ground_mask1)
+    _write_world_sweep(
+        bag_id, chunk_id, 1, xyz1, origin=origin_v, ground_mask=ground_mask1
+    )
     _write_proc_index(bag_id, chunk_id, [0, 1], xyz_per_sweep=[xyz0, xyz1])
 
     cfg = ComponentConfig(
@@ -408,7 +420,9 @@ def test_log_odds_free_only_voxel_not_dynamic(tmp_env):
     process_chunk(cfg, bag_id, chunk_id)
 
     mask1 = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 1)))
-    assert not mask1[0], "ground point in free-only voxel (n_hits==0) must not be labeled dynamic"
+    assert not mask1[
+        0
+    ], "ground point in free-only voxel (n_hits==0) must not be labeled dynamic"
 
 
 def test_static_map_xyz_excludes_free_only_and_under_evidenced(tmp_env):
@@ -481,24 +495,26 @@ def test_static_map_xyz_excludes_free_only_and_under_evidenced(tmp_env):
     result = process_chunk(cfg, bag_id, chunk_id)
 
     # Sanity: the static point made it through the static gates.
-    assert result.n_static == n_static_sweeps, (
-        f"expected {n_static_sweeps} confident-static points, got {result.n_static}"
-    )
+    assert (
+        result.n_static == n_static_sweeps
+    ), f"expected {n_static_sweeps} confident-static points, got {result.n_static}"
 
     static_data = np.load(local_path(static_map_path(bag_id, chunk_id)))
     static_xyz = static_data["xyz"]
 
     # Every saved point must be the static point — no ground, no under-evidenced.
     assert static_xyz.shape[0] == n_static_sweeps
-    np.testing.assert_allclose(static_xyz, np.repeat(static_pt, n_static_sweeps, axis=0))
+    np.testing.assert_allclose(
+        static_xyz, np.repeat(static_pt, n_static_sweeps, axis=0)
+    )
 
     flat = static_xyz.reshape(-1, 3)
-    assert not (flat == ground_pt[0]).all(axis=1).any(), (
-        "ground point in free-only voxel must NOT appear in static_map.npz['xyz']"
-    )
-    assert not (flat == under_pt[0]).all(axis=1).any(), (
-        "under-evidenced point must NOT appear in static_map.npz['xyz']"
-    )
+    assert (
+        not (flat == ground_pt[0]).all(axis=1).any()
+    ), "ground point in free-only voxel must NOT appear in static_map.npz['xyz']"
+    assert (
+        not (flat == under_pt[0]).all(axis=1).any()
+    ), "under-evidenced point must NOT appear in static_map.npz['xyz']"
 
 
 def test_under_evidenced_with_hits_not_dynamic(tmp_env):
@@ -531,8 +547,7 @@ def test_under_evidenced_with_hits_not_dynamic(tmp_env):
 
     assert result.n_static == 0, "under-evidenced voxel must not be static"
     assert result.n_dynamic == 0, (
-        "under-evidenced voxel WITH hits must not be labeled dynamic "
-        "(bug fix #2)"
+        "under-evidenced voxel WITH hits must not be labeled dynamic " "(bug fix #2)"
     )
 
     mask = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
@@ -611,9 +626,9 @@ def test_skip_ray_ground_not_dynamic(tmp_env):
         "A buggy impl that filters at sweep_keys level would give length 1."
     )
     # Contract 2: the ground point at index 0 must be False (bug fix #4).
-    assert not mask[0], (
-        "ground point in skip_ray mode must not be labeled dynamic (bug fix #4)"
-    )
+    assert not mask[
+        0
+    ], "ground point in skip_ray mode must not be labeled dynamic (bug fix #4)"
 
 
 def _write_mf_mos_mask(
@@ -667,9 +682,9 @@ def test_voxel_vote_fusion_requires_min_votes(tmp_env):
     )
     result = process_chunk(cfg, bag_id, chunk_id)
 
-    assert result.n_dynamic == 0, (
-        "single-sweep vote below min_mf_mos_votes=2 must not produce dynamic points"
-    )
+    assert (
+        result.n_dynamic == 0
+    ), "single-sweep vote below min_mf_mos_votes=2 must not produce dynamic points"
     mask = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
     assert not mask[0], "point in below-threshold-vote voxel must be mask=False"
 
@@ -756,9 +771,9 @@ def test_voxel_vote_fusion_independent_mode_no_effect(tmp_env):
     )
     result = process_chunk(cfg, bag_id, chunk_id)
 
-    assert result.n_dynamic == 0, (
-        "independent fusion_mode must not apply MF-MOS votes to AW classification"
-    )
+    assert (
+        result.n_dynamic == 0
+    ), "independent fusion_mode must not apply MF-MOS votes to AW classification"
 
 
 # ---------------------------------------------------------------------------
@@ -785,7 +800,7 @@ def test_union_fusion_must_not_reintroduce_ground_via_mf_mos_vote(tmp_env):
     # index 0 is ground, index 1 is a non-ground moving point.
     xyz = np.array(
         [
-            [5.0, 0.0, 0.0],   # ground point — must NOT be dynamic
+            [5.0, 0.0, 0.0],  # ground point — must NOT be dynamic
             [5.0, 0.0, 0.05],  # non-ground moving point — MAY be dynamic
         ]
     )
@@ -1039,9 +1054,7 @@ def test_ambiguous_log_odds_voxel_not_dynamic(tmp_env):
     bag_id, chunk_id = "bag_ambig", "chunk0"
     voxel_pt = np.array([[5.0, 0.0, 0.0]])
 
-    _write_world_sweep(
-        bag_id, chunk_id, 0, voxel_pt, origin=np.array([-1.0, 0.0, 0.0])
-    )
+    _write_world_sweep(bag_id, chunk_id, 0, voxel_pt, origin=np.array([-1.0, 0.0, 0.0]))
     _write_proc_index(bag_id, chunk_id, [0], xyz_per_sweep=[voxel_pt])
 
     cfg = ComponentConfig(

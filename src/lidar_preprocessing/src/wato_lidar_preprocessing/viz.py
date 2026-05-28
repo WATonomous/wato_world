@@ -33,6 +33,8 @@ _DYNAMIC_RGB = [0.91, 0.30, 0.24]  # red
 _GROUND_RGB = [0.20, 1.00, 0.20]  # green
 _STATIC_CONTEXT_RGB = [0.30, 0.30, 0.30]  # gray (faint backdrop)
 _EGO_RGB = [1.00, 0.20, 0.85]  # magenta
+
+
 def _o3d():
     try:
         import open3d as o3d
@@ -96,11 +98,11 @@ def _ego_trajectory_lineset(bag_id: str, chunk_id: str):
 # Classification → RGB mapping for voxel_diag overlay.
 # Must stay aligned with CLASS_* codes in classify/log_odds.py.
 _CLASS_COLORS: dict[int, list[float]] = {
-    0: [0.30, 0.56, 0.85],   # STATIC          — blue
-    1: [0.95, 0.85, 0.20],   # AMBIGUOUS       — yellow
-    2: [0.95, 0.55, 0.15],   # UNDER_EVIDENCED — orange
-    3: [0.55, 0.55, 0.55],   # FREE_ONLY       — gray
-    4: [0.91, 0.30, 0.24],   # DYNAMIC         — red
+    0: [0.30, 0.56, 0.85],  # STATIC          — blue
+    1: [0.95, 0.85, 0.20],  # AMBIGUOUS       — yellow
+    2: [0.95, 0.55, 0.15],  # UNDER_EVIDENCED — orange
+    3: [0.55, 0.55, 0.55],  # FREE_ONLY       — gray
+    4: [0.91, 0.30, 0.24],  # DYNAMIC         — red
 }
 _CLASS_MISSING_RGB = [0.20, 0.20, 0.20]
 
@@ -148,9 +150,12 @@ def _voxel_diag_per_point(xyz: np.ndarray, diag) -> dict[str, np.ndarray] | None
     rel = xyz.astype(np.float64) - origin
     idx = np.floor(rel / voxel_size).astype(np.int64)
     in_range = (
-        (idx[:, 0] >= 0) & (idx[:, 0] < AXIS_RANGE)
-        & (idx[:, 1] >= 0) & (idx[:, 1] < AXIS_RANGE)
-        & (idx[:, 2] >= 0) & (idx[:, 2] < AXIS_RANGE)
+        (idx[:, 0] >= 0)
+        & (idx[:, 0] < AXIS_RANGE)
+        & (idx[:, 1] >= 0)
+        & (idx[:, 1] < AXIS_RANGE)
+        & (idx[:, 2] >= 0)
+        & (idx[:, 2] < AXIS_RANGE)
     )
     pt_keys = np.zeros(xyz.shape[0], dtype=np.int64)
     pt_keys[in_range] = (
@@ -528,7 +533,8 @@ def _run_sweep_slider(bag_id: str, chunk_id: str) -> None:
     sweep_min = int(unique_sweeps.min())
     sweep_max = int(unique_sweeps.max())
     sweep_slices: dict[int, tuple[int, int]] = {
-        int(s): (int(st), int(st + c)) for s, st, c in zip(unique_sweeps, starts, counts)
+        int(s): (int(st), int(st + c))
+        for s, st, c in zip(unique_sweeps, starts, counts)
     }
     # Precompute turbo colors so cumulative mode doesn't recompute per tick.
     sweep_colors_all = _value_colors(sweep_id_arr.astype(np.float64), "turbo")
@@ -860,9 +866,7 @@ def _run_sweep_slider(bag_id: str, chunk_id: str) -> None:
     def on_layout(layout_context):
         r = window.content_rect
         panel_height = int(round(7.5 * em))
-        scene_widget.frame = gui.Rect(
-            r.x, r.y, r.width, r.height - panel_height
-        )
+        scene_widget.frame = gui.Rect(r.x, r.y, r.width, r.height - panel_height)
         panel.frame = gui.Rect(
             r.x, r.y + r.height - panel_height, r.width, panel_height
         )

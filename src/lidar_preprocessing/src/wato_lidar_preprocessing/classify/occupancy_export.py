@@ -71,7 +71,9 @@ def write_chunk_voxel_occupancy(
             save_kwargs["n_hits"] = occ_n_hits
         save_kwargs["p_occ"] = sigmoid(occ_lo).astype(np.float32)
 
-    np.savez_compressed(local_path(voxel_occupancy_path(bag_id, chunk_id)), **save_kwargs)
+    np.savez_compressed(
+        local_path(voxel_occupancy_path(bag_id, chunk_id)), **save_kwargs
+    )
     log.info(
         "chunk %s: wrote voxel_occupancy.npz (%d occupied voxels)",
         chunk_id,
@@ -139,6 +141,7 @@ def write_chunk_voxel_diagnostics(
         CLASS_STATIC,
         CLASS_UNDER_EVIDENCED,
     )
+
     n_per_class = {
         "static": int((classification == CLASS_STATIC).sum()),
         "ambiguous": int((classification == CLASS_AMBIGUOUS).sum()),

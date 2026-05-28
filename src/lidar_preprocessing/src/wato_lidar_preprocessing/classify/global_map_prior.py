@@ -37,9 +37,7 @@ class GlobalMapPrior:
 
         if global_map_xyz.shape[0] == 0:
             self._tree: cKDTree | None = None
-            log.warning(
-                "GlobalMapPrior: global map is empty — prior has no effect"
-            )
+            log.warning("GlobalMapPrior: global map is empty — prior has no effect")
         else:
             self._tree = cKDTree(global_map_xyz.astype(np.float64))
             log.info(

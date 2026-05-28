@@ -136,7 +136,9 @@ def _process_one_chunk(
         log.info("=== chunk %s: step C — ground ===", chunk_id)
         ground_result = ground.process_chunk(cfg, bag_id, chunk_id)
 
-        _write_chunk_summary(bag_id, chunk_id, classify_result, ground_result, mf_mos_result)
+        _write_chunk_summary(
+            bag_id, chunk_id, classify_result, ground_result, mf_mos_result
+        )
         return (chunk_id, True, "")
     except Exception as exc:  # noqa: BLE001 — one chunk failing must not stop the rest
         log.exception("chunk %s failed", chunk_id)
@@ -201,7 +203,9 @@ def _run_classify_pass2(
                 n_ok += 1
             except Exception as exc:  # noqa: BLE001 — one chunk failing must not stop the rest
                 log.exception("pass 2 chunk %s failed", cid)
-                failures.append((cid, f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"))
+                failures.append(
+                    (cid, f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}")
+                )
     else:
         # Each worker rebuilds its own KDTree; pickling cKDTree across the
         # pool pipe per chunk is slower than rebuilding from disk.
@@ -213,7 +217,9 @@ def _run_classify_pass2(
         )
         log.info("pass 2: running %d chunks across %d workers", n_total, workers)
         with ProcessPoolExecutor(max_workers=workers) as pool:
-            futs = {pool.submit(worker, r["chunk_id"]): r["chunk_id"] for r in chunk_rows}
+            futs = {
+                pool.submit(worker, r["chunk_id"]): r["chunk_id"] for r in chunk_rows
+            }
             for fut in as_completed(futs):
                 cid = futs[fut]
                 try:

@@ -4,13 +4,6 @@
 #
 # Defines `source` and `dependencies` build stages. The full image
 # (build / deploy / develop) is composed by docker/template.Dockerfile.
-#
-# TORCH INSTALL: torch wheels are 700+ MB and uv has no HTTP range-request
-# resume.  On flaky connections, mid-download resets force a full restart and
-# the wheel never completes.  Workaround: pre-download all torch wheels on
-# the host with `wget -c` (resume-capable) into docker/wheels/, then this
-# Dockerfile installs from the local directory — no network access for torch
-# during `docker build`.  See docker/wheels/README.md for the wget commands.
 
 # syntax=docker/dockerfile:1.6
 ARG BASE_IMAGE=ghcr.io/watonomous/wato_world/base:cuda12.8.1-cudnn-runtime-ubuntu24.04
@@ -59,13 +52,20 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && apt-get -qq autoremove -y && apt-get -qq clean \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc/* /usr/share/man/*
 
-# PyTorch + matched NVIDIA CUDA libs, installed from pre-downloaded wheels.
-# See docker/wheels/README.md for the host-side `wget -c` commands to populate
-# docker/wheels/ before running `./watod build`.  --find-links points uv at
-# the local wheelhouse; --no-index forbids any network access (so this fails
-# loudly if a wheel is missing instead of silently re-fetching from pypi).
-COPY docker/wheels /tmp/wheels
-RUN uv pip install --system --break-system-packages \
-        --no-index --find-links /tmp/wheels \
-        torch \
-    && rm -rf /tmp/wheels
+# PyTorch + matched NVIDIA CUDA libs. cu128 index matches the runtime base
+# image's CUDA 12.8 toolkit.
+#
+# uv has no per-wheel HTTP range resume, so a connection reset mid-download
+# on one of the 700MB+ wheels (torch, triton, nvidia-cusparselt-cu12...)
+# discards that wheel's partial bytes. The uv cache mount preserves any
+# wheel that finished cleanly though, so a retry only re-fetches the one
+# that crashed. Loop up to 10 attempts.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    n=0; until uv pip install --system --break-system-packages \
+            --extra-index-url https://download.pytorch.org/whl/cu128 \
+            'torch>=2.7,<3'; do \
+        n=$((n+1)); \
+        if [ "$n" -ge 10 ]; then echo "torch install failed after $n attempts" >&2; exit 1; fi; \
+        echo "torch install attempt $n failed, retrying in 5s..." >&2; \
+        sleep 5; \
+    done

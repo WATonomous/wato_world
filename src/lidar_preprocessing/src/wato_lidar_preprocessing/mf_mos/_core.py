@@ -91,12 +91,12 @@ def process_chunk(
 
     pose_samples = load_pose_samples(bag_id, chunk_id)
     if not pose_samples:
-        log.warning("chunk %s: no valid poses; MF-MOS skipped for entire chunk", chunk_id)
+        log.warning(
+            "chunk %s: no valid poses; MF-MOS skipped for entire chunk", chunk_id
+        )
         return MFMosResult()
 
-    lidar_ids = {
-        r["lidar_id"] for r in sweep_rows if r.get("valid", True) is not False
-    }
+    lidar_ids = {r["lidar_id"] for r in sweep_rows if r.get("valid", True) is not False}
     ego_T_lidar_by_id = load_ego_T_lidar_dict(bag_id, lidar_ids)
 
     ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
@@ -122,7 +122,10 @@ def process_chunk(
         # geometry would project into a non-KITTI-like range image and the
         # model mispredicts. Allowlist rejections count as disabled (not
         # invalid) so the result reflects "deliberately skipped" vs. "failed".
-        if params.lidar_id_allowlist is not None and lid not in params.lidar_id_allowlist:
+        if (
+            params.lidar_id_allowlist is not None
+            and lid not in params.lidar_id_allowlist
+        ):
             log.info(
                 "lidar %s: not in mf_mos.lidar_id_allowlist=%s; skipping its %d sweeps",
                 lid,
@@ -164,7 +167,9 @@ def process_chunk(
                     else None
                 )
             except Exception as exc:  # noqa: BLE001
-                log.warning("sweep %d: failed to load raw NPZ (%s); skipping MF-MOS", sid, exc)
+                log.warning(
+                    "sweep %d: failed to load raw NPZ (%s); skipping MF-MOS", sid, exc
+                )
                 _record_meta_path(meta_by_sid, sid, None)
                 result.n_sweeps_skipped_invalid += 1
                 result.skip_reasons.append((sid, f"raw load: {exc}"))
@@ -180,9 +185,13 @@ def process_chunk(
                         local_path(mf_mos_score_path(bag_id, chunk_id, sid)),
                         np.zeros(0, dtype=np.float32),
                     )
-                _record_meta_path(meta_by_sid, sid, mf_mos_mask_path(bag_id, chunk_id, sid))
+                _record_meta_path(
+                    meta_by_sid, sid, mf_mos_mask_path(bag_id, chunk_id, sid)
+                )
                 result.n_sweeps_skipped_empty += 1
-                past_window = (past_window + [(cur_ts, np.empty((0, 3), dtype=np.float32))])[-max_k:]
+                past_window = (
+                    past_window + [(cur_ts, np.empty((0, 3), dtype=np.float32))]
+                )[-max_k:]
                 continue
 
             # Match deskew's nonfinite filter so the mask is index-aligned.
@@ -204,7 +213,9 @@ def process_chunk(
             except _PoseGapError as exc:
                 log.warning("sweep %d: %s; MF-MOS writing zero mask", sid, exc)
                 _write_zero_mask(bag_id, chunk_id, sid, n_raw, params.save_scores)
-                _record_meta_path(meta_by_sid, sid, mf_mos_mask_path(bag_id, chunk_id, sid))
+                _record_meta_path(
+                    meta_by_sid, sid, mf_mos_mask_path(bag_id, chunk_id, sid)
+                )
                 result.n_sweeps_skipped_pose += 1
                 result.skip_reasons.append((sid, str(exc)))
                 past_window = (past_window + [(cur_ts, xyz_cur)])[-max_k:]
@@ -228,7 +239,8 @@ def process_chunk(
                 if j < 0:
                     residuals.append(
                         np.zeros(
-                            (params.range_image_h, params.range_image_w), dtype=np.float32
+                            (params.range_image_h, params.range_image_w),
+                            dtype=np.float32,
                         )
                     )
                     continue
@@ -236,7 +248,8 @@ def process_chunk(
                 if abs(cur_ts - past_ts) > max_gap_ns or past_xyz.shape[0] == 0:
                     residuals.append(
                         np.zeros(
-                            (params.range_image_h, params.range_image_w), dtype=np.float32
+                            (params.range_image_h, params.range_image_w),
+                            dtype=np.float32,
                         )
                     )
                     continue
@@ -245,7 +258,8 @@ def process_chunk(
                 except _PoseGapError:
                     residuals.append(
                         np.zeros(
-                            (params.range_image_h, params.range_image_w), dtype=np.float32
+                            (params.range_image_h, params.range_image_w),
+                            dtype=np.float32,
                         )
                     )
                     continue
@@ -270,9 +284,13 @@ def process_chunk(
                     range_image=range_img, residual_images=residuals
                 )  # (H, W) float32
             except Exception as exc:  # noqa: BLE001
-                log.exception("sweep %d: MF-MOS inference failed; writing zero mask", sid)
+                log.exception(
+                    "sweep %d: MF-MOS inference failed; writing zero mask", sid
+                )
                 _write_zero_mask(bag_id, chunk_id, sid, n_raw, params.save_scores)
-                _record_meta_path(meta_by_sid, sid, mf_mos_mask_path(bag_id, chunk_id, sid))
+                _record_meta_path(
+                    meta_by_sid, sid, mf_mos_mask_path(bag_id, chunk_id, sid)
+                )
                 result.n_sweeps_skipped_inference_error += 1
                 result.skip_reasons.append((sid, f"infer: {type(exc).__name__}: {exc}"))
                 past_window = (past_window + [(cur_ts, xyz_cur)])[-max_k:]
@@ -286,14 +304,16 @@ def process_chunk(
             full_mask = np.zeros(n_raw, dtype=bool)
             full_mask[finite] = mf_finite_mask
 
-            assert full_mask.shape == (n_raw,), (
-                f"mf_mos mask len {full_mask.shape} != raw sweep len {n_raw} for sweep {sid}"
-            )
+            assert (
+                full_mask.shape == (n_raw,)
+            ), f"mf_mos mask len {full_mask.shape} != raw sweep len {n_raw} for sweep {sid}"
 
             np.save(local_path(mf_mos_mask_path(bag_id, chunk_id, sid)), full_mask)
 
             if params.save_scores:
-                mf_finite_scores = _unproject_scores(score_img, point_to_pixel, n_finite)
+                mf_finite_scores = _unproject_scores(
+                    score_img, point_to_pixel, n_finite
+                )
                 full_scores = np.zeros(n_raw, dtype=np.float32)
                 full_scores[finite] = mf_finite_scores
                 np.save(
@@ -308,7 +328,9 @@ def process_chunk(
             past_window = (past_window + [(cur_ts, xyz_cur)])[-max_k:]
 
     updated = [meta_by_sid[int(r["sweep_id"])] for r in meta_rows]
-    write_table(updated, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
+    write_table(
+        updated, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id)
+    )
 
     log.info(
         "chunk %s: mf_mos processed=%d skipped(invalid=%d pose=%d empty=%d infer=%d) "
@@ -327,7 +349,12 @@ def process_chunk(
 
 def _load_model(params: MFMosParams) -> "MFMosModel":
     """Lazy load + cache the model. torch is imported inside _runtime."""
-    key = (params.checkpoint_path, params.arch_config, params.data_config, params.device)
+    key = (
+        params.checkpoint_path,
+        params.arch_config,
+        params.data_config,
+        params.device,
+    )
     if key not in _MODEL_CACHE:
         from ._runtime import MFMosModel  # noqa: PLC0415
 
@@ -391,8 +418,8 @@ def _range_project(
     fov_down = np.deg2rad(fov_down_deg)
     fov = fov_up - fov_down
 
-    proj_x = 0.5 * (yaw / np.pi + 1.0)          # [0, 1]
-    proj_y = 1.0 - (pitch - fov_down) / fov       # [0, 1], top=0
+    proj_x = 0.5 * (yaw / np.pi + 1.0)  # [0, 1]
+    proj_y = 1.0 - (pitch - fov_down) / fov  # [0, 1], top=0
 
     col = np.clip(np.floor(proj_x * w).astype(np.int32), 0, w - 1)
     row = np.clip(np.floor(proj_y * h).astype(np.int32), 0, h - 1)
@@ -416,7 +443,9 @@ def _range_project(
     range_image[3][row_s[write_mask], col_s[write_mask]] = z_s[write_mask]
 
     written_orig_idx = order[write_mask]
-    pixel_to_point_idx[row_s[write_mask], col_s[write_mask]] = written_orig_idx.astype(np.int32)
+    pixel_to_point_idx[row_s[write_mask], col_s[write_mask]] = written_orig_idx.astype(
+        np.int32
+    )
 
     if intensity is not None:
         intens_s = intensity[order].astype(np.float32)

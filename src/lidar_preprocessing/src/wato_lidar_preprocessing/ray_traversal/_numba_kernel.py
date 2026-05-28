@@ -15,16 +15,20 @@ from ._keys import AXIS_RANGE, SHIFT_X, SHIFT_Y
 
 @numba.njit(cache=True)
 def _update_sweep_numba(
-    ox: float, oy: float, oz: float,
-    endpoints: np.ndarray,     # (N, 3) float64
-    is_ground: np.ndarray,     # (N,) bool
-    cox: float, coy: float, coz: float,
+    ox: float,
+    oy: float,
+    oz: float,
+    endpoints: np.ndarray,  # (N, 3) float64
+    is_ground: np.ndarray,  # (N,) bool
+    cox: float,
+    coy: float,
+    coz: float,
     voxel_size: float,
     margin_voxels: float,
     max_length_m: float,
-    log_odds: numba.typed.Dict,   # int64 -> float32
-    n_obs: numba.typed.Dict,      # int64 -> int32
-    n_hits: numba.typed.Dict,     # int64 -> int32
+    log_odds: numba.typed.Dict,  # int64 -> float32
+    n_obs: numba.typed.Dict,  # int64 -> int32
+    n_hits: numba.typed.Dict,  # int64 -> int32
     l_occ: float,
     l_free: float,
     log_odds_clamp: float,
@@ -144,9 +148,12 @@ def _update_sweep_numba(
                 t_max_z += t_delta_z
 
             if (
-                cx < 0 or cx >= AXIS_RANGE
-                or cy < 0 or cy >= AXIS_RANGE
-                or cz < 0 or cz >= AXIS_RANGE
+                cx < 0
+                or cx >= AXIS_RANGE
+                or cy < 0
+                or cy >= AXIS_RANGE
+                or cz < 0
+                or cz >= AXIS_RANGE
             ):
                 continue
 
@@ -167,9 +174,12 @@ def _update_sweep_numba(
 
         # Endpoint voxel: occupied observation (skipped when is_ground).
         if not is_ground[i] and (
-            exi >= 0 and exi < AXIS_RANGE
-            and eyi >= 0 and eyi < AXIS_RANGE
-            and ezi >= 0 and ezi < AXIS_RANGE
+            exi >= 0
+            and exi < AXIS_RANGE
+            and eyi >= 0
+            and eyi < AXIS_RANGE
+            and ezi >= 0
+            and ezi < AXIS_RANGE
         ):
             key = (exi << SHIFT_X) | (eyi << SHIFT_Y) | ezi
             old_lo = log_odds.get(key, numba.float32(0.0))
@@ -183,11 +193,11 @@ def _update_sweep_numba(
 
 @numba.njit(cache=True)
 def _apply_global_map_boost_numba(
-    unique_keys: np.ndarray,   # (M,) int64, deduped
-    max_r_star: np.ndarray,    # (M,) float32, per-key max r*
+    unique_keys: np.ndarray,  # (M,) int64, deduped
+    max_r_star: np.ndarray,  # (M,) float32, per-key max r*
     l_occ_boost: float,
     clamp: float,
-    log_odds: numba.typed.Dict,   # int64 -> float32
+    log_odds: numba.typed.Dict,  # int64 -> float32
 ) -> None:
     """Add l_occ_boost * max_r_star[k] to log_odds[k] for each unique key, clamped."""
     for i in range(unique_keys.shape[0]):

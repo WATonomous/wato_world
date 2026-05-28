@@ -176,6 +176,8 @@ def extract_log_odds_arrays(
     lo_buf = np.empty(n, dtype=np.float32)
     n_obs_buf = np.empty(n, dtype=np.int32)
     n_hits_buf = np.empty(n, dtype=np.int32)
-    _extract_arrays_numba(log_odds, n_obs, n_hits, keys_buf, lo_buf, n_obs_buf, n_hits_buf)
+    _extract_arrays_numba(
+        log_odds, n_obs, n_hits, keys_buf, lo_buf, n_obs_buf, n_hits_buf
+    )
     order = np.argsort(keys_buf)
     return keys_buf[order], lo_buf[order], n_obs_buf[order], n_hits_buf[order]

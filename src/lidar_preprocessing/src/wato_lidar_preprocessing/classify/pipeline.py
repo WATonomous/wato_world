@@ -84,7 +84,6 @@ def _write_empty_outputs(
     return ClassifyResult(0, 0, out_uri)
 
 
-
 def _run_pass_1_persistence(
     cfg: ComponentConfig,
     meta_rows: list[dict],
@@ -201,7 +200,14 @@ def process_chunk(
             ground_mask_cache,
             sweep_keys,
             frame_keys,
-            (unique_keys, lo_vals, n_obs_vals, n_hits_vals, mf_mos_votes_arr, n_sweep_hits_arr),
+            (
+                unique_keys,
+                lo_vals,
+                n_obs_vals,
+                n_hits_vals,
+                mf_mos_votes_arr,
+                n_sweep_hits_arr,
+            ),
         ) = build_log_odds_grid(
             meta_rows,
             cfg,
@@ -218,7 +224,11 @@ def process_chunk(
             classification,
             diag,
         ) = classify_from_log_odds(
-            unique_keys, lo_vals, n_obs_vals, n_hits_vals, cfg,
+            unique_keys,
+            lo_vals,
+            n_obs_vals,
+            n_hits_vals,
+            cfg,
             mf_mos_votes_arr=mf_mos_votes_arr,
             n_sweep_hits_arr=n_sweep_hits_arr,
         )

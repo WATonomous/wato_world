@@ -19,11 +19,7 @@ import yaml
 
 log = logging.getLogger(__name__)
 
-_MFMOS_ROOT = str(
-    Path(__file__).parent.parent.parent.parent
-    / "third_party"
-    / "MF-MOS"
-)
+_MFMOS_ROOT = str(Path(__file__).parent.parent.parent.parent / "third_party" / "MF-MOS")
 
 if _MFMOS_ROOT not in sys.path:
     sys.path.insert(0, _MFMOS_ROOT)
@@ -57,7 +53,7 @@ class MFMosModel:
         self.W_model: int = int(sensor["img_prop"]["width"])
         self.n_input_scans: int = int(sensor["n_input_scans"])
         self.img_means: list[float] = sensor["img_means"]  # 5 values
-        self.img_stds: list[float] = sensor["img_stds"]    # 5 values
+        self.img_stds: list[float] = sensor["img_stds"]  # 5 values
         self.res_mean: float = float(sensor.get("res_mean", 0.0))
         self.res_std: float = float(sensor.get("res_std", 1.0))
 
@@ -92,7 +88,7 @@ class MFMosModel:
         # Upstream checkpoint was saved DataParallel-wrapped — strip "module."
         # prefix so keys line up with the unwrapped model.
         if state and all(k.startswith("module.") for k in state.keys()):
-            state = {k[len("module."):]: v for k, v in state.items()}
+            state = {k[len("module.") :]: v for k, v in state.items()}
         missing, unexpected = self._model.load_state_dict(state, strict=False)
         if missing:
             log.warning("MF-MOS checkpoint missing keys: %s", missing[:5])

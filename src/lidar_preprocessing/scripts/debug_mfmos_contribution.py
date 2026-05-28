@@ -18,6 +18,7 @@ this voxel is dynamic".  The actual voxel-aggregated MF-MOS verdict
 (mf_mos_dynamic_arr) requires min_mf_mos_votes + vote_fraction agreement
 across sweeps, so this slightly over-estimates MF-MOS's contribution.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -41,8 +42,12 @@ def main() -> None:
     ap.add_argument("bag_id")
     ap.add_argument("chunk_id")
     ap.add_argument("--sample-sweeps", type=int, default=20)
-    ap.add_argument("--radius-m", type=float, default=None,
-                    help="if set, restrict to near-ego points within this distance")
+    ap.add_argument(
+        "--radius-m",
+        type=float,
+        default=None,
+        help="if set, restrict to near-ego points within this distance",
+    )
     ap.add_argument("--root", default="/data/artifacts/raw")
     args = ap.parse_args()
 
@@ -65,8 +70,8 @@ def main() -> None:
     aw_only = 0
     mfmos_rescue = 0
     both_agree = 0
-    neither_in_dyn = 0    # both agree static, point is NOT in dynamic_mask (sanity check)
-    inconsistent = 0      # both say static yet dynamic_mask=True (would indicate a bug)
+    neither_in_dyn = 0  # both agree static, point is NOT in dynamic_mask (sanity check)
+    inconsistent = 0  # both say static yet dynamic_mask=True (would indicate a bug)
 
     # bucket the MF-MOS rescues by AW voxel class
     rescue_by_aw_class = {code: 0 for code in CLASS_NAMES}
@@ -130,7 +135,10 @@ def main() -> None:
     total_dyn = aw_only + mfmos_rescue + both_agree + inconsistent
     print(f"  total points in dynamic_mask: {total_dyn}")
     if total_dyn > 0:
-        f = lambda x: f"{x:>8d}  ({100.0*x/total_dyn:5.1f}%)"
+
+        def f(x: int) -> str:
+            return f"{x:>8d}  ({100.0 * x / total_dyn:5.1f}%)"
+
         print(f"    AW only                  {f(aw_only)}")
         print(f"    MF-MOS rescue (AW=no)    {f(mfmos_rescue)}")
         print(f"    Both AW + MF-MOS         {f(both_agree)}")
@@ -145,21 +153,29 @@ def main() -> None:
             if n:
                 print(f"    {name:18s} {n:>8d}  ({100.0*n/mfmos_rescue:5.1f}%)")
         if rescue_not_in_keys:
-            print(f"    {'not-in-keys':18s} {rescue_not_in_keys:>8d}  "
-                  f"({100.0*rescue_not_in_keys/mfmos_rescue:5.1f}%)")
+            print(
+                f"    {'not-in-keys':18s} {rescue_not_in_keys:>8d}  "
+                f"({100.0*rescue_not_in_keys/mfmos_rescue:5.1f}%)"
+            )
 
     # bottom line
     print()
     if total_dyn > 0 and mfmos_rescue > 0:
         good = rescue_by_aw_class[1] + rescue_by_aw_class[2]
         bad = rescue_by_aw_class[0] + rescue_by_aw_class[3] + rescue_not_in_keys
-        print(f"== bottom line ==")
-        print(f"  MF-MOS uniquely added {mfmos_rescue} pts to dynamic cloud "
-              f"({100.0*mfmos_rescue/total_dyn:.1f}% of total).")
-        print(f"    likely value-add (AW AMBIGUOUS/UNDER_EVIDENCED): {good} "
-              f"({100.0*good/mfmos_rescue:.1f}% of rescues)")
-        print(f"    likely false-pos (AW STATIC/FREE_ONLY/not-in-keys): {bad} "
-              f"({100.0*bad/mfmos_rescue:.1f}% of rescues)")
+        print("== bottom line ==")
+        print(
+            f"  MF-MOS uniquely added {mfmos_rescue} pts to dynamic cloud "
+            f"({100.0*mfmos_rescue/total_dyn:.1f}% of total)."
+        )
+        print(
+            f"    likely value-add (AW AMBIGUOUS/UNDER_EVIDENCED): {good} "
+            f"({100.0*good/mfmos_rescue:.1f}% of rescues)"
+        )
+        print(
+            f"    likely false-pos (AW STATIC/FREE_ONLY/not-in-keys): {bad} "
+            f"({100.0*bad/mfmos_rescue:.1f}% of rescues)"
+        )
 
 
 if __name__ == "__main__":

@@ -39,7 +39,6 @@ from wato_lidar_preprocessing.mf_mos import (
     _compute_residual,
     _range_project,
     _unproject_mask,
-    _unproject_scores,
     process_chunk,
 )
 
@@ -57,7 +56,9 @@ class _StubModel:
     n_input_scans = 4
     model_resolution = (H, W)
 
-    def infer(self, range_image: np.ndarray, residual_images: list[np.ndarray]) -> np.ndarray:
+    def infer(
+        self, range_image: np.ndarray, residual_images: list[np.ndarray]
+    ) -> np.ndarray:
         h, w = range_image.shape[1], range_image.shape[2]
         if residual_images:
             res_energy = sum(np.abs(r) for r in residual_images)
@@ -128,8 +129,13 @@ def _write_poses(bag_id: str, chunk_id: str, timestamps_ns: list[int]) -> None:
             "bag_id": bag_id,
             "chunk_id": chunk_id,
             "timestamp_ns": ts,
-            "x": 0.0, "y": 0.0, "z": 0.0,
-            "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": 0.0,
+            "qw": 1.0,
             "world_T_ego_flat": np.eye(4).flatten().tolist(),
             "source": "odom",
             "valid": True,
@@ -139,9 +145,7 @@ def _write_poses(bag_id: str, chunk_id: str, timestamps_ns: list[int]) -> None:
     write_table(rows, POSES_SCHEMA, poses_path(bag_id, chunk_id))
 
 
-def _write_raw_sweep(
-    bag_id: str, chunk_id: str, sweep_id: int, xyz: np.ndarray
-) -> str:
+def _write_raw_sweep(bag_id: str, chunk_id: str, sweep_id: int, xyz: np.ndarray) -> str:
     uri = lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", sweep_id)
     path = local_path(uri)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -156,23 +160,27 @@ def _write_lidar_sweeps(
     for sid, xyz in sweeps:
         raw_uri = _write_raw_sweep(bag_id, chunk_id, sid, xyz)
         n = xyz.shape[0]
-        rows.append({
-            "bag_id": bag_id,
-            "chunk_id": chunk_id,
-            "lidar_id": "LIDAR_TOP",
-            "sweep_id": sid,
-            "lidar_path": raw_uri,
-            "header_timestamp_ns": sid * 50_000_000,
-            "record_timestamp_ns": sid * 50_000_000,
-            "num_points": n,
-            "has_ring": False,
-            "has_intensity": False,
-            "has_point_time": False,
-            "min_range_m": 0.0,
-            "max_range_m": float(np.linalg.norm(xyz, axis=1).max()) if n > 0 else 0.0,
-            "valid": True,
-            "drop_reason": None,
-        })
+        rows.append(
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "lidar_id": "LIDAR_TOP",
+                "sweep_id": sid,
+                "lidar_path": raw_uri,
+                "header_timestamp_ns": sid * 50_000_000,
+                "record_timestamp_ns": sid * 50_000_000,
+                "num_points": n,
+                "has_ring": False,
+                "has_intensity": False,
+                "has_point_time": False,
+                "min_range_m": 0.0,
+                "max_range_m": float(np.linalg.norm(xyz, axis=1).max())
+                if n > 0
+                else 0.0,
+                "valid": True,
+                "drop_reason": None,
+            }
+        )
     write_table(rows, LIDAR_SWEEPS_SCHEMA, lidar_sweeps_path(bag_id, chunk_id))
 
 
@@ -233,9 +241,9 @@ def test_range_projection_round_trips_indices_match():
         winner = p2p_idx[row_px, col_px]
         r_winner = float(np.linalg.norm(xyz[winner]))
         r_i = float(np.linalg.norm(xyz[i]))
-        assert r_winner <= r_i + 1e-4, (
-            f"point {i}: winner range {r_winner:.4f} > self range {r_i:.4f}"
-        )
+        assert (
+            r_winner <= r_i + 1e-4
+        ), f"point {i}: winner range {r_winner:.4f} > self range {r_i:.4f}"
 
 
 def test_range_projection_closest_point_wins():
@@ -360,9 +368,9 @@ def test_process_chunk_lidar_id_allowlist_skips_others(tmp_env, monkeypatch):
     assert result.n_sweeps_skipped_disabled == 1
     proc_dir = local_path(lidar_proc_dir(bag_id, chunk_id))
     mask_files = [f for f in os.listdir(proc_dir) if "mf_mos_mask" in f]
-    assert mask_files == [], (
-        f"allowlisted-out LiDAR must write no mask files; got {mask_files}"
-    )
+    assert (
+        mask_files == []
+    ), f"allowlisted-out LiDAR must write no mask files; got {mask_files}"
 
 
 def test_process_chunk_lidar_id_allowlist_none_runs_all(tmp_env, monkeypatch):
@@ -450,7 +458,11 @@ def test_mask_length_equals_raw_point_count(tmp_env, monkeypatch):
     monkeypatch.setattr(mf_mos_mod, "_load_model", _stub_load_model)
 
     bag_id, chunk_id = "bag_align", "chunk0"
-    sweeps = [(0, _make_in_fov_points(3)), (1, _make_in_fov_points(7)), (2, _make_in_fov_points(12))]
+    sweeps = [
+        (0, _make_in_fov_points(3)),
+        (1, _make_in_fov_points(7)),
+        (2, _make_in_fov_points(12)),
+    ]
     _write_calibration(bag_id)
     _write_poses(bag_id, chunk_id, [0, 200_000_000])
     _write_lidar_sweeps(bag_id, chunk_id, sweeps)
@@ -462,9 +474,9 @@ def test_mask_length_equals_raw_point_count(tmp_env, monkeypatch):
     assert result.n_sweeps_processed == len(sweeps)
     for sid, xyz in sweeps:
         mask = np.load(local_path(mf_mos_mask_path(bag_id, chunk_id, sid)))
-        assert mask.shape == (xyz.shape[0],), (
-            f"sweep {sid}: mask len {mask.shape} != raw len {xyz.shape[0]}"
-        )
+        assert mask.shape == (
+            xyz.shape[0],
+        ), f"sweep {sid}: mask len {mask.shape} != raw len {xyz.shape[0]}"
 
 
 def test_lidar_proc_index_carries_mf_mos_mask_path(tmp_env, monkeypatch):
@@ -490,7 +502,9 @@ def test_lidar_proc_index_carries_mf_mos_mask_path(tmp_env, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _write_world_sweep(bag_id: str, chunk_id: str, sweep_id: int, xyz: np.ndarray) -> None:
+def _write_world_sweep(
+    bag_id: str, chunk_id: str, sweep_id: int, xyz: np.ndarray
+) -> None:
     path = local_path(lidar_world_path(bag_id, chunk_id, sweep_id))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     np.savez_compressed(path, x=xyz[:, 0], y=xyz[:, 1], z=xyz[:, 2])
@@ -503,7 +517,10 @@ def _write_world_sweep_with_origin(
     path = local_path(lidar_world_path(bag_id, chunk_id, sweep_id))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     np.savez_compressed(
-        path, x=xyz[:, 0], y=xyz[:, 1], z=xyz[:, 2],
+        path,
+        x=xyz[:, 0],
+        y=xyz[:, 1],
+        z=xyz[:, 2],
         origin=origin.astype(np.float64),
     )
 
@@ -601,9 +618,9 @@ def test_fusion_union_ors_signals(tmp_env):
 
     dmap = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
     assert dmap["xyz"].shape[0] > 0, "at least one point should be in dynamic_map"
-    assert pytest.approx(float(dmap["xyz"][:, 0].min()), abs=0.01) == 1.0, (
-        "point at x=1.0 (MF-MOS moving) should be in dynamic_map"
-    )
+    assert (
+        pytest.approx(float(dmap["xyz"][:, 0].min()), abs=0.01) == 1.0
+    ), "point at x=1.0 (MF-MOS moving) should be in dynamic_map"
 
 
 def test_fusion_union_log_odds_path(tmp_env):
@@ -642,13 +659,13 @@ def test_fusion_union_log_odds_path(tmp_env):
     classify_chunk(cfg, bag_id, chunk_id)
 
     dmap = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
-    assert dmap["xyz"].shape[0] > 0, (
-        "union mode: MF-MOS-voted point in a log_odds-static voxel must appear in dynamic_map"
-    )
+    assert (
+        dmap["xyz"].shape[0] > 0
+    ), "union mode: MF-MOS-voted point in a log_odds-static voxel must appear in dynamic_map"
     xs, ys = dmap["xyz"][:, 0], dmap["xyz"][:, 1]
-    assert any(abs(x - 5.0) < 0.01 and abs(y) < 0.01 for x, y in zip(xs, ys)), (
-        "point at (5.0, 0.0) must be in dynamic_map (MF-MOS union flipped it from static)"
-    )
+    assert any(
+        abs(x - 5.0) < 0.01 and abs(y) < 0.01 for x, y in zip(xs, ys)
+    ), "point at (5.0, 0.0) must be in dynamic_map (MF-MOS union flipped it from static)"
 
 
 def test_fusion_independent_log_odds_path(tmp_env):
@@ -678,10 +695,12 @@ def test_fusion_independent_log_odds_path(tmp_env):
 
     smap = np.load(local_path(static_map_path(bag_id, chunk_id)))
     dmap = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
-    assert smap["xyz"].shape[0] > 0, "log_odds should classify repeatedly-seen points as static"
-    assert dmap["xyz"].shape[0] == 0, (
-        "independent mode: MF-MOS all-dynamic vote must not override log_odds static label"
-    )
+    assert (
+        smap["xyz"].shape[0] > 0
+    ), "log_odds should classify repeatedly-seen points as static"
+    assert (
+        dmap["xyz"].shape[0] == 0
+    ), "independent mode: MF-MOS all-dynamic vote must not override log_odds static label"
 
 
 # ---------------------------------------------------------------------------
@@ -691,8 +710,6 @@ def test_fusion_independent_log_odds_path(tmp_env):
 
 def test_pipeline_runs_with_mf_mos_disabled_unchanged(tmp_env):
     """_process_one_chunk with mf_mos disabled produces no mf_mos artifacts."""
-    from wato_common.artifact_store import chunks_index_path
-    from wato_common.schemas import CHUNK_SCHEMA
     from wato_lidar_preprocessing.pipeline import _process_one_chunk
 
     bag_id, chunk_id = "bag_pipe", "chunk0"
@@ -712,13 +729,21 @@ def test_pipeline_runs_with_mf_mos_disabled_unchanged(tmp_env):
     write_table(
         [
             {
-                "bag_id": bag_id, "chunk_id": chunk_id,
-                "lidar_id": "LIDAR_TOP", "sweep_id": 0,
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "lidar_id": "LIDAR_TOP",
+                "sweep_id": 0,
                 "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
-                "header_timestamp_ns": 0, "record_timestamp_ns": 0,
-                "num_points": 2, "has_ring": False, "has_intensity": False,
-                "has_point_time": False, "min_range_m": 1.0, "max_range_m": 2.0,
-                "valid": True, "drop_reason": None,
+                "header_timestamp_ns": 0,
+                "record_timestamp_ns": 0,
+                "num_points": 2,
+                "has_ring": False,
+                "has_intensity": False,
+                "has_point_time": False,
+                "min_range_m": 1.0,
+                "max_range_m": 2.0,
+                "valid": True,
+                "drop_reason": None,
             }
         ],
         LIDAR_SWEEPS_SCHEMA,

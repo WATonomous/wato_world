@@ -1,4 +1,0 @@
-*.whl
-!.gitignore
-!README.md
-!fetch.sh

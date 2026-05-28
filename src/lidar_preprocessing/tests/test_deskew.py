@@ -767,8 +767,8 @@ def test_synthesize_t_offset_from_azimuth_ccw_full_rotation():
 
     xyz = np.array(
         [
-            [1.0, 0.0, 0.0],   # phi = 0      → t = 0
-            [0.0, 1.0, 0.0],   # phi = π/2    → t = 0.25 s
+            [1.0, 0.0, 0.0],  # phi = 0      → t = 0
+            [0.0, 1.0, 0.0],  # phi = π/2    → t = 0.25 s
             [-1.0, 0.0, 0.0],  # phi = π      → t = 0.5  s
             [0.0, -1.0, 0.0],  # phi = -π/2   → t = 0.75 s (wraps to +3π/2)
         ]
@@ -795,10 +795,14 @@ def test_synthesize_t_offset_anchored_at_phi_start():
     # First point at phi = -π (back), then sweeping CCW.
     xyz = np.array(
         [
-            [-1.0, 0.0, 0.0],   # phi = π (or -π)  → t = 0      (sweep start)
-            [0.0, 1.0, 0.0],    # phi = π/2        → t = 0.75 s (CCW from -π is +3π/2 away)
-            [1.0, 0.0, 0.0],    # phi = 0          → t = 0.5  s
-            [0.0, -1.0, 0.0],   # phi = -π/2       → t = 0.25 s
+            [-1.0, 0.0, 0.0],  # phi = π (or -π)  → t = 0      (sweep start)
+            [
+                0.0,
+                1.0,
+                0.0,
+            ],  # phi = π/2        → t = 0.75 s (CCW from -π is +3π/2 away)
+            [1.0, 0.0, 0.0],  # phi = 0          → t = 0.5  s
+            [0.0, -1.0, 0.0],  # phi = -π/2       → t = 0.25 s
         ]
     )
     t_ns = _synthesize_t_offset_ns_from_azimuth(
@@ -854,10 +858,10 @@ def test_synthesize_t_offset_from_azimuth_cw_reverses():
 
     xyz = np.array(
         [
-            [1.0, 0.0, 0.0],   # phi = 0      → t = 0
+            [1.0, 0.0, 0.0],  # phi = 0      → t = 0
             [0.0, -1.0, 0.0],  # phi = -π/2   → t = 0.25 s (CW)
             [-1.0, 0.0, 0.0],  # phi = π      → t = 0.5  s
-            [0.0, 1.0, 0.0],   # phi = π/2    → t = 0.75 s (CW)
+            [0.0, 1.0, 0.0],  # phi = π/2    → t = 0.75 s (CW)
         ]
     )
     t_ns = _synthesize_t_offset_ns_from_azimuth(
@@ -1029,9 +1033,12 @@ def test_synthesis_eliminates_intra_sweep_smear_for_static_wall(tmp_env):
     )
     process_chunk(cfg_off, bag2, chunk2)
     world_off = np.load(local_path(lidar_world_path(bag2, chunk2, 0)))
-    np.testing.assert_allclose(world_off["x"], [5.0, -5.0], atol=1e-3), (
-        "without synthesis, the back-azimuth point should land at world "
-        "x=-5 (sensor (-5,0,0) + ego (0,0,0)), demonstrating the smear bug"
+    (
+        np.testing.assert_allclose(world_off["x"], [5.0, -5.0], atol=1e-3),
+        (
+            "without synthesis, the back-azimuth point should land at world "
+            "x=-5 (sensor (-5,0,0) + ego (0,0,0)), demonstrating the smear bug"
+        ),
     )
 
 

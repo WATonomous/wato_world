@@ -62,9 +62,7 @@ def load_ego_T_lidar(bag_id: str, lidar_id: str) -> np.ndarray:
     return np.asarray(lidar_entry["ego_T_lidar"], dtype=np.float64)
 
 
-def load_ego_T_lidar_dict(
-    bag_id: str, lidar_ids: set[str]
-) -> dict[str, np.ndarray]:
+def load_ego_T_lidar_dict(bag_id: str, lidar_ids: set[str]) -> dict[str, np.ndarray]:
     """Load ego_T_lidar for multiple lidar IDs from one calibration.json read.
 
     Missing / unresolved lidar_ids are logged as errors and absent from the

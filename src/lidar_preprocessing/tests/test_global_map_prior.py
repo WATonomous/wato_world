@@ -23,7 +23,7 @@ from wato_common.artifact_store import (
 )
 from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.schemas import PROCESSED_SWEEPS_SCHEMA
-from wato_lidar_preprocessing.classify import GlobalMapPrior, process_chunk
+from wato_lidar_preprocessing.classify import GlobalMapPrior
 from wato_lidar_preprocessing.classify.io_helpers import origin_from_index
 from wato_lidar_preprocessing.classify.log_odds import build_log_odds_grid
 from wato_lidar_preprocessing.config import ComponentConfig
@@ -128,11 +128,11 @@ def test_global_map_prior_query_sweep_matches_within_radius():
 
     sweep_xyz = np.array(
         [
-            [1.10, 0.0, 0.0],   # 0.10 m from map[0] → HIT
-            [5.40, 0.0, 0.0],   # 0.40 m from map[1] → MISS (radius is 0.30)
+            [1.10, 0.0, 0.0],  # 0.10 m from map[0] → HIT
+            [5.40, 0.0, 0.0],  # 0.40 m from map[1] → MISS (radius is 0.30)
             [100.0, 0.0, 0.0],  # exact match map[2] → HIT
-            [50.0, 0.0, 0.0],   # 45 m from map[1], 50 m from map[2] → MISS
-            [0.99, 0.0, 0.0],   # 0.01 m from map[0] → HIT
+            [50.0, 0.0, 0.0],  # 45 m from map[1], 50 m from map[2] → MISS
+            [0.99, 0.0, 0.0],  # 0.01 m from map[0] → HIT
         ]
     )
     sensor = np.zeros(3)
@@ -153,10 +153,10 @@ def test_global_map_prior_r_star_attenuates_past_r_max():
 
     sweep_xyz = np.array(
         [
-            [50.0, 0.0, 0.0],    # range 50 → r_star = min(1, 100/50) = 1.0
-            [100.0, 0.0, 0.0],   # range 100 → r_star = 1.0 exactly
-            [200.0, 0.0, 0.0],   # range 200 → r_star = 100/200 = 0.5
-            [400.0, 0.0, 0.0],   # range 400 → r_star = 100/400 = 0.25
+            [50.0, 0.0, 0.0],  # range 50 → r_star = min(1, 100/50) = 1.0
+            [100.0, 0.0, 0.0],  # range 100 → r_star = 1.0 exactly
+            [200.0, 0.0, 0.0],  # range 200 → r_star = 100/200 = 0.5
+            [400.0, 0.0, 0.0],  # range 400 → r_star = 100/400 = 0.25
         ]
     )
     sensor = np.zeros(3)
@@ -207,7 +207,9 @@ def test_apply_global_map_boost_respects_clamp():
     log_odds[1] = np.float32(49.5)
     hit_keys = np.array([1], dtype=np.int64)
     hit_r_star = np.array([1.0], dtype=np.float32)
-    apply_global_map_boost(hit_keys, hit_r_star, l_occ_boost=2.0, clamp=50.0, log_odds=log_odds)
+    apply_global_map_boost(
+        hit_keys, hit_r_star, l_occ_boost=2.0, clamp=50.0, log_odds=log_odds
+    )
     # 49.5 + 2.0 = 51.5 → clamped to 50.0.
     assert float(log_odds[1]) == pytest.approx(50.0)
 
@@ -263,7 +265,12 @@ def test_build_log_odds_grid_with_prior_increases_lo(tmp_env):
 
     # (a) Baseline: no prior.
     *_, lo_arrays_no_prior = build_log_odds_grid(
-        meta_rows, cfg, origin, chunk_id, cache_xyz=False, bag_id=bag_id,
+        meta_rows,
+        cfg,
+        origin,
+        chunk_id,
+        cache_xyz=False,
+        bag_id=bag_id,
     )
     keys_no, lo_no, n_obs_no, n_hits_no, *_ = lo_arrays_no_prior
 
@@ -278,34 +285,35 @@ def test_build_log_odds_grid_with_prior_increases_lo(tmp_env):
     # world location.  Every sweep's endpoint will fall within match_radius_m.
     prior = GlobalMapPrior(static_pt, match_radius_m=0.30, r_max_credibility_m=200.0)
     *_, lo_arrays_prior = build_log_odds_grid(
-        meta_rows, cfg, origin, chunk_id,
-        cache_xyz=False, bag_id=bag_id, global_map_prior=prior,
+        meta_rows,
+        cfg,
+        origin,
+        chunk_id,
+        cache_xyz=False,
+        bag_id=bag_id,
+        global_map_prior=prior,
     )
     keys_p, lo_p, n_obs_p, n_hits_p, *_ = lo_arrays_prior
     idx_p = np.searchsorted(keys_p, pt_key)
     assert idx_p < len(keys_p) and keys_p[idx_p] == pt_key
 
     # Prior must strictly increase log_odds on the map-matched voxel.
-    assert float(lo_p[idx_p]) > baseline_lo, (
-        f"prior failed to boost log_odds: baseline={baseline_lo}, with_prior={float(lo_p[idx_p])}"
-    )
+    assert (
+        float(lo_p[idx_p]) > baseline_lo
+    ), f"prior failed to boost log_odds: baseline={baseline_lo}, with_prior={float(lo_p[idx_p])}"
 
     # n_hits must be unchanged — prior is NOT allowed to add synthetic hits.
-    assert int(n_hits_p[idx_p]) == baseline_n_hits, (
-        f"prior leaked into n_hits: baseline={baseline_n_hits}, with_prior={int(n_hits_p[idx_p])}"
-    )
+    assert (
+        int(n_hits_p[idx_p]) == baseline_n_hits
+    ), f"prior leaked into n_hits: baseline={baseline_n_hits}, with_prior={int(n_hits_p[idx_p])}"
 
     # n_obs must also be unchanged — prior is NOT allowed to add synthetic observations.
-    assert int(n_obs_p[idx_p]) == int(n_obs_no[idx_no]), (
-        "prior leaked into n_obs"
-    )
+    assert int(n_obs_p[idx_p]) == int(n_obs_no[idx_no]), "prior leaked into n_obs"
 
     # Expected boost magnitude: 3 sweeps × l_occ_global_map × r_star.
     # The single static point at (1,0,0) seen from origin (0,0,0) → range 1m,
     # r_star = min(1, 200/1) = 1.0.  So 3 × 0.10 × 1.0 = 0.30 added.
-    np.testing.assert_allclose(
-        float(lo_p[idx_p]) - baseline_lo, 3 * 0.10, atol=1e-5
-    )
+    np.testing.assert_allclose(float(lo_p[idx_p]) - baseline_lo, 3 * 0.10, atol=1e-5)
 
 
 def _write_world_sweep_with_ground(
@@ -366,8 +374,13 @@ def test_iwu_boost_excludes_ground_points(tmp_env):
     prior = GlobalMapPrior(xyz, match_radius_m=0.30, r_max_credibility_m=200.0)
 
     *_, lo_arrays = build_log_odds_grid(
-        meta_rows, cfg, origin, chunk_id,
-        cache_xyz=False, bag_id=bag_id, global_map_prior=prior,
+        meta_rows,
+        cfg,
+        origin,
+        chunk_id,
+        cache_xyz=False,
+        bag_id=bag_id,
+        global_map_prior=prior,
     )
     keys, lo_vals, _n_obs, n_hits, *_ = lo_arrays
 
@@ -376,9 +389,9 @@ def test_iwu_boost_excludes_ground_points(tmp_env):
 
     # Non-ground voxel must be present with both traversal hits and boost.
     ng_idx = np.searchsorted(keys, non_ground_key)
-    assert ng_idx < len(keys) and keys[ng_idx] == non_ground_key, (
-        "non-ground voxel must appear in unique_keys"
-    )
+    assert (
+        ng_idx < len(keys) and keys[ng_idx] == non_ground_key
+    ), "non-ground voxel must appear in unique_keys"
     assert int(n_hits[ng_idx]) == 2, "non-ground voxel got both sweep hits"
     assert float(lo_vals[ng_idx]) > 0, "non-ground voxel should have positive log_odds"
 

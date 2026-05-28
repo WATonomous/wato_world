@@ -24,9 +24,7 @@ from wato_lidar_preprocessing.ray_traversal import (
 )
 from wato_lidar_preprocessing.ray_traversal._keys import SHIFT_X, SHIFT_Y
 
-requires_numba = pytest.mark.skipif(
-    not _NUMBA_AVAILABLE, reason="numba unavailable"
-)
+requires_numba = pytest.mark.skipif(not _NUMBA_AVAILABLE, reason="numba unavailable")
 
 
 def _pack(vx: int, vy: int, vz: int) -> int:
@@ -103,8 +101,12 @@ def test_numba_python_parity():
         voxel_size,
         margin_voxels,
         max_length_m,
-        nlo, nno, nnh,
-        l_occ, l_free, log_odds_clamp,
+        nlo,
+        nno,
+        nnh,
+        l_occ,
+        l_free,
+        log_odds_clamp,
     )
     n_keys, n_lo, n_no, n_nh = extract_log_odds_arrays(nlo, nno, nnh)
 
@@ -120,8 +122,12 @@ def test_numba_python_parity():
         voxel_size,
         margin_voxels,
         max_length_m,
-        plo, pno, pnh,
-        l_occ, l_free, log_odds_clamp,
+        plo,
+        pno,
+        pnh,
+        l_occ,
+        l_free,
+        log_odds_clamp,
     )
     p_keys = np.array(sorted(plo.keys()), dtype=np.int64)
     p_lo = np.array([plo[k] for k in p_keys], dtype=np.float32)
@@ -314,7 +320,12 @@ def test_range_weight_per_voxel_free_space_uses_t_entry():
 
     # Sanity: near voxel must be more strongly carved than far voxel.
     # (|near| > |mid| > |far| in absolute terms; all negative.)
-    assert float(lo_vals[idx_near]) < float(lo_vals[idx_mid]) < float(lo_vals[idx_far]) < 0.0
+    assert (
+        float(lo_vals[idx_near])
+        < float(lo_vals[idx_mid])
+        < float(lo_vals[idx_far])
+        < 0.0
+    )
 
 
 @requires_numba
@@ -353,8 +364,12 @@ def test_range_weight_numba_python_parity():
         voxel_size,
         margin_voxels,
         max_length_m,
-        nlo, nno, nnh,
-        l_occ, l_free, log_odds_clamp,
+        nlo,
+        nno,
+        nnh,
+        l_occ,
+        l_free,
+        log_odds_clamp,
         r_max=r_max,
         use_range_weight=True,
     )
@@ -371,8 +386,12 @@ def test_range_weight_numba_python_parity():
         voxel_size,
         margin_voxels,
         max_length_m,
-        plo, pno, pnh,
-        l_occ, l_free, log_odds_clamp,
+        plo,
+        pno,
+        pnh,
+        l_occ,
+        l_free,
+        log_odds_clamp,
         r_max=r_max,
         use_range_weight=True,
     )
@@ -470,16 +489,24 @@ def test_range_weight_endpoint_python_kernel():
         np.array([[50.001, 0.0, 0.0]]),
         None,
         chunk_origin,
-        1.0, 1.0, 200.0,
-        log_odds, n_obs, n_hits,
-        0.85, 0.40, 50.0,
+        1.0,
+        1.0,
+        200.0,
+        log_odds,
+        n_obs,
+        n_hits,
+        0.85,
+        0.40,
+        50.0,
         r_max=200.0,
         use_range_weight=True,
     )
     assert _pack(50, 0, 0) in log_odds
     np.testing.assert_allclose(
-        float(log_odds[_pack(50, 0, 0)]), 0.85, atol=1e-6,
-        err_msg="endpoint inside r_max must keep full l_occ"
+        float(log_odds[_pack(50, 0, 0)]),
+        0.85,
+        atol=1e-6,
+        err_msg="endpoint inside r_max must keep full l_occ",
     )
 
     # Case 2: 500m endpoint, r_max=200 → r*_j = 200/500 = 0.4 → endpoint = 0.34.
@@ -491,9 +518,15 @@ def test_range_weight_endpoint_python_kernel():
         np.array([[500.001, 0.0, 0.0]]),
         None,
         chunk_origin,
-        1.0, 1.0, 1000.0,
-        log_odds, n_obs, n_hits,
-        0.85, 0.40, 50.0,
+        1.0,
+        1.0,
+        1000.0,
+        log_odds,
+        n_obs,
+        n_hits,
+        0.85,
+        0.40,
+        50.0,
         r_max=200.0,
         use_range_weight=True,
     )
@@ -502,7 +535,7 @@ def test_range_weight_endpoint_python_kernel():
         float(log_odds[_pack(500, 0, 0)]),
         0.85 * (200.0 / 500.0),
         rtol=1e-5,
-        err_msg="endpoint at 2.5*r_max must scale to r_max/length"
+        err_msg="endpoint at 2.5*r_max must scale to r_max/length",
     )
 
     # Case 3: flag off → 500m endpoint still gets +l_occ unchanged.
@@ -514,15 +547,23 @@ def test_range_weight_endpoint_python_kernel():
         np.array([[500.001, 0.0, 0.0]]),
         None,
         chunk_origin,
-        1.0, 1.0, 1000.0,
-        log_odds, n_obs, n_hits,
-        0.85, 0.40, 50.0,
+        1.0,
+        1.0,
+        1000.0,
+        log_odds,
+        n_obs,
+        n_hits,
+        0.85,
+        0.40,
+        50.0,
         # default r_max=200.0, use_range_weight=False
     )
     assert _pack(500, 0, 0) in log_odds
     np.testing.assert_allclose(
-        float(log_odds[_pack(500, 0, 0)]), 0.85, atol=1e-6,
-        err_msg="flag-off reproducibility: endpoint must carry full l_occ"
+        float(log_odds[_pack(500, 0, 0)]),
+        0.85,
+        atol=1e-6,
+        err_msg="flag-off reproducibility: endpoint must carry full l_occ",
     )
 
 

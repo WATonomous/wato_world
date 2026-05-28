@@ -53,9 +53,7 @@ class DeskewResult:
     world_path: str
 
 
-def _make_patchwork(
-    params: PatchworkParams, *, required: bool = True
-) -> Optional[Any]:
+def _make_patchwork(params: PatchworkParams, *, required: bool = True) -> Optional[Any]:
     """Lazy-import + construct one Patchwork++ instance.
 
     Raises ImportError when ``required=True`` and pypatchworkpp isn't
