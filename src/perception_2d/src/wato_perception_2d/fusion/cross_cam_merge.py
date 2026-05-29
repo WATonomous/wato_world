@@ -17,8 +17,8 @@ import numpy as np
 
 from wato_common.artifact_store import depth_2d_path, local_path
 from wato_common.geometry import invert_se3, lift_pixel_to_world
+from wato_perception_2d.fusion.tracker_2d import Masklet
 from wato_perception_2d.io import CalibrationInfo
-from wato_perception_2d.tracker_2d import Masklet
 
 log = logging.getLogger(__name__)
 

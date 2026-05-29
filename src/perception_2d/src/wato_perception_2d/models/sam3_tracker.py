@@ -20,9 +20,9 @@ from typing import Optional
 
 import numpy as np
 
-from wato_perception_2d.reid import extract_dino_feature
-from wato_perception_2d.segmenter import SegmentedDetection
-from wato_perception_2d.tracker_2d import Masklet
+from wato_perception_2d.fusion.tracker_2d import Masklet
+from wato_perception_2d.models.reid import extract_dino_feature
+from wato_perception_2d.models.segmenter import SegmentedDetection
 
 log = logging.getLogger(__name__)
 
@@ -214,7 +214,7 @@ class SAM3Tracker:
         seg_detections: list[SegmentedDetection],
     ) -> None:
         """Minimal IoU-based fallback, mirroring Tracker2D logic."""
-        from wato_perception_2d.tracker_2d import Tracker2D
+        from wato_perception_2d.fusion.tracker_2d import Tracker2D
 
         if not hasattr(self, "_fallback_tracker"):
             self._fallback_tracker = Tracker2D(

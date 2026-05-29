@@ -6,13 +6,13 @@ import numpy as np
 import pytest
 from PIL import Image as PILImage
 
-from wato_perception_2d.cross_cam_merge import (
+from wato_perception_2d.fusion.cross_cam_merge import (
     _load_depth_at,
     _mask_centroid_px,
     merge_cross_camera,
 )
+from wato_perception_2d.fusion.tracker_2d import Masklet
 from wato_perception_2d.io import CalibrationInfo
-from wato_perception_2d.tracker_2d import Masklet
 
 
 # ---------------------------------------------------------------------------

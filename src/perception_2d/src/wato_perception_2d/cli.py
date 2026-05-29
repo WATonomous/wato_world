@@ -18,7 +18,11 @@ def main() -> None:
 @click.option(
     "--chunk", "chunk_id", default=None, help="optional chunk_id; default: all chunks."
 )
-@click.option("--config", "config_path", default="/config/perception_2d.yaml")
+@click.option(
+    "--config",
+    "config_path",
+    default="/ws/src/perception_2d/config/perception_2d.yaml",
+)
 def run_cmd(bag_id: str, chunk_id: str | None, config_path: str) -> None:
     cfg = load_config(config_path)
     run_pipeline(cfg, bag_id=bag_id, chunk_id=chunk_id)

@@ -59,7 +59,7 @@ RUN uv pip install --system --break-system-packages \
 # SAM-style models need hydra-core + iopath for config loading.
 # Licenses: SAM3 ("SAM License").
 RUN uv pip install --system --break-system-packages \
-        hydra-core iopath tqdm \
+        hydra-core iopath tqdm pycocotools \
         git+https://github.com/facebookresearch/sam3
 
 # Depth Anything V2 (depth.py).  The upstream Meta/ByteDance repo isn't

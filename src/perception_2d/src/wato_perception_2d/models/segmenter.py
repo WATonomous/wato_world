@@ -21,7 +21,7 @@ from typing import Optional
 
 import numpy as np
 
-from wato_perception_2d.discovery import RegionProposal
+from wato_perception_2d.models.discovery import RegionProposal
 
 log = logging.getLogger(__name__)
 

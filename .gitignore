@@ -31,3 +31,5 @@ dist/
 .idea/
 *.swp
 .DS_Store
+
+venv

@@ -18,7 +18,9 @@ def main() -> None:
     "--chunk", "chunk_id", default=None, help="optional chunk_id; default: all chunks."
 )
 @click.option(
-    "--config", "config_path", default="/config/semantic_lifting.yaml"
+    "--config",
+    "config_path",
+    default="/ws/src/semantic_lifting/config/semantic_lifting.yaml",
 )
 def run_cmd(bag_id: str, chunk_id: str | None, config_path: str) -> None:
     cfg = load_config(config_path)

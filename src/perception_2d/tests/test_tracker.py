@@ -8,8 +8,8 @@ import numpy as np
 import pytest
 from PIL import Image as PILImage
 
-from wato_perception_2d.segmenter import SegmentedDetection
-from wato_perception_2d.tracker_2d import Tracker2D
+from wato_perception_2d.fusion.tracker_2d import Tracker2D
+from wato_perception_2d.models.segmenter import SegmentedDetection
 
 
 def _mask(H: int, W: int, x1: int, y1: int, x2: int, y2: int) -> np.ndarray:

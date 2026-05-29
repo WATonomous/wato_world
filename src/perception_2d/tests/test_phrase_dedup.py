@@ -5,14 +5,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from wato_perception_2d.phrase_dedup import (
+from wato_perception_2d.fusion.phrase_dedup import (
     _exact_string_dedup,
     _mask_iou,
     coarsen_synonyms,
     nms_2d_fallback,
     nms_3d,
 )
-from wato_perception_2d.segmenter import SegmentedDetection
+from wato_perception_2d.models.segmenter import SegmentedDetection
 
 
 # ---------------------------------------------------------------------------

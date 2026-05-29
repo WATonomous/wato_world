@@ -43,10 +43,10 @@ from wato_common.geometry import invert_se3, unflatten_se3
 from wato_common.io.parquet_io import write_table
 from wato_common.schemas import MASKLET_SCHEMA, MaskletRow, encode_int_list
 from wato_perception_2d.config import ComponentConfig
-from wato_perception_2d.cross_cam_merge import merge_cross_camera
-from wato_perception_2d.depth import DepthAnythingV2
-from wato_perception_2d.depth_align import apply_affine, build_anchor_pairs, ransac_affine_fit
-from wato_perception_2d.discovery import Florence2Discovery
+from wato_perception_2d.fusion.cross_cam_merge import merge_cross_camera
+from wato_perception_2d.fusion.depth_align import apply_affine, build_anchor_pairs, ransac_affine_fit
+from wato_perception_2d.fusion.phrase_dedup import coarsen_synonyms, nms_2d_fallback, nms_3d
+from wato_perception_2d.fusion.tracker_2d import Masklet, Tracker2D
 from wato_perception_2d.io import (
     CameraFrameInfo,
     load_calibration,
@@ -54,10 +54,10 @@ from wato_perception_2d.io import (
     load_frame_index,
     load_static_lidar_points,
 )
-from wato_perception_2d.phrase_dedup import coarsen_synonyms, nms_2d_fallback, nms_3d
-from wato_perception_2d.sam3_tracker import SAM3Tracker
-from wato_perception_2d.segmenter import SAM3Segmenter
-from wato_perception_2d.tracker_2d import Masklet, Tracker2D
+from wato_perception_2d.models.depth import DepthAnythingV2
+from wato_perception_2d.models.discovery import Florence2Discovery
+from wato_perception_2d.models.sam3_tracker import SAM3Tracker
+from wato_perception_2d.models.segmenter import SAM3Segmenter
 
 log = logging.getLogger(__name__)
 

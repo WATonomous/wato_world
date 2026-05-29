@@ -48,23 +48,47 @@ class DepthAnythingV2:
         except ImportError:
             return "cpu"
 
+    # encoder → (DPT head config, HF repo holding the .pth checkpoint).
+    _ENCODER_CONFIGS = {
+        "vits": ({"features": 64, "out_channels": [48, 96, 192, 384]},
+                 "depth-anything/Depth-Anything-V2-Small"),
+        "vitb": ({"features": 128, "out_channels": [96, 192, 384, 768]},
+                 "depth-anything/Depth-Anything-V2-Base"),
+        "vitl": ({"features": 256, "out_channels": [256, 512, 1024, 1024]},
+                 "depth-anything/Depth-Anything-V2-Large"),
+    }
+
+    def _encoder(self) -> str:
+        s = self._model_size.lower()
+        if "vits" in s or "small" in s:
+            return "vits"
+        if "vitb" in s or "base" in s:
+            return "vitb"
+        return "vitl"
+
     def _load(self) -> bool:
         global _warned_missing
         if self._model is not None:
             return True
         try:
+            import torch
             from depth_anything_v2.dpt import DepthAnythingV2 as _DA
+            from huggingface_hub import hf_hub_download
 
-            encoder = {"small": "vits", "base": "vitb", "large": "vitl"}.get(
-                self._model_size, "vitl"
+            encoder = self._encoder()
+            head_cfg, repo_id = self._ENCODER_CONFIGS[encoder]
+            ckpt = hf_hub_download(
+                repo_id=repo_id, filename=f"depth_anything_v2_{encoder}.pth"
             )
-            self._model = _DA(encoder=encoder, features=256, out_channels=[256, 512, 1024, 1024])
-            self._model.load_pretrained()
-            self._model.to(self._device)
-            self._model.eval()
-            log.info("DepthAnythingV2 loaded (%s) on %s", self._model_size, self._device)
+            model = _DA(encoder=encoder, **head_cfg)
+            model.load_state_dict(torch.load(ckpt, map_location="cpu"))
+            # Assign only after a fully successful load: a partially-built model
+            # left in self._model would make the guard above wrongly short-circuit.
+            self._model = model.to(self._device).eval()
+            log.info("DepthAnythingV2 loaded (%s) on %s", encoder, self._device)
             return True
         except Exception as exc:  # noqa: BLE001
+            self._model = None
             if not _warned_missing:
                 log.warning(
                     "DepthAnythingV2 unavailable (%s) — returning zero depth maps. "
@@ -92,7 +116,9 @@ class DepthAnythingV2:
             import torch
 
             with torch.no_grad():
-                depth = self._model.infer_image(image_rgb)  # (H, W) float32
+                # infer_image expects a BGR (cv2-style) array; our input is RGB.
+                image_bgr = np.ascontiguousarray(image_rgb[:, :, ::-1])
+                depth = self._model.infer_image(image_bgr)  # (H, W) float32
             if hasattr(depth, "cpu"):
                 depth = depth.cpu().numpy()
             depth = np.asarray(depth, dtype=np.float32)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from wato_perception_2d.depth_align import (
+from wato_perception_2d.fusion.depth_align import (
     apply_affine,
     build_anchor_pairs,
     ransac_affine_fit,

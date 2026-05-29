@@ -17,7 +17,7 @@ from typing import Optional
 
 import numpy as np
 
-from wato_perception_2d.segmenter import SegmentedDetection
+from wato_perception_2d.models.segmenter import SegmentedDetection
 
 log = logging.getLogger(__name__)
 
