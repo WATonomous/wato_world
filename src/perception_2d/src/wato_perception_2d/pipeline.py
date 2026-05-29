@@ -39,7 +39,7 @@ from wato_perception_2d.io import (
     load_dynamic_lidar_points,
     load_frame_index,
 )
-from wato_perception_2d.segmenter import SAM2Segmenter
+from wato_perception_2d.segmenter import build_segmenter
 from wato_perception_2d.tracker_2d import Masklet, Tracker2D
 
 log = logging.getLogger(__name__)
@@ -265,7 +265,8 @@ def run(
 
     # Build models once and reuse across chunks.
     detector = GroundingDINODetector(device=None)
-    segmenter = SAM2Segmenter(checkpoint=cfg.sam2_checkpoint, device=None)
+    checkpoint = cfg.sam2_checkpoint if cfg.segmenter_backend == "sam2" else cfg.sam3_checkpoint
+    segmenter = build_segmenter(cfg.segmenter_backend, checkpoint, device=None)
 
     n_ok = n_skip = 0
     for chunk in chunks:
