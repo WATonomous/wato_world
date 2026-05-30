@@ -17,8 +17,6 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-_warned_missing = False
-
 
 class DepthAnythingV2:
     """Depth Anything V2 relative-depth estimator.
@@ -27,7 +25,8 @@ class DepthAnythingV2:
     - relative_depth: (H, W) float32, arbitrary positive scale.
     - confidence: (H, W) float32 in [0, 1], derived from gradient magnitude.
 
-    Falls back to zero arrays when the package is not installed.
+    Raises RuntimeError when the package/checkpoint is unavailable — no
+    degraded fallback.
     """
 
     def __init__(
@@ -50,12 +49,18 @@ class DepthAnythingV2:
 
     # encoder → (DPT head config, HF repo holding the .pth checkpoint).
     _ENCODER_CONFIGS = {
-        "vits": ({"features": 64, "out_channels": [48, 96, 192, 384]},
-                 "depth-anything/Depth-Anything-V2-Small"),
-        "vitb": ({"features": 128, "out_channels": [96, 192, 384, 768]},
-                 "depth-anything/Depth-Anything-V2-Base"),
-        "vitl": ({"features": 256, "out_channels": [256, 512, 1024, 1024]},
-                 "depth-anything/Depth-Anything-V2-Large"),
+        "vits": (
+            {"features": 64, "out_channels": [48, 96, 192, 384]},
+            "depth-anything/Depth-Anything-V2-Small",
+        ),
+        "vitb": (
+            {"features": 128, "out_channels": [96, 192, 384, 768]},
+            "depth-anything/Depth-Anything-V2-Base",
+        ),
+        "vitl": (
+            {"features": 256, "out_channels": [256, 512, 1024, 1024]},
+            "depth-anything/Depth-Anything-V2-Large",
+        ),
     }
 
     def _encoder(self) -> str:
@@ -66,10 +71,9 @@ class DepthAnythingV2:
             return "vitb"
         return "vitl"
 
-    def _load(self) -> bool:
-        global _warned_missing
+    def _load(self) -> None:
         if self._model is not None:
-            return True
+            return
         try:
             import torch
             from depth_anything_v2.dpt import DepthAnythingV2 as _DA
@@ -86,47 +90,42 @@ class DepthAnythingV2:
             # left in self._model would make the guard above wrongly short-circuit.
             self._model = model.to(self._device).eval()
             log.info("DepthAnythingV2 loaded (%s) on %s", encoder, self._device)
-            return True
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._model = None
-            if not _warned_missing:
-                log.warning(
-                    "DepthAnythingV2 unavailable (%s) — returning zero depth maps. "
-                    "Install: pip install depth-anything-v2",
-                    exc,
-                )
-                _warned_missing = True
-            return False
+            raise RuntimeError(
+                f"Depth Anything V2 ({self._encoder()}) could not be loaded: {exc}. "
+                "Install 'depth_anything_v2' (+ huggingface_hub) or set depth.enabled: "
+                "false. perception_2d does not fall back to zero depth."
+            ) from exc
 
-    def infer(self, image_rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def infer(
+        self, image_rgb: np.ndarray, with_confidence: bool = False
+    ) -> tuple[np.ndarray, Optional[np.ndarray]]:
         """Run inference on one RGB image.
 
         Args:
             image_rgb: (H, W, 3) uint8 RGB image.
+            with_confidence: when True, also compute the gradient-magnitude
+                confidence map.  The pipeline does not consume it, so it
+                defaults off to avoid the per-frame gradient computation.
 
         Returns:
             relative_depth: (H, W) float32, arbitrary positive scale.
-            confidence: (H, W) float32 in [0, 1].
+            confidence: (H, W) float32 in [0, 1], or None when not requested.
         """
-        H, W = image_rgb.shape[:2]
-        if not self._load():
-            return np.zeros((H, W), dtype=np.float32), np.zeros((H, W), dtype=np.float32)
+        self._load()
 
-        try:
-            import torch
+        import torch
 
-            with torch.no_grad():
-                # infer_image expects a BGR (cv2-style) array; our input is RGB.
-                image_bgr = np.ascontiguousarray(image_rgb[:, :, ::-1])
-                depth = self._model.infer_image(image_bgr)  # (H, W) float32
-            if hasattr(depth, "cpu"):
-                depth = depth.cpu().numpy()
-            depth = np.asarray(depth, dtype=np.float32)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("DepthAnythingV2 inference failed: %s", exc)
-            return np.zeros((H, W), dtype=np.float32), np.zeros((H, W), dtype=np.float32)
+        with torch.no_grad():
+            # infer_image expects a BGR (cv2-style) array; our input is RGB.
+            image_bgr = np.ascontiguousarray(image_rgb[:, :, ::-1])
+            depth = self._model.infer_image(image_bgr)  # (H, W) float32
+        if hasattr(depth, "cpu"):
+            depth = depth.cpu().numpy()
+        depth = np.asarray(depth, dtype=np.float32)
 
-        confidence = _gradient_confidence(depth)
+        confidence = _gradient_confidence(depth) if with_confidence else None
         return depth, confidence
 
 

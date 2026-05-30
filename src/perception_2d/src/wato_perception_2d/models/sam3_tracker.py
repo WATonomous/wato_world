@@ -1,14 +1,16 @@
-"""SAM 3.1 video tracker wrapper — primary tracker backend.
+"""SAM 3.1 video tracker wrapper — the "sam3" tracker backend.
 
 Uses SAM 3.1's Object Multiplex update for multi-object temporal tracking
-within a single camera stream.  Falls back to the IoU tracker (Tracker2D)
-when SAM3 is not installed.
+within a single camera stream.  Raises RuntimeError when SAM3 is not installed:
+there is NO automatic fallback.  To run the IoU tracker instead, select it
+explicitly with tracker.backend: "deva" (Tracker2D).
 
 The SAM3Tracker is stateful across frames: call reset() between camera streams
 or chunks.  finalize() closes all active tracks and returns Masklet objects
 compatible with the rest of the pipeline.
 
-DINOv2 ReID embeddings are extracted every `dino_every_k` frames via reid.py.
+DINOv2 appearance embeddings are extracted every `dino_every_k` frames via
+embeddings.py (for downstream re-identification; not used for tracking here).
 """
 
 from __future__ import annotations
@@ -21,12 +23,10 @@ from typing import Optional
 import numpy as np
 
 from wato_perception_2d.fusion.tracker_2d import Masklet
-from wato_perception_2d.models.reid import extract_dino_feature
+from wato_perception_2d.models.embeddings import extract_dino_feature
 from wato_perception_2d.models.segmenter import SegmentedDetection
 
 log = logging.getLogger(__name__)
-
-_warned_missing = False
 
 
 class SAM3Tracker:
@@ -40,7 +40,8 @@ class SAM3Tracker:
             tracker.update(frame.camera_seq, image, seg_dets)
         masklets = tracker.finalize()
 
-    Falls back to IoU-based Tracker2D when SAM3 is unavailable.
+    Raises RuntimeError when SAM3 is unavailable — no IoU fallback (use
+    tracker.backend: "deva" for the IoU tracker explicitly).
     """
 
     def __init__(
@@ -64,9 +65,8 @@ class SAM3Tracker:
         self.dino_every_k = dino_every_k
 
         self._video_predictor = None  # lazy-loaded
-        self._state = None            # SAM3 inference state (per stream)
+        self._state = None  # SAM3 inference state (per stream)
         self._track_meta: dict[int, _TrackMeta] = {}  # sam3_obj_id → metadata
-        self._closed: list[Masklet] = []
         self._frame_counter = 0
 
     @staticmethod
@@ -78,10 +78,9 @@ class SAM3Tracker:
         except ImportError:
             return "cpu"
 
-    def _load(self) -> bool:
-        global _warned_missing
+    def _load(self) -> None:
         if self._video_predictor is not None:
-            return True
+            return
         try:
             from sam3.build_sam import build_sam3_video_predictor
 
@@ -89,22 +88,17 @@ class SAM3Tracker:
                 self._checkpoint, device=self._device
             )
             log.info("SAM3Tracker loaded (%s) on %s", self._checkpoint, self._device)
-            return True
-        except Exception as exc:  # noqa: BLE001
-            if not _warned_missing:
-                log.warning(
-                    "SAM3 video predictor unavailable (%s) — falling back to IoU tracker. "
-                    "Install: pip install sam3",
-                    exc,
-                )
-                _warned_missing = True
-            return False
+        except Exception as exc:
+            raise RuntimeError(
+                f"SAM 3.1 video predictor unavailable (checkpoint {self._checkpoint!r}): "
+                f"{exc}. Install 'sam3', or set tracker.backend: 'deva' to use the IoU "
+                "tracker (Tracker2D) explicitly. perception_2d does not auto-fall-back."
+            ) from exc
 
     def reset(self) -> None:
         """Reset state for a new camera stream.  Call before each camera."""
         self._state = None
         self._track_meta = {}
-        self._closed = []
         self._frame_counter = 0
 
     def update(
@@ -113,19 +107,13 @@ class SAM3Tracker:
         image_rgb: np.ndarray,
         seg_detections: list[SegmentedDetection],
     ) -> None:
-        """Process one frame.  Call in camera_seq order."""
+        """Process one frame.  Call in camera_seq order.
+
+        Raises RuntimeError if SAM3 is unavailable; SAM3 step errors propagate.
+        """
         self._frame_counter += 1
-
-        if not self._load():
-            # Delegate to IoU fallback — don't track via SAM3.
-            self._iou_update(camera_seq, image_rgb, seg_detections)
-            return
-
-        try:
-            self._sam3_update(camera_seq, image_rgb, seg_detections)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("SAM3 tracking step failed (frame %d): %s", camera_seq, exc)
-            self._iou_update(camera_seq, image_rgb, seg_detections)
+        self._load()
+        self._sam3_update(camera_seq, image_rgb, seg_detections)
 
     def _sam3_update(
         self,
@@ -133,13 +121,25 @@ class SAM3Tracker:
         image_rgb: np.ndarray,
         seg_detections: list[SegmentedDetection],
     ) -> None:
-        """SAM 3.1 Object Multiplex tracking step."""
+        """SAM 3.1 Object Multiplex tracking step.
+
+        FIXME(sam3-api): this streaming flow (re-register every detection each
+        frame, then propagate a single frame) does NOT perform real cross-frame
+        association — `obj_id = id(sd)` is a fresh id every frame, so each
+        detection becomes a brand-new track.  A correct implementation must
+        carry a stable per-object id across frames (matching new detections to
+        existing tracks) and use SAM 3.1's propagation to maintain identity.
+        Fixing this requires pinning the actual SAM 3.1 video-predictor API
+        (init_state / add_new_mask / propagate_in_video signatures are
+        currently unverified — the package is not installed in CI).  Until then
+        the IoU fallback (Tracker2D) is the path that produces correct masklets.
+        """
         if self._state is None:
             self._state = self._video_predictor.init_state(images_dir=None)
 
         # Register new detections as tracked objects.
         for sd in seg_detections:
-            obj_id = id(sd)  # unique per detection in this call
+            obj_id = id(sd)  # FIXME(sam3-api): not stable across frames — see above
             self._video_predictor.add_new_mask(
                 inference_state=self._state,
                 frame_idx=camera_seq,
@@ -164,21 +164,25 @@ class SAM3Tracker:
             if obj_id not in self._track_meta:
                 continue
             meta = self._track_meta[obj_id]
-            mask = masks[0].cpu().numpy().astype(bool) if hasattr(masks, "cpu") else masks[0].astype(bool)
+            mask = (
+                masks[0].cpu().numpy().astype(bool)
+                if hasattr(masks, "cpu")
+                else masks[0].astype(bool)
+            )
             mask_path = self._save_mask(meta.masklet_id, camera_seq, mask)
             meta.frames_present.append(camera_seq)
             meta.mask_paths.append(mask_path)
 
             if self._frame_counter % self.dino_every_k == 0:
-                feat = extract_dino_feature(image_rgb, mask, self.dino_model, self._device)
+                feat = extract_dino_feature(
+                    image_rgb, mask, self.dino_model, self._device
+                )
                 if feat is not None:
                     meta.dino_accum.append(feat)
 
     def finalize(self) -> list[Masklet]:
-        """Close all tracks and return Masklet objects."""
-        if self._video_predictor is None:
-            return list(self._closed)
-
+        """Close all SAM3-tracked objects and return Masklet objects."""
+        closed: list[Masklet] = []
         for meta in self._track_meta.values():
             if not meta.frames_present:
                 continue
@@ -187,7 +191,7 @@ class SAM3Tracker:
                 if meta.dino_accum
                 else None
             )
-            self._closed.append(
+            closed.append(
                 Masklet(
                     masklet_id=meta.masklet_id,
                     bag_id=meta.bag_id,
@@ -201,33 +205,7 @@ class SAM3Tracker:
                 )
             )
         self._track_meta = {}
-        return list(self._closed)
-
-    # ------------------------------------------------------------------
-    # IoU fallback (used when SAM3 is unavailable)
-    # ------------------------------------------------------------------
-
-    def _iou_update(
-        self,
-        camera_seq: int,
-        image_rgb: np.ndarray,
-        seg_detections: list[SegmentedDetection],
-    ) -> None:
-        """Minimal IoU-based fallback, mirroring Tracker2D logic."""
-        from wato_perception_2d.fusion.tracker_2d import Tracker2D
-
-        if not hasattr(self, "_fallback_tracker"):
-            self._fallback_tracker = Tracker2D(
-                bag_id=self.bag_id,
-                chunk_id=self.chunk_id,
-                cam_id=self.cam_id,
-                masks_2d_base_dir=self.masks_2d_base_dir,
-                dino_model=self.dino_model,
-                dino_every_k=self.dino_every_k,
-            )
-        self._fallback_tracker.update(camera_seq, image_rgb, seg_detections)
-        # Sync closed masklets.
-        self._closed = self._fallback_tracker._closed  # type: ignore[attr-defined]
+        return closed
 
     def _save_mask(self, masklet_id: str, camera_seq: int, mask: np.ndarray) -> str:
         from PIL import Image as PILImage
@@ -243,8 +221,15 @@ class _TrackMeta:
     """Internal metadata for one SAM3-tracked object."""
 
     __slots__ = (
-        "masklet_id", "bag_id", "chunk_id", "cam_id", "cls", "score",
-        "frames_present", "mask_paths", "dino_accum",
+        "masklet_id",
+        "bag_id",
+        "chunk_id",
+        "cam_id",
+        "cls",
+        "score",
+        "frames_present",
+        "mask_paths",
+        "dino_accum",
     )
 
     def __init__(

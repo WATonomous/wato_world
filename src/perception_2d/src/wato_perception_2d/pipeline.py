@@ -2,8 +2,9 @@
 
 Per-chunk steps:
   Image branch (per camera, per frame):
-    1. Florence-2 → RegionProposals
-    2. Filter proposals against prompts.yaml allowlist
+    1. Discovery → RegionProposals (Florence-2 open-vocab, or a fixed
+       closed-set class list when discovery.backend == "fixed")
+    2. Filter proposals against prompts.yaml allowlist (florence2 backend only)
     3. SAM3.segment() text-prompted → SegmentedDetections
     4. phrase_dedup.coarsen_synonyms() → deduped detections
   Depth branch (per camera, per frame, parallel with image branch):
@@ -18,8 +19,14 @@ Per-chunk steps:
    12. tracker.update()
   After all frames:
    13. tracker.finalize() → cam_masklets
-   14. cross_cam_merge() using depth_2d artifacts
-   15. Write detections_2d.parquet + tracklets_2d.parquet
+   14. Write detections_2d.parquet + tracklets_2d.parquet
+
+Cross-camera identity merging is intentionally NOT done here.  perception_2d's
+deliverable is per-camera masklets + masks + metric depth + DINOv2 appearance
+embeddings.  Resolving the same physical object across cameras belongs in the
+downstream `tracking` component, which does it in 3D/4D (gated by the DINOv2
+features persisted here).  `global_object_id` is left null for `tracking` to
+populate.
 """
 
 from __future__ import annotations
@@ -43,9 +50,16 @@ from wato_common.geometry import invert_se3, unflatten_se3
 from wato_common.io.parquet_io import write_table
 from wato_common.schemas import MASKLET_SCHEMA, MaskletRow, encode_int_list
 from wato_perception_2d.config import ComponentConfig
-from wato_perception_2d.fusion.cross_cam_merge import merge_cross_camera
-from wato_perception_2d.fusion.depth_align import apply_affine, build_anchor_pairs, ransac_affine_fit
-from wato_perception_2d.fusion.phrase_dedup import coarsen_synonyms, nms_2d_fallback, nms_3d
+from wato_perception_2d.fusion.depth_align import (
+    apply_affine,
+    build_anchor_pairs,
+    ransac_affine_fit,
+)
+from wato_perception_2d.fusion.phrase_dedup import (
+    coarsen_synonyms,
+    nms_2d_fallback,
+    nms_3d,
+)
 from wato_perception_2d.fusion.tracker_2d import Masklet, Tracker2D
 from wato_perception_2d.io import (
     CameraFrameInfo,
@@ -55,7 +69,10 @@ from wato_perception_2d.io import (
     load_static_lidar_points,
 )
 from wato_perception_2d.models.depth import DepthAnythingV2
-from wato_perception_2d.models.discovery import Florence2Discovery
+from wato_perception_2d.models.discovery import (
+    FixedClassDiscovery,
+    Florence2Discovery,
+)
 from wato_perception_2d.models.sam3_tracker import SAM3Tracker
 from wato_perception_2d.models.segmenter import SAM3Segmenter
 
@@ -109,7 +126,7 @@ def _process_chunk(
     cfg: ComponentConfig,
     bag_id: str,
     chunk_id: str,
-    discovery: Florence2Discovery,
+    discovery: Florence2Discovery | FixedClassDiscovery,
     segmenter: SAM3Segmenter,
     depth_model: Optional[DepthAnythingV2],
 ) -> None:
@@ -147,8 +164,8 @@ def _process_chunk(
                 cam_id=cam_id,
                 masks_2d_base_dir=masks_base,
                 checkpoint=cfg.segmentation.checkpoint,
-                dino_model=cfg.reid.model,
-                dino_every_k=cfg.reid.every_k_frames,
+                dino_model=cfg.embeddings.model,
+                dino_every_k=cfg.embeddings.every_k_frames,
             )
             tracker.reset()
         else:
@@ -157,8 +174,8 @@ def _process_chunk(
                 chunk_id=chunk_id,
                 cam_id=cam_id,
                 masks_2d_base_dir=masks_base,
-                dino_model=cfg.reid.model,
-                dino_every_k=cfg.reid.every_k_frames,
+                dino_model=cfg.embeddings.model,
+                dino_every_k=cfg.embeddings.every_k_frames,
             )
 
         # Rolling fallback affine params for depth alignment.
@@ -174,17 +191,21 @@ def _process_chunk(
 
             # --- Image branch ---
             proposals = discovery.propose(image)
-            # Filter to prompts allowlist (case-insensitive substring match).
-            if text_prompt_set:
+            # Florence-2 emits open-vocabulary phrases — filter them against the
+            # taxonomy allowlist.  In "fixed" mode the proposals already ARE the
+            # configured vocabulary, so no filtering is applied.
+            if cfg.discovery.backend == "florence2" and text_prompt_set:
                 proposals = [
-                    p for p in proposals
+                    p
+                    for p in proposals
                     if any(kw in p.phrase.lower() for kw in text_prompt_set)
                     and p.confidence >= cfg.discovery.min_confidence
                 ]
 
             seg_detections = segmenter.segment(image, proposals)
             seg_detections = [
-                sd for sd in seg_detections
+                sd
+                for sd in seg_detections
                 if sd.sam3_score >= cfg.segmentation.min_score
             ]
             seg_detections = coarsen_synonyms(
@@ -193,13 +214,23 @@ def _process_chunk(
 
             # --- Depth branch ---
             metric_depth = np.zeros((H, W), dtype=np.float16)
-            fit_params: dict = {"a": 1.0, "b": 0.0, "n_inliers": 0, "rmse_inliers_m": 0.0, "fit_status": 2}
+            fit_params: dict = {
+                "a": 1.0,
+                "b": 0.0,
+                "n_inliers": 0,
+                "rmse_inliers_m": 0.0,
+                "fit_status": 2,
+            }
 
             if cfg.depth.enabled and depth_model is not None:
-                rel_depth, confidence = depth_model.infer(image)
+                rel_depth, _ = depth_model.infer(image)
                 static_pts = load_static_lidar_points(bag_id, chunk_id, frame.sweep_id)
 
-                if static_pts is not None and frame.valid_pose and frame.world_T_ego_flat:
+                if (
+                    static_pts is not None
+                    and frame.valid_pose
+                    and frame.world_T_ego_flat
+                ):
                     world_T_ego = unflatten_se3(frame.world_T_ego_flat)
                     cam_T_ego = invert_se3(calib.ego_T_cam)
                     cam_T_world = cam_T_ego @ invert_se3(world_T_ego)
@@ -220,6 +251,7 @@ def _process_chunk(
                         n_iter=cfg.depth.ransac_n_iter,
                         inlier_threshold_m=cfg.depth.ransac_inlier_threshold_m,
                         fallback=fallback,
+                        min_anchors=cfg.depth.min_lidar_anchors,
                     )
                     fit_params["n_anchors"] = int(len(d_lidar))
                     if fit_params["fit_status"] == 0:
@@ -227,10 +259,16 @@ def _process_chunk(
 
                 metric_depth = apply_affine(rel_depth, fit_params["a"], fit_params["b"])
 
-            _write_depth_artifact(bag_id, chunk_id, cam_id, frame.camera_seq, metric_depth, fit_params)
+            _write_depth_artifact(
+                bag_id, chunk_id, cam_id, frame.camera_seq, metric_depth, fit_params
+            )
 
             # --- Converge: 3D NMS then track ---
-            if fit_params["fit_status"] < 2 and frame.valid_pose and frame.world_T_ego_flat:
+            if (
+                fit_params["fit_status"] < 2
+                and frame.valid_pose
+                and frame.world_T_ego_flat
+            ):
                 world_T_ego = unflatten_se3(frame.world_T_ego_flat)
                 seg_detections = nms_3d(
                     seg_detections,
@@ -250,33 +288,21 @@ def _process_chunk(
         cam_masklets = tracker.finalize()
         log.info(
             "chunk %s / %s: %d masklets from %d frames",
-            chunk_id, cam_id, len(cam_masklets), len(cam_frames),
+            chunk_id,
+            cam_id,
+            len(cam_masklets),
+            len(cam_frames),
         )
         all_masklets.extend(cam_masklets)
 
-    # Cross-camera merge using depth_2d artifacts for back-projection depth.
-    if len(frames_by_cam) > 1 and all_masklets:
-        world_T_ego_by_cam: dict[str, np.ndarray] = {}
-        for cam_id, cam_frames in frames_by_cam.items():
-            for f in reversed(cam_frames):
-                if f.valid_pose and f.world_T_ego_flat:
-                    world_T_ego_by_cam[cam_id] = unflatten_se3(f.world_T_ego_flat)
-                    break
-
-        all_masklets = merge_cross_camera(
-            all_masklets,
-            calibration,
-            world_T_ego_by_cam,
-            bag_id=bag_id,
-            chunk_id=chunk_id,
-            radius_m=cfg.cross_cam.match_radius_m,
-        )
-
-    _write_masklets(bag_id, chunk_id, all_masklets)
+    # NOTE: cross-camera identity merging is deliberately deferred to the
+    # downstream `tracking` component (see module docstring).  global_object_id
+    # is left null here.
+    _write_masklets(bag_id, chunk_id, all_masklets, cfg.synonym_to_class())
     log.info("chunk %s: wrote %d masklets", chunk_id, len(all_masklets))
 
 
-def _masklet_to_row(mkl: Masklet) -> dict:
+def _masklet_to_row(mkl: Masklet, class_map: dict[str, str]) -> dict:
     dino_path: Optional[str] = None
     if mkl.dino_feature is not None:
         dino_dir = os.path.dirname(mkl.mask_paths[0]) if mkl.mask_paths else ""
@@ -284,12 +310,16 @@ def _masklet_to_row(mkl: Masklet) -> dict:
             dino_path = os.path.join(dino_dir, "dino_feature.npy")
             np.save(dino_path, mkl.dino_feature)
 
+    # mkl.cls is the raw Florence-2 phrase; map it to the canonical taxonomy
+    # class when prompts.yaml defines a synonym, otherwise keep the raw phrase.
+    canonical = class_map.get(mkl.cls, mkl.cls)
+
     return MaskletRow(
         masklet_id=mkl.masklet_id,
         bag_id=mkl.bag_id,
         chunk_id=mkl.chunk_id,
         cam_id=mkl.cam_id,
-        cls=mkl.cls,
+        cls=canonical,
         score=mkl.score,
         frames_present=encode_int_list(mkl.frames_present),
         mask_path=mkl.mask_paths[0] if mkl.mask_paths else "",
@@ -300,8 +330,14 @@ def _masklet_to_row(mkl: Masklet) -> dict:
     ).model_dump()
 
 
-def _write_masklets(bag_id: str, chunk_id: str, masklets: list[Masklet]) -> None:
-    rows = [_masklet_to_row(m) for m in masklets]
+def _write_masklets(
+    bag_id: str,
+    chunk_id: str,
+    masklets: list[Masklet],
+    class_map: Optional[dict[str, str]] = None,
+) -> None:
+    class_map = class_map or {}
+    rows = [_masklet_to_row(m, class_map) for m in masklets]
     write_table(rows, MASKLET_SCHEMA, detections_2d_path(bag_id, chunk_id))
     write_table(rows, MASKLET_SCHEMA, tracklets_2d_path(bag_id, chunk_id))
 
@@ -334,9 +370,13 @@ def run(
             raise ValueError(f"chunk_id {chunk_id!r} not found for bag {bag_id!r}")
 
     # Build models once and reuse across chunks.
-    discovery = Florence2Discovery(
-        model_id=cfg.discovery.model, device=None
-    )
+    discovery: Florence2Discovery | FixedClassDiscovery
+    if cfg.discovery.backend == "fixed":
+        classes = cfg.discovery.fixed_classes or cfg.text_prompts()
+        discovery = FixedClassDiscovery(classes)
+        log.info("perception_2d: fixed-vocabulary discovery (%d classes)", len(classes))
+    else:
+        discovery = Florence2Discovery(model_id=cfg.discovery.model, device=None)
     segmenter = SAM3Segmenter(checkpoint=cfg.segmentation.checkpoint, device=None)
     depth_model: Optional[DepthAnythingV2] = None
     if cfg.depth.enabled:
@@ -351,13 +391,14 @@ def run(
             )
             n_skip += 1
             continue
-        try:
-            _process_chunk(cfg, bag_id, cid, discovery, segmenter, depth_model)
-            n_ok += 1
-        except Exception:  # noqa: BLE001
-            log.exception("perception_2d: chunk %s failed", cid)
+        # Fail loud: a chunk failure (e.g. a missing model) propagates out of
+        # run() rather than being swallowed into a log line.
+        _process_chunk(cfg, bag_id, cid, discovery, segmenter, depth_model)
+        n_ok += 1
 
     log.info(
         "perception_2d complete for bag %s: %d processed, %d skipped",
-        bag_id, n_ok, n_skip,
+        bag_id,
+        n_ok,
+        n_skip,
     )

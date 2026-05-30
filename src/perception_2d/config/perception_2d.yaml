@@ -1,13 +1,21 @@
 discovery:
+  # "florence2" → open-vocabulary noun phrases from Florence-2.
+  # "fixed"     → bypass Florence-2 and prompt SAM 3.1 directly with the
+  #               `fixed_classes` list below (closed-set, e.g. COCO classes).
+  backend: "florence2"
   model: "microsoft/Florence-2-large-ft"
   task: "<DENSE_REGION_CAPTION>"
   min_confidence: 0.3
+  # Used only when backend: "fixed".  Empty → falls back to the prompts.yaml
+  # taxonomy.  Example COCO-style driving subset:
+  #   fixed_classes: ["car", "truck", "bus", "motorcycle", "bicycle",
+  #                   "person", "traffic light", "stop sign"]
+  fixed_classes: []
 
 segmentation:
   model: "sam3.1"
   checkpoint: "facebook/sam3.1"
   min_score: 0.5
-  object_only: true
 
 phrase_dedup:
   synonym_clip_threshold: 0.85
@@ -15,8 +23,7 @@ phrase_dedup:
   nms_2d_iou: 0.5
 
 tracker:
-  backend: "sam3"
-  deva_model: "deva-vit-l"
+  backend: "sam3"  # "sam3" (primary) or "deva" (IoU fallback, Tracker2D)
 
 depth:
   enabled: true
@@ -24,16 +31,16 @@ depth:
   min_lidar_anchors: 30
   ransac_n_iter: 200
   ransac_inlier_threshold_m: 0.5
-  use_static_anchors_only: true
   fallback_window: 5
   sky_mask_top_fraction: 0.3
-  output_dtype: "float16"
 
-reid:
+# DINOv2 appearance-embedding extraction (persisted per masklet for the
+# downstream `tracking` component; perception_2d does not re-identify here).
+embeddings:
   model: "dinov2_vitl14"
   every_k_frames: 5
 
-cross_cam:
-  match_radius_m: 1.5
+# Cross-camera identity merging is handled downstream in the `tracking`
+# component (3D/4D association gated by the DINOv2 features written here).
 
 prompts_path: "/config/prompts.yaml"

@@ -21,6 +21,10 @@ from wato_perception_2d.models.segmenter import SegmentedDetection
 
 log = logging.getLogger(__name__)
 
+# Cache the CLIP tokenizer + text model so from_pretrained runs once rather
+# than on every coarsen_synonyms() call (i.e. every frame, every camera).
+_CLIP_CACHE: dict[str, tuple] = {}
+
 
 def coarsen_synonyms(
     seg_detections: list[SegmentedDetection],
@@ -31,22 +35,21 @@ def coarsen_synonyms(
     Groups phrases by CLIP text-embedding cosine similarity.  Within each
     group keeps the detection with the highest sam3_score.
 
-    Falls back to exact-string deduplication if CLIP (via transformers) is
-    unavailable.
-
     Args:
         seg_detections: list of SegmentedDetection (one per SAM3 output).
         clip_threshold: cosine similarity threshold for merging [0, 1].
 
     Returns:
         Deduplicated list (at most one detection per semantic cluster).
+
+    Raises:
+        RuntimeError: if CLIP (transformers) is unavailable — no degraded
+        string-only fallback.
     """
     if len(seg_detections) <= 1:
         return seg_detections
 
     embeddings = _clip_text_embeddings([d.phrase for d in seg_detections])
-    if embeddings is None:
-        return _exact_string_dedup(seg_detections)
 
     n = len(seg_detections)
     assigned = [-1] * n
@@ -73,37 +76,50 @@ def coarsen_synonyms(
     return list(best.values())
 
 
-def _exact_string_dedup(
-    seg_detections: list[SegmentedDetection],
-) -> list[SegmentedDetection]:
-    """Deduplicate by exact phrase string, keeping highest sam3_score."""
-    best: dict[str, SegmentedDetection] = {}
-    for det in seg_detections:
-        if det.phrase not in best or det.sam3_score > best[det.phrase].sam3_score:
-            best[det.phrase] = det
-    return list(best.values())
+def _get_clip(model_id: str = "openai/clip-vit-base-patch32"):
+    """Load (or fetch from cache) the CLIP tokenizer + text model."""
+    cached = _CLIP_CACHE.get(model_id)
+    if cached is None:
+        from transformers import CLIPTextModel, CLIPTokenizer
+
+        tokenizer = CLIPTokenizer.from_pretrained(model_id)
+        model = CLIPTextModel.from_pretrained(model_id)
+        model.eval()
+        cached = (tokenizer, model)
+        _CLIP_CACHE[model_id] = cached
+    return cached
 
 
 def _clip_text_embeddings(
     phrases: list[str],
-) -> Optional[np.ndarray]:
-    """Return (N, D) normalized CLIP text embeddings, or None if unavailable."""
+) -> np.ndarray:
+    """Return (N, D) normalized CLIP text embeddings.
+
+    NOTE: uses the raw CLS token of last_hidden_state rather than CLIP's
+    projected text-embedding space (get_text_features); the 0.85 similarity
+    threshold is calibrated against this space.  Revisit if synonym clustering
+    behaves poorly.
+
+    Raises:
+        RuntimeError: if CLIP (transformers) is unavailable.
+    """
     try:
         import torch
-        from transformers import CLIPTextModel, CLIPTokenizer
 
-        tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
-        model = CLIPTextModel.from_pretrained("openai/clip-vit-base-patch32")
-        model.eval()
+        tokenizer, model = _get_clip()
+    except Exception as exc:
+        raise RuntimeError(
+            f"CLIP (transformers) is required for synonym coarsening: {exc}. "
+            "Install 'transformers'. perception_2d does not fall back to "
+            "string-only dedup."
+        ) from exc
 
-        inputs = tokenizer(phrases, padding=True, truncation=True, return_tensors="pt")
-        with torch.no_grad():
-            outputs = model(**inputs)
-        embeds = outputs.last_hidden_state[:, 0, :]  # CLS token
-        embeds = embeds / embeds.norm(dim=-1, keepdim=True)
-        return embeds.cpu().numpy()
-    except Exception:  # noqa: BLE001
-        return None
+    inputs = tokenizer(phrases, padding=True, truncation=True, return_tensors="pt")
+    with torch.no_grad():
+        outputs = model(**inputs)
+    embeds = outputs.last_hidden_state[:, 0, :]  # CLS token
+    embeds = embeds / embeds.norm(dim=-1, keepdim=True)
+    return embeds.cpu().numpy()
 
 
 def nms_3d(

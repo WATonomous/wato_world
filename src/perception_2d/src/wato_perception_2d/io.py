@@ -95,11 +95,25 @@ def load_calibration(bag_id: str) -> dict[str, CalibrationInfo]:
     return result
 
 
-def _load_lidar_proc_row(
-    bag_id: str, chunk_id: str, sweep_id: int
-) -> Optional[dict]:
-    proc_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
-    return next((r for r in proc_rows if int(r["sweep_id"]) == sweep_id), None)
+# Cache the lidar_proc_index parquet as a {sweep_id → row} map, keyed by the
+# resolved local path.  Previously every frame re-read the whole parquet and
+# linearly scanned it for one sweep_id.  The key is the resolved path (unique
+# per pytest tmp_path and per real chunk), so there's no cross-chunk staleness.
+_PROC_INDEX_CACHE: dict[str, dict[int, dict]] = {}
+
+
+def _proc_index_map(bag_id: str, chunk_id: str) -> dict[int, dict]:
+    path = local_path(lidar_proc_index_path(bag_id, chunk_id))
+    cached = _PROC_INDEX_CACHE.get(path)
+    if cached is None:
+        rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
+        cached = {int(r["sweep_id"]): r for r in rows}
+        _PROC_INDEX_CACHE[path] = cached
+    return cached
+
+
+def _load_lidar_proc_row(bag_id: str, chunk_id: str, sweep_id: int) -> Optional[dict]:
+    return _proc_index_map(bag_id, chunk_id).get(int(sweep_id))
 
 
 def load_dynamic_lidar_points(

@@ -1,12 +1,14 @@
-"""Per-camera 2D temporal tracker — IoU fallback backend.
+"""Per-camera 2D temporal tracker — the "deva" (IoU) tracker backend.
 
 Associates per-frame segmented detections into masklets using IoU-based
-greedy matching.  This is the fallback tracker used when `tracker.backend`
-is set to "deva" in config; the primary tracker is SAM3Tracker in
-sam3_tracker.py.
+greedy matching.  Selected explicitly via `tracker.backend: "deva"`; the
+default backend is SAM3Tracker ("sam3") in sam3_tracker.py.  SAM3Tracker no
+longer auto-falls-back to this — choosing the IoU tracker is a deliberate
+config choice.
 
-Extracts DINOv2 embeddings for each tracklet at configurable intervals
-for downstream cross-camera ReID (shared with sam3_tracker via reid.py).
+Extracts DINOv2 appearance embeddings for each tracklet at configurable
+intervals for downstream re-identification (shared with sam3_tracker via
+embeddings.py).
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from typing import Optional
 
 import numpy as np
 
-from wato_perception_2d.models.reid import extract_dino_feature
+from wato_perception_2d.models.embeddings import extract_dino_feature
 from wato_perception_2d.models.segmenter import SegmentedDetection
 
 log = logging.getLogger(__name__)

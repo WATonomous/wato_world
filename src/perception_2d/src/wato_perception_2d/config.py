@@ -12,9 +12,16 @@ from pydantic import BaseModel, ConfigDict, Field
 class DiscoveryConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    # "florence2" → open-vocabulary phrases from Florence-2.
+    # "fixed"     → bypass Florence-2 and prompt SAM 3.1 directly with
+    #               `fixed_classes` (closed-set, e.g. COCO classes).
+    backend: str = "florence2"
     model: str = "microsoft/Florence-2-large-ft"
     task: str = "<DENSE_REGION_CAPTION>"
     min_confidence: float = 0.3
+    # Closed-set class list used when backend == "fixed".  Empty → falls back to
+    # the prompts.yaml taxonomy (text_prompts()).
+    fixed_classes: list[str] = Field(default_factory=list)
 
 
 class SegmentationConfig(BaseModel):
@@ -23,7 +30,6 @@ class SegmentationConfig(BaseModel):
     model: str = "sam3.1"
     checkpoint: str = "facebook/sam3.1"
     min_score: float = 0.5
-    object_only: bool = True
 
 
 class PhraseDeduplicationConfig(BaseModel):
@@ -37,8 +43,7 @@ class PhraseDeduplicationConfig(BaseModel):
 class TrackerConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    backend: str = "sam3"  # "sam3" or "deva" (IoU fallback)
-    deva_model: str = "deva-vit-l"
+    backend: str = "sam3"  # "sam3" (primary) or "deva" (IoU fallback, Tracker2D)
 
 
 class DepthConfig(BaseModel):
@@ -49,23 +54,22 @@ class DepthConfig(BaseModel):
     min_lidar_anchors: int = 30
     ransac_n_iter: int = 200
     ransac_inlier_threshold_m: float = 0.5
-    use_static_anchors_only: bool = True
     fallback_window: int = 5
     sky_mask_top_fraction: float = 0.3
-    output_dtype: str = "float16"
 
 
-class ReidConfig(BaseModel):
+class EmbeddingConfig(BaseModel):
+    """DINOv2 appearance-embedding extraction.
+
+    This stage only *extracts and persists* embeddings (for the downstream
+    `tracking` component to use for re-identification); it does not itself
+    re-identify anything.
+    """
+
     model_config = ConfigDict(extra="allow")
 
     model: str = "dinov2_vitl14"
     every_k_frames: int = 5
-
-
-class CrossCamConfig(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    match_radius_m: float = 1.5
 
 
 class ComponentConfig(BaseModel):
@@ -78,8 +82,7 @@ class ComponentConfig(BaseModel):
     )
     tracker: TrackerConfig = Field(default_factory=TrackerConfig)
     depth: DepthConfig = Field(default_factory=DepthConfig)
-    reid: ReidConfig = Field(default_factory=ReidConfig)
-    cross_cam: CrossCamConfig = Field(default_factory=CrossCamConfig)
+    embeddings: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
 
     prompts_path: str = "/config/prompts.yaml"
     upstream_versions: dict[str, str] = Field(default_factory=dict)
@@ -108,17 +111,26 @@ class ComponentConfig(BaseModel):
             synonyms.extend(entry.get("synonyms", [entry["name"]]))
         return synonyms
 
-    def class_from_synonym(self, synonym: str) -> str:
-        """Map a detected synonym back to its canonical class name."""
+    def synonym_to_class(self) -> dict[str, str]:
+        """Build a {synonym → canonical class name} map from prompts.yaml.
+
+        Returns an empty map when prompts.yaml is absent (callers then keep the
+        raw phrase).  Built once per chunk and passed to row construction so
+        masklet `cls` carries the canonical taxonomy label rather than the raw
+        Florence-2 phrase.
+        """
         path = self.prompts_path
         if not os.path.exists(path):
-            return synonym
+            return {}
         with open(path, "r", encoding="utf-8") as fh:
             data: dict[str, Any] = yaml.safe_load(fh) or {}
+        mapping: dict[str, str] = {}
         for entry in data.get("primary_taxonomy", []):
-            if synonym in entry.get("synonyms", []):
-                return entry["name"]
-        return synonym
+            name = entry["name"]
+            for syn in entry.get("synonyms", [name]):
+                mapping[syn] = name
+            mapping.setdefault(name, name)
+        return mapping
 
 
 def load_config(path: str) -> ComponentConfig:

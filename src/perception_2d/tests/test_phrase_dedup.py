@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 
 from wato_perception_2d.fusion.phrase_dedup import (
-    _exact_string_dedup,
     _mask_iou,
     coarsen_synonyms,
     nms_2d_fallback,
@@ -42,31 +41,12 @@ def _det(
 
 
 # ---------------------------------------------------------------------------
-# _exact_string_dedup
-# ---------------------------------------------------------------------------
-
-
-def test_exact_dedup_identical_phrase_keeps_highest_score():
-    m = _make_mask(100, 100, 10, 10, 50, 50)
-    dets = [_det("car", m, 0.7), _det("car", m, 0.9), _det("car", m, 0.3)]
-    result = _exact_string_dedup(dets)
-    assert len(result) == 1
-    assert result[0].sam3_score == pytest.approx(0.9)
-
-
-def test_exact_dedup_different_phrases_all_kept():
-    m = _make_mask(100, 100, 0, 0, 50, 50)
-    dets = [_det("car", m), _det("truck", m), _det("pedestrian", m)]
-    result = _exact_string_dedup(dets)
-    assert len(result) == 3
-
-
-# ---------------------------------------------------------------------------
-# coarsen_synonyms — without CLIP (exact-string fallback)
+# coarsen_synonyms
 # ---------------------------------------------------------------------------
 
 
 def test_coarsen_synonyms_empty():
+    """Trivial inputs short-circuit before any CLIP load."""
     assert coarsen_synonyms([]) == []
 
 
@@ -76,21 +56,15 @@ def test_coarsen_synonyms_single():
     assert len(coarsen_synonyms(dets)) == 1
 
 
-def test_coarsen_synonyms_fallback_deduplicates_exact():
-    """CLIP will be unavailable in test env; falls back to exact-string dedup."""
+def test_coarsen_synonyms_raises_without_clip():
+    """>1 detection with CLIP (transformers) unavailable → loud RuntimeError.
+
+    No silent string-only fallback.
+    """
     m = _make_mask(100, 100, 0, 0, 50, 50)
-    dets = [
-        _det("car", m, sam3_score=0.6),
-        _det("car", m, sam3_score=0.9),
-        _det("truck", m, sam3_score=0.5),
-    ]
-    result = coarsen_synonyms(dets)
-    # Both unique phrases kept; "car" deduped to highest score.
-    phrases = {d.phrase for d in result}
-    assert "car" in phrases
-    assert "truck" in phrases
-    car_det = next(d for d in result if d.phrase == "car")
-    assert car_det.sam3_score == pytest.approx(0.9)
+    dets = [_det("car", m, sam3_score=0.9), _det("truck", m, sam3_score=0.5)]
+    with pytest.raises(RuntimeError):
+        coarsen_synonyms(dets)
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +95,9 @@ def test_nms_2d_partial_overlap_below_threshold_both_kept():
     m2 = _make_mask(100, 100, 50, 50, 100, 100)
     iou = _mask_iou(m1, m2)
     assert iou < 0.5  # verify the test setup
-    result = nms_2d_fallback([_det("a", m1, 0.8), _det("b", m2, 0.7)], iou_threshold=0.5)
+    result = nms_2d_fallback(
+        [_det("a", m1, 0.8), _det("b", m2, 0.7)], iou_threshold=0.5
+    )
     assert len(result) == 2
 
 
