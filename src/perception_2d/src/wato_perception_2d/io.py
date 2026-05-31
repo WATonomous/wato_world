@@ -95,11 +95,41 @@ def load_calibration(bag_id: str) -> dict[str, CalibrationInfo]:
     return result
 
 
+# Per-chunk caches so the lidar-proc index isn't re-read (and sweeps aren't
+# re-loaded) once per camera-frame. On nuScenes each sweep is referenced by ~6
+# cameras; without these the same parquet scan + npz load happens ~6×.
+# Cleared per chunk via clear_lidar_caches() to bound memory.
+_proc_index_cache: dict[tuple[str, str], dict[int, dict]] = {}
+_static_points_cache: dict[tuple[str, str, int], Optional[np.ndarray]] = {}
+
+
+def _proc_index(bag_id: str, chunk_id: str) -> dict[int, dict]:
+    """Return {sweep_id: row} for a chunk's lidar-proc index, built once."""
+    key = (bag_id, chunk_id)
+    cached = _proc_index_cache.get(key)
+    if cached is None:
+        cached = {}
+        for r in read_rows(lidar_proc_index_path(bag_id, chunk_id)):
+            cached.setdefault(int(r["sweep_id"]), r)  # first-match, as before
+        _proc_index_cache[key] = cached
+    return cached
+
+
 def _load_lidar_proc_row(
     bag_id: str, chunk_id: str, sweep_id: int
 ) -> Optional[dict]:
-    proc_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
-    return next((r for r in proc_rows if int(r["sweep_id"]) == sweep_id), None)
+    return _proc_index(bag_id, chunk_id).get(sweep_id)
+
+
+def clear_lidar_caches(bag_id: str, chunk_id: str) -> None:
+    """Drop this chunk's cached lidar index and static points (call at chunk end)."""
+    _proc_index_cache.pop((bag_id, chunk_id), None)
+    stale = [
+        k for k in _static_points_cache
+        if k[0] == bag_id and k[1] == chunk_id
+    ]
+    for k in stale:
+        _static_points_cache.pop(k, None)
 
 
 def load_dynamic_lidar_points(
@@ -128,7 +158,21 @@ def load_static_lidar_points(
 
     Static points are the complement of the dynamic mask — used as depth
     alignment anchors (dynamic points introduce ~75cm error at 25ms desync).
+
+    Cached per (bag, chunk, sweep) so cameras sharing a sweep don't each reload
+    it. Callers must treat the returned array as read-only.
     """
+    key = (bag_id, chunk_id, sweep_id)
+    if key in _static_points_cache:
+        return _static_points_cache[key]
+    result = _compute_static_lidar_points(bag_id, chunk_id, sweep_id)
+    _static_points_cache[key] = result
+    return result
+
+
+def _compute_static_lidar_points(
+    bag_id: str, chunk_id: str, sweep_id: int
+) -> Optional[np.ndarray]:
     row = _load_lidar_proc_row(bag_id, chunk_id, sweep_id)
     if row is None or row.get("valid") is False:
         return None

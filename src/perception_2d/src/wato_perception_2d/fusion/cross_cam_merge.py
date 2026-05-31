@@ -17,7 +17,7 @@ import numpy as np
 
 from wato_common.artifact_store import depth_2d_path, local_path
 from wato_common.geometry import invert_se3, lift_pixel_to_world
-from wato_perception_2d.fusion.tracker_2d import Masklet
+from wato_perception_2d.fusion.masklet import Masklet
 from wato_perception_2d.io import CalibrationInfo
 
 log = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ def _os_exists(path: str) -> bool:
 def merge_cross_camera(
     masklets: list[Masklet],
     calibration: dict[str, CalibrationInfo],
-    world_T_ego_by_cam: dict[str, np.ndarray],
+    pose_by_cam_seq: dict[tuple[str, int], np.ndarray],
     bag_id: str,
     chunk_id: str,
     radius_m: float = 1.5,
@@ -86,7 +86,9 @@ def merge_cross_camera(
     Args:
         masklets: all masklets from all cameras for this chunk.
         calibration: per-camera CalibrationInfo (K, ego_T_cam).
-        world_T_ego_by_cam: per-camera 4×4 world_T_ego at the last valid frame.
+        pose_by_cam_seq: 4×4 world_T_ego keyed by (cam_id, camera_seq). The
+            lift uses the pose at the masklet's *own* last frame, matching the
+            centroid and depth taken from that same frame.
         bag_id: for depth_2d artifact lookup.
         chunk_id: for depth_2d artifact lookup.
         radius_m: 3D clustering radius.
@@ -99,12 +101,16 @@ def merge_cross_camera(
     world_positions: list[Optional[np.ndarray]] = []
     for mkl in masklets:
         calib = calibration.get(mkl.cam_id)
-        if calib is None or mkl.cam_id not in world_T_ego_by_cam:
+        if calib is None or not mkl.mask_paths or not mkl.frames_present:
             world_positions.append(None)
             continue
-        if not mkl.mask_paths or not mkl.frames_present:
+
+        last_frame_seq = mkl.frames_present[-1]
+        world_T_ego = pose_by_cam_seq.get((mkl.cam_id, last_frame_seq))
+        if world_T_ego is None:
             world_positions.append(None)
             continue
+
         try:
             from PIL import Image as PILImage
 
@@ -118,7 +124,6 @@ def merge_cross_camera(
             world_positions.append(None)
             continue
 
-        last_frame_seq = mkl.frames_present[-1]
         depth = _load_depth_at(
             bag_id, chunk_id, mkl.cam_id, last_frame_seq,
             float(centroid[0]), float(centroid[1]),
@@ -127,7 +132,6 @@ def merge_cross_camera(
             world_positions.append(None)
             continue
 
-        world_T_ego = world_T_ego_by_cam[mkl.cam_id]
         world_pt = lift_pixel_to_world(
             float(centroid[0]),
             float(centroid[1]),

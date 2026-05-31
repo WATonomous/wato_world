@@ -4,8 +4,6 @@ Produces per-frame relative depth maps from RGB images.  The relative depth
 is subsequently aligned to metric scale via LiDAR anchor pairs in depth_align.py.
 
 Lazy-imports depth_anything_v2 so the module can be imported without it installed.
-Confidence is derived from depth-gradient magnitude: flat regions get high
-confidence, depth discontinuities get low confidence.
 """
 
 from __future__ import annotations
@@ -23,11 +21,8 @@ _warned_missing = False
 class DepthAnythingV2:
     """Depth Anything V2 relative-depth estimator.
 
-    Returns (relative_depth, confidence) per image:
-    - relative_depth: (H, W) float32, arbitrary positive scale.
-    - confidence: (H, W) float32 in [0, 1], derived from gradient magnitude.
-
-    Falls back to zero arrays when the package is not installed.
+    Returns relative_depth (H, W) float32, arbitrary positive scale, per image.
+    Falls back to a zero array when the package is not installed.
     """
 
     def __init__(
@@ -71,12 +66,19 @@ class DepthAnythingV2:
         if self._model is not None:
             return True
         try:
+            import time
+
             import torch
             from depth_anything_v2.dpt import DepthAnythingV2 as _DA
             from huggingface_hub import hf_hub_download
 
             encoder = self._encoder()
             head_cfg, repo_id = self._ENCODER_CONFIGS[encoder]
+            log.info(
+                "DepthAnythingV2: loading %s (%s) on %s …",
+                encoder, repo_id, self._device,
+            )
+            t0 = time.perf_counter()
             ckpt = hf_hub_download(
                 repo_id=repo_id, filename=f"depth_anything_v2_{encoder}.pth"
             )
@@ -85,7 +87,10 @@ class DepthAnythingV2:
             # Assign only after a fully successful load: a partially-built model
             # left in self._model would make the guard above wrongly short-circuit.
             self._model = model.to(self._device).eval()
-            log.info("DepthAnythingV2 loaded (%s) on %s", encoder, self._device)
+            log.info(
+                "DepthAnythingV2 ready in %.1fs: %s on %s",
+                time.perf_counter() - t0, encoder, self._device,
+            )
             return True
         except Exception as exc:  # noqa: BLE001
             self._model = None
@@ -98,7 +103,7 @@ class DepthAnythingV2:
                 _warned_missing = True
             return False
 
-    def infer(self, image_rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def infer(self, image_rgb: np.ndarray) -> np.ndarray:
         """Run inference on one RGB image.
 
         Args:
@@ -106,11 +111,10 @@ class DepthAnythingV2:
 
         Returns:
             relative_depth: (H, W) float32, arbitrary positive scale.
-            confidence: (H, W) float32 in [0, 1].
         """
         H, W = image_rgb.shape[:2]
         if not self._load():
-            return np.zeros((H, W), dtype=np.float32), np.zeros((H, W), dtype=np.float32)
+            return np.zeros((H, W), dtype=np.float32)
 
         try:
             import torch
@@ -124,19 +128,6 @@ class DepthAnythingV2:
             depth = np.asarray(depth, dtype=np.float32)
         except Exception as exc:  # noqa: BLE001
             log.warning("DepthAnythingV2 inference failed: %s", exc)
-            return np.zeros((H, W), dtype=np.float32), np.zeros((H, W), dtype=np.float32)
+            return np.zeros((H, W), dtype=np.float32)
 
-        confidence = _gradient_confidence(depth)
-        return depth, confidence
-
-
-def _gradient_confidence(depth: np.ndarray) -> np.ndarray:
-    """Derive per-pixel confidence from depth-gradient magnitude.
-
-    Confidence = 1 / (1 + gradient_magnitude).  Flat regions → ~1.0;
-    depth discontinuities → near 0.
-    """
-    gy = np.gradient(depth, axis=0)
-    gx = np.gradient(depth, axis=1)
-    grad_mag = np.sqrt(gx**2 + gy**2)
-    return (1.0 / (1.0 + grad_mag)).astype(np.float32)
+        return depth

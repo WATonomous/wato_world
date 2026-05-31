@@ -1,4 +1,4 @@
-"""Pydantic config for perception_2d v2, sourced from perception_2d.yaml."""
+"""Pydantic config for perception_2d, sourced from perception_2d.yaml."""
 
 from __future__ import annotations
 
@@ -9,36 +9,14 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class DiscoveryConfig(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    model: str = "microsoft/Florence-2-large-ft"
-    task: str = "<DENSE_REGION_CAPTION>"
-    min_confidence: float = 0.3
-
-
 class SegmentationConfig(BaseModel):
+    """SAM 3.1 multiplex concept-video tracker settings."""
+
     model_config = ConfigDict(extra="allow")
 
-    model: str = "sam3.1"
-    checkpoint: str = "facebook/sam3.1"
-    min_score: float = 0.5
-    object_only: bool = True
-
-
-class PhraseDeduplicationConfig(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    synonym_clip_threshold: float = 0.85
-    nms_3d_radius_m: float = 1.0
-    nms_2d_iou: float = 0.5
-
-
-class TrackerConfig(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    backend: str = "sam3"  # "sam3" or "deva" (IoU fallback)
-    deva_model: str = "deva-vit-l"
+    version: str = "sam3.1"           # download_ckpt_from_hf(version)
+    use_fa3: bool = False             # FlashAttention 3 (GPU-only); off by default
+    output_prob_thresh: float = 0.5   # SAM 3.1 mask probability threshold
 
 
 class DepthConfig(BaseModel):
@@ -46,13 +24,15 @@ class DepthConfig(BaseModel):
 
     enabled: bool = True
     model: str = "depth-anything-v2-large"
-    min_lidar_anchors: int = 30
+    min_lidar_anchors: int = 30  # min anchor pairs to attempt an affine fit
     ransac_n_iter: int = 200
     ransac_inlier_threshold_m: float = 0.5
+    # Always static: the pipeline only loads static LiDAR (dynamic points desync
+    # ~75cm at 25ms; see depth_align). Flag retained as explicit intent.
     use_static_anchors_only: bool = True
     fallback_window: int = 5
     sky_mask_top_fraction: float = 0.3
-    output_dtype: str = "float16"
+    output_dtype: str = "float16"  # stored depth-map dtype (apply_affine)
 
 
 class ReidConfig(BaseModel):
@@ -68,15 +48,41 @@ class CrossCamConfig(BaseModel):
     match_radius_m: float = 1.5
 
 
+# Cache of {synonym(lowercased): canonical class}, keyed by prompts_path, so
+# prompts.yaml is parsed once rather than per masklet.
+_synonym_map_cache: dict[str, dict[str, str]] = {}
+
+
+def _build_synonym_map(path: str) -> dict[str, str]:
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as fh:
+        data: dict[str, Any] = yaml.safe_load(fh) or {}
+    mapping: dict[str, str] = {}
+    for entry in data.get("primary_taxonomy", []):
+        name = entry["name"]
+        for syn in entry.get("synonyms", [name]):
+            mapping[str(syn).lower()] = name
+    return mapping
+
+
+# Fallback taxonomy when prompts.yaml isn't mounted: (text_prompt, canonical).
+_FALLBACK_CONCEPTS: list[tuple[str, str]] = [
+    ("car", "car"),
+    ("truck", "truck"),
+    ("bus", "bus"),
+    ("motorcycle", "motorcycle"),
+    ("bicycle", "bicycle"),
+    ("pedestrian", "pedestrian"),
+    ("traffic cone", "traffic_cone"),
+    ("barrier", "barrier"),
+]
+
+
 class ComponentConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
     segmentation: SegmentationConfig = Field(default_factory=SegmentationConfig)
-    phrase_dedup: PhraseDeduplicationConfig = Field(
-        default_factory=PhraseDeduplicationConfig
-    )
-    tracker: TrackerConfig = Field(default_factory=TrackerConfig)
     depth: DepthConfig = Field(default_factory=DepthConfig)
     reid: ReidConfig = Field(default_factory=ReidConfig)
     cross_cam: CrossCamConfig = Field(default_factory=CrossCamConfig)
@@ -84,41 +90,41 @@ class ComponentConfig(BaseModel):
     prompts_path: str = "/config/prompts.yaml"
     upstream_versions: dict[str, str] = Field(default_factory=dict)
 
-    def text_prompts(self) -> list[str]:
-        """Return flat synonym list used to filter Florence-2 proposals.
+    def concept_prompts(self) -> list[tuple[str, str]]:
+        """Return (text_prompt, canonical_class) per taxonomy class for SAM 3.1.
 
-        Reads prompts.yaml if available; falls back to a hardcoded set.
+        text_prompt is a natural phrase (the first synonym) that seeds SAM 3.1
+        concept detection; canonical_class is the taxonomy name stored as the
+        masklet cls. Falls back to a hardcoded set when prompts.yaml is absent.
         """
         path = self.prompts_path
         if not os.path.exists(path):
-            return [
-                "car",
-                "truck",
-                "bus",
-                "motorcycle",
-                "bicycle",
-                "pedestrian",
-                "traffic cone",
-                "barrier",
-            ]
+            return list(_FALLBACK_CONCEPTS)
         with open(path, "r", encoding="utf-8") as fh:
             data: dict[str, Any] = yaml.safe_load(fh) or {}
-        synonyms: list[str] = []
+        out: list[tuple[str, str]] = []
         for entry in data.get("primary_taxonomy", []):
-            synonyms.extend(entry.get("synonyms", [entry["name"]]))
-        return synonyms
+            name = str(entry["name"])
+            syns = entry.get("synonyms", [])
+            text = str(syns[0]) if syns else name
+            out.append((text, name))
+        return out or list(_FALLBACK_CONCEPTS)
+
+    def synonym_to_class_map(self) -> dict[str, str]:
+        """Cached {synonym(lowercased): canonical class} from prompts.yaml.
+
+        Built once per prompts_path so canonicalisation is a dict lookup rather
+        than a YAML re-parse per masklet.
+        """
+        cached = _synonym_map_cache.get(self.prompts_path)
+        if cached is None:
+            cached = _build_synonym_map(self.prompts_path)
+            _synonym_map_cache[self.prompts_path] = cached
+        return cached
 
     def class_from_synonym(self, synonym: str) -> str:
         """Map a detected synonym back to its canonical class name."""
-        path = self.prompts_path
-        if not os.path.exists(path):
-            return synonym
-        with open(path, "r", encoding="utf-8") as fh:
-            data: dict[str, Any] = yaml.safe_load(fh) or {}
-        for entry in data.get("primary_taxonomy", []):
-            if synonym in entry.get("synonyms", []):
-                return entry["name"]
-        return synonym
+        return self.synonym_to_class_map().get(synonym.lower(), synonym)
 
 
 def load_config(path: str) -> ComponentConfig:

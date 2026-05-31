@@ -1,5 +1,5 @@
-# Perception 2D v2 — Florence-2 discovery + SAM 3.1 text-prompted segmentation
-# + Depth Anything V2 + SAM 3.1 video tracker + DINOv2 ReID + x-cam merge.
+# Perception 2D — SAM 3.1 multiplex concept-video tracker (detect+segment+track)
+# + Depth Anything V2 + DINOv2 ReID + cross-camera merge.
 # Heaviest GPU component — budget several hundred GPU-hours per hour of bag.
 #
 # Defines `source` and `dependencies` build stages. The full image
@@ -23,9 +23,9 @@ FROM ${BASE_IMAGE} AS dependencies
 # is frequently slow.  Default uv timeout is 30s which is far too short here.
 ENV UV_HTTP_TIMEOUT=900
 
-# Common light deps (CPU-only).
+# Common light deps (CPU-only). numpy pinned <2 — the `sam3` package requires it.
 RUN uv pip install --system --break-system-packages \
-        pyarrow numpy scipy pydantic fsspec click pyyaml pillow
+        pyarrow "numpy<2" scipy pydantic fsspec click pyyaml pillow
 
 # PyTorch matched to base CUDA 12.8.1.
 #
@@ -44,23 +44,26 @@ RUN --mount=type=bind,source=data/wheels/perception_2d,target=/wheels \
         --no-index --find-links /wheels \
         "torch==2.7.1" "torchvision==0.22.1"
 
-# HuggingFace stack — required by:
-#   - Florence-2 (loaded from HF Hub via transformers + trust_remote_code).
-#     Note: Florence-2 is NOT on PyPI or GitHub as a pip package; it ships
-#     custom code inside the HF Hub model repo and is fetched at runtime.
-#   - CLIP text embeddings (phrase_dedup.py).
-# einops + timm are required by Florence-2's custom DaViT vision encoder
-# and by Depth-Anything-V2.
+# HuggingFace Hub (checkpoint downloads for SAM 3.1 + Depth-Anything-V2) plus
+# einops/timm/safetensors used by Depth-Anything-V2's DPT head.
 RUN uv pip install --system --break-system-packages \
-        transformers accelerate huggingface_hub safetensors \
-        einops timm
+        huggingface_hub safetensors einops timm
 
-# SAM 3.1 video predictor (sam3_tracker.py) + image predictor (segmenter.py).
-# SAM-style models need hydra-core + iopath for config loading.
-# Licenses: SAM3 ("SAM License").
+# SAM 3.1 multiplex tracker via Meta's official `sam3` package (vendored at the
+# repo root). The published checkpoint sam3.1_multiplex.pt (facebook/sam3.1)
+# loads ONLY through this code — SAM 3.1 has no HuggingFace Transformers
+# integration. Pulls light deps (ftfy/regex/iopath/numpy<2); config use_fa3=False
+# avoids the FlashAttention-3 dependency. Checkpoint is pre-fetched by
+# scripts/fetch_models.py into HF_HOME. License: SAM License.
+# Runtime deps the multiplex build path pulls (beyond sam3's light core deps):
+# hydra/omegaconf (config instantiation), open_clip_torch (text encoder),
+# pycocotools (mask RLE), psutil, and scikit-image/learn used by helpers.
 RUN uv pip install --system --break-system-packages \
-        hydra-core iopath tqdm pycocotools \
-        git+https://github.com/facebookresearch/sam3
+        hydra-core omegaconf open_clip_torch psutil pycocotools \
+        scikit-image scikit-learn
+COPY sam3 /tmp/sam3
+RUN uv pip install --system --break-system-packages /tmp/sam3 \
+    && rm -rf /tmp/sam3
 
 # Depth Anything V2 (depth.py).  The upstream Meta/ByteDance repo isn't
 # pip-installable (no pyproject.toml / setup.py); use the community PyPI

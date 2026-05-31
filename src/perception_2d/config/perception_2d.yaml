@@ -1,22 +1,9 @@
-discovery:
-  model: "microsoft/Florence-2-large-ft"
-  task: "<DENSE_REGION_CAPTION>"
-  min_confidence: 0.3
-
+# SAM 3.1 multiplex concept-video tracker. Concepts come from prompts.yaml
+# (primary_taxonomy); the checkpoint is fetched from facebook/sam3.1.
 segmentation:
-  model: "sam3.1"
-  checkpoint: "facebook/sam3.1"
-  min_score: 0.5
-  object_only: true
-
-phrase_dedup:
-  synonym_clip_threshold: 0.85
-  nms_3d_radius_m: 1.0
-  nms_2d_iou: 0.5
-
-tracker:
-  backend: "sam3"
-  deva_model: "deva-vit-l"
+  version: "sam3.1"
+  use_fa3: false           # FlashAttention 3 (GPU-only); off by default
+  output_prob_thresh: 0.5  # SAM 3.1 mask probability threshold
 
 depth:
   enabled: true

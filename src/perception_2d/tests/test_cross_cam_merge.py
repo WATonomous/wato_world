@@ -11,7 +11,7 @@ from wato_perception_2d.fusion.cross_cam_merge import (
     _mask_centroid_px,
     merge_cross_camera,
 )
-from wato_perception_2d.fusion.tracker_2d import Masklet
+from wato_perception_2d.fusion.masklet import Masklet
 from wato_perception_2d.io import CalibrationInfo
 
 
@@ -126,10 +126,10 @@ def test_same_camera_masklets_never_merged(tmp_path, monkeypatch):
     mkl2 = _masklet_with_png(tmp_path, "m2", "cam_front", mask)
 
     calib = {"cam_front": _simple_calib()}
-    world_T_ego = {"cam_front": np.eye(4, dtype=np.float64)}
+    poses = {("cam_front", 0): np.eye(4, dtype=np.float64)}
 
     result = merge_cross_camera(
-        [mkl1, mkl2], calib, world_T_ego, bag_id="bag0", chunk_id="chunk0"
+        [mkl1, mkl2], calib, poses, bag_id="bag0", chunk_id="chunk0"
     )
     assert result[0].global_object_id != result[1].global_object_id
 
@@ -150,13 +150,13 @@ def test_different_cameras_same_world_position_merged(tmp_path, monkeypatch):
     mkl2 = _masklet_with_png(tmp_path, "m2", "cam_back", mask)
 
     calib = {"cam_front": _simple_calib(), "cam_back": _simple_calib()}
-    world_T_ego = {
-        "cam_front": np.eye(4, dtype=np.float64),
-        "cam_back": np.eye(4, dtype=np.float64),
+    poses = {
+        ("cam_front", 0): np.eye(4, dtype=np.float64),
+        ("cam_back", 0): np.eye(4, dtype=np.float64),
     }
 
     result = merge_cross_camera(
-        [mkl1, mkl2], calib, world_T_ego, bag_id="bag0", chunk_id="chunk0",
+        [mkl1, mkl2], calib, poses, bag_id="bag0", chunk_id="chunk0",
         radius_m=1.5,
     )
     assert result[0].global_object_id == result[1].global_object_id
@@ -181,13 +181,13 @@ def test_different_cameras_far_world_positions_not_merged(tmp_path, monkeypatch)
     mkl2 = _masklet_with_png(tmp_path, "m2", "cam_back", mask_corner)
 
     calib = {"cam_front": _simple_calib(), "cam_back": _simple_calib()}
-    world_T_ego = {
-        "cam_front": np.eye(4, dtype=np.float64),
-        "cam_back": np.eye(4, dtype=np.float64),
+    poses = {
+        ("cam_front", 0): np.eye(4, dtype=np.float64),
+        ("cam_back", 0): np.eye(4, dtype=np.float64),
     }
 
     result = merge_cross_camera(
-        [mkl1, mkl2], calib, world_T_ego, bag_id="bag0", chunk_id="chunk0",
+        [mkl1, mkl2], calib, poses, bag_id="bag0", chunk_id="chunk0",
         radius_m=1.5,
     )
     assert result[0].global_object_id != result[1].global_object_id
@@ -210,10 +210,10 @@ def test_three_cameras_two_merged_one_separate(tmp_path, monkeypatch):
     mkl_c = _masklet_with_png(tmp_path, "mc", "cam_c", mask_far)
 
     calib = {k: _simple_calib() for k in ("cam_a", "cam_b", "cam_c")}
-    world_T_ego = {k: np.eye(4, dtype=np.float64) for k in ("cam_a", "cam_b", "cam_c")}
+    poses = {(k, 0): np.eye(4, dtype=np.float64) for k in ("cam_a", "cam_b", "cam_c")}
 
     result = merge_cross_camera(
-        [mkl_a, mkl_b, mkl_c], calib, world_T_ego,
+        [mkl_a, mkl_b, mkl_c], calib, poses,
         bag_id="bag0", chunk_id="chunk0", radius_m=1.5,
     )
 
@@ -244,9 +244,9 @@ def test_masklet_without_mask_path_still_gets_id(tmp_path, monkeypatch):
         mask_paths=[],
     )
     calib = {"cam_front": _simple_calib()}
-    world_T_ego = {"cam_front": np.eye(4, dtype=np.float64)}
+    poses = {("cam_front", 0): np.eye(4, dtype=np.float64)}
 
     result = merge_cross_camera(
-        [mkl], calib, world_T_ego, bag_id="bag0", chunk_id="chunk0"
+        [mkl], calib, poses, bag_id="bag0", chunk_id="chunk0"
     )
     assert result[0].global_object_id is not None

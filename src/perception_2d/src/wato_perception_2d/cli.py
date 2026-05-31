@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import logging
+
 import click
 
 from wato_perception_2d.config import load_config
 from wato_perception_2d.pipeline import run as run_pipeline
+
+# Without this, every `log.info(...)` across perception_2d is dropped at
+# Python's default WARNING level — so you can't see model-load status,
+# per-chunk progress, etc. Mirrors src/ingest/src/wato_ingest/cli.py.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 
 @click.group()
@@ -23,9 +33,17 @@ def main() -> None:
     "config_path",
     default="/ws/src/perception_2d/config/perception_2d.yaml",
 )
-def run_cmd(bag_id: str, chunk_id: str | None, config_path: str) -> None:
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="re-run chunks even if outputs exist; discard per-camera resume caches.",
+)
+def run_cmd(
+    bag_id: str, chunk_id: str | None, config_path: str, force: bool
+) -> None:
     cfg = load_config(config_path)
-    run_pipeline(cfg, bag_id=bag_id, chunk_id=chunk_id)
+    run_pipeline(cfg, bag_id=bag_id, chunk_id=chunk_id, force=force)
 
 
 if __name__ == "__main__":

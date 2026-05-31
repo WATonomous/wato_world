@@ -86,6 +86,7 @@ def ransac_affine_fit(
     n_iter: int = 200,
     inlier_threshold_m: float = 0.5,
     min_depth_range_m: float = 5.0,
+    min_anchors: int = 2,
     fallback: Optional[tuple[float, float]] = None,
 ) -> dict:
     """Fit d_lidar = a * d_da + b via RANSAC.
@@ -97,6 +98,9 @@ def ransac_affine_fit(
         inlier_threshold_m: max residual |d_lidar - (a*d_da + b)| to be inlier.
         min_depth_range_m: if LiDAR depth range < this, fit is underdetermined;
             use fallback or fail.
+        min_anchors: require at least this many anchor pairs to attempt a fit
+            (clamped to >= 2, the minimum for the 2-point RANSAC sample);
+            fewer → use fallback or fail.
         fallback: (a, b) from a prior successful frame, or None.
 
     Returns:
@@ -105,8 +109,8 @@ def ransac_affine_fit(
     """
     M = d_lidar.shape[0]
 
-    # Check if we have enough depth range for a reliable fit.
-    if M < 2 or float(d_lidar.max() - d_lidar.min()) < min_depth_range_m:
+    # Check we have enough anchors and depth range for a reliable fit.
+    if M < max(2, min_anchors) or float(d_lidar.max() - d_lidar.min()) < min_depth_range_m:
         if fallback is not None:
             a, b = fallback
             log.debug("ransac_affine_fit: insufficient depth range — using fallback (a=%.3f, b=%.3f)", a, b)
@@ -164,6 +168,7 @@ def apply_affine(
     relative_depth: np.ndarray,
     a: float,
     b: float,
+    out_dtype: str = "float16",
 ) -> np.ndarray:
     """Apply affine d_metric = a * d_da + b to the full depth map.
 
@@ -171,9 +176,15 @@ def apply_affine(
         relative_depth: (H, W) float32 DA relative depth.
         a: scale factor.
         b: offset.
+        out_dtype: numpy dtype name for the stored depth map (default float16).
+            Unknown names fall back to float16.
 
     Returns:
-        metric_depth: (H, W) float16, clamped to [0, 250] m.
+        metric_depth: (H, W) out_dtype array, clamped to [0, 250] m.
     """
+    try:
+        dtype = np.dtype(out_dtype)
+    except TypeError:
+        dtype = np.dtype(np.float16)
     metric = (a * relative_depth.astype(np.float32) + b).clip(0, 250)
-    return metric.astype(np.float16)
+    return metric.astype(dtype)

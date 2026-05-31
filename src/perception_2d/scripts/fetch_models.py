@@ -8,10 +8,8 @@ Layout produced:
 
     ${MODELS_ROOT}/
       hf/                          # HuggingFace cache (HF_HOME)
-        hub/models--microsoft--Florence-2-large-ft/...
-        hub/models--openai--clip-vit-base-patch32/...
-        hub/models--depth-anything--Depth-Anything-V2-Large/...
         hub/models--facebook--sam3.1/...
+        hub/models--depth-anything--Depth-Anything-V2-Large/...
       torch_hub/                   # torch.hub cache (TORCH_HOME)
         hub/checkpoints/dinov2_vitl14_pretrain.pth
         hub/facebookresearch_dinov2_main/...
@@ -49,10 +47,10 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 HF_MODELS: dict[str, str] = {
-    "florence2": "microsoft/Florence-2-large-ft",       # discovery.py
-    "sam3": "facebook/sam3.1",                          # segmenter.py + sam3_tracker.py
+    # facebook/sam3.1 hosts the multiplex checkpoint (sam3.1_multiplex.pt) +
+    # config/tokenizer; loaded via the `sam3` package, not transformers.
+    "sam3": "facebook/sam3.1",                          # sam3_concept_tracker.py
     "depth_anything_v2": "depth-anything/Depth-Anything-V2-Large",  # depth.py
-    "clip": "openai/clip-vit-base-patch32",             # phrase_dedup.py
 }
 
 # DINOv2 weights ship via torch.hub (reid.py).  We pre-populate TORCH_HOME
