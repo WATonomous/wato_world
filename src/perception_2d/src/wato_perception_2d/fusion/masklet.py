@@ -1,7 +1,7 @@
 """Masklet: one temporally-associated object track within a single camera view.
 
 Produced by the SAM 3.1 concept tracker (one per tracked object id) and consumed
-by cross_cam_merge + the parquet writer in pipeline.py.
+by the parquet writer in pipeline.py.
 """
 
 from __future__ import annotations

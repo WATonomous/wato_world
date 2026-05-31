@@ -115,19 +115,14 @@ def _proc_index(bag_id: str, chunk_id: str) -> dict[int, dict]:
     return cached
 
 
-def _load_lidar_proc_row(
-    bag_id: str, chunk_id: str, sweep_id: int
-) -> Optional[dict]:
+def _load_lidar_proc_row(bag_id: str, chunk_id: str, sweep_id: int) -> Optional[dict]:
     return _proc_index(bag_id, chunk_id).get(sweep_id)
 
 
 def clear_lidar_caches(bag_id: str, chunk_id: str) -> None:
     """Drop this chunk's cached lidar index and static points (call at chunk end)."""
     _proc_index_cache.pop((bag_id, chunk_id), None)
-    stale = [
-        k for k in _static_points_cache
-        if k[0] == bag_id and k[1] == chunk_id
-    ]
+    stale = [k for k in _static_points_cache if k[0] == bag_id and k[1] == chunk_id]
     for k in stale:
         _static_points_cache.pop(k, None)
 

@@ -8,7 +8,7 @@ official `sam3` package (facebookresearch/sam3) via
 directly (the checkpoint is built for that code).
 
 The predictor is heavy and GPU-resident; this module caches one instance so the
-segmenter/tracker share it across cameras and chunks.
+concept tracker shares it across cameras and chunks.
 
 Lazy-imports `sam3` so this module can be imported without it installed; callers
 treat a None return as "SAM 3.1 unavailable".
@@ -57,7 +57,8 @@ def get_sam3_predictor(
         _cache[key] = predictor
         log.info(
             "SAM 3.1 predictor ready in %.1fs (checkpoint=%s)",
-            time.perf_counter() - t0, ckpt,
+            time.perf_counter() - t0,
+            ckpt,
         )
         return predictor
     except Exception as exc:  # noqa: BLE001
@@ -67,3 +68,39 @@ def get_sam3_predictor(
             exc,
         )
         return None
+
+
+def sam3_importable() -> bool:
+    """Cheap check that `sam3` + its deps import, WITHOUT building the heavy
+    GPU-resident predictor.
+
+    The pipeline calls this before the (expensive) depth pass so a missing
+    `sam3` install / dependency fails fast instead of after hours of depth.
+    Actually executes the import (not importlib.util.find_spec) so a broken
+    transitive dep — e.g. a missing pycocotools — is caught, not just an
+    absent top-level package.
+    """
+    import importlib
+
+    try:
+        importlib.import_module("sam3.model_builder")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("SAM 3.1 (`sam3.model_builder`) not importable: %s", exc)
+        return False
+
+
+def release_sam3_predictor() -> None:
+    """Drop the cached predictor and free its GPU memory (best-effort).
+
+    Called at the end of a bag so a long-lived process doesn't keep SAM 3.1
+    parked in VRAM after the run.
+    """
+    _cache.clear()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass

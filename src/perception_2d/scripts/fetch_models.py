@@ -53,7 +53,7 @@ HF_MODELS: dict[str, str] = {
     "depth_anything_v2": "depth-anything/Depth-Anything-V2-Large",  # depth.py
 }
 
-# DINOv2 weights ship via torch.hub (reid.py).  We pre-populate TORCH_HOME
+# DINOv2 weights ship via torch.hub (embeddings.py).  We pre-populate TORCH_HOME
 # by issuing a `torch.hub.load(...)` once.
 TORCH_HUB_MODELS: list[tuple[str, str]] = [
     ("facebookresearch/dinov2", "dinov2_vitl14"),

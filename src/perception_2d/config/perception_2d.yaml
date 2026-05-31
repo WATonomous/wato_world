@@ -1,7 +1,25 @@
-# SAM 3.1 multiplex concept-video tracker. Concepts come from prompts.yaml
-# (primary_taxonomy); the checkpoint is fetched from facebook/sam3.1.
+# perception_2d: SAM 3.1 multiplex concept-video tracker.
+#
+# SAM 3.1 detects + segments + tracks each concept across a camera stream into
+# masklets (the checkpoint is fetched from facebook/sam3.1).  The concept
+# vocabulary comes from one of two sources, selected by `discovery.backend`.
+
+discovery:
+  # Source of the concept vocabulary fed to SAM 3.1:
+  #   "fixed"     → closed-set class list (`fixed_classes`, e.g. COCO). DEFAULT.
+  #   "florence2" → open-vocabulary noun phrases discovered per frame by
+  #                 Florence-2, then pooled into one concept set per camera.
+  backend: "fixed"
+  model: "microsoft/Florence-2-large-ft"
+  task: "<DENSE_REGION_CAPTION>"
+  min_confidence: 0.3
+  sample_every_k: 10   # florence2 only: run discovery on every k-th frame
+  # Used when backend: "fixed".  Empty → falls back to the prompts.yaml taxonomy.
+  fixed_classes: ["car", "truck", "bus", "motorcycle", "bicycle", "person",
+                  "traffic light", "stop sign", "traffic cone"]
+
 segmentation:
-  version: "sam3.1"
+  version: "sam3.1"        # download_ckpt_from_hf(version)
   use_fa3: false           # FlashAttention 3 (GPU-only); off by default
   output_prob_thresh: 0.5  # SAM 3.1 mask probability threshold
 
@@ -16,11 +34,14 @@ depth:
   sky_mask_top_fraction: 0.3
   output_dtype: "float16"
 
-reid:
+# DINOv2 appearance-embedding extraction (persisted per masklet for the
+# downstream `tracking` component; perception_2d does not re-identify here).
+embeddings:
   model: "dinov2_vitl14"
   every_k_frames: 5
 
-cross_cam:
-  match_radius_m: 1.5
+# Cross-camera identity merging is handled downstream in the `tracking`
+# component (3D/4D association gated by the DINOv2 features written here).
+# global_object_id is left null by perception_2d.
 
 prompts_path: "/config/prompts.yaml"

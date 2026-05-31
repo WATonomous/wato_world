@@ -110,13 +110,26 @@ def ransac_affine_fit(
     M = d_lidar.shape[0]
 
     # Check we have enough anchors and depth range for a reliable fit.
-    if M < max(2, min_anchors) or float(d_lidar.max() - d_lidar.min()) < min_depth_range_m:
+    if (
+        M < max(2, min_anchors)
+        or float(d_lidar.max() - d_lidar.min()) < min_depth_range_m
+    ):
         if fallback is not None:
             a, b = fallback
-            log.debug("ransac_affine_fit: insufficient depth range — using fallback (a=%.3f, b=%.3f)", a, b)
+            log.debug(
+                "ransac_affine_fit: insufficient depth range — using fallback (a=%.3f, b=%.3f)",
+                a,
+                b,
+            )
             return _eval_fit(a, b, d_lidar, d_da, fit_status=1)
         log.debug("ransac_affine_fit: insufficient depth range and no fallback")
-        return {"a": 1.0, "b": 0.0, "n_inliers": 0, "rmse_inliers_m": float("inf"), "fit_status": 2}
+        return {
+            "a": 1.0,
+            "b": 0.0,
+            "n_inliers": 0,
+            "rmse_inliers_m": float("inf"),
+            "fit_status": 2,
+        }
 
     best_n_inliers = 0
     best_a, best_b = 1.0, 0.0
@@ -142,7 +155,13 @@ def ransac_affine_fit(
         if fallback is not None:
             a, b = fallback
             return _eval_fit(a, b, d_lidar, d_da, fit_status=1)
-        return {"a": 1.0, "b": 0.0, "n_inliers": 0, "rmse_inliers_m": float("inf"), "fit_status": 2}
+        return {
+            "a": 1.0,
+            "b": 0.0,
+            "n_inliers": 0,
+            "rmse_inliers_m": float("inf"),
+            "fit_status": 2,
+        }
 
     # Refit on all inliers via least-squares for best accuracy.
     inlier_mask = np.abs(d_lidar - (best_a * d_da + best_b)) < inlier_threshold_m
@@ -157,11 +176,23 @@ def _eval_fit(
     a: float, b: float, d_lidar: np.ndarray, d_da: np.ndarray, fit_status: int
 ) -> dict:
     if d_lidar.shape[0] == 0:
-        return {"a": a, "b": b, "n_inliers": 0, "rmse_inliers_m": float("inf"), "fit_status": fit_status}
+        return {
+            "a": a,
+            "b": b,
+            "n_inliers": 0,
+            "rmse_inliers_m": float("inf"),
+            "fit_status": fit_status,
+        }
     residuals = d_lidar - (a * d_da + b)
     n_inliers = int(d_lidar.shape[0])
     rmse = float(np.sqrt(np.mean(residuals**2)))
-    return {"a": a, "b": b, "n_inliers": n_inliers, "rmse_inliers_m": rmse, "fit_status": fit_status}
+    return {
+        "a": a,
+        "b": b,
+        "n_inliers": n_inliers,
+        "rmse_inliers_m": rmse,
+        "fit_status": fit_status,
+    }
 
 
 def apply_affine(

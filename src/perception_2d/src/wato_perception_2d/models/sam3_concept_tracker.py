@@ -33,7 +33,7 @@ import numpy as np
 
 from wato_perception_2d.fusion.masklet import Masklet
 from wato_perception_2d.io import CameraFrameInfo
-from wato_perception_2d.models.reid import extract_dino_feature
+from wato_perception_2d.models.embeddings import extract_dino_feature
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +41,14 @@ log = logging.getLogger(__name__)
 class _Track:
     """Accumulator for one (concept, obj_id) across frames."""
 
-    __slots__ = ("masklet_id", "cls", "score", "frames_present", "mask_paths", "dino_accum")
+    __slots__ = (
+        "masklet_id",
+        "cls",
+        "score",
+        "frames_present",
+        "mask_paths",
+        "dino_accum",
+    )
 
     def __init__(self, masklet_id: str, cls: str) -> None:
         self.masklet_id = masklet_id
@@ -172,7 +179,10 @@ def track_camera_concepts(
     except Exception as exc:  # noqa: BLE001
         log.warning(
             "chunk %s / %s: SAM 3.1 tracking failed (%s) — keeping %d tracks so far.",
-            chunk_id, cam_id, exc, len(tracks),
+            chunk_id,
+            cam_id,
+            exc,
+            len(tracks),
         )
     finally:
         if sid is not None:
@@ -231,7 +241,9 @@ def _accumulate_frame(
                 track.dino_accum.append(feat)
 
 
-def _save_mask(base_dir: str, masklet_id: str, camera_seq: int, mask: np.ndarray) -> str:
+def _save_mask(
+    base_dir: str, masklet_id: str, camera_seq: int, mask: np.ndarray
+) -> str:
     from PIL import Image as PILImage
 
     d = os.path.join(base_dir, masklet_id)
