@@ -38,8 +38,8 @@ ALL_MODULES=(ingest perception_2d lidar_preprocessing proposal_generation tracki
 
 base_flavor_for() {
     case "$1" in
-        ingest|lidar_preprocessing) echo "cpu" ;;
-        perception_2d|proposal_generation|tracking|label_refinement|open_vocab_discovery|student_training) echo "cuda" ;;
+        ingest) echo "cpu" ;;
+        lidar_preprocessing|perception_2d|proposal_generation|tracking|label_refinement|open_vocab_discovery|student_training) echo "cuda" ;;
         *) echo "" ;;
     esac
 }

@@ -603,6 +603,445 @@ def test_motion_compensation_with_per_point_timestamps(tmp_env):
     np.testing.assert_allclose(world["y"], [0.0, 0.0], atol=1e-6)
 
 
+def test_deskew_raises_when_no_per_point_time_and_synthesis_disabled(tmp_env):
+    """deskew refuses to silently fall back to header-pose-per-sweep.
+
+    When a raw NPZ lacks t_offset_us AND synthesize_per_point_times=False
+    AND allow_uncompensated_motion=False (defaults for strict mode), the
+    sweep records a deskew_failed row instead of producing motion-uncomp
+    output that smears statics across voxels.
+
+    This is the safety net for the "buildings as dynamic" bug: a silent
+    fallback was exactly what hid it.  We refuse the case explicitly.
+    """
+    bag_id, chunk_id = "bag_strict", "chunk0"
+    _write_calibration(bag_id)
+    _write_poses(
+        bag_id,
+        chunk_id,
+        [
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "timestamp_ns": 0,
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0,
+                "qx": 0.0,
+                "qy": 0.0,
+                "qz": 0.0,
+                "qw": 1.0,
+                "world_T_ego_flat": _flat(np.eye(4)),
+                "source": "odom",
+                "valid": True,
+            }
+        ],
+    )
+
+    x = np.ones(2, dtype=np.float32)
+    y = np.zeros(2, dtype=np.float32)
+    z = np.zeros(2, dtype=np.float32)
+    _write_raw_sweep(bag_id, chunk_id, 0, x=x, y=y, z=z)
+
+    from wato_common.artifact_store import lidar_proc_index_path, lidar_sweep_path
+    from wato_common.io.parquet_io import read_rows
+
+    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
+    _write_sweep_index(
+        bag_id,
+        chunk_id,
+        [
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "lidar_id": "LIDAR_TOP",
+                "sweep_id": 0,
+                "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
+                "header_timestamp_ns": 0,
+                "record_timestamp_ns": 0,
+                "num_points": 2,
+                "has_ring": False,
+                "has_intensity": False,
+                "has_point_time": False,
+                "min_range_m": 1.0,
+                "max_range_m": 1.0,
+                "valid": True,
+                "drop_reason": None,
+            }
+        ],
+    )
+
+    cfg = ComponentConfig(
+        synthesize_per_point_times=False,
+        allow_uncompensated_motion=False,  # default — strict
+    )
+    results = process_chunk(cfg, bag_id, chunk_id)
+    assert results == []
+    rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
+    assert len(rows) == 1
+    assert rows[0]["valid"] is False
+    assert "uncompensated" in (rows[0]["drop_reason"] or "")
+
+
+def test_deskew_allows_uncompensated_motion_when_opted_in(tmp_env):
+    """allow_uncompensated_motion=True bypasses the strict check.
+
+    For users with stationary ego or who knowingly accept smear, the
+    opt-out lets deskew use the header-pose-per-sweep fallback.
+    """
+    bag_id, chunk_id = "bag_optout", "chunk0"
+    _write_calibration(bag_id)
+    _write_poses(
+        bag_id,
+        chunk_id,
+        [
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "timestamp_ns": 0,
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0,
+                "qx": 0.0,
+                "qy": 0.0,
+                "qz": 0.0,
+                "qw": 1.0,
+                "world_T_ego_flat": _flat(np.eye(4)),
+                "source": "odom",
+                "valid": True,
+            }
+        ],
+    )
+
+    x = np.ones(2, dtype=np.float32)
+    y = np.zeros(2, dtype=np.float32)
+    z = np.zeros(2, dtype=np.float32)
+    _write_raw_sweep(bag_id, chunk_id, 0, x=x, y=y, z=z)
+
+    from wato_common.artifact_store import lidar_sweep_path
+
+    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
+    _write_sweep_index(
+        bag_id,
+        chunk_id,
+        [
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "lidar_id": "LIDAR_TOP",
+                "sweep_id": 0,
+                "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
+                "header_timestamp_ns": 0,
+                "record_timestamp_ns": 0,
+                "num_points": 2,
+                "has_ring": False,
+                "has_intensity": False,
+                "has_point_time": False,
+                "min_range_m": 1.0,
+                "max_range_m": 1.0,
+                "valid": True,
+                "drop_reason": None,
+            }
+        ],
+    )
+
+    cfg = ComponentConfig(
+        synthesize_per_point_times=False,
+        allow_uncompensated_motion=True,
+    )
+    results = process_chunk(cfg, bag_id, chunk_id)
+    assert results, "with allow_uncompensated_motion=True the sweep should deskew"
+    assert results[0].deskewed is False  # has_point_time was False
+
+
+def test_synthesize_t_offset_from_azimuth_ccw_full_rotation():
+    """Azimuth-based per-point time synthesis for a CCW rotating LiDAR.
+
+    A CCW sensor's points at azimuth phi were fired at t = phi/(2π)*T_sweep.
+    Four points at cardinal directions over a 1-second sweep should map to
+    t = 0, 0.25, 0.5, 0.75 seconds.
+    """
+    from wato_lidar_preprocessing.deskew._core import (
+        _synthesize_t_offset_ns_from_azimuth,
+    )
+
+    xyz = np.array(
+        [
+            [1.0, 0.0, 0.0],  # phi = 0      → t = 0
+            [0.0, 1.0, 0.0],  # phi = π/2    → t = 0.25 s
+            [-1.0, 0.0, 0.0],  # phi = π      → t = 0.5  s
+            [0.0, -1.0, 0.0],  # phi = -π/2   → t = 0.75 s (wraps to +3π/2)
+        ]
+    )
+    t_ns = _synthesize_t_offset_ns_from_azimuth(
+        xyz, sweep_duration_ns=1_000_000_000.0, rotation_dir="ccw"
+    )
+    expected_ns = np.array([0.0, 0.25e9, 0.5e9, 0.75e9])
+    np.testing.assert_allclose(t_ns, expected_ns, atol=1.0)
+
+
+def test_synthesize_t_offset_anchored_at_phi_start():
+    """phi_start = phi[0]: the sweep starts where the first point fired.
+
+    NuScenes LIDAR_TOP starts scanning at azimuth ≈ -π (back of vehicle),
+    NOT azimuth = 0.  The synthesis must anchor t=0 to phi[0], not to
+    azimuth = 0, otherwise per-point times are offset by up to half a
+    sweep duration and motion compensation goes in the wrong direction.
+    """
+    from wato_lidar_preprocessing.deskew._core import (
+        _synthesize_t_offset_ns_from_azimuth,
+    )
+
+    # First point at phi = -π (back), then sweeping CCW.
+    xyz = np.array(
+        [
+            [-1.0, 0.0, 0.0],  # phi = π (or -π)  → t = 0      (sweep start)
+            [
+                0.0,
+                1.0,
+                0.0,
+            ],  # phi = π/2        → t = 0.75 s (CCW from -π is +3π/2 away)
+            [1.0, 0.0, 0.0],  # phi = 0          → t = 0.5  s
+            [0.0, -1.0, 0.0],  # phi = -π/2       → t = 0.25 s
+        ]
+    )
+    t_ns = _synthesize_t_offset_ns_from_azimuth(
+        xyz, sweep_duration_ns=1_000_000_000.0, rotation_dir="ccw"
+    )
+    # First point is t=0 by definition (it's the anchor).
+    assert t_ns[0] == 0.0
+    # CCW from phi_start = π (treating -π as +π for the wrap):
+    # phi=π/2  → CCW delta = (π/2 - π) mod 2π = 3π/2 → t = 0.75 s
+    # phi=0    → CCW delta = (0 - π) mod 2π   = π    → t = 0.5  s
+    # phi=-π/2 → CCW delta = (-π/2 - π) mod 2π = π/2 → t = 0.25 s
+    expected_ns = np.array([0.0, 0.75e9, 0.5e9, 0.25e9])
+    np.testing.assert_allclose(t_ns, expected_ns, atol=1.0)
+
+
+def test_synthesize_t_offset_auto_detects_cw_rotation():
+    """auto rotation_dir picks CW when azimuth decreases after phi[0].
+
+    NuScenes LIDAR_TOP rotates CW in the lidar frame (azimuth decreases
+    with time).  The probe at index ~200 should detect this — delta_ccw
+    wraps all the way to almost-2π, well above the π threshold.
+    """
+    from wato_lidar_preprocessing.deskew._core import (
+        _synthesize_t_offset_ns_from_azimuth,
+    )
+
+    # 250 points sweeping CW from phi=0 down to phi=-π/2 (quarter rotation).
+    # Azimuth strictly decreases, so auto should pick "cw".
+    n = 250
+    phi = np.linspace(0.0, -np.pi / 2, n)
+    xyz = np.stack([np.cos(phi), np.sin(phi), np.zeros(n)], axis=1)
+    t_ns = _synthesize_t_offset_ns_from_azimuth(
+        xyz, sweep_duration_ns=1_000_000_000.0, rotation_dir="auto"
+    )
+    # Quarter rotation in 250 points → t goes from 0 to ~0.25 s, monotonically.
+    assert t_ns[0] == 0.0
+    assert 0.24e9 < t_ns[-1] < 0.26e9, (
+        f"expected ~0.25s at end of quarter-rotation, got {t_ns[-1]/1e9:.3f}s. "
+        f"auto-detect probably picked the wrong direction (would give ~0.75s)."
+    )
+    # Monotonic increase confirms direction is correct.
+    assert np.all(np.diff(t_ns) >= 0), (
+        "t_ns must be monotonic for points fired in sequence; non-monotonic "
+        "means rotation direction was detected backwards."
+    )
+
+
+def test_synthesize_t_offset_from_azimuth_cw_reverses():
+    """CW rotation: t increases in the opposite azimuth direction."""
+    from wato_lidar_preprocessing.deskew._core import (
+        _synthesize_t_offset_ns_from_azimuth,
+    )
+
+    xyz = np.array(
+        [
+            [1.0, 0.0, 0.0],  # phi = 0      → t = 0
+            [0.0, -1.0, 0.0],  # phi = -π/2   → t = 0.25 s (CW)
+            [-1.0, 0.0, 0.0],  # phi = π      → t = 0.5  s
+            [0.0, 1.0, 0.0],  # phi = π/2    → t = 0.75 s (CW)
+        ]
+    )
+    t_ns = _synthesize_t_offset_ns_from_azimuth(
+        xyz, sweep_duration_ns=1_000_000_000.0, rotation_dir="cw"
+    )
+    expected_ns = np.array([0.0, 0.25e9, 0.5e9, 0.75e9])
+    np.testing.assert_allclose(t_ns, expected_ns, atol=1.0)
+
+
+def test_synthesis_eliminates_intra_sweep_smear_for_static_wall(tmp_env):
+    """End-to-end: missing per-point times + moving ego = smeared statics; fix removes the smear.
+
+    Bug: when raw NPZ lacks t_offset_us, deskew uses one pose for the whole
+    sweep.  For a rotating LiDAR with moving ego, this places points fired
+    at different intra-sweep times at the wrong world positions — the
+    "static wall smear" that leaks buildings into dynamic_map.npz.
+
+    Setup: ego moves +10 m/s on X over a 1-second sweep (extreme to make the
+    effect crisp).  Two LiDAR-frame points at azimuth 0 (front) and azimuth
+    π (back) hit a static wall.  Because they're observed half a sweep
+    apart, ego has moved 5 m between them in reality.
+
+    Without the fix (synthesize_per_point_times=False): both points get the
+    header pose at t=0, so the deskewed world X differs by exactly the
+    lidar-frame offsets — the smear is visible.
+
+    With the fix: the azimuth-π point gets the t=0.5 s pose, which puts
+    the ego 5 m ahead, exactly compensating the lidar-frame offset.  Both
+    deskewed world positions converge.
+    """
+    bag_id, chunk_id = "bag_synth", "chunk0"
+    _write_calibration(bag_id)
+
+    # Ego at (0,0,0) at t=0, at (10,0,0) at t=1 s.
+    T0 = np.eye(4)
+    T1 = np.eye(4)
+    T1[0, 3] = 10.0
+    poses = [
+        {
+            "bag_id": bag_id,
+            "chunk_id": chunk_id,
+            "timestamp_ns": 0,
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": 0.0,
+            "qw": 1.0,
+            "world_T_ego_flat": _flat(T0),
+            "source": "odom",
+            "valid": True,
+        },
+        {
+            "bag_id": bag_id,
+            "chunk_id": chunk_id,
+            "timestamp_ns": 1_000_000_000,
+            "x": 10.0,
+            "y": 0.0,
+            "z": 0.0,
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": 0.0,
+            "qw": 1.0,
+            "world_T_ego_flat": _flat(T1),
+            "source": "odom",
+            "valid": True,
+        },
+    ]
+    _write_poses(bag_id, chunk_id, poses)
+
+    # Two LiDAR-frame points: one at azimuth 0 (front, t=0), one at azimuth
+    # π (back, t=0.5 s).  Both hit the same true world position (5, 0, 0).
+    # - At t=0:  ego at (0,0,0); wall at world (5,0,0) → sensor (5,0,0).
+    # - At t=0.5 s: ego at (5,0,0); same wall → sensor (0,0,0) which would
+    #   technically be at the lidar, so use a slightly offset wall position
+    #   for the back-azimuth point that ALSO lives at world (5,0,0)... but
+    #   azimuth π means the point is BEHIND the lidar at lidar-frame
+    #   (-r, 0, 0).  Ego at (5,0,0) + sensor (-r, 0, 0) = world (5-r, 0, 0).
+    #   For that to equal world (5, 0, 0), r=0 — pathological.
+    # Instead, place wall_back at sensor (-5, 0, 0) at t=0.5 s:
+    #   world = ego(5,0,0) + sensor(-5,0,0) = (0,0,0).
+    # So front-wall world = (5,0,0); back-wall world = (0,0,0).  Both
+    # static; with the fix they should land at these distinct positions.
+    # Without the fix (single t=0 pose), back-wall world = ego(0,0,0) +
+    # sensor(-5,0,0) = (-5,0,0) — wrong by 5 m on x.
+    x = np.array([5.0, -5.0], dtype=np.float32)
+    y = np.zeros(2, dtype=np.float32)
+    z = np.zeros(2, dtype=np.float32)
+    _write_raw_sweep(bag_id, chunk_id, 0, x=x, y=y, z=z)
+
+    from wato_common.artifact_store import lidar_sweep_path
+
+    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
+    _write_sweep_index(
+        bag_id,
+        chunk_id,
+        [
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "lidar_id": "LIDAR_TOP",
+                "sweep_id": 0,
+                "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
+                "header_timestamp_ns": 0,
+                "record_timestamp_ns": 0,
+                "num_points": 2,
+                "has_ring": False,
+                "has_intensity": False,
+                # has_point_time=False is the case this test exercises.
+                "has_point_time": False,
+                "min_range_m": 5.0,
+                "max_range_m": 5.0,
+                "valid": True,
+                "drop_reason": None,
+            }
+        ],
+    )
+
+    # WITH the fix: synthesize_per_point_times=True, 1-second sweep.
+    cfg = ComponentConfig(
+        synthesize_per_point_times=True,
+        lidar_sweep_duration_ms=1_000.0,
+        lidar_rotation_dir="ccw",
+    )
+    results = process_chunk(cfg, bag_id, chunk_id)
+    assert results, "deskew should have processed one sweep"
+
+    world = np.load(local_path(lidar_world_path(bag_id, chunk_id, 0)))
+    # Point 0 at azimuth 0, t=0: ego at (0,0,0) + sensor (5,0,0) = world (5,0,0).
+    # Point 1 at azimuth π, t=0.5 s: ego at (5,0,0) + sensor (-5,0,0) = world (0,0,0).
+    np.testing.assert_allclose(world["x"], [5.0, 0.0], atol=1e-3)
+
+    # SANITY: without the fix, point 1 lands at world (-5,0,0) because both
+    # points share the t=0 pose at world origin.  Re-run with the flag off.
+    bag2, chunk2 = "bag_synth_off", "chunk0"
+    _write_calibration(bag2)
+    _write_poses(bag2, chunk2, poses)
+    _write_raw_sweep(bag2, chunk2, 0, x=x, y=y, z=z)
+    ensure_local_dir(lidar_proc_dir(bag2, chunk2))
+    _write_sweep_index(
+        bag2,
+        chunk2,
+        [
+            {
+                "bag_id": bag2,
+                "chunk_id": chunk2,
+                "lidar_id": "LIDAR_TOP",
+                "sweep_id": 0,
+                "lidar_path": lidar_sweep_path(bag2, chunk2, "LIDAR_TOP", 0),
+                "header_timestamp_ns": 0,
+                "record_timestamp_ns": 0,
+                "num_points": 2,
+                "has_ring": False,
+                "has_intensity": False,
+                "has_point_time": False,
+                "min_range_m": 5.0,
+                "max_range_m": 5.0,
+                "valid": True,
+                "drop_reason": None,
+            }
+        ],
+    )
+    cfg_off = ComponentConfig(
+        synthesize_per_point_times=False,
+        # Opt out of the strict-error gate — this test explicitly wants to
+        # observe the smear, which is what allow_uncompensated_motion permits.
+        allow_uncompensated_motion=True,
+    )
+    process_chunk(cfg_off, bag2, chunk2)
+    world_off = np.load(local_path(lidar_world_path(bag2, chunk2, 0)))
+    (
+        np.testing.assert_allclose(world_off["x"], [5.0, -5.0], atol=1e-3),
+        (
+            "without synthesis, the back-azimuth point should land at world "
+            "x=-5 (sensor (-5,0,0) + ego (0,0,0)), demonstrating the smear bug"
+        ),
+    )
+
+
 def test_point_time_unit_mismatch_records_failure(tmp_env):
     """t_offset_us in microseconds but config says 'seconds' → sanity check fires.
 
