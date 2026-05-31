@@ -270,6 +270,10 @@ class ProcessedSweepMeta(BaseModel):
     # (canonical_lidar=None in config) just get frame_id = sweep ordinal.
     # Nullable: orphan sweeps outside any window are None.
     frame_id: Optional[int] = None
+    # Step A.5 — MF-MOS mask path.  Populated by mf_mos.process_chunk when
+    # cfg.mf_mos.enabled is True; None otherwise.  Points to a (n_raw,) bool
+    # NPY file aligned to the raw sweep (same length as the raw lidar NPZ).
+    mf_mos_mask_path: Optional[str] = None
 
 
 PROCESSED_SWEEPS_SCHEMA = pa.schema(
@@ -296,6 +300,7 @@ PROCESSED_SWEEPS_SCHEMA = pa.schema(
         pa.field("world_zmin", pa.float64()),
         pa.field("world_zmax", pa.float64()),
         pa.field("frame_id", pa.int64()),
+        pa.field("mf_mos_mask_path", pa.string()),
     ]
 )
 
@@ -323,6 +328,10 @@ class ChunkSummaryRow(BaseModel):
     cache_auto_disabled: bool
     estimated_cache_bytes: int
     ground_status: str  # "ok" | "skipped_no_ground_mask" | "empty"
+    # MF-MOS step stats — None when mf_mos.enabled is False.
+    mf_mos_n_processed: Optional[int] = None
+    mf_mos_n_skipped: Optional[int] = None
+    mf_mos_n_points_moving: Optional[int] = None
 
 
 CHUNK_SUMMARY_SCHEMA = pa.schema(
@@ -340,6 +349,9 @@ CHUNK_SUMMARY_SCHEMA = pa.schema(
         pa.field("cache_auto_disabled", pa.bool_()),
         pa.field("estimated_cache_bytes", pa.int64()),
         pa.field("ground_status", pa.string()),
+        pa.field("mf_mos_n_processed", pa.int64()),
+        pa.field("mf_mos_n_skipped", pa.int64()),
+        pa.field("mf_mos_n_points_moving", pa.int64()),
     ]
 )
 

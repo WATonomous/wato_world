@@ -204,8 +204,10 @@ services:
     image: "${LIDAR_PREPROCESSING_IMAGE}:${TAG}"
     environment:
       - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
+      - MODELS_ROOT=${MODELS_ROOT}
     volumes:
       - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/data/models:/data/models:ro
       - ${WATO_WORLD_DIR}/config:/config:ro
 
   # =====================================================================

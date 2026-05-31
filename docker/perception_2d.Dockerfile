@@ -35,19 +35,13 @@ RUN uv pip install --system --break-system-packages \
 
 # PyTorch matched to base CUDA 12.8.1.
 #
-# Pinned to 2.7.x deliberately: torch 2.10+ adds a runtime dep on the
-# `cuda-toolkit` PyPI meta-wheel (multi-GB; pulled from pypi.nvidia.com).
-# The base image already ships the CUDA 12.8.1 runtime + cuDNN, so that
-# wheel is pure bloat for our use case and the download routinely times
-# out during builds.  2.7.x has cu128 wheels without that dependency.
-#
-# Even on 2.7.1, the nvidia-*-cu12 sub-wheels still come from
-# pypi.nvidia.com which is flaky.  Pre-fetch the closure on the host with
-# src/perception_2d/scripts/fetch_wheels.sh and install offline from the
-# bind-mounted dir so build-time network failures stop being a problem.
-RUN --mount=type=bind,source=data/wheels/perception_2d,target=/wheels \
-    uv pip install --system --break-system-packages \
-        --no-index --find-links /wheels \
+# Pinned to 2.7.x: torch 2.10+ adds a runtime dep on the `cuda-toolkit`
+# PyPI meta-wheel (multi-GB; pulled from pypi.nvidia.com). The base image
+# already ships the CUDA 12.8.1 runtime + cuDNN, so 2.7.x cu128 wheels
+# (no cuda-toolkit dep) are the right choice. UV_HTTP_TIMEOUT=900 handles
+# pypi.nvidia.com latency for the nvidia-*-cu12 sub-wheels.
+RUN uv pip install --system --break-system-packages \
+        --extra-index-url https://download.pytorch.org/whl/cu128 \
         "torch==2.7.1" "torchvision==0.22.1"
 
 # HuggingFace Hub (checkpoint downloads for SAM 3.1 + Depth-Anything-V2) plus
@@ -55,21 +49,19 @@ RUN --mount=type=bind,source=data/wheels/perception_2d,target=/wheels \
 RUN uv pip install --system --break-system-packages \
         huggingface_hub safetensors einops timm
 
-# SAM 3.1 multiplex tracker via Meta's official `sam3` package (vendored at the
-# repo root). The published checkpoint sam3.1_multiplex.pt (facebook/sam3.1)
-# loads ONLY through this code — SAM 3.1 has no HuggingFace Transformers
-# integration. Pulls light deps (ftfy/regex/iopath/numpy<2); config use_fa3=False
-# avoids the FlashAttention-3 dependency. Checkpoint is pre-fetched by
+# SAM 3.1 multiplex tracker via Meta's official `sam3` package. The published
+# checkpoint sam3.1_multiplex.pt (facebook/sam3.1) loads ONLY through this
+# code — SAM 3.1 has no HuggingFace Transformers integration. Pulls light
+# deps (ftfy/regex/iopath/numpy<2); config use_fa3=False avoids the
+# FlashAttention-3 dependency. Checkpoint is pre-fetched by
 # scripts/fetch_models.py into HF_HOME. License: SAM License.
 # Runtime deps the multiplex build path pulls (beyond sam3's light core deps):
 # hydra/omegaconf (config instantiation), open_clip_torch (text encoder),
 # pycocotools (mask RLE), psutil, and scikit-image/learn used by helpers.
 RUN uv pip install --system --break-system-packages \
         hydra-core omegaconf open_clip_torch psutil pycocotools \
-        scikit-image scikit-learn
-COPY sam3 /tmp/sam3
-RUN uv pip install --system --break-system-packages /tmp/sam3 \
-    && rm -rf /tmp/sam3
+        scikit-image scikit-learn \
+        git+https://github.com/facebookresearch/sam3
 
 # Depth Anything V2 (depth.py).  The upstream Meta/ByteDance repo isn't
 # pip-installable (no pyproject.toml / setup.py); use the community PyPI

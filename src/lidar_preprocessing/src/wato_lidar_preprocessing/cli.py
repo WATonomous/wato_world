@@ -25,8 +25,8 @@ def _resolve_bag_id(value: str) -> str:
         --bag data/bags/NuScenes-v1.0-mini-scene-1100/
     """
     p = Path(value)
-    # If it looks like a path (contains a separator or the name has non-ID chars),
-    # derive the bag_id from the directory name the same way ingest does.
+    # Path-shaped input → derive bag_id from the directory name the same way
+    # ingest does (slugify non-identifier chars).
     if "/" in value or not _SLUG.sub("", p.name) == p.name:
         raw = _SLUG.sub("_", p.name).strip("_") or "bag"
         return raw
@@ -79,6 +79,19 @@ def main(log_level: str) -> None:
         "across multiple machines — run 'reduce' manually once all chunks are done."
     ),
 )
+@click.option(
+    "--two-pass/--no-two-pass",
+    "two_pass",
+    default=True,
+    help=(
+        "Enabled by default: run classification twice — pass 1 builds a rough "
+        "static map, then reduce builds the bag-level global_static_map.npz, "
+        "then pass 2 re-classifies every chunk using that map as a per-sweep "
+        "KDTree prior (UniLiPs IWU).  Roughly doubles wall time but improves "
+        "static recall on long-range structure sparsely observed in any single "
+        "chunk.  Use --no-two-pass for the legacy single-pass behavior."
+    ),
+)
 def run_cmd(
     bag_id: str,
     chunk_id: str | None,
@@ -86,11 +99,21 @@ def run_cmd(
     force: bool,
     workers: int,
     auto_reduce: bool,
+    two_pass: bool,
 ) -> None:
     """Run deskew → classify → ground for all chunks (or one chunk) of a bag."""
     bag_id = _resolve_bag_id(bag_id)
     cfg = load_config(config_path)
-    run_pipeline(cfg, bag_id=bag_id, chunk_id=chunk_id, force=force, workers=workers)
+    run_pipeline(
+        cfg,
+        bag_id=bag_id,
+        chunk_id=chunk_id,
+        force=force,
+        workers=workers,
+        two_pass=two_pass,
+    )
+    # Two-pass already built one global_static_map.npz to seed pass 2; we
+    # re-reduce here so the final on-disk map reflects pass-2 outputs.
     if auto_reduce and chunk_id is None:
         log.info("auto-reduce: building global_static_map.npz + global_ground.npz ...")
         static_out = reduce_static_map(bag_id, cfg)

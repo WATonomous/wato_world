@@ -1,0 +1,3 @@
+[submodule "src/lidar_preprocessing/third_party/MF-MOS"]
+	path = src/lidar_preprocessing/third_party/MF-MOS
+	url = https://github.com/SCNU-RISLAB/MF-MOS.git

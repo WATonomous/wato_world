@@ -7,7 +7,7 @@ services:
   # at parse time, BEFORE override files are layered on. So adding the
   # nvidia runtime to e.g. `perception_2d` here does NOT propagate to
   # `perception_2d_dev` — each _dev variant needs its own override entry.
-  perception_2d: &gpu-defaults
+  lidar_preprocessing: &gpu-defaults
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
@@ -19,6 +19,9 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+  lidar_preprocessing_dev: *gpu-defaults
+
+  perception_2d: *gpu-defaults
   perception_2d_dev: *gpu-defaults
 
   proposal_generation: *gpu-defaults

@@ -90,12 +90,17 @@ ingest
 
 lidar_preprocessing   reads: sweeps, poses, calibration
   └─ per-chunk/
-       ├─ lidar_proc_index.parquet   (per-sweep stats, world_path, dynamic_mask_path)
-       ├─ world/*.npz                (deskewed world-frame xyz + intensity + ground_mask)
-       ├─ dynamic_masks/*.npy        (per-sweep boolean dynamic mask)
-       ├─ static_map.npz             (chunk static cloud + voxel keys)
-       └─ ground.npz                 (height grid + surface normals)
+       ├─ lidar_proc_index.parquet   (per-sweep stats, world_path, dynamic_mask_path, mf_mos_mask_path)
+       ├─ lidar_proc_summary.parquet (chunk-level stats: point counts, MF-MOS stats, cache budget)
+       ├─ lidar_proc/*.npz           (deskewed world-frame xyz + origin + ground_mask + intensity)
+       ├─ lidar_proc/*_dynamic_mask.npy    (per-sweep boolean dynamic mask from AW log-odds)
+       ├─ lidar_proc/*_mf_mos_mask.npy     (per-sweep MF-MOS moving mask; null when disabled)
+       ├─ static_map.npz             (chunk static cloud + voxel keys + origin)
+       ├─ dynamic_map.npz            (chunk dynamic cloud + per-point sweep_id)
+       ├─ voxel_occupancy.npz        (sparse int32 voxel coords for MinkUNet encoder; all sweeps)
+       └─ ground.npz                 (height grid + surface normals + raw ground points)
   └─ global_static_map.npz          (bag-level downsampled static cloud)
+  └─ global_ground.npz              (bag-level height grid spanning all chunks)
 
 perception_2d         reads: frames, lidar_proc_index, world/*.npz, calibration
   └─ per-chunk/

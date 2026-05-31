@@ -1,14 +1,11 @@
 """Step D — Global static map reduce.
 
 Merges all per-chunk static_map.npz files for a bag into a single
-downsampled global_static_map.npz at bag level.  Run after all chunks
-have been processed via the `reduce` CLI subcommand.
+downsampled global_static_map.npz. Invoked via the `reduce` CLI subcommand.
 
-Uses a numpy voxel-corner snap (np.unique on packed voxel keys) — one
-point per voxel, snapped to the cell centre.  This avoids the ~80 MB
-Open3D dependency for what is effectively a visualisation/QA artifact.
-If sub-voxel centroid accuracy ever matters we can switch to a
-group-and-mean implementation, see README "Possible follow-ups".
+Uses a numpy voxel-corner snap (np.unique on packed keys) — one point per
+voxel, snapped to cell centre. Cheaper than pulling in Open3D for what is
+effectively a QA / two-pass-prior artifact.
 """
 
 from __future__ import annotations
@@ -34,25 +31,16 @@ log = logging.getLogger(__name__)
 
 
 def _voxel_snap_downsample(xyz: np.ndarray, voxel_size: float) -> np.ndarray:
-    """Return one point per voxel, snapped to the voxel-cell centre.
-
-    Equivalent to Open3D's voxel_down_sample for visualisation purposes,
-    minus the per-voxel centroid (we use the cell centre instead).  ~30 LOC
-    less than the Open3D path and works on identical inputs.
-    """
+    """Return one point per voxel, snapped to the voxel-cell centre."""
     if xyz.shape[0] == 0:
         return np.empty((0, 3), dtype=np.float64)
 
-    # Discretise to int64 voxel indices.  Range is unbounded by design here
-    # (no AXIS_BITS limit) — we simply use a wide-enough int64 packing.
     idx = np.floor(xyz / voxel_size).astype(np.int64)
-    # Pack into one int64 key for np.unique.  Bit budget: 21 bits per axis,
-    # supporting ±(2^20 * voxel_size) m ≈ ±300 km at 30 cm voxel — plenty.
+    # 21 bits per axis → ±(2^20 * voxel_size) m ≈ ±300 km at 30 cm voxel.
     bits = 21
     axis_max = 1 << (bits - 1)
     if (np.abs(idx) >= axis_max).any():
-        # Catastrophic input — keep the function correct rather than silently
-        # truncating.  Falls back to the slow but accurate dedup.
+        # Fall back to row-wise unique rather than silently truncating.
         log.warning(
             "global_static_map: voxel indices exceed int64 packing range — "
             "falling back to row-wise unique"
@@ -60,7 +48,7 @@ def _voxel_snap_downsample(xyz: np.ndarray, voxel_size: float) -> np.ndarray:
         unique_idx = np.unique(idx, axis=0)
         return (unique_idx.astype(np.float64) + 0.5) * voxel_size
 
-    # Shift to non-negative (so left-shift is well defined), then pack.
+    # Shift non-negative before packing so left-shift is well defined.
     shifted = idx + axis_max
     keys = (
         (shifted[:, 0].astype(np.int64) << (2 * bits))
@@ -68,7 +56,6 @@ def _voxel_snap_downsample(xyz: np.ndarray, voxel_size: float) -> np.ndarray:
         | shifted[:, 2].astype(np.int64)
     )
     unique_keys = np.unique(keys)
-    # Unpack.
     mask = (1 << bits) - 1
     sx = ((unique_keys >> (2 * bits)) & mask) - axis_max
     sy = ((unique_keys >> bits) & mask) - axis_max
@@ -80,8 +67,8 @@ def _voxel_snap_downsample(xyz: np.ndarray, voxel_size: float) -> np.ndarray:
 def reduce_static_map(bag_id: str, cfg: ComponentConfig) -> str:
     """Merge and downsample all per-chunk static maps for bag_id.
 
-    Silently skips chunks whose static_map.npz does not yet exist so that
-    a partial run is still useful.  Returns the URI of global_static_map.npz.
+    Chunks without a static_map.npz are skipped so partial runs are useful.
+    Returns the global_static_map.npz URI.
     """
     chunk_rows = read_rows(chunks_index_path(bag_id))
     if not chunk_rows:
@@ -140,15 +127,15 @@ def reduce_ground_map(bag_id: str, cfg: ComponentConfig) -> str:
     """Merge per-chunk ground.npz into a bag-level global_ground.npz.
 
     Concatenates `ground_xyz` from every chunk and rebuilds one bag-level
-    height_grid + normal_grid via the existing `_build_height_grid` helper
-    (the same one ground.py uses), so the schema matches per-chunk ground.npz
-    and downstream consumers can use a single loader regardless of scope.
+    height_grid + normal_grid via _build_height_grid (same helper as the
+    per-chunk path) so the schema matches and consumers can use a single
+    loader regardless of scope.
 
-    This solves the SLF chunk-boundary problem: proposal_generation can query
-    z_ground(x, y) over the full bag without stitching per-chunk grids.
+    Lets proposal_generation query z_ground(x, y) over the full bag without
+    stitching per-chunk grids — solves the SLF chunk-boundary problem.
 
-    Silently skips chunks whose ground.npz is missing or has empty
-    `ground_xyz` so partial runs still produce a useful artifact.
+    Missing or empty-ground chunks are skipped so partial runs still produce
+    a useful artifact.
     """
     chunk_rows = read_rows(chunks_index_path(bag_id))
     if not chunk_rows:
@@ -179,8 +166,8 @@ def reduce_ground_map(bag_id: str, cfg: ComponentConfig) -> str:
             "bag %s: no per-chunk ground points found, writing empty global ground map",
             bag_id,
         )
-        # Sentinel: 1x1 height grid so consumers don't have to special-case
-        # the empty path; matches what _build_height_grid does for empty input.
+        # _build_height_grid returns a 1x1 sentinel grid for empty input,
+        # so consumers don't have to special-case missing ground.
         height_grid, normal_grid, grid_origin = _build_height_grid(
             np.empty((0, 3), dtype=np.float64), cell_size=cell_size
         )
