@@ -18,6 +18,12 @@ COPY src/perception_2d /ws/src/perception_2d
 FROM ${BASE_IMAGE} AS dependencies
 # Base image already provides: libgl1, libglib2.0-0, libsm6, libxext6,
 # libxrender1, ffmpeg (see docker/base/inject_cuda_base.Dockerfile).
+# python3-tk — matplotlib's TkAgg backend, so `watod run perception_2d viz`
+# can pop the interactive depth viewer (see src/.../viz.py). ~tiny.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3-tk \
+    && apt-get -qq autoremove -y && apt-get -qq clean \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc/* /usr/share/man/*
 
 # Generous HTTP timeout — torch's CUDA wheel set is multi-GB and pypi.nvidia.com
 # is frequently slow.  Default uv timeout is 30s which is far too short here.
