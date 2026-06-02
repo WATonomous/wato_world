@@ -23,9 +23,10 @@ configure_tqdm()
 def _resolve_bag_id(value: str) -> str:
     """Accept either a plain bag_id or a bag path (mirrors ingest/lidar_preprocessing)."""
     p = Path(value)
-    if "/" in value or not _SLUG.sub("", p.name) == p.name:
+    if "/" in value or _SLUG.sub("", p.name) != p.name:
         return _SLUG.sub("_", p.name).strip("_") or "bag"
     return value
+
 
 # Without this, every `log.info(...)` across perception_2d is dropped at
 # Python's default WARNING level — so you can't see model-load status,
@@ -57,11 +58,50 @@ def main() -> None:
     default=False,
     help="re-run chunks even if outputs exist; discard per-camera resume caches.",
 )
-def run_cmd(
-    bag_id: str, chunk_id: str | None, config_path: str, force: bool
-) -> None:
+def run_cmd(bag_id: str, chunk_id: str | None, config_path: str, force: bool) -> None:
     cfg = load_config(config_path)
     run_pipeline(cfg, bag_id=_resolve_bag_id(bag_id), chunk_id=chunk_id, force=force)
+
+
+@main.command("viz")
+@click.option("--bag", "bag_id", required=True, help="bag_id or bag path.")
+@click.option(
+    "--chunk",
+    "chunk_id",
+    default=None,
+    help="chunk_id to visualize (default: all chunks, one window each).",
+)
+@click.option(
+    "--cam",
+    "cam_id",
+    default=None,
+    help="starting camera id (default: first with depth; switchable in-window).",
+)
+@click.option(
+    "--max-side",
+    "max_side",
+    default=1280,
+    type=int,
+    help="downscale frames so the longest side ≤ this many pixels (display only).",
+)
+def viz_cmd(
+    bag_id: str, chunk_id: str | None, cam_id: str | None, max_side: int
+) -> None:
+    """Interactive depth-vs-image viewer for depth_2d artifacts.
+
+    Scrub frames, blend RGB ↔ depth heatmap by opacity, or drag a split
+    curtain to compare. The window blocks until closed. Requires DISPLAY
+    (or WSLg) forwarded into the container — see modules/docker-compose.dev.yaml
+    — or just run it on the host where matplotlib has a GUI backend.
+    """
+    from wato_perception_2d.viz import viz_depth
+
+    viz_depth(
+        _resolve_bag_id(bag_id),
+        chunk_id=chunk_id,
+        cam_id=cam_id,
+        max_side=max_side,
+    )
 
 
 if __name__ == "__main__":
