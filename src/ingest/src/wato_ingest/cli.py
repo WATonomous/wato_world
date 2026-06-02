@@ -22,6 +22,7 @@ import sys
 
 import click
 
+from wato_common.progress import configure_tqdm
 from wato_ingest import pipeline
 from wato_ingest.artifacts import frame_index, manifest, quality
 from wato_ingest.config import load_config
@@ -31,6 +32,10 @@ from wato_ingest.inputs import bags, calibration, chunks
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
 )
+
+# Single live tqdm line on a terminal, silent when output is captured. See
+# wato_common.progress (override with WATO_PROGRESS=on|off).
+configure_tqdm()
 
 
 @click.group()
@@ -271,21 +276,16 @@ def run_cmd(
         calibration_source=calib_source,
         only_chunk=only_chunk,
     )
-    click.echo(
-        json.dumps(
-            [
-                {
-                    "bag_id": r.bag_id,
-                    "chunk_id": r.chunk_id,
-                    "quality_tags": r.quality_tags,
-                    "valid_camera_rows": r.valid_camera_count,
-                    "dropped_camera_rows": r.dropped_camera_count,
-                }
-                for r in results
-            ],
-            indent=2,
-        )
-    )
+    click.echo("")
+    click.echo(f"bag: {results[0].bag_id}  ({len(results)} chunk{'s' if len(results) != 1 else ''})")
+    click.echo("")
+    click.echo(f"  {'chunk':<8}  {'frames':>8}  {'dropped':>7}  tags")
+    click.echo(f"  {'-----':<8}  {'------':>8}  {'-------':>7}  ----")
+    for r in results:
+        total = r.valid_camera_count + r.dropped_camera_count
+        tags = ", ".join(r.quality_tags) if r.quality_tags else "ok"
+        click.echo(f"  {r.chunk_id:<8}  {r.valid_camera_count:>6}/{total:<6}  {r.dropped_camera_count:>7}  {tags}")
+    click.echo("")
 
 
 def _load_chunk(bag_id: str, chunk_id: str) -> dict | None:

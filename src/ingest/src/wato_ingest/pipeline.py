@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from tqdm import tqdm
+
 from wato_ingest.artifacts import frame_index, manifest, quality
 from wato_ingest.config import IngestConfig
 from wato_ingest.decoders import cameras, lidar, poses
@@ -75,8 +77,9 @@ def run_bag(
             raise ValueError(f"chunk_id {only_chunk} not found")
 
     results: list[ChunkRunResult] = []
-    for c in chunk_rows:
-        log.info("processing chunk %s", c.chunk_id)
+    bar = tqdm(chunk_rows, desc="chunks", unit="chunk", leave=True)
+    for c in bar:
+        bar.set_postfix(chunk=c.chunk_id, step="cameras")
         cameras.decode_chunk(
             bag_path,
             bag_id,
@@ -85,6 +88,7 @@ def run_bag(
             t_end_ns=c.t_overlap_end_ns,
             cfg=cfg,
         )
+        bar.set_postfix(chunk=c.chunk_id, step="lidar")
         lidar.decode_chunk(
             bag_path,
             bag_id,
@@ -93,6 +97,7 @@ def run_bag(
             t_end_ns=c.t_overlap_end_ns,
             cfg=cfg,
         )
+        bar.set_postfix(chunk=c.chunk_id, step="poses")
         poses.extract(
             bag_path,
             bag_id,
@@ -101,13 +106,14 @@ def run_bag(
             t_end_ns=c.t_overlap_end_ns,
             cfg=cfg,
         )
-
+        bar.set_postfix(chunk=c.chunk_id, step="frame_index")
         frame_index_result = frame_index.build(
             bag_id,
             c.chunk_id,
             max_cam_offset_ms=cfg.max_cam_offset_ms,
             max_pose_gap_ns=int(cfg.max_pose_gap_ms * 1e6),
         )
+        bar.set_postfix(chunk=c.chunk_id, step="quality")
         report = quality.compute(bag_id, c.chunk_id, cfg)
 
         manifest.write(

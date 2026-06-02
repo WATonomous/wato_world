@@ -16,12 +16,71 @@ discovery:
   sample_every_k: 10   # florence2 only: run discovery on every k-th frame
   # Used when backend: "fixed".  Empty → falls back to the prompts.yaml taxonomy.
   fixed_classes: ["car", "truck", "bus", "motorcycle", "bicycle", "person",
-                  "traffic light", "stop sign", "traffic cone"]
+                  "traffic light", "stop sign"]
 
 segmentation:
   version: "sam3.1"        # download_ckpt_from_hf(version)
   use_fa3: false           # FlashAttention 3 (GPU-only); off by default
   output_prob_thresh: 0.5  # SAM 3.1 mask probability threshold
+
+  # --- VRAM controls for long panoramic clips (see SegmentationConfig) ---
+  # Long clips (hundreds of 1008px frames, 16 multiplex slots) otherwise pin the
+  # whole video on the GPU and accumulate every frame's state until even a 24 GB
+  # card OOMs mid-propagation. These bound that without changing tracking.
+  #
+  # Speed/VRAM ladder:
+  #   - offload_output_to_cpu: low overhead, big VRAM win — leave on.
+  #   - offload_video_to_cpu: streams each frame to the GPU (a ~6 MB async copy,
+  #     negligible vs the forward pass). Frees ~4 GB. If you have headroom and
+  #     want the last bit of speed, set false to keep the clip resident.
+  #   - trim_past_non_cond_mem: ON — the only lever that bounds the per-clip OOM
+  #     (multiplex_count is locked at 16 by the checkpoint). It hits an upstream
+  #     sam3 KeyError that _patch_trim_keyerror() in _sam3_runtime.py neutralises;
+  #     get_sam3_predictor only enables trim when that patch is in place.
+  offload_video_to_cpu: true
+  offload_output_to_cpu: true
+  trim_past_non_cond_mem: true
+  forward_backbone_per_frame: true   # backbone one frame at a time, not batched
+
+  # multiplex_count is a BUILD-TIME architectural dimension baked into the
+  # checkpoint (sam3.1_multiplex.pt trained at 16). It sizes tracker params, so
+  # ANY value but 16 makes load_state_dict raise size-mismatch and the predictor
+  # silently comes back None. Verified: 8 -> "size mismatch [16,256] vs [8,256]".
+  # MUST stay 16 — it is NOT an OOM lever. (See config.py for the full note.)
+  # max_num_objects only sizes the compile cache (no param-shape effect), so it
+  # is a safe runtime cap on instances tracked per (concept, camera) pass.
+  # Lower it (e.g. 4) to bound the per-pass transient when scenes are dense.
+  # Changing these rebuilds the predictor.
+  multiplex_count: 16
+  max_num_objects: 12
+
+  # --- The knobs that actually keep SAM 3.1 inside a 24 GB card ---
+  # The sam3 builder bakes these (1008 / 16 / 16, sized for an 80 GB card) and
+  # exposes no override, so get_sam3_predictor sets them on the built model.
+  # null = keep the build default.
+  #
+  # batched_grounding_batch_size: PRIMARY fix. The detector grounds this many
+  #   frames through its ViT in one batch; at the built-in 16 + image_size 1008
+  #   that single ~20 GB allocation OOMs the first batch on a 24 GB card (the
+  #   propagation bar dies at frame 16). Keep small (1-2).
+  batched_grounding_batch_size: 1
+  # postprocess_batch_size: frames accumulated before postprocessing runs on them
+  #   together. Class default is 1 ("set to 1 to disable batching"); builder forces 16.
+  postprocess_batch_size: 1
+  # image_size: resolution each frame is resized to before the backbone (RoPE
+  #   tolerates smaller; memory ~quadratic). null keeps 1008. Lower (e.g. 768)
+  #   for extra headroom at the cost of small-object recall.
+  image_size: null
+
+  # OOM fallback: the tracker runs the whole clip in one session, but if that
+  # CUDA-OOMs mid-propagation it retries the camera in frame windows (fresh
+  # session each). A window that *itself* OOMs is recursively halved down to
+  # min_sub_clip_frames before being skipped, so a dense stretch fragments
+  # finely instead of dropping a whole sub_clip_frames-wide swath. Object ids
+  # reset between windows — the same gap as between chunks — which downstream
+  # `tracking` re-links via DINOv2 ReID. Clips that fit never touch this path.
+  sub_clip_frames: 150
+  min_sub_clip_frames: 16
 
 depth:
   enabled: true

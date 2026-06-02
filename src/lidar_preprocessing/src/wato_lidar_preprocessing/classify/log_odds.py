@@ -298,17 +298,36 @@ def classify_from_log_odds(
     ):
         denom = np.maximum(n_sweep_hits_arr, 1)
         vote_fraction = mf_mos_votes_arr / denom
-        mf_mos_mask = (mf_mos_votes_arr >= cfg.min_mf_mos_votes) & (
+        strict_mask = (mf_mos_votes_arr >= cfg.min_mf_mos_votes) & (
             vote_fraction >= cfg.mf_mos_vote_fraction_threshold
         )
+        # Transient-mover recovery: a fast object (cyclist / sprinting
+        # pedestrian) crossing in ~0.2 s touches only ~4 sweeps at 20 Hz, so
+        # the absolute min_mf_mos_votes floor drops it on any single-sweep
+        # miss. Accept a voxel observed in few sweeps (n_sweep_hits <=
+        # mf_mos_transient_max_sweeps) with near-unanimous agreement
+        # (vote_fraction >= mf_mos_transient_vote_fraction_threshold) even
+        # below the floor, keeping a >= mf_mos_transient_min_votes guard so
+        # genuine single-sweep noise is still rejected.
+        transient_mask = (
+            (mf_mos_votes_arr >= cfg.mf_mos_transient_min_votes)
+            & (vote_fraction >= cfg.mf_mos_transient_vote_fraction_threshold)
+            & (n_sweep_hits_arr <= cfg.mf_mos_transient_max_sweeps)
+        )
+        mf_mos_mask = strict_mask | transient_mask
         mf_mos_dynamic_arr = np.sort(unique_keys[mf_mos_mask])
         log.info(
-            "mf_mos vote aggregation: %d voxels with votes, %d pass thresholds "
-            "(min_votes=%d, fraction>=%.2f) → %d mf_mos-dynamic voxels",
+            "mf_mos vote aggregation: %d voxels with votes, %d pass strict "
+            "(min_votes=%d, fraction>=%.2f), +%d recovered transient "
+            "(>=%d votes, fraction>=%.2f, <=%d sweeps) → %d mf_mos-dynamic voxels",
             int((mf_mos_votes_arr > 0).sum()),
-            int(mf_mos_mask.sum()),
+            int(strict_mask.sum()),
             cfg.min_mf_mos_votes,
             cfg.mf_mos_vote_fraction_threshold,
+            int((transient_mask & ~strict_mask).sum()),
+            cfg.mf_mos_transient_min_votes,
+            cfg.mf_mos_transient_vote_fraction_threshold,
+            cfg.mf_mos_transient_max_sweeps,
             mf_mos_dynamic_arr.size,
         )
 

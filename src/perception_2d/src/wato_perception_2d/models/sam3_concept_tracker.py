@@ -23,6 +23,7 @@ API (Sam3MultiplexVideoPredictor, from the `sam3` package):
 
 from __future__ import annotations
 
+import itertools
 import logging
 import os
 import time
@@ -68,7 +69,35 @@ def _to_numpy(x):
     return np.asarray(x)
 
 
-def _start_session(predictor, pil_frames: list) -> str:
+def _is_cuda_oom(exc: BaseException) -> bool:
+    """True for a CUDA out-of-memory failure.
+
+    Matches torch.cuda.OutOfMemoryError by name (so torch needn't be imported
+    at module scope) and also the generic "CUDA out of memory" RuntimeError some
+    paths raise. Used to distinguish an OOM (retry in smaller sub-clips) from any
+    other tracking failure (swallow + keep partial tracks).
+    """
+    if type(exc).__name__ == "OutOfMemoryError":
+        return True
+    return "out of memory" in str(exc).lower()
+
+
+def _empty_cuda_cache() -> None:
+    """gc + empty_cache so a window's freed allocations return to the driver
+    before the next window's session is built (best-effort, no-op on CPU)."""
+    try:
+        import gc
+
+        import torch
+
+        if torch.cuda.is_available():
+            gc.collect()
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _start_session(predictor, pil_frames: list, offload_video_to_cpu: bool) -> str:
     """Start a multiplex video session on an in-memory list of PIL frames.
 
     The shared Sam3BasePredictor.start_session passes init_state kwargs
@@ -77,9 +106,15 @@ def _start_session(predictor, pil_frames: list) -> str:
     and register the session in the predictor's state map ourselves. The
     add_prompt / propagate paths filter kwargs by signature, so only
     start_session needs this workaround.
+
+    offload_video_to_cpu keeps the full (N, 3, image_size, image_size) frame
+    stack in host RAM instead of pinning it all on the GPU; _get_image_feature
+    streams one frame to the GPU per propagation step. Essential for long
+    panoramic clips that would otherwise OOM at init_state.
     """
     inference_state = predictor.model.init_state(
         resource_path=pil_frames,
+        offload_video_to_cpu=offload_video_to_cpu,
         async_loading_frames=getattr(predictor, "async_loading_frames", False),
     )
     sid = str(uuid.uuid4())
@@ -107,8 +142,25 @@ def track_camera_concepts(
     dino_every_k: int = 5,
     device: str = "cuda",
     output_prob_thresh: float = 0.5,
+    offload_video_to_cpu: bool = True,
+    sub_clip_frames: int = 150,
+    min_sub_clip_frames: int = 16,
 ) -> list[Masklet]:
     """Track every concept across one camera's frames → list of Masklets.
+
+    Tries the whole clip in one SAM 3.1 session. On a CUDA OOM (the multiplex
+    tracker's per-clip memory grows with sequence length until even a 24 GB card
+    OOMs mid-propagation), it falls back to processing the frames in windows of
+    ``sub_clip_frames``, one fresh session each. A window that *itself* OOMs
+    (a pathologically dense stretch) is not dropped: it is recursively halved
+    and each half retried, down to a ``min_sub_clip_frames`` floor — only a
+    range that still OOMs at the floor is skipped. So a dense region fragments
+    finely instead of losing a whole ``sub_clip_frames``-wide swath. Object ids
+    reset between windows — exactly the same discontinuity as between chunks —
+    which the downstream `tracking` component re-links via the DINOv2 embeddings
+    persisted here. Graceful degradation: the full-clip path is unchanged when it
+    fits, and a clip that no longer fits yields windowed masklets instead of
+    dying.
 
     Args:
         predictor: a Sam3MultiplexVideoPredictor (from get_sam3_predictor()).
@@ -117,12 +169,130 @@ def track_camera_concepts(
         concept_prompts: list of (text_prompt, canonical_class) — one per
             taxonomy class. text_prompt seeds SAM 3.1; canonical_class is the cls.
         masks_2d_base_dir: where per-masklet PNG dirs are written.
+        offload_video_to_cpu: keep the frame stack in host RAM and stream it to
+            the GPU per frame (avoids the up-front full-video VRAM allocation).
+        sub_clip_frames: initial window size (frames) for the OOM fallback.
+        min_sub_clip_frames: floor below which a still-OOMing window is skipped
+            rather than halved further.
 
     Returns one Masklet per (concept, obj_id) that the predictor tracked.
     """
     if not frames or not images:
         return []
 
+    kw = dict(
+        bag_id=bag_id,
+        chunk_id=chunk_id,
+        cam_id=cam_id,
+        masks_2d_base_dir=masks_2d_base_dir,
+        dino_model=dino_model,
+        dino_every_k=dino_every_k,
+        device=device,
+        output_prob_thresh=output_prob_thresh,
+        offload_video_to_cpu=offload_video_to_cpu,
+    )
+
+    # Attempt 1: the whole clip in one session.
+    try:
+        tracks = _track_window(predictor, frames, images, concept_prompts, frame_offset=0, **kw)
+        return _tracks_to_masklets(tracks, bag_id, chunk_id, cam_id)
+    except Exception as exc:  # noqa: BLE001
+        # _track_window only re-raises CUDA OOM; any other failure is swallowed
+        # there (keeping partial tracks). Anything else here is unexpected.
+        if not _is_cuda_oom(exc):
+            raise
+        window = sub_clip_frames if sub_clip_frames and sub_clip_frames > 0 else 150
+        floor = max(1, min(min_sub_clip_frames, window))
+        log.warning(
+            "chunk %s / %s: OOM on full %d-frame clip (%s) — retrying in "
+            "%d-frame sub-clips (halving to a %d-frame floor on further OOM).",
+            chunk_id,
+            cam_id,
+            len(frames),
+            exc,
+            window,
+            floor,
+        )
+        _empty_cuda_cache()
+
+    # Attempt 2: windowed, fresh session each. A window that itself OOMs
+    # (pathologically dense) is recursively halved down to ``floor`` before
+    # being skipped, so a busy stretch fragments finely instead of dropping a
+    # whole ``window``-wide swath.
+    def _track_range(start: int, stop: int) -> list[Masklet]:
+        fseg = frames[start:stop]
+        iseg = images[start:stop]
+        try:
+            tr = _track_window(
+                predictor, fseg, iseg, concept_prompts, frame_offset=start, **kw
+            )
+        except Exception as exc:  # noqa: BLE001
+            if not _is_cuda_oom(exc):
+                raise
+            _empty_cuda_cache()
+            n = stop - start
+            if n <= floor:
+                log.warning(
+                    "chunk %s / %s: sub-clip [%d:%d] still OOM at the %d-frame "
+                    "floor (%s) — skipping window.",
+                    chunk_id,
+                    cam_id,
+                    start,
+                    stop,
+                    floor,
+                    exc,
+                )
+                return []
+            mid = start + n // 2
+            log.warning(
+                "chunk %s / %s: sub-clip [%d:%d] OOM (%s) — halving into "
+                "[%d:%d] + [%d:%d].",
+                chunk_id,
+                cam_id,
+                start,
+                stop,
+                exc,
+                start,
+                mid,
+                mid,
+                stop,
+            )
+            return _track_range(start, mid) + _track_range(mid, stop)
+        out = _tracks_to_masklets(tr, bag_id, chunk_id, cam_id)
+        _empty_cuda_cache()
+        return out
+
+    masklets: list[Masklet] = []
+    for start in range(0, len(frames), window):
+        masklets.extend(_track_range(start, min(start + window, len(frames))))
+    return masklets
+
+
+def _track_window(
+    predictor,
+    frames: list[CameraFrameInfo],
+    images: list[np.ndarray],
+    concept_prompts: list[tuple[str, str]],
+    *,
+    frame_offset: int,
+    bag_id: str,
+    chunk_id: str,
+    cam_id: str,
+    masks_2d_base_dir: str,
+    dino_model: str,
+    dino_every_k: int,
+    device: str,
+    output_prob_thresh: float,
+    offload_video_to_cpu: bool,
+) -> dict[tuple[str, int], _Track]:
+    """Run every concept over one (windowed) frame range in a single session.
+
+    Re-raises a CUDA OOM so the caller can retry in smaller windows; swallows any
+    other failure (logging it) and returns the tracks accumulated so far — a
+    DINOv2 / serialization hiccup must not abort the camera. ``frame_offset`` is
+    the window's start index in the full clip, used only for DINOv2 sampling
+    cadence and log lines (mask filenames use the absolute camera_seq).
+    """
     from PIL import Image as PILImage
 
     pil_frames = [PILImage.fromarray(img) for img in images]
@@ -133,12 +303,15 @@ def track_camera_concepts(
 
     sid: Optional[str] = None
     try:
-        sid = _start_session(predictor, pil_frames)
+        sid = _start_session(predictor, pil_frames, offload_video_to_cpu)
+        # SAM 3.1 has copied the frames into inference_state; drop our PIL list so
+        # CPython reclaims it (~4 GB for a 650-frame 1008px clip) rather than
+        # pinning it for the whole propagation.
+        del pil_frames
 
         for text_prompt, canonical in concept_prompts:
             predictor.handle_request({"type": "reset_session", "session_id": sid})
 
-            outputs_by_frame: dict[int, dict] = {}
             resp = predictor.handle_request(
                 {
                     "type": "add_prompt",
@@ -148,28 +321,40 @@ def track_camera_concepts(
                     "output_prob_thresh": output_prob_thresh,
                 }
             )
-            outputs_by_frame[int(resp["frame_index"])] = resp["outputs"]
 
-            for r in predictor.handle_stream_request(
-                {
-                    "type": "propagate_in_video",
-                    "session_id": sid,
-                    "propagation_direction": "forward",
-                    "start_frame_index": 0,
-                    "output_prob_thresh": output_prob_thresh,
-                }
+            # Drain the propagation stream incrementally: each frame's masks are
+            # written to a PNG and released as it arrives. Buffering the whole
+            # stream first (the previous behaviour) held every frame's mask
+            # tensors — GPU tensors at full video resolution — live for the
+            # entire propagation, which pins them past SAM 3.1's own
+            # offload/trim and grows memory with clip length. The `seen` set
+            # keeps each frame processed exactly once (the stream re-yields the
+            # prompted frame 0). frames are emitted in increasing order, so
+            # per-track lists stay time-ordered (re-sorted in _track_to_masklet
+            # for safety).
+            seen_frames: set[int] = set()
+            for r in itertools.chain(
+                [resp],
+                predictor.handle_stream_request(
+                    {
+                        "type": "propagate_in_video",
+                        "session_id": sid,
+                        "propagation_direction": "forward",
+                        "start_frame_index": 0,
+                        "output_prob_thresh": output_prob_thresh,
+                    }
+                ),
             ):
-                outputs_by_frame[int(r["frame_index"])] = r["outputs"]
-
-            for fi in sorted(outputs_by_frame):
-                if not (0 <= fi < n_frames):
+                fi = int(r["frame_index"])
+                if fi in seen_frames or not (0 <= fi < n_frames):
                     continue
+                seen_frames.add(fi)
                 _accumulate_frame(
                     tracks,
                     canonical,
-                    fi,
+                    frame_offset + fi,
                     seq_by_index[fi],
-                    outputs_by_frame[fi],
+                    r["outputs"],
                     image_rgb=images[fi],
                     masks_2d_base_dir=masks_2d_base_dir,
                     dino_model=dino_model,
@@ -177,12 +362,15 @@ def track_camera_concepts(
                     device=device,
                 )
     except Exception as exc:  # noqa: BLE001
+        if _is_cuda_oom(exc):
+            raise  # let the caller retry this range in smaller windows
         log.warning(
             "chunk %s / %s: SAM 3.1 tracking failed (%s) — keeping %d tracks so far.",
             chunk_id,
             cam_id,
             exc,
             len(tracks),
+            exc_info=True,
         )
     finally:
         if sid is not None:
@@ -191,6 +379,12 @@ def track_camera_concepts(
             except Exception:  # noqa: BLE001
                 pass
 
+    return tracks
+
+
+def _tracks_to_masklets(
+    tracks: dict[tuple[str, int], _Track], bag_id: str, chunk_id: str, cam_id: str
+) -> list[Masklet]:
     return [
         _track_to_masklet(t, bag_id, chunk_id, cam_id)
         for t in tracks.values()
@@ -236,7 +430,20 @@ def _accumulate_frame(
         track.mask_paths.append(mask_path)
         track.score = max(track.score, prob)
         if dino_every_k > 0 and frame_index % dino_every_k == 0:
-            feat = extract_dino_feature(image_rgb, m, dino_model, device)
+            # DINOv2 (torch.hub) is independent of SAM 3.1 and only feeds the
+            # downstream tracking ReID — a failure here (e.g. the torch.hub
+            # "No module named 'data'" sys.path issue) must NOT abort the
+            # camera's SAM tracking. Isolate it: drop the embedding, keep masks.
+            try:
+                feat = extract_dino_feature(image_rgb, m, dino_model, device)
+            except Exception as exc:  # noqa: BLE001
+                feat = None
+                log.warning(
+                    "DINOv2 embedding failed at frame %d (%s) — keeping mask, "
+                    "skipping embedding.",
+                    frame_index,
+                    exc,
+                )
             if feat is not None:
                 track.dino_accum.append(feat)
 
@@ -261,6 +468,12 @@ def _track_to_masklet(
         if track.dino_accum
         else None
     )
+    # frames_present / mask_paths are appended in stream order (already
+    # increasing for forward propagation); re-sort the pair by camera_seq so
+    # the masklet is time-ordered regardless of yield order.
+    order = sorted(range(len(track.frames_present)), key=track.frames_present.__getitem__)
+    frames_present = [track.frames_present[i] for i in order]
+    mask_paths = [track.mask_paths[i] for i in order]
     return Masklet(
         masklet_id=track.masklet_id,
         bag_id=bag_id,
@@ -268,8 +481,8 @@ def _track_to_masklet(
         cam_id=cam_id,
         cls=track.cls,
         score=track.score,
-        frames_present=track.frames_present,
-        mask_paths=track.mask_paths,
+        frames_present=frames_present,
+        mask_paths=mask_paths,
         dino_feature=dino,
         tracker_backend="sam3",
     )

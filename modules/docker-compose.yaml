@@ -113,6 +113,12 @@ services:
       - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
       - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
       - HF_MODULES_CACHE=/tmp/hf_modules
+      # Let the CUDA caching allocator grow/shrink segments instead of holding
+      # fixed reserved blocks. SAM 3.1 long-video propagation fragments VRAM
+      # (small allocs fail while hundreds of MB sit reserved-but-unallocated);
+      # expandable_segments reclaims that headroom. Must be set before torch
+      # initialises CUDA, so it lives here rather than in Python.
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
     volumes:
       - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
       - ${WATO_WORLD_DIR}/data/models:/data/models:ro

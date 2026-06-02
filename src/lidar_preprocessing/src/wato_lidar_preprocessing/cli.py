@@ -8,6 +8,7 @@ from pathlib import Path
 
 import click
 
+from wato_common.progress import configure_tqdm
 from wato_lidar_preprocessing.config import load_config
 from wato_lidar_preprocessing.pipeline import run as run_pipeline
 from wato_lidar_preprocessing.reduce import reduce_ground_map, reduce_static_map
@@ -41,6 +42,9 @@ def main(log_level: str) -> None:
         level=getattr(logging, log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Single live tqdm line on a terminal, silent when output is captured. See
+    # wato_common.progress (override with WATO_PROGRESS=on|off).
+    configure_tqdm()
 
 
 @main.command("run")

@@ -216,7 +216,7 @@ FRAME_INDEX_SCHEMA = pa.schema(
         pa.field("valid_camera", pa.bool_()),
         pa.field("camera_drop_reason", pa.string()),
         pa.field("pose_timestamp_ns", pa.int64()),
-        pa.field("world_T_ego_flat", pa.list_(pa.float64(), 16)),
+        pa.field("world_T_ego_flat", pa.list_(pa.float64())),
         pa.field("pose_interp_error", pa.float64()),
         pa.field("valid_pose", pa.bool_()),
         pa.field("calibration_path", pa.string()),

@@ -297,14 +297,59 @@ def _save_cam_partial(
 
 
 def _free_cuda() -> None:
-    """Return freed allocations to the CUDA driver (best-effort, no-op on CPU)."""
+    """Return freed allocations to the CUDA driver (best-effort, no-op on CPU).
+
+    gc.collect() first so tensors held only by unreachable cycles (e.g. a model's
+    intermediate objects that reference GPU buffers) are dropped before
+    empty_cache, which only frees blocks with no live references.
+    """
+    try:
+        import gc
+
+        import torch
+
+        if torch.cuda.is_available():
+            gc.collect()
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _log_vram(tag: str) -> None:
+    """Log current reserved/allocated VRAM (best-effort, no-op on CPU).
+
+    Called after each camera's close_session so drift (memory not returned
+    between cameras) is visible in the logs *before* it turns into an OOM,
+    instead of only finding out by dying mid-propagation.
+    """
     try:
         import torch
 
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            log.info(
+                "VRAM after %s: %.1fGB reserved, %.1fGB allocated",
+                tag,
+                torch.cuda.memory_reserved() / 1e9,
+                torch.cuda.memory_allocated() / 1e9,
+            )
     except Exception:  # noqa: BLE001
         pass
+
+
+def _inference_ctx():
+    """torch.inference_mode() when torch is present, else a no-op context.
+
+    Wrapping the tracking loop is cheap insurance against any accidental autograd
+    bookkeeping on inference tensors; it does not itself reduce VRAM (SAM 3.1
+    already manages no_grad internally for its forward passes)."""
+    try:
+        import torch
+
+        return torch.inference_mode()
+    except Exception:  # noqa: BLE001
+        import contextlib
+
+        return contextlib.nullcontext()
 
 
 def _process_chunk(
@@ -457,7 +502,16 @@ def _run_tracking_pass(
     one camera's frames are resident at a time.
     """
     predictor = get_sam3_predictor(
-        version=cfg.segmentation.version, use_fa3=cfg.segmentation.use_fa3
+        version=cfg.segmentation.version,
+        use_fa3=cfg.segmentation.use_fa3,
+        offload_output_to_cpu=cfg.segmentation.offload_output_to_cpu,
+        trim_past_non_cond_mem=cfg.segmentation.trim_past_non_cond_mem,
+        forward_backbone_per_frame=cfg.segmentation.forward_backbone_per_frame,
+        multiplex_count=cfg.segmentation.multiplex_count,
+        max_num_objects=cfg.segmentation.max_num_objects,
+        image_size=cfg.segmentation.image_size,
+        postprocess_batch_size=cfg.segmentation.postprocess_batch_size,
+        batched_grounding_batch_size=cfg.segmentation.batched_grounding_batch_size,
     )
     if predictor is None:
         # sam3 imports (checked before the depth pass) but the predictor still
@@ -468,65 +522,74 @@ def _run_tracking_pass(
         )
 
     all_masklets: list[Masklet] = []
-    for cam_id, cam_frames in frames_by_cam.items():
-        calib = calibration.get(cam_id)
-        if calib is None:
-            log.warning("chunk %s: no calibration for %s — skipping", chunk_id, cam_id)
-            continue
+    # inference_mode over the whole per-camera loop: cheap insurance against
+    # stray autograd bookkeeping on inference tensors (no-op when torch absent).
+    with _inference_ctx():
+        for cam_id, cam_frames in frames_by_cam.items():
+            calib = calibration.get(cam_id)
+            if calib is None:
+                log.warning("chunk %s: no calibration for %s — skipping", chunk_id, cam_id)
+                continue
 
-        cached = _load_cam_partial(bag_id, chunk_id, cam_id)
-        if cached is not None:
+            cached = _load_cam_partial(bag_id, chunk_id, cam_id)
+            if cached is not None:
+                log.info(
+                    "chunk %s / %s: resuming %d cached masklets — skipping reprocessing",
+                    chunk_id,
+                    cam_id,
+                    len(cached),
+                )
+                all_masklets.extend(cached)
+                continue
+
             log.info(
-                "chunk %s / %s: resuming %d cached masklets — skipping reprocessing",
+                "chunk %s / %s: tracking (%d frames)", chunk_id, cam_id, len(cam_frames)
+            )
+
+            valid_frames: list[CameraFrameInfo] = []
+            valid_images: list[np.ndarray] = []
+            for frame in cam_frames:
+                image = _load_image(frame.image_path)
+                if image is None:
+                    continue
+                valid_frames.append(frame)
+                valid_images.append(image)
+
+            # Concept vocabulary for this camera: open-vocab (Florence-2) or fixed.
+            if discovery is not None:
+                concepts = _discover_concepts_florence2(discovery, valid_images, cfg)
+            else:
+                concepts = fixed_concepts
+
+            cam_masklets = track_camera_concepts(
+                predictor,
+                valid_frames,
+                valid_images,
+                concepts,
+                bag_id=bag_id,
+                chunk_id=chunk_id,
+                cam_id=cam_id,
+                masks_2d_base_dir=masks_base,
+                dino_model=cfg.embeddings.model,
+                dino_every_k=cfg.embeddings.every_k_frames,
+                device=device,
+                output_prob_thresh=cfg.segmentation.output_prob_thresh,
+                offload_video_to_cpu=cfg.segmentation.offload_video_to_cpu,
+                sub_clip_frames=cfg.segmentation.sub_clip_frames,
+                min_sub_clip_frames=cfg.segmentation.min_sub_clip_frames,
+            )
+            log.info(
+                "chunk %s / %s: %d masklets from %d frames",
                 chunk_id,
                 cam_id,
-                len(cached),
+                len(cam_masklets),
+                len(valid_frames),
             )
-            all_masklets.extend(cached)
-            continue
-
-        log.info(
-            "chunk %s / %s: tracking (%d frames)", chunk_id, cam_id, len(cam_frames)
-        )
-
-        valid_frames: list[CameraFrameInfo] = []
-        valid_images: list[np.ndarray] = []
-        for frame in cam_frames:
-            image = _load_image(frame.image_path)
-            if image is None:
-                continue
-            valid_frames.append(frame)
-            valid_images.append(image)
-
-        # Concept vocabulary for this camera: open-vocab (Florence-2) or fixed.
-        if discovery is not None:
-            concepts = _discover_concepts_florence2(discovery, valid_images, cfg)
-        else:
-            concepts = fixed_concepts
-
-        cam_masklets = track_camera_concepts(
-            predictor,
-            valid_frames,
-            valid_images,
-            concepts,
-            bag_id=bag_id,
-            chunk_id=chunk_id,
-            cam_id=cam_id,
-            masks_2d_base_dir=masks_base,
-            dino_model=cfg.embeddings.model,
-            dino_every_k=cfg.embeddings.every_k_frames,
-            device=device,
-            output_prob_thresh=cfg.segmentation.output_prob_thresh,
-        )
-        log.info(
-            "chunk %s / %s: %d masklets from %d frames",
-            chunk_id,
-            cam_id,
-            len(cam_masklets),
-            len(valid_frames),
-        )
-        _save_cam_partial(bag_id, chunk_id, cam_id, cam_masklets)
-        all_masklets.extend(cam_masklets)
+            # track_camera_concepts has already closed its session(s); log the
+            # post-close baseline so accumulation across cameras is visible early.
+            _log_vram(f"{cam_id} close_session")
+            _save_cam_partial(bag_id, chunk_id, cam_id, cam_masklets)
+            all_masklets.extend(cam_masklets)
 
     return all_masklets
 

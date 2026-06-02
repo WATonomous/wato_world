@@ -55,7 +55,7 @@ RUN uv pip install --system --break-system-packages \
 RUN uv pip install --system --break-system-packages \
         hydra-core omegaconf open_clip_torch psutil pycocotools \
         scikit-image scikit-learn \
-        git+https://github.com/facebookresearch/sam3
+        git+https://github.com/facebookresearch/sam3@8e451d5eb43c817b64ae7577fb7b9ae223db88a9
 
 # Depth Anything V2 (depth.py).  The upstream Meta/ByteDance repo isn't
 # pip-installable (no pyproject.toml / setup.py); use the community PyPI

@@ -52,6 +52,90 @@ class SegmentationConfig(BaseModel):
     use_fa3: bool = False  # FlashAttention 3 (GPU-only); off by default
     output_prob_thresh: float = 0.5  # SAM 3.1 mask probability threshold
 
+    # --- VRAM controls for long panoramic clips ---
+    # The multiplex predictor otherwise (a) pins the whole video tensor on the
+    # GPU at init_state and (b) accumulates every propagated frame's
+    # mask/memory features in VRAM. On a ~650-frame, 1008px clip with 16
+    # multiplex slots that OOMs a 24 GB card mid-propagation.
+    #
+    # offload_video_to_cpu: keep the (N, 3, 1008, 1008) fp16 frame stack in host
+    #   RAM and stream one frame to the GPU per step (_get_image_feature already
+    #   does `.cuda()` per frame). Frees ~4 GB up front for a 650-frame clip.
+    offload_video_to_cpu: bool = True
+    # offload_output_to_cpu: move each frame's pred_masks / maskmem features to
+    #   host RAM as propagation advances (SAM 3.1's
+    #   offload_output_to_cpu_for_eval), bounding the per-frame VRAM growth that
+    #   OOMs mid-propagation; the tracker pages them back to the GPU on demand.
+    #   Disable only if you suspect it regresses tracking on your build.
+    offload_output_to_cpu: bool = True
+    # trim_past_non_cond_mem: drop the memory features of frames that have slid
+    #   past SAM 3.1's num_maskmem attention window (obj pointers are kept), so
+    #   VRAM does not grow without bound over a long clip. This is the ONLY lever
+    #   that bounds the per-clip OOM (multiplex_count is fixed at 16 by the
+    #   checkpoint, so it can't be lowered): with trim OFF, long high-res clips
+    #   OOM ~frame 80 at 1024x1280 on a 24 GB card; with trim ON, VRAM plateaus.
+    #
+    #   Enabling it triggers an upstream sam3 KeyError('multistep_point_inputs')
+    #   mid-clip — _patch_trim_keyerror() in _sam3_runtime.py neutralises that
+    #   (the key is write-only in inference). get_sam3_predictor only turns trim
+    #   on if that patch is in place, so leaving this True is safe.
+    trim_past_non_cond_mem: bool = True
+    # forward_backbone_per_frame: compute the image backbone one frame at a time
+    #   instead of batching all frames. SAM 3.1's first recommended remedy "to
+    #   avoid backbone OOM errors on very long videos". Free; quality-neutral.
+    forward_backbone_per_frame: bool = True
+
+    # --- multiplex_count is NOT a tunable OOM lever ---
+    # multiplex_count is a BUILD-TIME ARCHITECTURAL DIMENSION baked into the
+    # published checkpoint (sam3.1_multiplex.pt was trained at 16). It sizes
+    # several tracker params (no_obj_embed_spatial [16,256], mask_tokens
+    # [48,256]=16*3, iou_token, mask_downsampler, ...). Setting it to anything
+    # but 16 makes load_state_dict raise size-mismatch errors (which fire even
+    # under strict=False), get_sam3_predictor swallows that, and the predictor
+    # comes back None — i.e. SAM 3.1 silently unavailable. Verified empirically:
+    # multiplex_count=8 -> "size mismatch ... [16,256] vs [8,256]". MUST stay 16.
+    #
+    # max_num_objects only sizes the torch.compile object-count cache
+    # (num_obj_for_compile); it does NOT touch param shapes, so it is a safe
+    # runtime cap. Lower it to bound how many instances are tracked per
+    # (concept, camera) pass. Build-time: the predictor is rebuilt when these
+    # change.
+    #
+    multiplex_count: int = 16
+    max_num_objects: int = 12
+
+    # --- The knobs that actually keep SAM 3.1 inside a 24 GB card ---
+    # build_sam3_multiplex_video_predictor bakes these (1008 / 16 / 16, sized for
+    # an 80 GB card) and exposes no override, so get_sam3_predictor sets them as
+    # attributes on the built model afterwards. None = keep the build default.
+    #
+    # batched_grounding_batch_size: frames the detector grounds through its ViT
+    #   in one batch. At the built-in 16 + image_size 1008 that single allocation
+    #   is ~20 GB and OOMs the FIRST batch on a 24 GB card (propagation dies at
+    #   frame 16). This is the primary fix — keep it small (1-2).
+    batched_grounding_batch_size: int | None = 1
+    # postprocess_batch_size: frames accumulated before postprocessing runs on
+    #   them together (buffer = postprocess_batch_size * max_num_objects). Class
+    #   default is 1 ("set to 1 to disable batching"); the builder forces 16.
+    postprocess_batch_size: int | None = 1
+    # image_size: resolution each frame is resized to before the backbone (real-
+    #   valued RoPE tolerates a smaller size; memory falls ~quadratically). None
+    #   keeps the built-in 1008. Lower (e.g. 768) for extra headroom at the cost
+    #   of small-object recall.
+    image_size: int | None = None
+
+    # OOM fallback window. With multiplex_count locked at 16, a long enough clip
+    # still OOMs mid-propagation even with every offload/trim lever on. The
+    # tracker tries the whole clip first and, only on a CUDA OOM, retries in
+    # windows of this many frames (fresh session each — object ids reset between
+    # windows, which the downstream `tracking` component re-links via DINOv2).
+    # A window that itself OOMs is recursively halved down to
+    # min_sub_clip_frames before being skipped, so a dense stretch fragments
+    # finely instead of dropping a whole sub_clip_frames-wide swath. Graceful
+    # degradation, not an upfront decision: clips that fit are untouched.
+    sub_clip_frames: int = 150
+    min_sub_clip_frames: int = 16
+
 
 class DepthConfig(BaseModel):
     model_config = ConfigDict(extra="allow")

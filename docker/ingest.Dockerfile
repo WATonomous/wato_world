@@ -38,4 +38,4 @@ ENV ROS_DISTRO=jazzy
 ENV PYTHONPATH=/opt/ros/jazzy/lib/python3.12/site-packages:${PYTHONPATH}
 
 RUN uv pip install --system --break-system-packages \
-        pyarrow numpy scipy pydantic fsspec click pyyaml pillow
+        pyarrow numpy scipy pydantic fsspec click pyyaml pillow tqdm
