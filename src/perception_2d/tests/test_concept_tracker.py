@@ -121,6 +121,43 @@ def test_groups_instances_by_concept_and_obj_id(tmp_path):
         assert m.score == pytest.approx(0.9)
 
 
+def test_resizes_mask_when_shape_differs_from_frame(tmp_path):
+    """SAM 3.1 can return masks at its internal (square image_size) resolution
+    rather than the original frame size — most visibly on wide / panoramic
+    cameras. Those masks must be resized to the frame, not silently dropped
+    (which previously surfaced as '0 masklets' from a clean propagation).
+    """
+    from PIL import Image as PILImage
+
+    img_H, img_W, n = 48, 96, 3  # wide (panoramic-ish) frame
+    mask_H, mask_W = 64, 64  # square model resolution the predictor emits
+    frames = _frames(n)
+    images = [np.zeros((img_H, img_W, 3), dtype=np.uint8) for _ in range(n)]
+    predictor = _FakePredictor(mask_H, mask_W, n)  # emits 64x64 masks
+
+    masklets = track_camera_concepts(
+        predictor,
+        frames,
+        images,
+        concept_prompts=[("car", "car")],
+        bag_id="bag0",
+        chunk_id="chunk0",
+        cam_id="cam_pano",
+        masks_2d_base_dir=str(tmp_path),
+        dino_every_k=0,
+        device="cpu",
+        offload_video_to_cpu=True,
+    )
+
+    # Detections are kept, not dropped: car -> 2 instances across 3 frames.
+    assert len(masklets) == 2
+    for m in masklets:
+        assert m.frames_present == [0, 1, 2]
+        # Saved masks land at the frame resolution, not the model's mask size.
+        arr = np.array(PILImage.open(m.mask_paths[0]))
+        assert arr.shape == (img_H, img_W)
+
+
 class _OOM(RuntimeError):
     """Named to satisfy _is_cuda_oom (matches OutOfMemoryError by class name)."""
 

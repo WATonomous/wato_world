@@ -75,10 +75,13 @@ class SegmentationConfig(BaseModel):
     #   checkpoint, so it can't be lowered): with trim OFF, long high-res clips
     #   OOM ~frame 80 at 1024x1280 on a 24 GB card; with trim ON, VRAM plateaus.
     #
-    #   Enabling it triggers an upstream sam3 KeyError('multistep_point_inputs')
-    #   mid-clip — _patch_trim_keyerror() in _sam3_runtime.py neutralises that
-    #   (the key is write-only in inference). get_sam3_predictor only turns trim
-    #   on if that patch is in place, so leaving this True is safe.
+    #   Enabling it triggers TWO upstream sam3 KeyErrors mid-clip, both
+    #   neutralised in _sam3_runtime.py: KeyError('multistep_point_inputs') in the
+    #   trim itself (_patch_trim_keyerror — the key is write-only in inference) and
+    #   KeyError('maskmem_features') when the multiplex tracker later drops a dead
+    #   object and re-slices past frames (_patch_remove_objects_keyerror — the trim
+    #   stubs have no maskmem to slice). get_sam3_predictor only turns trim on if
+    #   BOTH patches are in place, so leaving this True is safe.
     trim_past_non_cond_mem: bool = True
     # forward_backbone_per_frame: compute the image backbone one frame at a time
     #   instead of batching all frames. SAM 3.1's first recommended remedy "to
@@ -142,6 +145,14 @@ class DepthConfig(BaseModel):
 
     enabled: bool = True
     model: str = "depth-anything-v2-large"
+    # Frames pushed through the DA-V2 backbone in one GPU batch during the depth
+    # pass. The depth pass is VRAM-disjoint from SAM 3.1 (DA-V2 is the only heavy
+    # model resident), and DA-V2-Large at 518px is light, so batching is a cheap
+    # throughput win when the card has headroom. 1 = original per-frame streaming.
+    # Only the GPU inference is batched; LiDAR alignment stays sequential so the
+    # fallback-window behaviour is unchanged. Frames within a camera share one
+    # resolution, which is what makes a single batched forward valid.
+    batch_size: int = 1
     min_lidar_anchors: int = 30  # min anchor pairs to attempt an affine fit
     ransac_n_iter: int = 200
     ransac_inlier_threshold_m: float = 0.5

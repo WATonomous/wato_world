@@ -25,6 +25,11 @@ log = logging.getLogger(__name__)
 # (version, use_fa3) → predictor
 _cache: dict[tuple, object] = {}
 
+# Sentinel meaning "MultiplexState.remove_objects was not called this removal"
+# (the demo's remove_objects early-returns before touching buckets when every
+# object is gone), so the trim-stub restore knows not to re-slice obj_ptr.
+_NO_BUCKETS = object()
+
 
 def get_sam3_predictor(
     version: str = "sam3.1",
@@ -125,10 +130,17 @@ def get_sam3_predictor(
         )
         # trim_past_non_cond_mem is the only lever that bounds the maskmem that
         # accumulates over a long clip (multiplex_count is fixed at 16 by the
-        # checkpoint, so it can't be lowered). But sam3's trim path has a bug
-        # that KeyErrors mid-clip; _patch_trim_keyerror makes it safe. Only
-        # enable trim if the patch is actually in place.
-        trim_ok = _patch_trim_keyerror() if trim_past_non_cond_mem else False
+        # checkpoint, so it can't be lowered). But sam3's trim path has TWO bugs
+        # that KeyError mid-clip — _patch_trim_keyerror (the 'multistep_point_
+        # inputs' read in the trim itself) and _patch_remove_objects_keyerror
+        # (the 'maskmem_features' read when the multiplex tracker later drops a
+        # dead object). Only enable trim if BOTH patches are in place; otherwise
+        # a long clip either OOMs (trim off) or aborts at the first removal.
+        trim_ok = (
+            _patch_trim_keyerror() and _patch_remove_objects_keyerror()
+            if trim_past_non_cond_mem
+            else False
+        )
         _apply_long_video_memory_savers(
             predictor,
             offload_output_to_cpu=offload_output_to_cpu,
@@ -348,6 +360,168 @@ def _patch_trim_keyerror() -> bool:
     log.info(
         "SAM 3.1: patched VideoTrackingMultiplex._trim_output_and_memory to "
         "tolerate missing 'multistep_point_inputs' (upstream trim KeyError)."
+    )
+    return True
+
+
+def _pop_trimmed_noncond(output_dict: object) -> dict:
+    """Lift trim-stub entries out of ``non_cond_frame_outputs``, returning them.
+
+    Once trim_past_non_cond_mem_for_eval is on, _trim_past_out reduces each past
+    non-conditioning frame to a pointer-only stub (obj_ptr + pred_masks + scores)
+    that no longer carries 'maskmem_features' / 'maskmem_pos_enc' /
+    'local_obj_id_to_idx'. Upstream's remove_objects → _slice_state assumes every
+    non-cond frame is still a full output and unconditionally indexes
+    ``out["maskmem_features"][buckets_to_keep]``, so it KeyErrors on the first
+    stub the moment the multiplex tracker drops a dead object. We pop the stubs
+    aside so _slice_state only ever sees full frames, then restore them.
+
+    A stub is identified purely by the absence of 'maskmem_features' — which also
+    correctly catches a (rare) empty frame that never ran the memory encoder, the
+    other case _slice_state would choke on. Returns {frame_idx: out}; empty when
+    there are no stubs or the structure isn't what we expect (then the original
+    runs unchanged and any genuine error surfaces normally).
+    """
+    if not isinstance(output_dict, dict):
+        return {}
+    noncond = output_dict.get("non_cond_frame_outputs")
+    if not isinstance(noncond, dict):
+        return {}
+    popped: dict = {}
+    for frame_idx, out in list(noncond.items()):
+        if isinstance(out, dict) and "maskmem_features" not in out:
+            popped[frame_idx] = out
+            del noncond[frame_idx]
+    return popped
+
+
+def _restore_trimmed_noncond(
+    output_dict: object, popped: dict, buckets_to_keep: object
+) -> int:
+    """Re-insert the stubs popped by _pop_trimmed_noncond into the output dict.
+
+    ``buckets_to_keep`` is the list[int] of surviving multiplex buckets returned
+    by MultiplexState.remove_objects (captured in _patch_remove_objects_keyerror),
+    or _NO_BUCKETS when the demo's remove_objects early-returned without touching
+    buckets (every object removed → the inference state is discarded anyway). When
+    it is a real list we slice each stub's obj_ptr by it, reproducing the one
+    bucket-dim slice _slice_state would have applied to a stub (obj_ptr is the
+    only bucketed tensor a stub still holds), so its bucket dim stays consistent
+    with the frames upstream just sliced. Returns the count of stubs re-sliced.
+    """
+    if not popped:
+        return 0
+    noncond = (
+        output_dict.get("non_cond_frame_outputs")
+        if isinstance(output_dict, dict)
+        else None
+    )
+    apply = buckets_to_keep is not _NO_BUCKETS and buckets_to_keep is not None
+    sliced = 0
+    for frame_idx, out in popped.items():
+        if apply and isinstance(out, dict) and "obj_ptr" in out:
+            try:
+                out["obj_ptr"] = out["obj_ptr"][buckets_to_keep]
+                sliced += 1
+            except Exception as exc:  # noqa: BLE001
+                # A stale obj_ptr only bites later if a whole bucket was dropped
+                # (rare); never lose the stub over it.
+                log.warning(
+                    "SAM 3.1: could not re-slice a trimmed frame's obj_ptr to the "
+                    "surviving buckets (%s) — leaving it; bucket removal is rare.",
+                    exc,
+                )
+        if isinstance(noncond, dict):
+            noncond[frame_idx] = out
+    return sliced
+
+
+def _patch_remove_objects_keyerror() -> bool:
+    """Make sam3's multiplex object-removal tolerate trim-stub frames. Returns
+    True if the patch is in place.
+
+    Upstream bug (sam3 @8e451d5, pinned in docker/perception_2d.Dockerfile):
+    VideoTrackingMultiplexDemo.remove_objects rebuilds the packed per-bucket
+    tensors via a nested _slice_state that does
+    ``out["maskmem_features"][buckets_to_keep]`` for EVERY non-cond frame
+    (video_tracking_multiplex_demo.py:3096). But with trim_past_non_cond_mem on,
+    _trim_past_out has already replaced past non-cond frames with pointer-only
+    stubs that dropped 'maskmem_features'. So the first time the multiplex tracker
+    removes a dead object (which it does routinely, mid-clip), _slice_state
+    KeyErrors on 'maskmem_features' and propagation dies — observed at frame 61 /
+    120 on real nuScenes clips, salvaging only a handful of tracks per camera.
+
+    _slice_state is a nested local we can't patch directly (same constraint as the
+    trim KeyError), so we wrap the enclosing remove_objects: pop the maskmem-less
+    stubs out of non_cond_frame_outputs before it runs (so _slice_state only sees
+    full frames) and restore them after, slicing each stub's obj_ptr to the
+    surviving buckets so its bucket dim still lines up. To learn which buckets
+    survived we also wrap MultiplexState.remove_objects (the call that computes
+    buckets_to_keep) to stash its return on the instance. Idempotent; applied once
+    per process. Without this, trim_past_non_cond_mem must stay off (→ long
+    high-res clips OOM) or tracking aborts at the first object removal.
+    """
+    try:
+        from sam3.model.multiplex_utils import MultiplexState
+        from sam3.model.video_tracking_multiplex_demo import (
+            VideoTrackingMultiplexDemo,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "SAM 3.1: could not import the multiplex classes to patch the "
+            "object-removal KeyError (%s) — leaving trim_past_non_cond_mem OFF.",
+            exc,
+        )
+        return False
+
+    # 1. Capture buckets_to_keep: MultiplexState.remove_objects returns the list
+    #    of surviving bucket indices. Stash it on the instance so the wrapper
+    #    below can re-slice the stubs it set aside.
+    if not getattr(MultiplexState, "_wato_capture_patched", False):
+        _ms_orig = MultiplexState.remove_objects
+
+        def _ms_patched(self, object_indices, strict=True):
+            result = _ms_orig(self, object_indices, strict=strict)
+            self._wato_last_buckets_to_keep = result
+            return result
+
+        MultiplexState.remove_objects = _ms_patched
+        MultiplexState._wato_capture_patched = True
+
+    # 2. Quarantine the trim stubs around the demo's remove_objects.
+    if getattr(VideoTrackingMultiplexDemo, "_wato_remove_patched", False):
+        return True
+
+    _orig = VideoTrackingMultiplexDemo.remove_objects
+
+    def _patched(self, *args, **kwargs):
+        inference_state = args[0] if args else kwargs.get("inference_state")
+        state = inference_state if isinstance(inference_state, dict) else None
+        output_dict = state.get("output_dict") if state is not None else None
+        ms = state.get("multiplex_state") if state is not None else None
+        popped = _pop_trimmed_noncond(output_dict)
+        if ms is not None:
+            try:
+                # Reset so an early-return (no bucket call) is distinguishable
+                # from a real removal that kept buckets.
+                ms._wato_last_buckets_to_keep = _NO_BUCKETS
+            except Exception:  # noqa: BLE001
+                ms = None  # can't stash on it → treat as no capture
+        try:
+            return _orig(self, *args, **kwargs)
+        finally:
+            btk = (
+                getattr(ms, "_wato_last_buckets_to_keep", _NO_BUCKETS)
+                if ms is not None
+                else _NO_BUCKETS
+            )
+            _restore_trimmed_noncond(output_dict, popped, btk)
+
+    VideoTrackingMultiplexDemo.remove_objects = _patched
+    VideoTrackingMultiplexDemo._wato_remove_patched = True
+    log.info(
+        "SAM 3.1: patched VideoTrackingMultiplexDemo.remove_objects to tolerate "
+        "trimmed (maskmem-less) past frames (upstream object-removal KeyError)."
     )
     return True
 

@@ -392,6 +392,49 @@ def _tracks_to_masklets(
     ]
 
 
+# Distinct (mask_shape, frame_shape) pairs already warned about — so a genuine
+# mismatch is logged once, not once per (frame x object) across the whole clip.
+_warned_mask_shapes: set[tuple] = set()
+
+
+def _resize_mask(m: np.ndarray, H: int, W: int) -> Optional[np.ndarray]:
+    """Nearest-neighbour resize a boolean mask to the frame's (H, W).
+
+    SAM 3.1 sometimes returns out_binary_masks at its internal square image_size
+    rather than the original frame resolution — most visibly on wide / panoramic
+    cameras. _accumulate_frame used to drop every mismatched mask silently, which
+    surfaced as "0 masklets" from an otherwise clean propagation. Resize instead
+    so the detection is kept; nearest interpolation preserves the binary label.
+    Returns None for a non-2D mask (can't be mapped to a frame), so the caller
+    skips it. Warns once per distinct shape pair to stay visible without logging
+    every frame.
+    """
+    key = (tuple(m.shape), (H, W))
+    warn = key not in _warned_mask_shapes
+    if warn:
+        _warned_mask_shapes.add(key)
+    if m.ndim != 2:
+        if warn:
+            log.warning(
+                "SAM 3.1 mask has shape %s (not 2D) — cannot map to frame %s; "
+                "skipping.",
+                m.shape,
+                (H, W),
+            )
+        return None
+    if warn:
+        log.warning(
+            "SAM 3.1 mask shape %s != frame %s — resizing (nearest). This was "
+            "previously a silent drop that surfaced as '0 masklets'.",
+            m.shape,
+            (H, W),
+        )
+    from PIL import Image as PILImage
+
+    resized = PILImage.fromarray(m.astype(np.uint8)).resize((W, H), PILImage.NEAREST)
+    return np.asarray(resized, dtype=bool)
+
+
 def _accumulate_frame(
     tracks: dict[tuple[str, int], _Track],
     canonical: str,
@@ -417,7 +460,14 @@ def _accumulate_frame(
     for i in range(len(obj_ids_np)):
         m = _to_numpy(masks[i]).astype(bool)
         if m.shape != (H, W):
-            continue
+            # SAM 3.1 can return a mask at its internal (square image_size)
+            # resolution rather than the original frame size — most visibly on
+            # wide / panoramic cameras. Dropping the mismatch silently surfaced
+            # as "0 masklets" from a clean propagation; resize it to the frame
+            # (nearest, label-preserving) so the detection is kept.
+            m = _resize_mask(m, H, W)
+            if m is None:
+                continue
         oid = int(obj_ids_np[i])
         prob = float(probs_np[i]) if probs_np is not None else 0.0
         key = (canonical, oid)

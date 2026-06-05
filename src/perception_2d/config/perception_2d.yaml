@@ -85,6 +85,13 @@ segmentation:
 depth:
   enabled: true
   model: "depth-anything-v2-large"
+  # Frames pushed through the DA-V2 backbone per GPU batch. The depth pass is
+  # VRAM-disjoint from SAM 3.1 (DA-V2 is the only heavy model resident) and
+  # DA-V2-Large at 518px is light, so raising this is a cheap throughput win
+  # when the card has headroom. 1 = original per-frame streaming. Only the GPU
+  # inference batches; LiDAR alignment stays sequential (fallback window
+  # unchanged).
+  batch_size: 4
   min_lidar_anchors: 30
   ransac_n_iter: 200
   ransac_inlier_threshold_m: 0.5

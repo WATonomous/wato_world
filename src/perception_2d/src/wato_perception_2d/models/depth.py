@@ -128,6 +128,69 @@ class DepthAnythingV2:
         confidence = _gradient_confidence(depth) if with_confidence else None
         return depth, confidence
 
+    def infer_batch(
+        self,
+        images_rgb: list[np.ndarray],
+        *,
+        batch_size: int = 1,
+        with_confidence: bool = False,
+    ) -> tuple[list[np.ndarray], list[Optional[np.ndarray]]]:
+        """Run inference on many same-resolution RGB images, GPU-batched.
+
+        All images must share one (H, W) — true when they come from a single
+        camera stream, which is how the pipeline calls this.  Frames are pushed
+        through the backbone ``batch_size`` at a time: a larger batch trades VRAM
+        for throughput (the per-frame backbone forward is the depth pass's
+        bottleneck).  Equivalent to looping ``infer`` when batch_size == 1.
+
+        Args:
+            images_rgb: list of (H, W, 3) uint8 RGB images, all the same size.
+            batch_size: frames per GPU forward (clamped to >= 1).
+            with_confidence: also compute the gradient-magnitude confidence map.
+
+        Returns:
+            relative_depth: list of (H, W) float32 maps, aligned with images_rgb.
+            confidence: list of (H, W) float32 maps in [0, 1], or None entries
+                when with_confidence is False.
+        """
+        self._load()
+
+        import torch
+        import torch.nn.functional as F
+
+        bs = max(1, batch_size)
+        depths: list[np.ndarray] = []
+        confidences: list[Optional[np.ndarray]] = []
+
+        with torch.no_grad():
+            for start in range(0, len(images_rgb), bs):
+                chunk = images_rgb[start : start + bs]
+                tensors = []
+                sizes = []
+                for img in chunk:
+                    # image2tensor expects a BGR (cv2-style) array; ours is RGB.
+                    img_bgr = np.ascontiguousarray(img[:, :, ::-1])
+                    tensor, (h, w) = self._model.image2tensor(img_bgr)
+                    tensors.append(tensor)
+                    sizes.append((h, w))
+                # Same input (h, w) → same resized tensor shape, so this cat is
+                # valid (and would raise loudly if a caller mixed resolutions).
+                batch = torch.cat(tensors, dim=0)  # (B, 3, H', W')
+                pred = self._model.forward(batch)  # (B, H', W')
+                # All frames share (h, w), so one interpolate covers the batch.
+                h, w = sizes[0]
+                pred = F.interpolate(
+                    pred[:, None], (h, w), mode="bilinear", align_corners=True
+                )[:, 0]
+                pred_np = np.asarray(pred.cpu().numpy(), dtype=np.float32)
+                for depth in pred_np:
+                    depths.append(depth)
+                    confidences.append(
+                        _gradient_confidence(depth) if with_confidence else None
+                    )
+
+        return depths, confidences
+
     def unload(self) -> None:
         """Drop the GPU-resident model so its VRAM can be reclaimed.
 

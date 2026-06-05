@@ -4,8 +4,9 @@ Each chunk is processed in two passes so the two heavy GPU models are never
 co-resident — critical on small-VRAM GPUs, where DA-V2-Large + SAM 3.1 + DINOv2
 do not all fit (e.g. ~6 GB):
 
-  PASS 1 — depth (only DA-V2 in VRAM), per camera/frame:
-    1. DepthAnythingV2.infer() → relative_depth
+  PASS 1 — depth (only DA-V2 in VRAM), per camera (frames batched through the
+  backbone `depth.batch_size` at a time; steps 2-6 then run per frame):
+    1. DepthAnythingV2.infer_batch() → relative_depth
     2. Load static LiDAR points for this sweep
     3. depth_align.build_anchor_pairs() → d_lidar, d_da
     4. depth_align.ransac_affine_fit() → affine params
@@ -170,25 +171,23 @@ def _write_depth_artifact(
     )
 
 
-def _run_depth_branch(
+def _align_and_write_depth(
     cfg: ComponentConfig,
     bag_id: str,
     chunk_id: str,
     cam_id: str,
     frame: CameraFrameInfo,
-    image: np.ndarray,
+    rel_depth: np.ndarray,
     calib: CalibrationInfo,
-    depth_model: Optional[DepthAnythingV2],
     fallback_window: deque,
 ) -> None:
-    """Estimate + LiDAR-align metric depth for one frame and write the artifact.
+    """LiDAR-align one frame's relative depth to metric and write the artifact.
 
-    Writes nothing on total failure (fit_status==2 / depth disabled): downstream
+    The DA-V2 inference is done by the caller (batched); this is the per-frame
+    sequential tail. Writes nothing on total failure (fit_status==2): downstream
     treats a missing depth_2d artifact identically to a written fit_status==2 one.
     """
-    if not (cfg.depth.enabled and depth_model is not None):
-        return
-    H, W = image.shape[:2]
+    H, W = rel_depth.shape[:2]
     fit_params: dict = {
         "a": 1.0,
         "b": 0.0,
@@ -197,7 +196,6 @@ def _run_depth_branch(
         "fit_status": 2,
     }
 
-    rel_depth, _ = depth_model.infer(image)
     static_pts = load_static_lidar_points(bag_id, chunk_id, frame.sweep_id)
 
     if static_pts is not None and frame.valid_pose and frame.world_T_ego_flat:
@@ -447,9 +445,13 @@ def _run_depth_pass(
     """PASS 1: write metric depth for every frame, then free DA-V2's VRAM.
 
     DA-V2 is built here (not in run()) and unloaded in the finally block so it
-    never co-resides with SAM 3.1.
+    never co-resides with SAM 3.1. Frames within a camera are pushed through the
+    backbone ``cfg.depth.batch_size`` at a time (they share one resolution); the
+    LiDAR alignment that follows each batch stays strictly sequential, so the
+    fallback-window state is identical to per-frame processing.
     """
     depth_model = DepthAnythingV2(model_size=cfg.depth.model, device=None)
+    batch_size = max(1, cfg.depth.batch_size)
     try:
         for cam_id, cam_frames in frames_by_cam.items():
             calib = calibration.get(cam_id)
@@ -458,26 +460,38 @@ def _run_depth_pass(
             fallback_window: deque[tuple[float, float]] = deque(
                 maxlen=cfg.depth.fallback_window
             )
-            for frame in tqdm(
-                cam_frames,
+            with tqdm(
+                total=len(cam_frames),
                 desc=f"{chunk_id}/{cam_id} depth",
                 unit="frame",
                 leave=False,
-            ):
-                image = _load_image(frame.image_path)
-                if image is None:
-                    continue
-                _run_depth_branch(
-                    cfg,
-                    bag_id,
-                    chunk_id,
-                    cam_id,
-                    frame,
-                    image,
-                    calib,
-                    depth_model,
-                    fallback_window,
-                )
+            ) as pbar:
+                for start in range(0, len(cam_frames), batch_size):
+                    batch_frames = cam_frames[start : start + batch_size]
+                    images: list[np.ndarray] = []
+                    kept_frames: list[CameraFrameInfo] = []
+                    for frame in batch_frames:
+                        image = _load_image(frame.image_path)
+                        if image is None:
+                            continue
+                        images.append(image)
+                        kept_frames.append(frame)
+                    if images:
+                        rel_depths, _ = depth_model.infer_batch(
+                            images, batch_size=batch_size
+                        )
+                        for frame, rel_depth in zip(kept_frames, rel_depths):
+                            _align_and_write_depth(
+                                cfg,
+                                bag_id,
+                                chunk_id,
+                                cam_id,
+                                frame,
+                                rel_depth,
+                                calib,
+                                fallback_window,
+                            )
+                    pbar.update(len(batch_frames))
     finally:
         # Drop DA-V2 from VRAM before the tracking pass builds SAM 3.1.
         depth_model.unload()
