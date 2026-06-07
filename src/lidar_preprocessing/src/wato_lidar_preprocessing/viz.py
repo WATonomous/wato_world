@@ -103,6 +103,7 @@ _CLASS_COLORS: dict[int, list[float]] = {
     2: [0.95, 0.55, 0.15],  # UNDER_EVIDENCED — orange
     3: [0.55, 0.55, 0.55],  # FREE_ONLY       — gray
     4: [0.91, 0.30, 0.24],  # DYNAMIC         — red
+    5: [0.40, 0.20, 0.45],  # CARVED_NOISE    — purple (carved but barely hit)
 }
 _CLASS_MISSING_RGB = [0.20, 0.20, 0.20]
 
@@ -795,7 +796,7 @@ def _run_sweep_slider(bag_id: str, chunk_id: str) -> None:
     color_options: list[tuple[str, str]] = [("red (uniform)", "uniform")]
     if has_diag:
         color_options.append(("p_occ (carving evidence)", "p_occ"))
-        color_options.append(("classification (5-bucket)", "classification"))
+        color_options.append(("classification (6-bucket)", "classification"))
         color_options.append(("n_obs (sweeps that touched voxel)", "n_obs"))
         color_options.append(("n_hits (endpoint hits in voxel)", "n_hits"))
     if intensity_arr is not None:

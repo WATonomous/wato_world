@@ -36,7 +36,6 @@ from .global_map_prior import GlobalMapPrior
 from .io_helpers import (
     cache_byte_budget,
     estimate_cache_bytes,
-    load_mf_mos_world_mask,
     load_world_full,
     origin_from_index,
 )
@@ -96,18 +95,21 @@ def _run_pass_1_persistence(
     list[np.ndarray | None],
     list[np.ndarray | None],
     list[np.ndarray | None],
+    list[np.ndarray | None],
     list[np.ndarray],
     dict[int, list[np.ndarray]],
 ]:
     """Pass 1 for the persistence path (no log-odds accumulators).
 
-    Returns the same 5-tuple shape as build_log_odds_grid minus the log-odds
-    arrays. ground_mask_cache is always populated regardless of cache_xyz —
-    masking.py needs it to keep ground out of dynamic_map.npz.
+    Returns the same shape as build_log_odds_grid minus the log-odds arrays.
+    ground_mask_cache and origin_cache are always populated regardless of
+    cache_xyz — masking.py needs ground to keep it out of dynamic_map.npz, and
+    origin for the near-range dynamic gate.
     """
     xyz_cache: list[np.ndarray | None] = []
     intensity_cache: list[np.ndarray | None] = []
     ground_mask_cache: list[np.ndarray | None] = []
+    origin_cache: list[np.ndarray | None] = []
     sweep_keys: list[np.ndarray] = []
     frame_keys: dict[int, list[np.ndarray]] = {}
 
@@ -120,15 +122,17 @@ def _run_pass_1_persistence(
             xyz_cache.append(None)
             intensity_cache.append(None)
             ground_mask_cache.append(None)
+            origin_cache.append(None)
             sweep_keys.append(np.empty(0, dtype=np.int64))
             continue
 
         # load_world_full so we get ground_mask without a second NPZ read.
-        xyz, intensity, _origin, ground_mask = load_world_full(row["world_path"])
+        xyz, intensity, sweep_origin, ground_mask = load_world_full(row["world_path"])
         if xyz.shape[0] == 0:
             xyz_cache.append(xyz if cache_xyz else None)
             intensity_cache.append(intensity if cache_xyz and cache_intensity else None)
             ground_mask_cache.append(ground_mask)
+            origin_cache.append(sweep_origin)
             sweep_keys.append(np.empty(0, dtype=np.int64))
             continue
 
@@ -137,11 +141,19 @@ def _run_pass_1_persistence(
         xyz_cache.append(xyz if cache_xyz else None)
         intensity_cache.append(intensity if cache_xyz and cache_intensity else None)
         ground_mask_cache.append(ground_mask)
+        origin_cache.append(sweep_origin)
         fid = row.get("frame_id")
         if fid is not None:
             frame_keys.setdefault(int(fid), []).append(keys)
 
-    return xyz_cache, intensity_cache, ground_mask_cache, sweep_keys, frame_keys
+    return (
+        xyz_cache,
+        intensity_cache,
+        ground_mask_cache,
+        origin_cache,
+        sweep_keys,
+        frame_keys,
+    )
 
 
 def process_chunk(
@@ -198,6 +210,7 @@ def process_chunk(
             xyz_cache,
             intensity_cache,
             ground_mask_cache,
+            origin_cache,
             sweep_keys,
             frame_keys,
             (
@@ -205,8 +218,6 @@ def process_chunk(
                 lo_vals,
                 n_obs_vals,
                 n_hits_vals,
-                mf_mos_votes_arr,
-                n_sweep_hits_arr,
             ),
         ) = build_log_odds_grid(
             meta_rows,
@@ -214,13 +225,11 @@ def process_chunk(
             origin,
             chunk_id,
             cache_xyz=cache_xyz,
-            bag_id=bag_id,
             global_map_prior=global_map_prior,
         )
         (
             static_arr,
             not_dynamic_arr,
-            mf_mos_dynamic_arr,
             classification,
             diag,
         ) = classify_from_log_odds(
@@ -229,8 +238,6 @@ def process_chunk(
             n_obs_vals,
             n_hits_vals,
             cfg,
-            mf_mos_votes_arr=mf_mos_votes_arr,
-            n_sweep_hits_arr=n_sweep_hits_arr,
         )
     else:
         if global_map_prior is not None:
@@ -243,6 +250,7 @@ def process_chunk(
             xyz_cache,
             intensity_cache,
             ground_mask_cache,
+            origin_cache,
             sweep_keys,
             frame_keys,
         ) = _run_pass_1_persistence(
@@ -251,7 +259,6 @@ def process_chunk(
         static_arr, not_dynamic_arr, threshold = classify_persistence(
             sweep_keys, len(meta_rows), cfg
         )
-        mf_mos_dynamic_arr = None
         unique_keys = np.empty(0, dtype=np.int64)
         lo_vals = np.empty(0, dtype=np.float32)
         n_obs_vals = np.empty(0, dtype=np.int32)
@@ -281,40 +288,6 @@ def process_chunk(
             updated_meta.append(_invalid_meta_row(row, sweep_id))
             continue
 
-        # The sweep-local MF-MOS voxel set must come from the per-sweep mask
-        # — using mf_mos_dynamic_arr (chunk-wide) directly bleeds dynamic
-        # labels across time. When mf_mos_require_chunk_wide_vote is True
-        # the per-sweep set is AND-filtered against chunk-wide votes to
-        # preserve denoising. Persistence path has no chunk-wide votes so
-        # the gate is a no-op there.
-        sweep_mf_mos_dynamic_arr = None
-        if (
-            cfg.mf_mos.enabled
-            and cfg.mf_mos.fusion_mode != "independent"
-            and keys.shape[0] > 0
-        ):
-            mf_mask = load_mf_mos_world_mask(
-                bag_id, chunk_id, row, keys.shape[0], cfg.filter_nonfinite_points
-            )
-            if mf_mask is not None:
-                sweep_keys_dyn = np.unique(keys[mf_mask])
-                if (
-                    cfg.mf_mos_require_chunk_wide_vote
-                    and mf_mos_dynamic_arr is not None
-                    and sweep_keys_dyn.size > 0
-                ):
-                    if mf_mos_dynamic_arr.size == 0:
-                        sweep_keys_dyn = np.empty(0, dtype=sweep_keys_dyn.dtype)
-                    else:
-                        sweep_keys_dyn = sweep_keys_dyn[
-                            np.isin(
-                                sweep_keys_dyn,
-                                mf_mos_dynamic_arr,
-                                assume_unique=True,
-                            )
-                        ]
-                sweep_mf_mos_dynamic_arr = np.sort(sweep_keys_dyn)
-
         result = apply_classification_to_sweep(
             row,
             sweep_id,
@@ -324,11 +297,11 @@ def process_chunk(
             xyz_cache[i],
             intensity_cache[i],
             ground_mask_cache[i],
-            cfg,
+            origin_cache[i],
             bag_id,
             chunk_id,
             any_intensity,
-            sweep_mf_mos_dynamic_arr=sweep_mf_mos_dynamic_arr,
+            dynamic_min_range_m=cfg.dynamic_min_range_m,
         )
         total_static += result.n_static
         total_dynamic += result.n_dynamic
@@ -404,7 +377,8 @@ def process_chunk(
         log.info(
             "chunk %s: static=%d dynamic=%d "
             "(log_odds: %d touched, %d evidenced, "
-            "%d under-evidenced-with-hits, %d ambiguous, %d free-only)",
+            "%d under-evidenced-with-hits, %d ambiguous, %d free-only, "
+            "%d dynamic-voxels, %d carved-noise)",
             chunk_id,
             total_static,
             total_dynamic,
@@ -413,6 +387,8 @@ def process_chunk(
             diag.get("n_under_evidenced_with_hits", 0),
             diag.get("n_ambiguous", 0),
             diag.get("n_free_only", 0),
+            diag.get("n_dynamic", 0),
+            diag.get("n_carved_noise", 0),
         )
     else:
         log.info(
@@ -466,7 +442,6 @@ def process_chunk(
             classification,
             cfg.voxel_size_m,
             origin,
-            mf_mos_dynamic_arr=mf_mos_dynamic_arr,
         )
 
     return ClassifyResult(

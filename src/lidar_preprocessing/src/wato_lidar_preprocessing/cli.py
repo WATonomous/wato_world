@@ -54,6 +54,18 @@ def main(log_level: str) -> None:
     default="/ws/src/lidar_preprocessing/config/lidar_preprocessing.yaml",
 )
 @click.option(
+    "--seg",
+    "seg",
+    type=click.Choice(["aw", "mos"]),
+    default=None,
+    help=(
+        "Segmentation method for the static/dynamic split (Step B). "
+        "'aw' = pure Amanatides-Woo log-odds ray-casting (no MF-MOS). "
+        "'mos' = pure MF-MOS learned segmentation (no ray traversal). "
+        "Overrides the config's `segmentation` field; default uses the config."
+    ),
+)
+@click.option(
     "--force",
     "-f",
     "force",
@@ -96,14 +108,18 @@ def run_cmd(
     bag_id: str,
     chunk_id: str | None,
     config_path: str,
+    seg: str | None,
     force: bool,
     workers: int,
     auto_reduce: bool,
     two_pass: bool,
 ) -> None:
-    """Run deskew → classify → ground for all chunks (or one chunk) of a bag."""
+    """Run deskew → (aw|mos) → ground for all chunks (or one chunk) of a bag."""
     bag_id = _resolve_bag_id(bag_id)
     cfg = load_config(config_path)
+    if seg is not None:
+        cfg.segmentation = seg
+    log.info("segmentation method: %s", cfg.segmentation)
     run_pipeline(
         cfg,
         bag_id=bag_id,

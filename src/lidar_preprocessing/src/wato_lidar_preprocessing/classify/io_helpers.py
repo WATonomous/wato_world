@@ -7,7 +7,7 @@ import os
 
 import numpy as np
 
-from wato_common.artifact_store import lidar_sweep_path, local_path
+from wato_common.artifact_store import local_path
 
 log = logging.getLogger(__name__)
 
@@ -80,76 +80,6 @@ def load_world_full(
 
 def sigmoid(x: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-x.astype(np.float64)))
-
-
-def load_mf_mos_world_mask(
-    bag_id: str,
-    chunk_id: str,
-    row: dict,
-    n_world: int,
-    filter_nonfinite: bool,
-) -> np.ndarray | None:
-    """Load an MF-MOS raw-length mask and align it to world-frame length.
-
-    MF-MOS masks are (n_raw,) bool aligned to the raw lidar NPZ.  Deskew
-    applies a nonfinite filter, so n_world <= n_raw.  We re-apply the same
-    filter here so the mask can be fused with the (n_world,) voxel mask.
-
-    Returns None if the mask is unavailable or can't be loaded.
-    """
-    mf_path = row.get("mf_mos_mask_path")
-    if not mf_path:
-        return None
-    try:
-        mf_raw = np.load(local_path(mf_path))
-    except Exception as exc:  # noqa: BLE001
-        log.warning("could not load mf_mos mask %s: %s", mf_path, exc)
-        return None
-
-    n_raw = mf_raw.shape[0]
-    if n_raw == n_world:
-        return mf_raw  # common case: no NaN/inf points were dropped
-
-    if n_raw < n_world:
-        log.warning(
-            "sweep %s: mf_mos mask len %d < world len %d — fusion skipped for this sweep",
-            row.get("sweep_id"),
-            n_raw,
-            n_world,
-        )
-        return None
-
-    # n_raw > n_world: re-apply the nonfinite filter to get world-aligned mask.
-    raw_uri = lidar_sweep_path(
-        bag_id,
-        chunk_id,
-        str(row.get("lidar_id", "")),
-        int(row.get("sweep_id", 0)),
-    )
-    try:
-        raw = np.load(local_path(raw_uri))
-    except Exception as exc:  # noqa: BLE001
-        log.warning("could not load raw sweep for mf_mos fusion alignment: %s", exc)
-        return None
-
-    x_r = raw["x"].astype(np.float64)
-    y_r = raw["y"].astype(np.float64)
-    z_r = raw["z"].astype(np.float64)
-    if filter_nonfinite:
-        finite = np.isfinite(x_r) & np.isfinite(y_r) & np.isfinite(z_r)
-    else:
-        finite = np.ones(n_raw, dtype=bool)
-
-    mf_world = mf_raw[finite]
-    if mf_world.shape[0] != n_world:
-        log.warning(
-            "sweep %s: mf_mos world-aligned len %d != world len %d — fusion skipped",
-            row.get("sweep_id"),
-            mf_world.shape[0],
-            n_world,
-        )
-        return None
-    return mf_world
 
 
 def origin_from_index(meta_rows: list[dict]) -> np.ndarray | None:

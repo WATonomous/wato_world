@@ -79,13 +79,15 @@ class PatchworkParams(BaseModel):
 class MFMosParams(BaseModel):
     """MF-MOS moving-object segmentation parameters.
 
-    Step A.5 between deskew and classify when enabled. Requires a CUDA GPU
-    for realistic data; device="cpu" is for tiny smoke tests only.
+    Used only by the `mos` segmentation method (selected with `--seg mos`).
+    The MF-MOS method is fully self-contained: it runs inference (Step A.5)
+    and derives static/dynamic clouds purely from the per-sweep moving masks,
+    with no Amanatides-Woo / log-odds involvement. Requires a CUDA GPU for
+    realistic data; device="cpu" is for tiny smoke tests only.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = False
     checkpoint_path: str = "/data/models/mf_mos/mf_mos_semantic_kitti.pt"
     arch_config: str = "/data/models/mf_mos/arch_cfg.yaml"
     data_config: str = "/data/models/mf_mos/data_cfg.yaml"
@@ -97,12 +99,17 @@ class MFMosParams(BaseModel):
     device: str = "cuda"
     score_threshold: float = 0.5
     save_scores: bool = False
-    # fusion_mode controls how classify uses the MF-MOS mask:
-    #   independent — masks written side-by-side, downstream decides.
-    #   union       — static/dynamic accumulators use (voxel | mf_mos).
-    #   mfmos_only  — accumulators use the mf_mos mask only.
-    fusion_mode: str = "independent"
+    # Max pose-interpolation gap (ms) used when warping a historical sweep
+    # into the current frame for a residual. Gates POSE quality only.
     max_pose_gap_ms: float = 200.0
+    # Max sweep-to-sweep time baseline (ms) accepted for a residual channel.
+    # This is distinct from max_pose_gap_ms: a residual at step k spans
+    # k * sweep_dt, which for the longer residual_steps legitimately exceeds
+    # the pose-gap cap. Conflating the two (the historical bug) zeroed every
+    # residual channel whose baseline exceeded max_pose_gap_ms, silently
+    # gutting multi-frame MOS. Set comfortably above max(residual_steps) *
+    # sweep_dt (e.g. 16 steps * 50 ms @ 20 Hz = 800 ms).
+    max_residual_gap_ms: float = 1000.0
     # Match training preprocessing (data_preparing.yaml).
     min_range_m: float = 2.0
     max_range_m: float = 50.0
@@ -125,14 +132,6 @@ class MFMosParams(BaseModel):
             raise ValueError(f"residual_steps must be unique, got {v}")
         return sorted(v)
 
-    @field_validator("fusion_mode")
-    @classmethod
-    def _fusion_mode_valid(cls, v: str) -> str:
-        valid = {"independent", "union", "mfmos_only"}
-        if v not in valid:
-            raise ValueError(f"fusion_mode must be one of {valid}, got {v!r}")
-        return v
-
     @field_validator("score_threshold")
     @classmethod
     def _threshold_range(cls, v: float) -> float:
@@ -143,6 +142,16 @@ class MFMosParams(BaseModel):
 
 class ComponentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    # Segmentation method for the static/dynamic split (Step B). The two
+    # methods are fully independent modules with no cross-imports:
+    #   "aw"  — Amanatides-Woo log-odds voxel ray-casting (classify/). Never
+    #           touches MF-MOS; no model inference.
+    #   "mos" — MF-MOS learned moving-object segmentation (mf_mos/). Runs the
+    #           model and derives static/dynamic purely from the per-sweep
+    #           masks; no ray traversal.
+    # Selected at the CLI with `--seg aw|mos`.
+    segmentation: Literal["aw", "mos"] = "aw"
 
     # Step A — deskew filter.
     filter_nonfinite_points: bool = True
@@ -191,6 +200,22 @@ class ComponentConfig(BaseModel):
     min_observations: int = 3
     # Voxels with fewer endpoint hits go to free_only (never dynamic).
     min_occupied_hits: int = 1
+    # Occupancy-ratio gate for the DYNAMIC class. A voxel may be labelled
+    # dynamic only if it was actually occupied on at least this fraction of
+    # the rays that traversed it (n_hits / n_obs). Near the ego, scan-plane
+    # voxels are pierced by thousands of through-rays (n_obs ~ 1e4) while
+    # catching a handful of stray returns (ego self-returns, near clutter);
+    # raw p_occ drives them to "dynamic" even though they are free space.
+    # True movers are hit on a meaningful fraction of in-view passes (~0.2-0.6)
+    # vs ~0.01-0.04 for that near-ego shell, so this cleanly separates them.
+    # 0.0 disables the gate (legacy behaviour). 0.10 is a conservative default.
+    min_hit_fraction_dynamic: float = 0.10
+    # Points within this horizontal range of the sensor are never labelled
+    # dynamic. Inside a few metres the return is dominated by the ego's own
+    # body and near clutter, and free-space carving is maximal, so AW cannot
+    # reliably call motion there. 0.0 disables. Mirrors patchwork.min_range
+    # and mf_mos.min_range_m.
+    dynamic_min_range_m: float = 2.5
     # Default 200 m pairs with range-credibility weighting. Without that
     # weighting, long rays still contribute full weight — set to 50-80 m
     # to recover the historical "drop distant evidence" behaviour.
@@ -238,19 +263,8 @@ class ComponentConfig(BaseModel):
     # Multi-lidar frame grouping (SAM4D alignment).
     frame_sync: FrameSyncParams = FrameSyncParams()
 
-    # Step A.5 — MF-MOS learned moving-object segmentation.
+    # MF-MOS parameters (used only when segmentation == "mos").
     mf_mos: MFMosParams = MFMosParams()
-    # Voxel-level MF-MOS aggregation: a voxel is MF-MOS-dynamic if it got
-    # >= min_mf_mos_votes AND vote fraction >= mf_mos_vote_fraction_threshold.
-    mf_mos_vote_fraction_threshold: float = 0.5
-    min_mf_mos_votes: int = 1
-    # True: a point is fused as MF-MOS-dynamic only if (a) the per-sweep mask
-    # flags it AND (b) its voxel passed the chunk-wide vote.
-    # False: (a) alone is enough.
-    # The chunk-wide vote denoises across sweeps; the per-sweep mask prevents
-    # the chunk-wide voxel set from bleeding dynamic labels back in time.
-    # Log-odds path only — persistence has no chunk-wide votes.
-    mf_mos_require_chunk_wide_vote: bool = True
 
     # voxel_occupancy.npz alongside static_map.npz. Includes ALL occupied
     # voxels (static + dynamic) — that's what MinkUNet consumes.
@@ -301,11 +315,18 @@ class ComponentConfig(BaseModel):
             raise ValueError(f"value must be >= 1, got {v}")
         return v
 
-    @field_validator("min_mf_mos_votes")
+    @field_validator("min_hit_fraction_dynamic")
     @classmethod
-    def _positive_min_mf_mos_votes(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError(f"min_mf_mos_votes must be >= 1, got {v}")
+    def _hit_fraction_range(cls, v: float) -> float:
+        if not (0.0 <= v <= 1.0):
+            raise ValueError(f"min_hit_fraction_dynamic must be in [0, 1], got {v}")
+        return v
+
+    @field_validator("dynamic_min_range_m")
+    @classmethod
+    def _nonneg_dyn_range(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError(f"dynamic_min_range_m must be >= 0, got {v}")
         return v
 
     @field_validator("static_sweep_fraction")

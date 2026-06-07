@@ -1,13 +1,20 @@
 """lidar_preprocessing pipeline orchestrator.
 
-Runs Steps A → A.5 → B → C for each chunk:
-  A.   deskew   — motion compensation + world-frame projection (+ Patchwork++)
-  A.5. mf_mos   — learned moving-object segmentation (no-op when disabled)
-  B.   classify — voxel static/dynamic decomposition
-  C.   ground   — per-sweep ground aggregation + height grid
+Runs Steps A → B → C for each chunk. Step B is one of two fully independent
+segmentation methods, selected by cfg.segmentation (`--seg aw|mos`):
+
+  A.  deskew        — motion compensation + world-frame projection (+ Patchwork++)
+  B.  static/dynamic decomposition:
+        seg=aw  → classify (Amanatides-Woo log-odds ray-casting). No MF-MOS.
+        seg=mos → mf_mos inference + mf_mos segmentation. No ray traversal.
+  C.  ground        — per-sweep ground aggregation + height grid
+
+The two Step-B methods never import each other; each writes the same
+artifacts (static_map / dynamic_map / dynamic_mask / index) so C and D are
+method-agnostic.
 
 Step D (reduce) runs separately via the `reduce` CLI subcommand. In
-two_pass mode, run() invokes reduce + a classify-only pass 2 internally.
+two_pass mode (aw only), run() invokes reduce + a classify-only pass 2.
 
 Idempotency: chunks whose ground.npz exists are skipped unless force=True.
 Failures in one chunk don't stop the others.
@@ -42,14 +49,16 @@ log = logging.getLogger(__name__)
 def _write_chunk_summary(
     bag_id: str,
     chunk_id: str,
-    classify_result: classify.ClassifyResult,
+    seg_result: "classify.ClassifyResult | mf_mos_step.MosSegmentResult",
     ground_result: ground.GroundResult,
     mf_mos_result: mf_mos_step.MFMosResult | None = None,
 ) -> None:
-    """Aggregate per-sweep parquet + classify/ground results into one row.
+    """Aggregate per-sweep parquet + segmentation/ground results into one row.
 
-    Per-sweep counts come from lidar_proc_index (after classify updated it).
-    Runtime stats come from the step result objects.
+    Per-sweep counts come from lidar_proc_index (after Step B updated it).
+    Runtime stats come from the step result objects. `seg_result` is the AW
+    ClassifyResult or the MF-MOS MosSegmentResult; both expose the cache
+    fields the summary reads.
     """
     sweep_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
     n_total = len(sweep_rows)
@@ -71,8 +80,8 @@ def _write_chunk_summary(
         n_points_dynamic=n_points_dynamic,
         n_points_ground=n_points_ground,
         n_dropped_dynamic_ground=ground_result.n_dropped_dynamic,
-        cache_auto_disabled=classify_result.cache_auto_disabled,
-        estimated_cache_bytes=classify_result.estimated_cache_bytes,
+        cache_auto_disabled=seg_result.cache_auto_disabled,
+        estimated_cache_bytes=seg_result.estimated_cache_bytes,
         ground_status=ground_result.status,
         mf_mos_n_processed=mf_mos_result.n_sweeps_processed if mf_mos_result else None,
         mf_mos_n_skipped=mf_mos_result.n_skipped if mf_mos_result else None,
@@ -123,21 +132,23 @@ def _process_one_chunk(
         log.info("=== chunk %s: step A — deskew ===", chunk_id)
         deskew.process_chunk(cfg, bag_id, chunk_id)
 
-        log.info(
-            "=== chunk %s: step A.5 — mf_mos (enabled=%s) ===",
-            chunk_id,
-            cfg.mf_mos.enabled,
-        )
-        mf_mos_result = mf_mos_step.process_chunk(cfg, bag_id, chunk_id)
-
-        log.info("=== chunk %s: step B — classify ===", chunk_id)
-        classify_result = classify.process_chunk(cfg, bag_id, chunk_id)
+        # Step B: one of two fully independent segmentation methods. They do
+        # not coexist — aw never runs MF-MOS, mos never runs ray traversal.
+        if cfg.segmentation == "mos":
+            log.info("=== chunk %s: step B — mf_mos inference ===", chunk_id)
+            mf_mos_result = mf_mos_step.process_chunk(cfg, bag_id, chunk_id)
+            log.info("=== chunk %s: step B — mf_mos segmentation ===", chunk_id)
+            seg_result = mf_mos_step.classify_chunk(cfg, bag_id, chunk_id)
+        else:  # "aw"
+            log.info("=== chunk %s: step B — classify (Amanatides-Woo) ===", chunk_id)
+            mf_mos_result = None
+            seg_result = classify.process_chunk(cfg, bag_id, chunk_id)
 
         log.info("=== chunk %s: step C — ground ===", chunk_id)
         ground_result = ground.process_chunk(cfg, bag_id, chunk_id)
 
         _write_chunk_summary(
-            bag_id, chunk_id, classify_result, ground_result, mf_mos_result
+            bag_id, chunk_id, seg_result, ground_result, mf_mos_result
         )
         return (chunk_id, True, "")
     except Exception as exc:  # noqa: BLE001 — one chunk failing must not stop the rest
@@ -264,6 +275,12 @@ def run(
             (UniLiPs IWU). Roughly doubles wall time; improves static recall
             on long-range structure sparsely observed in any one chunk.
     """
+    # The global-map prior (UniLiPs IWU) is an Amanatides-Woo log-odds boost;
+    # the MF-MOS method has no log-odds to boost, so two-pass is aw-only.
+    if two_pass and cfg.segmentation == "mos":
+        log.info("seg=mos: two-pass global-map prior is aw-only — running single-pass")
+        two_pass = False
+
     chunks_idx = chunks_index_path(bag_id)
     if not os.path.exists(local_path(chunks_idx)):
         raise FileNotFoundError(
