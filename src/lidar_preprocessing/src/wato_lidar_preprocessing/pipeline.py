@@ -1,17 +1,20 @@
 """lidar_preprocessing pipeline orchestrator.
 
-Runs Steps A → B → C for each chunk. Step B is one of two fully independent
-segmentation methods, selected by cfg.segmentation (`--seg aw|mos`):
+Runs Steps A → B → C for each chunk. Step B is one of three segmentation
+methods, selected by cfg.segmentation (`--seg aw|mos|union`):
 
   A.  deskew        — motion compensation + world-frame projection (+ Patchwork++)
   B.  static/dynamic decomposition:
-        seg=aw  → classify (Amanatides-Woo log-odds ray-casting). No MF-MOS.
-        seg=mos → mf_mos inference + mf_mos segmentation. No ray traversal.
+        seg=aw    → classify (Amanatides-Woo log-odds ray-casting). No MF-MOS.
+        seg=mos   → mf_mos inference + mf_mos segmentation. No ray traversal.
+        seg=union → classify (static basis) + mf_mos inference + union fusion:
+                    keep AW's static map, take MF-MOS dynamics vetoed by it.
   C.  ground        — per-sweep ground aggregation + height grid
 
-The two Step-B methods never import each other; each writes the same
+The two base methods (aw, mos) never import each other; each writes the same
 artifacts (static_map / dynamic_map / dynamic_mask / index) so C and D are
-method-agnostic.
+method-agnostic. `union` is the fusion layer — it runs both halves and reads
+their outputs, then rewrites only the dynamic side.
 
 Step D (reduce) runs separately via the `reduce` CLI subcommand. In
 two_pass mode (aw only), run() invokes reduce + a classify-only pass 2.
@@ -39,7 +42,13 @@ from wato_common.artifact_store import (
 )
 from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.schemas import CHUNK_SUMMARY_SCHEMA, ChunkSummaryRow
-from wato_lidar_preprocessing import classify, deskew, ground, mf_mos as mf_mos_step
+from wato_lidar_preprocessing import (
+    classify,
+    deskew,
+    ground,
+    mf_mos as mf_mos_step,
+    union as union_step,
+)
 from wato_lidar_preprocessing.config import ComponentConfig
 from wato_lidar_preprocessing.reduce import reduce_static_map
 
@@ -49,7 +58,10 @@ log = logging.getLogger(__name__)
 def _write_chunk_summary(
     bag_id: str,
     chunk_id: str,
-    seg_result: "classify.ClassifyResult | mf_mos_step.MosSegmentResult",
+    seg_result: (
+        "classify.ClassifyResult | mf_mos_step.MosSegmentResult "
+        "| union_step.UnionSegmentResult"
+    ),
     ground_result: ground.GroundResult,
     mf_mos_result: mf_mos_step.MFMosResult | None = None,
 ) -> None:
@@ -139,6 +151,22 @@ def _process_one_chunk(
             mf_mos_result = mf_mos_step.process_chunk(cfg, bag_id, chunk_id)
             log.info("=== chunk %s: step B — mf_mos segmentation ===", chunk_id)
             seg_result = mf_mos_step.classify_chunk(cfg, bag_id, chunk_id)
+        elif cfg.segmentation == "union":
+            # Fusion: AW builds the static basis, MF-MOS proposes motion, the
+            # union step keeps AW's static map and vetoes MF-MOS dynamics that
+            # land on it. Must run AW + MF-MOS first, in that order.
+            log.info(
+                "=== chunk %s: step B — classify (Amanatides-Woo static basis) ===",
+                chunk_id,
+            )
+            aw_result = classify.process_chunk(cfg, bag_id, chunk_id)
+            log.info("=== chunk %s: step B — mf_mos inference ===", chunk_id)
+            mf_mos_result = mf_mos_step.process_chunk(cfg, bag_id, chunk_id)
+            log.info("=== chunk %s: step B — union fusion ===", chunk_id)
+            seg_result = union_step.classify_chunk(cfg, bag_id, chunk_id)
+            # Carry the AW half's cache telemetry into the summary.
+            seg_result.cache_auto_disabled = aw_result.cache_auto_disabled
+            seg_result.estimated_cache_bytes = aw_result.estimated_cache_bytes
         else:  # "aw"
             log.info("=== chunk %s: step B — classify (Amanatides-Woo) ===", chunk_id)
             mf_mos_result = None
@@ -157,12 +185,34 @@ def _process_one_chunk(
         return (chunk_id, False, f"{type(exc).__name__}: {exc}\n{tb}")
 
 
+def _classify_then_maybe_fuse(
+    cfg: ComponentConfig,
+    bag_id: str,
+    chunk_id: str,
+    prior: "classify.GlobalMapPrior",
+) -> "classify.ClassifyResult | union_step.UnionSegmentResult":
+    """Pass-2 Step B for one chunk.
+
+    Re-classify with the global-map prior. For `union`, re-fuse afterwards so
+    the improved (prior-boosted) AW static map re-vetoes the MF-MOS dynamics.
+    MF-MOS masks are unchanged from pass 1 (the prior is AW-only), so inference
+    is not re-run — union just re-reads them.
+    """
+    res = classify.process_chunk(cfg, bag_id, chunk_id, global_map_prior=prior)
+    if cfg.segmentation == "union":
+        fused = union_step.classify_chunk(cfg, bag_id, chunk_id)
+        fused.cache_auto_disabled = res.cache_auto_disabled
+        fused.estimated_cache_bytes = res.estimated_cache_bytes
+        return fused
+    return res
+
+
 def _pass2_chunk_worker(
     chunk_id: str,
     cfg: ComponentConfig,
     bag_id: str,
     global_map_path: str,
-) -> classify.ClassifyResult:
+) -> "classify.ClassifyResult | union_step.UnionSegmentResult":
     """ProcessPoolExecutor worker. Must stay module-scope (closures aren't
     picklable). Each worker rebuilds the KDTree from disk rather than pickling
     a large cKDTree across the pool pipe.
@@ -172,7 +222,7 @@ def _pass2_chunk_worker(
         match_radius_m=cfg.global_map_match_radius_m,
         r_max_credibility_m=cfg.r_max_credibility_m,
     )
-    return classify.process_chunk(cfg, bag_id, chunk_id, global_map_prior=prior)
+    return _classify_then_maybe_fuse(cfg, bag_id, chunk_id, prior)
 
 
 def _run_classify_pass2(
@@ -182,10 +232,12 @@ def _run_classify_pass2(
     workers: int,
     global_map_path: str,
 ) -> None:
-    """Re-run classify (only) on every chunk with the global map as a prior.
+    """Re-run classify on every chunk with the global map as a prior.
 
-    Skips deskew/mf_mos/ground — their outputs are unchanged. Rewrites
-    static_map.npz / dynamic_map.npz / lidar_proc_index per chunk.
+    Skips deskew/ground — their outputs are unchanged. For `union`, also
+    re-runs the fusion (but not MF-MOS inference, whose masks are unchanged
+    since the prior is AW-only). Rewrites static_map.npz / dynamic_map.npz /
+    lidar_proc_index per chunk.
     """
     chunk_rows = read_rows(chunks_index_path(bag_id))
     if chunk_id:
@@ -210,7 +262,7 @@ def _run_classify_pass2(
         for row in chunk_rows:
             cid = row["chunk_id"]
             try:
-                classify.process_chunk(cfg, bag_id, cid, global_map_prior=prior)
+                _classify_then_maybe_fuse(cfg, bag_id, cid, prior)
                 n_ok += 1
             except Exception as exc:  # noqa: BLE001 — one chunk failing must not stop the rest
                 log.exception("pass 2 chunk %s failed", cid)
@@ -275,8 +327,10 @@ def run(
             (UniLiPs IWU). Roughly doubles wall time; improves static recall
             on long-range structure sparsely observed in any one chunk.
     """
-    # The global-map prior (UniLiPs IWU) is an Amanatides-Woo log-odds boost;
-    # the MF-MOS method has no log-odds to boost, so two-pass is aw-only.
+    # The global-map prior (UniLiPs IWU) is an Amanatides-Woo log-odds boost.
+    # `mos` has no log-odds to boost, so it runs single-pass. `union` does have
+    # an AW half, and a better static map sharpens the dynamic veto, so it
+    # keeps two-pass (pass 2 re-classifies + re-fuses; MF-MOS is not re-run).
     if two_pass and cfg.segmentation == "mos":
         log.info("seg=mos: two-pass global-map prior is aw-only — running single-pass")
         two_pass = False

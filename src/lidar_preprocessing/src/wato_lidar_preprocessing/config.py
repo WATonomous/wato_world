@@ -140,18 +140,51 @@ class MFMosParams(BaseModel):
         return v
 
 
+class UnionParams(BaseModel):
+    """Fusion parameters for the `union` segmentation method (`--seg union`).
+
+    `union` runs BOTH existing methods and combines them instead of picking
+    one (see wato_lidar_preprocessing.union):
+      * static cloud  = Amanatides-Woo's static map (classify/) — kept
+        verbatim. High precision: a voxel is static only with a preponderance
+        of occupied evidence.
+      * dynamic cloud = MF-MOS moving points (mf_mos/), with Patchwork++
+        ground removed and — by default — every point whose voxel AW
+        confirmed static removed. The AW static map is the "comparison" that
+        rejects MF-MOS false positives hugging static structure.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Drop any MF-MOS-moving point whose voxel is in AW's static set. This is
+    # the core of the method: AW's static map vetoes MF-MOS false positives
+    # that hug static structure. False makes `union` == raw MF-MOS dynamic
+    # (still ground-removed), useful for A/B'ing the veto's contribution.
+    aw_static_veto: bool = True
+    # Recall mode. When True the dynamic cloud is the UNION of MF-MOS-moving
+    # and AW's own dynamic verdict (both still ground-removed and, when
+    # aw_static_veto, static-vetoed). Off by default: AW dynamics are
+    # high-recall/low-precision (they hug static surfaces), so the precision
+    # default is MF-MOS-only.
+    keep_aw_dynamic: bool = False
+
+
 class ComponentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    # Segmentation method for the static/dynamic split (Step B). The two
+    # Segmentation method for the static/dynamic split (Step B). The two base
     # methods are fully independent modules with no cross-imports:
-    #   "aw"  — Amanatides-Woo log-odds voxel ray-casting (classify/). Never
-    #           touches MF-MOS; no model inference.
-    #   "mos" — MF-MOS learned moving-object segmentation (mf_mos/). Runs the
-    #           model and derives static/dynamic purely from the per-sweep
-    #           masks; no ray traversal.
-    # Selected at the CLI with `--seg aw|mos`.
-    segmentation: Literal["aw", "mos"] = "aw"
+    #   "aw"    — Amanatides-Woo log-odds voxel ray-casting (classify/). Never
+    #             touches MF-MOS; no model inference.
+    #   "mos"   — MF-MOS learned moving-object segmentation (mf_mos/). Runs the
+    #             model and derives static/dynamic purely from the per-sweep
+    #             masks; no ray traversal.
+    #   "union" — fusion (union/): runs BOTH, keeps AW's static map, and takes
+    #             the dynamic cloud from MF-MOS vetoed by that static map. The
+    #             only method allowed to import from the other two. See
+    #             UnionParams.
+    # Selected at the CLI with `--seg aw|mos|union`.
+    segmentation: Literal["aw", "mos", "union"] = "aw"
 
     # Step A — deskew filter.
     filter_nonfinite_points: bool = True
@@ -263,8 +296,11 @@ class ComponentConfig(BaseModel):
     # Multi-lidar frame grouping (SAM4D alignment).
     frame_sync: FrameSyncParams = FrameSyncParams()
 
-    # MF-MOS parameters (used only when segmentation == "mos").
+    # MF-MOS parameters (used when segmentation is "mos" or "union").
     mf_mos: MFMosParams = MFMosParams()
+
+    # Fusion parameters (used only when segmentation == "union").
+    union: UnionParams = UnionParams()
 
     # voxel_occupancy.npz alongside static_map.npz. Includes ALL occupied
     # voxels (static + dynamic) — that's what MinkUNet consumes.

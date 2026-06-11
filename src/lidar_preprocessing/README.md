@@ -47,9 +47,9 @@ A.   deskew/          per-sweep motion compensation + world-frame projection
                       stored inside each world NPZ; sensor origin also stored)
     │
     ▼
-B.   static/dynamic decomposition — ONE of two independent methods, picked by
-     `--seg aw|mos` (cfg.segmentation). They share no code and never run
-     together:
+B.   static/dynamic decomposition — picked by `--seg aw|mos|union`
+     (cfg.segmentation). aw and mos are independent (share no code); union
+     fuses them:
 
        seg=aw   classify/   voxel-based decomposition via log-odds
                             Amanatides-Woo ray traversal (or legacy
@@ -59,6 +59,13 @@ B.   static/dynamic decomposition — ONE of two independent methods, picked by
                             MF-MOS model (range-image residual MOS) and
                             derives static/dynamic purely from the per-sweep
                             moving masks. No ray traversal.
+
+       seg=union union/     fusion. Runs aw (static basis) + mos, keeps aw's
+                            high-precision static map, takes the dynamic cloud
+                            from MF-MOS with that map as a veto:
+                            dynamic = mf_mos_moving & ~ground & ~aw_static.
+                            On NuScenes 0061 this cut dynamic-cloud "on a
+                            static surface" from 84% (aw) / 72% (mos) to 28%.
     │
     ▼
 C.   ground/          aggregate per-sweep ground masks → height grid
@@ -67,9 +74,10 @@ C.   ground/          aggregate per-sweep ground masks → height grid
 D.   reduce/          [separate command] bag-level global static map
 ```
 
-Both Step-B methods write the identical artifact set (`static_map.npz` with
-`static_voxel_keys`, `dynamic_map.npz`, per-sweep `dynamic_mask.npy`, updated
-`lidar_proc_index.parquet`), so Steps C and D are method-agnostic.
+All three Step-B methods write the identical artifact set (`static_map.npz`
+with `static_voxel_keys`, `dynamic_map.npz`, per-sweep `dynamic_mask.npy`,
+updated `lidar_proc_index.parquet`), so Steps C and D are method-agnostic.
+`union` rewrites only the dynamic side — it keeps aw's `static_map.npz`.
 
 ---
 
@@ -424,8 +432,13 @@ All outputs are written under `data/artifacts/raw/<bag_id>/`.
 ./watod run lidar_preprocessing --bag NuScenes_v1_0_mini_scene_1100   # equivalent
 
 # Pick the Step-B segmentation method (default from config; aw if unset).
-./watod run lidar_preprocessing --bag <bag> --seg aw    # Amanatides-Woo only
-./watod run lidar_preprocessing --bag <bag> --seg mos   # MF-MOS only (needs GPU + weights)
+./watod run lidar_preprocessing --bag <bag> --seg aw     # Amanatides-Woo only
+./watod run lidar_preprocessing --bag <bag> --seg mos    # MF-MOS only (needs GPU + weights)
+./watod run lidar_preprocessing --bag <bag> --seg union  # fusion: aw static + MF-MOS dynamic vetoed by it
+
+# Score how much of a method's dynamic cloud is actually static structure
+# (lower = cleaner); run after each --seg to A/B them on the same chunk:
+python -m wato_lidar_preprocessing.scripts.compare_seg_dynamic <bag> 0000
 
 # Process a single chunk only (auto-reduce is skipped on single-chunk runs).
 ./watod run lidar_preprocessing --bag data/bags/NuScenes-v1.0-mini-scene-1100/ --chunk 0000
@@ -487,7 +500,9 @@ The Pydantic schema is in [`src/wato_lidar_preprocessing/config.py`](src/wato_li
 
 | Parameter | Default | Description |
 |---|---|---|
-| `segmentation` | `"aw"` | `"aw"` (Amanatides-Woo log-odds, `classify/`) or `"mos"` (MF-MOS, `mf_mos/`). Override per-run with `--seg aw\|mos`. |
+| `segmentation` | `"aw"` | `"aw"` (Amanatides-Woo log-odds, `classify/`), `"mos"` (MF-MOS, `mf_mos/`), or `"union"` (fusion, `union/`). Override per-run with `--seg aw\|mos\|union`. |
+| `union.aw_static_veto` | `true` | seg=union: drop MF-MOS dynamics whose voxel aw confirmed static (the core of the method). `false` → raw MF-MOS dynamic, for A/B'ing the veto. |
+| `union.keep_aw_dynamic` | `false` | seg=union: also union in aw's own dynamic verdict (recall mode). Off by default — aw dynamics hug static surfaces. |
 | `voxel_size_m` | 0.15 | Voxel side length for static/dynamic classification (m) |
 | `classification_method` | `"log_odds"` | seg=aw backend: `"log_odds"` (Bayesian AW ray-casting) or `"persistence"` (sweep-count threshold) |
 
@@ -575,7 +590,7 @@ src/lidar_preprocessing/
 │   ├── pipeline.py                    # orchestration: deskew → mf_mos → classify → ground
 │   ├── voxel.py                       # shared voxel-key packing: voxel_indices(), pack_voxel_key()
 │   ├── io.py                          # reader helpers for downstream components
-│   ├── viz.py                         # optional Open3D visualization helpers
+│   ├── viz.py                         # multi-backend (open3d/plotly/matplotlib) point-cloud viewer
 │   ├── _inputs.py                     # shared I/O: load_pose_samples(), load_ego_T_lidar()
 │   │                                  # (used by both deskew/ and mf_mos/)
 │   │

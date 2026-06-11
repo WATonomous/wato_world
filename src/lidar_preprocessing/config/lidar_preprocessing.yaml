@@ -1,11 +1,26 @@
 lidar_preprocessing:
   # Step B — segmentation method for the static/dynamic split.
-  # Two fully independent methods (no shared code):
-  #   "aw"  → Amanatides-Woo log-odds voxel ray-casting (classify/). No MF-MOS.
-  #   "mos" → MF-MOS learned moving-object segmentation (mf_mos/). No ray
-  #           traversal; static/dynamic comes purely from the per-sweep masks.
-  # Override per-run at the CLI: `./watod run lidar_preprocessing --seg mos`.
+  # Two independent base methods (no shared code) + one fusion method:
+  #   "aw"    → Amanatides-Woo log-odds voxel ray-casting (classify/). No MF-MOS.
+  #   "mos"   → MF-MOS learned moving-object segmentation (mf_mos/). No ray
+  #             traversal; static/dynamic comes purely from the per-sweep masks.
+  #   "union" → fusion (union/): keep AW's high-precision static map, take the
+  #             dynamic cloud from MF-MOS with that static map as a veto. Runs
+  #             both AW and MF-MOS. Tuned by the `union:` block below.
+  # Override per-run at the CLI: `./watod run lidar_preprocessing --seg union`.
   segmentation: aw
+
+  # --- Fusion (seg=union) ---
+  union:
+    # Drop MF-MOS-moving points whose voxel AW confirmed static. This is the
+    # core of the method: AW's static map vetoes MF-MOS false positives that
+    # hug static structure (parked cars, facades, poles). false → union is
+    # just raw MF-MOS dynamic (still ground-removed), for A/B'ing the veto.
+    aw_static_veto: true
+    # Recall mode: also union in AW's own dynamic verdict (still ground-removed
+    # and static-vetoed). Off by default — AW dynamics are high-recall but
+    # low-precision (they hug static surfaces), so the default is MF-MOS-only.
+    keep_aw_dynamic: false
 
   # --- Amanatides-Woo (seg=aw) voxel static/dynamic classification ---
 
@@ -177,8 +192,8 @@ lidar_preprocessing:
 
   # Export voxel_diag.npz with per-voxel log_odds / n_obs / n_hits /
   # classification for EVERY classified voxel (including carved ones).
-  # Required for the viz's p_occ color mode (lets you distinguish
-  # threshold-edge leakage from deep-carving leakage in the dynamic cloud).
+  # Consumed by the scripts/debug_*.py leakage tools to distinguish
+  # threshold-edge leakage from deep-carving leakage in the dynamic cloud.
   save_voxel_diagnostics: true
 
   # Export one voxel_occupancy_frame_NNNN.npz per frame_id.
