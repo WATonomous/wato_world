@@ -5,12 +5,15 @@ the AW path — no ray traversal, no log-odds, no imports from classify/. The
 per-sweep dynamic mask comes straight from the MF-MOS moving masks written by
 `mf_mos._core.process_chunk`:
 
-    dynamic = mf_mos_moving & ~ground
+    dynamic = mf_mos_moving & ~ground & ~near_ego
     static  = ~mf_mos_moving & ~ground
 
 Patchwork++ ground stays authoritative — ground points belong to ground.npz,
 never static_map/dynamic_map — mirroring classify/masking.py so Step C
-behaves identically regardless of which segmentation method ran.
+behaves identically regardless of which segmentation method ran. The same
+near-ego gate classify pass 2 applies (cfg.dynamic_min_range_m) suppresses
+moving verdicts on ego self-returns; gated points drop from both clouds
+rather than being promoted to static.
 
 Outputs are byte-compatible with classify/ (same static_map.npz /
 dynamic_map.npz / dynamic_mask.npy / lidar_proc_index columns) so ground,
@@ -20,6 +23,7 @@ reduce, and downstream consumers don't care which method produced them.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -33,6 +37,7 @@ from wato_common.artifact_store import (
     lidar_proc_index_path,
     lidar_sweep_path,
     local_path,
+    mf_mos_score_path,
     static_map_path,
     voxel_occupancy_frame_path,
     voxel_occupancy_path,
@@ -100,38 +105,32 @@ def _origin_from_index(meta_rows: list[dict]) -> np.ndarray | None:
     return np.array([min(xmins), min(ymins), min(zmins)], dtype=np.float64)
 
 
-def load_mf_mos_world_mask(
+def _align_raw_to_world(
+    raw_arr: np.ndarray,
     bag_id: str,
     chunk_id: str,
     row: dict,
     n_world: int,
     filter_nonfinite: bool,
+    what: str,
 ) -> np.ndarray | None:
-    """Load an MF-MOS raw-length mask and align it to world-frame length.
+    """Align a raw-length per-point MF-MOS array to world-frame length.
 
-    MF-MOS masks are (n_raw,) bool aligned to the raw lidar NPZ. Deskew
+    MF-MOS artifacts are (n_raw,) aligned to the raw lidar NPZ. Deskew
     applies a nonfinite filter, so n_world <= n_raw. We re-apply the same
-    filter here so the mask is index-aligned with the (n_world,) world cloud.
+    filter here so the array is index-aligned with the (n_world,) world cloud.
 
-    Returns None if the mask is unavailable or can't be reconciled.
+    Returns None if the array can't be reconciled.
     """
-    mf_path = row.get("mf_mos_mask_path")
-    if not mf_path:
-        return None
-    try:
-        mf_raw = np.load(local_path(mf_path))
-    except Exception as exc:  # noqa: BLE001
-        log.warning("could not load mf_mos mask %s: %s", mf_path, exc)
-        return None
-
-    n_raw = mf_raw.shape[0]
+    n_raw = raw_arr.shape[0]
     if n_raw == n_world:
-        return mf_raw  # common case: no NaN/inf points were dropped
+        return raw_arr  # common case: no NaN/inf points were dropped
 
     if n_raw < n_world:
         log.warning(
-            "sweep %s: mf_mos mask len %d < world len %d — sweep left static",
+            "sweep %s: mf_mos %s len %d < world len %d — discarded",
             row.get("sweep_id"),
+            what,
             n_raw,
             n_world,
         )
@@ -158,25 +157,96 @@ def load_mf_mos_world_mask(
     else:
         finite = np.ones(n_raw, dtype=bool)
 
-    mf_world = mf_raw[finite]
-    if mf_world.shape[0] != n_world:
+    aligned = raw_arr[finite]
+    if aligned.shape[0] != n_world:
         log.warning(
-            "sweep %s: mf_mos world-aligned len %d != world len %d — sweep left static",
+            "sweep %s: mf_mos %s world-aligned len %d != world len %d — discarded",
             row.get("sweep_id"),
-            mf_world.shape[0],
+            what,
+            aligned.shape[0],
             n_world,
         )
         return None
-    return mf_world
+    return aligned
+
+
+def load_mf_mos_world_mask(
+    bag_id: str,
+    chunk_id: str,
+    row: dict,
+    n_world: int,
+    filter_nonfinite: bool,
+) -> np.ndarray | None:
+    """Load an MF-MOS raw-length mask and align it to world-frame length.
+
+    Returns None if the mask is unavailable or can't be reconciled (the
+    caller treats the sweep as having no MF-MOS verdict).
+    """
+    mf_path = row.get("mf_mos_mask_path")
+    if not mf_path:
+        return None
+    try:
+        mf_raw = np.load(local_path(mf_path))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not load mf_mos mask %s: %s", mf_path, exc)
+        return None
+    return _align_raw_to_world(
+        mf_raw, bag_id, chunk_id, row, n_world, filter_nonfinite, "mask"
+    )
+
+
+def load_mf_mos_world_scores(
+    bag_id: str,
+    chunk_id: str,
+    row: dict,
+    n_world: int,
+    filter_nonfinite: bool,
+) -> np.ndarray | None:
+    """Load per-point MF-MOS moving probabilities, world-aligned.
+
+    Scores are optional (written only when cfg.mf_mos.save_scores) — a
+    missing file is normal and returns None without a warning.
+    """
+    score_uri = mf_mos_score_path(bag_id, chunk_id, int(row.get("sweep_id", 0)))
+    score_path = local_path(score_uri)
+    if not os.path.exists(score_path):
+        return None
+    try:
+        raw = np.load(score_path)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not load mf_mos scores %s: %s", score_uri, exc)
+        return None
+    return _align_raw_to_world(
+        raw, bag_id, chunk_id, row, n_world, filter_nonfinite, "scores"
+    )
 
 
 def _load_world(world_path_uri: str):
-    """world NPZ → (xyz float64, intensity-or-None, ground_mask-or-None)."""
+    """world NPZ → (xyz float64, intensity, ground_mask, sweep origin).
+
+    intensity / ground_mask / origin are None when absent from the NPZ.
+    `origin` is the sensor position in the world frame (written by deskew),
+    needed for the near-ego dynamic gate.
+    """
     data = np.load(local_path(world_path_uri))
     xyz = np.stack([data["x"], data["y"], data["z"]], axis=1)
     intensity = data["intensity"].astype(np.float32) if "intensity" in data else None
     ground_mask = data["ground_mask"] if "ground_mask" in data else None
-    return xyz, intensity, ground_mask
+    origin = np.asarray(data["origin"], dtype=np.float64) if "origin" in data else None
+    return xyz, intensity, ground_mask, origin
+
+
+def near_ego_mask(
+    xyz: np.ndarray, sweep_origin: np.ndarray, min_range_m: float
+) -> np.ndarray:
+    """True for points within min_range_m horizontal range of the sensor.
+
+    The same gate classify pass 2 applies (cfg.dynamic_min_range_m): within
+    this radius the returns are ego self-returns / near clutter, so a moving
+    verdict is unreliable regardless of which method produced it.
+    """
+    d_xy = np.hypot(xyz[:, 0] - sweep_origin[0], xyz[:, 1] - sweep_origin[1])
+    return d_xy < min_range_m
 
 
 def _write_empty_outputs(
@@ -270,7 +340,7 @@ def classify_chunk(
             updated_meta.append(_invalid_meta_row(row, sweep_id))
             continue
 
-        xyz, intensity, ground_mask = _load_world(row["world_path"])
+        xyz, intensity, ground_mask, sweep_origin = _load_world(row["world_path"])
         n = xyz.shape[0]
         dyn_uri = dynamic_mask_path(bag_id, chunk_id, sweep_id)
         has_intensity = bool(row.get("has_intensity", False))
@@ -298,6 +368,16 @@ def classify_chunk(
             not_ground = np.ones(n, dtype=bool)
 
         dyn_mask = moving & not_ground
+        # Near-ego dynamic gate, mirroring classify pass 2: within
+        # dynamic_min_range_m the returns are ego self-returns / near clutter,
+        # so a moving verdict is unreliable. Gated points drop from the
+        # dynamic cloud without being promoted to static.
+        if (
+            cfg.dynamic_min_range_m > 0.0
+            and sweep_origin is not None
+            and dyn_mask.any()
+        ):
+            dyn_mask &= ~near_ego_mask(xyz, sweep_origin, cfg.dynamic_min_range_m)
         static_mask = (~moving) & not_ground
         np.save(local_path(dyn_uri), dyn_mask)
 

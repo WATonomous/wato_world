@@ -39,7 +39,7 @@ from .io_helpers import (
     load_world_full,
     origin_from_index,
 )
-from .log_odds import build_log_odds_grid, classify_from_log_odds
+from .log_odds import CLASS_DYNAMIC, build_log_odds_grid, classify_from_log_odds
 from .masking import apply_classification_to_sweep
 from .occupancy_export import (
     write_chunk_voxel_diagnostics,
@@ -74,6 +74,7 @@ def _write_empty_outputs(
         voxel_size=np.float32(voxel_size),
         origin=np.zeros(3, dtype=np.float64),
         static_voxel_keys=np.empty(0, dtype=np.int64),
+        dynamic_voxel_keys=np.empty(0, dtype=np.int64),
     )
     np.savez_compressed(
         local_path(dynamic_map_path(bag_id, chunk_id)),
@@ -302,6 +303,9 @@ def process_chunk(
             chunk_id,
             any_intensity,
             dynamic_min_range_m=cfg.dynamic_min_range_m,
+            # union overwrites dynamic_mask.npy with the fused verdict, so
+            # preserve AW's own verdict for keep_aw_dynamic / re-fusing.
+            write_aw_snapshot=cfg.segmentation == "union",
         )
         total_static += result.n_static
         total_dynamic += result.n_dynamic
@@ -358,6 +362,11 @@ def process_chunk(
     save_kwargs["voxel_size"] = np.float32(cfg.voxel_size_m)
     save_kwargs["origin"] = origin
     save_kwargs["static_voxel_keys"] = static_arr
+    # Voxels AW itself classed as movers (carved + hit-fraction ok). Sorted,
+    # since unique_keys is. union's dilated static veto exempts candidates in
+    # these voxels — AW corroborates the motion there, so a static neighbor
+    # must not delete them. Empty in persistence mode (no classification).
+    save_kwargs["dynamic_voxel_keys"] = unique_keys[classification == CLASS_DYNAMIC]
     np.savez_compressed(local_path(out_uri), **save_kwargs)
 
     dyn_save_kwargs: dict[str, np.ndarray] = {}

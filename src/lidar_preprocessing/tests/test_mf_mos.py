@@ -15,6 +15,7 @@ import pytest
 from wato_common.artifact_store import (
     calibration_path,
     dynamic_map_path,
+    dynamic_mask_path,
     ensure_local_dir,
     lidar_proc_dir,
     lidar_proc_index_path,
@@ -89,10 +90,16 @@ def _stub_load_model(_params):
     return _StubModel()
 
 
-def _mos_cfg(**kw) -> ComponentConfig:
-    """ComponentConfig on the MF-MOS path (segmentation='mos')."""
+def _mos_cfg(dynamic_min_range_m: float = 0.0, **kw) -> ComponentConfig:
+    """ComponentConfig on the MF-MOS path (segmentation='mos').
+
+    The segmentation tests stage points 1–3 m from the sweep origin, so the
+    near-ego gate (default 2.5 m) is disabled here and exercised explicitly
+    by test_mos_near_ego_gate_suppresses_close_movers.
+    """
     return ComponentConfig(
         segmentation="mos",
+        dynamic_min_range_m=dynamic_min_range_m,
         mf_mos=MFMosParams(
             range_image_h=H,
             range_image_w=W,
@@ -672,6 +679,35 @@ def test_mos_missing_mask_leaves_sweep_static(tmp_env):
     assert result.n_static == 2
     dmap = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
     assert dmap["xyz"].shape[0] == 0
+
+
+def test_mos_near_ego_gate_suppresses_close_movers(tmp_env):
+    """seg=mos honors cfg.dynamic_min_range_m exactly like classify pass 2:
+    a mover inside the gate drops from the dynamic cloud and is NOT promoted
+    to static (its MF-MOS verdict was still 'moving')."""
+    bag_id, chunk_id = "bag_mos_nearego", "chunk0"
+    # Sweep origin is (0,0,0); x=1 is inside the 2.5 m gate, x=3 outside.
+    xyz = np.array([[1.0, 0.0, 0.0], [3.0, 0.0, 0.0], [3.0, 1.0, 0.0]])
+
+    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
+    _write_world(bag_id, chunk_id, 0, xyz)
+    # Points 0 and 1 moving; point 2 static.
+    mf_uri = _write_mf_mask(bag_id, chunk_id, 0, np.array([True, True, False]))
+    rows = [_proc_row_with_mask(bag_id, chunk_id, 0, xyz, mf_uri)]
+    write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
+
+    result = classify_chunk(_mos_cfg(dynamic_min_range_m=2.5), bag_id, chunk_id)
+
+    # Only the far mover (x=3) stays dynamic; the gated one drops entirely.
+    assert result.n_dynamic == 1
+    assert result.n_static == 1
+    dmap = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
+    assert dmap["xyz"].shape[0] == 1
+    assert abs(float(dmap["xyz"][0, 0]) - 3.0) < 1e-6
+    smap = np.load(local_path(static_map_path(bag_id, chunk_id)))
+    assert smap["xyz"].shape[0] == 1  # the gated mover is not in static either
+    mask = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
+    assert mask.tolist() == [False, True, False]
 
 
 def test_mos_static_map_carries_voxel_keys_for_ground(tmp_env):

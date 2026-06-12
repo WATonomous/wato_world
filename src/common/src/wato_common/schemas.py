@@ -328,6 +328,19 @@ class ChunkSummaryRow(BaseModel):
     cache_auto_disabled: bool
     estimated_cache_bytes: int
     ground_status: str  # "ok" | "skipped_no_ground_mask" | "empty"
+    # Which Step-B method produced this chunk's artifacts ("aw"|"mos"|"union").
+    # None on summaries written before the column existed. The orchestrator's
+    # skip check compares it against the current run's cfg.segmentation so
+    # switching --seg never silently serves another method's artifacts.
+    segmentation_method: Optional[str] = None
+    # Sweeps Step B had no usable MF-MOS mask for (mos/union only; None for
+    # aw). Their movers are left static (mos) or dropped (union) — chunks
+    # where this is high (e.g. residual warm-up at chunk starts) lose recall.
+    seg_n_sweeps_no_mask: Optional[int] = None
+    # Dynamic candidates removed by the AW-static veto (union only).
+    union_n_points_vetoed: Optional[int] = None
+    # Dynamic candidates removed by the ground-height veto (union only).
+    union_n_points_ground_vetoed: Optional[int] = None
     # MF-MOS step stats — None when mf_mos.enabled is False.
     mf_mos_n_processed: Optional[int] = None
     mf_mos_n_skipped: Optional[int] = None
@@ -349,6 +362,10 @@ CHUNK_SUMMARY_SCHEMA = pa.schema(
         pa.field("cache_auto_disabled", pa.bool_()),
         pa.field("estimated_cache_bytes", pa.int64()),
         pa.field("ground_status", pa.string()),
+        pa.field("segmentation_method", pa.string()),
+        pa.field("seg_n_sweeps_no_mask", pa.int64()),
+        pa.field("union_n_points_vetoed", pa.int64()),
+        pa.field("union_n_points_ground_vetoed", pa.int64()),
         pa.field("mf_mos_n_processed", pa.int64()),
         pa.field("mf_mos_n_skipped", pa.int64()),
         pa.field("mf_mos_n_points_moving", pa.int64()),

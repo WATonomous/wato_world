@@ -20,9 +20,9 @@ _DEFAULT_CACHE_BYTES = 4 * 1024**3
 
 def cache_byte_budget() -> int:
     """Resolve the cache size cap, honouring WATO_LIDAR_CACHE_BYTES if set.
-
-    Invalid values (non-int, <=0) are ignored with a warning so a typo in
-    the env doesn't silently disable the safety net.
+    1
+        Invalid values (non-int, <=0) are ignored with a warning so a typo in
+        the env doesn't silently disable the safety net.
     """
     raw = os.environ.get("WATO_LIDAR_CACHE_BYTES")
     if raw is None:

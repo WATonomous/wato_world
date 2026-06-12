@@ -1044,8 +1044,64 @@ def test_near_range_gate_excludes_close_points(tmp_env):
 
     # With the gate disabled both stay dynamic.
     res0 = apply_classification_to_sweep(
-        {}, 0, keys, empty, empty, xyz, None, None,
-        np.zeros(3, dtype=np.float64), bag_id, chunk_id, False,
+        {},
+        0,
+        keys,
+        empty,
+        empty,
+        xyz,
+        None,
+        None,
+        np.zeros(3, dtype=np.float64),
+        bag_id,
+        chunk_id,
+        False,
         dynamic_min_range_m=0.0,
     )
     assert res0.n_dynamic == 2
+
+
+def test_aw_snapshot_written_only_on_union_path(tmp_env):
+    """segmentation='union' makes classify also write aw_dynamic_mask.npy
+    (identical to dynamic_mask.npy at that point) so union's keep_aw_dynamic
+    survives the fused overwrite; the plain aw path writes no snapshot."""
+    from wato_common.artifact_store import aw_dynamic_mask_path
+
+    xyz = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+
+    for seg, bag_id in (("union", "bag_snap_union"), ("aw", "bag_snap_aw")):
+        chunk_id = "chunk0"
+        for i in range(5):
+            _write_world_sweep(bag_id, chunk_id, i, xyz)
+        _write_proc_index(bag_id, chunk_id, list(range(5)), xyz_per_sweep=[xyz] * 5)
+        cfg = ComponentConfig(classification_method="persistence", segmentation=seg)
+        process_chunk(cfg, bag_id, chunk_id)
+
+        snap = local_path(aw_dynamic_mask_path(bag_id, chunk_id, 0))
+        if seg == "union":
+            assert os.path.exists(snap), "union path must snapshot AW's verdict"
+            np.testing.assert_array_equal(
+                np.load(snap),
+                np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0))),
+            )
+        else:
+            assert not os.path.exists(snap), "aw path must not write a snapshot"
+
+
+def test_static_map_carries_dynamic_voxel_keys(tmp_env):
+    """static_map.npz exports AW's CLASS_DYNAMIC voxel set (consumed by
+    union's dilated-veto exemption). Present but empty in persistence mode,
+    which has no per-voxel classification."""
+    bag_id, chunk_id = "bag_dynkeys", "chunk0"
+    xyz = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    for i in range(5):
+        _write_world_sweep(bag_id, chunk_id, i, xyz)
+    _write_proc_index(bag_id, chunk_id, list(range(5)), xyz_per_sweep=[xyz] * 5)
+
+    process_chunk(
+        ComponentConfig(classification_method="persistence"), bag_id, chunk_id
+    )
+
+    sm = np.load(local_path(static_map_path(bag_id, chunk_id)))
+    assert "dynamic_voxel_keys" in sm
+    assert sm["dynamic_voxel_keys"].size == 0

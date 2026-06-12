@@ -167,6 +167,52 @@ class UnionParams(BaseModel):
     # high-recall/low-precision (they hug static surfaces), so the precision
     # default is MF-MOS-only.
     keep_aw_dynamic: bool = False
+    # Veto exemption for high-confidence MF-MOS movers. AW's static evidence
+    # aggregates the whole chunk, so an object parked for most of the chunk
+    # that drives off gets voxel-static evidence — and the veto would delete
+    # MF-MOS's correct moving verdict. Points whose MF-MOS moving probability
+    # is >= this value survive the veto. Requires mf_mos.save_scores (the
+    # exemption is a per-sweep no-op when the score artifact is missing).
+    # None disables the exemption (every static-voxel point is vetoed).
+    veto_score_exempt: float | None = None
+    # Drop dynamic candidates below this height (m) over Step C's ground.npz
+    # height grid. The AW static set is structurally blind to the road
+    # (skip_endpoint keeps road voxels at n_hits==0, never static), so MF-MOS
+    # road false positives — including below-grade artifacts — pass every
+    # voxel veto; height over the aggregated ground surface catches them.
+    # Costs the bottom slice of real movers (wheels/feet below the
+    # threshold). 0.0 disables. Skipped with a warning when ground.npz is
+    # missing or a sentinel.
+    ground_height_veto_m: float = 0.25
+    # Dilate the AW-static veto to voxels within this Chebyshev distance of
+    # a static voxel. Surface returns straddle voxel boundaries, so the
+    # exact-voxel test misses the leakage shell one voxel off the structure.
+    # Candidates whose own voxel AW classed dynamic (dynamic_voxel_keys) are
+    # exempt from the dilated part — AW corroborates the motion there.
+    # 0 = exact-voxel veto only.
+    veto_dilation_voxels: int = 1
+
+    @field_validator("veto_score_exempt")
+    @classmethod
+    def _exempt_range(cls, v: float | None) -> float | None:
+        if v is not None and not (0.0 <= v <= 1.0):
+            raise ValueError(f"veto_score_exempt must be in [0, 1], got {v}")
+        return v
+
+    @field_validator("ground_height_veto_m")
+    @classmethod
+    def _ground_height_nonneg(cls, v: float) -> float:
+        if v < 0.0:
+            raise ValueError(f"ground_height_veto_m must be >= 0, got {v}")
+        return v
+
+    @field_validator("veto_dilation_voxels")
+    @classmethod
+    def _dilation_range(cls, v: int) -> int:
+        # (2D+1)^3 - 1 neighbour lookups per candidate; D=3 is already 342.
+        if not (0 <= v <= 3):
+            raise ValueError(f"veto_dilation_voxels must be in [0, 3], got {v}")
+        return v
 
 
 class ComponentConfig(BaseModel):
@@ -245,9 +291,10 @@ class ComponentConfig(BaseModel):
     min_hit_fraction_dynamic: float = 0.10
     # Points within this horizontal range of the sensor are never labelled
     # dynamic. Inside a few metres the return is dominated by the ego's own
-    # body and near clutter, and free-space carving is maximal, so AW cannot
-    # reliably call motion there. 0.0 disables. Mirrors patchwork.min_range
-    # and mf_mos.min_range_m.
+    # body and near clutter, and free-space carving is maximal, so no method
+    # can reliably call motion there. Applies to every segmentation method
+    # (aw, mos, union). 0.0 disables. Mirrors patchwork.min_range and
+    # mf_mos.min_range_m.
     dynamic_min_range_m: float = 2.5
     # Default 200 m pairs with range-credibility weighting. Without that
     # weighting, long rays still contribute full weight — set to 50-80 m

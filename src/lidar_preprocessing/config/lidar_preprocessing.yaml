@@ -21,6 +21,27 @@ lidar_preprocessing:
     # and static-vetoed). Off by default — AW dynamics are high-recall but
     # low-precision (they hug static surfaces), so the default is MF-MOS-only.
     keep_aw_dynamic: false
+    # Veto exemption for high-confidence MF-MOS movers (handles parked-then-
+    # moving objects: AW's chunk-aggregate evidence calls their voxels static,
+    # which would delete MF-MOS's correct verdict). Points with MF-MOS moving
+    # probability >= this survive the veto. Requires mf_mos.save_scores: true;
+    # null disables the exemption. Suggested starting point: 0.9.
+    veto_score_exempt: null
+    # Drop dynamic candidates below this height (m) over Step C's ground.npz
+    # height grid. The AW static set is structurally blind to the road
+    # (skip_endpoint keeps road voxels at n_hits == 0, never static), so
+    # MF-MOS road false positives — half the union dynamic cloud on
+    # NuScenes 0061, median height -0.36 m — pass every voxel veto; height
+    # over the aggregated ground surface catches them. Costs the bottom
+    # slice of real movers (wheels/feet below the threshold). 0.0 disables.
+    ground_height_veto_m: 0.25
+    # Dilate the AW-static veto to voxels within this Chebyshev distance of a
+    # static voxel — surface returns straddle voxel boundaries, so the exact
+    # test misses the leakage shell one voxel off the structure. Candidates
+    # whose own voxel AW classed dynamic are exempt from the dilated part (AW
+    # corroborates the motion; movers brushing structure must survive).
+    # 0 = exact-voxel veto only.
+    veto_dilation_voxels: 1
 
   # --- Amanatides-Woo (seg=aw) voxel static/dynamic classification ---
 
@@ -89,7 +110,8 @@ lidar_preprocessing:
 
   # Points within this horizontal range (m) of the sensor are never labelled
   # dynamic.  Inside a few metres the return is dominated by the ego's own
-  # body and free-space carving is maximal, so AW can't reliably call motion.
+  # body and free-space carving is maximal, so no method can reliably call
+  # motion there.  Applies to every segmentation method (aw, mos, union).
   # 0.0 disables.  Mirrors patchwork.min_range and mf_mos.min_range_m.
   dynamic_min_range_m: 2.5
 

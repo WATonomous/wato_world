@@ -14,12 +14,15 @@ methods, selected by cfg.segmentation (`--seg aw|mos|union`):
 The two base methods (aw, mos) never import each other; each writes the same
 artifacts (static_map / dynamic_map / dynamic_mask / index) so C and D are
 method-agnostic. `union` is the fusion layer — it runs both halves and reads
-their outputs, then rewrites only the dynamic side.
+their outputs, then rewrites only the dynamic side. On the union path Step C
+runs BEFORE the fusion (union's ground-height veto reads ground.npz's height
+grid; ground itself only needs static_map.npz, so the swap is safe).
 
 Step D (reduce) runs separately via the `reduce` CLI subcommand. In
 two_pass mode (aw only), run() invokes reduce + a classify-only pass 2.
 
-Idempotency: chunks whose ground.npz exists are skipped unless force=True.
+Idempotency: chunks whose summary parquet exists (written last, after every
+step) for the same segmentation method are skipped unless force=True.
 Failures in one chunk don't stop the others.
 """
 
@@ -58,6 +61,7 @@ log = logging.getLogger(__name__)
 def _write_chunk_summary(
     bag_id: str,
     chunk_id: str,
+    segmentation: str,
     seg_result: (
         "classify.ClassifyResult | mf_mos_step.MosSegmentResult "
         "| union_step.UnionSegmentResult"
@@ -69,8 +73,10 @@ def _write_chunk_summary(
 
     Per-sweep counts come from lidar_proc_index (after Step B updated it).
     Runtime stats come from the step result objects. `seg_result` is the AW
-    ClassifyResult or the MF-MOS MosSegmentResult; both expose the cache
-    fields the summary reads.
+    ClassifyResult, the MF-MOS MosSegmentResult, or the UnionSegmentResult;
+    all three expose the cache fields the summary reads, and the mos/union
+    extras (n_sweeps_no_mask, n_vetoed) are read with getattr so the others
+    record None.
     """
     sweep_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
     n_total = len(sweep_rows)
@@ -95,6 +101,10 @@ def _write_chunk_summary(
         cache_auto_disabled=seg_result.cache_auto_disabled,
         estimated_cache_bytes=seg_result.estimated_cache_bytes,
         ground_status=ground_result.status,
+        segmentation_method=segmentation,
+        seg_n_sweeps_no_mask=getattr(seg_result, "n_sweeps_no_mask", None),
+        union_n_points_vetoed=getattr(seg_result, "n_vetoed", None),
+        union_n_points_ground_vetoed=getattr(seg_result, "n_ground_vetoed", None),
         mf_mos_n_processed=mf_mos_result.n_sweeps_processed if mf_mos_result else None,
         mf_mos_n_skipped=mf_mos_result.n_skipped if mf_mos_result else None,
         mf_mos_n_points_moving=mf_mos_result.n_points_moving if mf_mos_result else None,
@@ -106,9 +116,39 @@ def _write_chunk_summary(
     )
 
 
-def _chunk_complete(bag_id: str, chunk_id: str) -> bool:
-    """ground.npz exists (real or sentinel) → chunk done; re-running won't help."""
-    return os.path.exists(local_path(ground_path(bag_id, chunk_id)))
+def _chunk_complete(bag_id: str, chunk_id: str, segmentation: str) -> bool:
+    """Chunk done for THIS run's segmentation method; re-running won't help.
+
+    The chunk summary is the completeness marker — it is written last in
+    _process_one_chunk, after every step, so its presence means the chunk
+    finished. ground.npz alone is NOT enough: on the union path Step C runs
+    before the fusion, so ground.npz can exist for a chunk whose dynamic
+    side was never written.
+
+    Artifacts are also only reusable if the same Step-B method produced them
+    — comparing `--seg` runs against each other must not silently serve
+    stale outputs. Summaries written before segmentation_method existed
+    can't be verified and are trusted (legacy behavior).
+    """
+    if not os.path.exists(local_path(ground_path(bag_id, chunk_id))):
+        return False
+    summary_uri = lidar_proc_summary_path(bag_id, chunk_id)
+    if not os.path.exists(local_path(summary_uri)):
+        return False  # crashed mid-chunk (or pre-summary artifacts): redo
+    rows = read_rows(summary_uri)
+    recorded = rows[0].get("segmentation_method") if rows else None
+    if recorded is None:
+        return True  # legacy summary without the column
+    if recorded != segmentation:
+        log.info(
+            "chunk %s: artifacts were produced by seg=%s but this run is seg=%s "
+            "— re-processing",
+            chunk_id,
+            recorded,
+            segmentation,
+        )
+        return False
+    return True
 
 
 def _validate_chunk_inputs(bag_id: str, chunk_id: str) -> None:
@@ -151,10 +191,14 @@ def _process_one_chunk(
             mf_mos_result = mf_mos_step.process_chunk(cfg, bag_id, chunk_id)
             log.info("=== chunk %s: step B — mf_mos segmentation ===", chunk_id)
             seg_result = mf_mos_step.classify_chunk(cfg, bag_id, chunk_id)
+            log.info("=== chunk %s: step C — ground ===", chunk_id)
+            ground_result = ground.process_chunk(cfg, bag_id, chunk_id)
         elif cfg.segmentation == "union":
             # Fusion: AW builds the static basis, MF-MOS proposes motion, the
             # union step keeps AW's static map and vetoes MF-MOS dynamics that
-            # land on it. Must run AW + MF-MOS first, in that order.
+            # land on it. Step C runs BEFORE the fusion here — union's
+            # ground-height veto reads ground.npz's height grid (ground only
+            # needs static_map.npz, so the swap is safe).
             log.info(
                 "=== chunk %s: step B — classify (Amanatides-Woo static basis) ===",
                 chunk_id,
@@ -162,21 +206,21 @@ def _process_one_chunk(
             aw_result = classify.process_chunk(cfg, bag_id, chunk_id)
             log.info("=== chunk %s: step B — mf_mos inference ===", chunk_id)
             mf_mos_result = mf_mos_step.process_chunk(cfg, bag_id, chunk_id)
+            log.info("=== chunk %s: step C — ground (before fusion) ===", chunk_id)
+            ground_result = ground.process_chunk(cfg, bag_id, chunk_id)
             log.info("=== chunk %s: step B — union fusion ===", chunk_id)
-            seg_result = union_step.classify_chunk(cfg, bag_id, chunk_id)
-            # Carry the AW half's cache telemetry into the summary.
-            seg_result.cache_auto_disabled = aw_result.cache_auto_disabled
-            seg_result.estimated_cache_bytes = aw_result.estimated_cache_bytes
+            seg_result = union_step.classify_chunk(
+                cfg, bag_id, chunk_id, aw_result=aw_result
+            )
         else:  # "aw"
             log.info("=== chunk %s: step B — classify (Amanatides-Woo) ===", chunk_id)
             mf_mos_result = None
             seg_result = classify.process_chunk(cfg, bag_id, chunk_id)
-
-        log.info("=== chunk %s: step C — ground ===", chunk_id)
-        ground_result = ground.process_chunk(cfg, bag_id, chunk_id)
+            log.info("=== chunk %s: step C — ground ===", chunk_id)
+            ground_result = ground.process_chunk(cfg, bag_id, chunk_id)
 
         _write_chunk_summary(
-            bag_id, chunk_id, seg_result, ground_result, mf_mos_result
+            bag_id, chunk_id, cfg.segmentation, seg_result, ground_result, mf_mos_result
         )
         return (chunk_id, True, "")
     except Exception as exc:  # noqa: BLE001 — one chunk failing must not stop the rest
@@ -200,10 +244,7 @@ def _classify_then_maybe_fuse(
     """
     res = classify.process_chunk(cfg, bag_id, chunk_id, global_map_prior=prior)
     if cfg.segmentation == "union":
-        fused = union_step.classify_chunk(cfg, bag_id, chunk_id)
-        fused.cache_auto_disabled = res.cache_auto_disabled
-        fused.estimated_cache_bytes = res.estimated_cache_bytes
-        return fused
+        return union_step.classify_chunk(cfg, bag_id, chunk_id, aw_result=res)
     return res
 
 
@@ -352,7 +393,7 @@ def run(
     skipped: list[str] = []
     for row in chunk_rows:
         cid = row["chunk_id"]
-        if not force and _chunk_complete(bag_id, cid):
+        if not force and _chunk_complete(bag_id, cid, cfg.segmentation):
             skipped.append(cid)
             continue
         pending.append(cid)

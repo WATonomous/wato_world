@@ -62,10 +62,14 @@ B.   static/dynamic decomposition — picked by `--seg aw|mos|union`
 
        seg=union union/     fusion. Runs aw (static basis) + mos, keeps aw's
                             high-precision static map, takes the dynamic cloud
-                            from MF-MOS with that map as a veto:
-                            dynamic = mf_mos_moving & ~ground & ~aw_static.
-                            On NuScenes 0061 this cut dynamic-cloud "on a
-                            static surface" from 84% (aw) / 72% (mos) to 28%.
+                            from MF-MOS gated and vetoed:
+                            dynamic = mf_mos_moving & ~ground & ~near_ego
+                                      & ~near_ground & ~aw_static_dilated.
+                            ~near_ground = below union.ground_height_veto_m
+                            over Step C's ground grid (road FPs are invisible
+                            to the static veto — road voxels are never
+                            static). Step C therefore runs BEFORE the fusion
+                            on this path only.
     │
     ▼
 C.   ground/          aggregate per-sweep ground masks → height grid
@@ -502,7 +506,10 @@ The Pydantic schema is in [`src/wato_lidar_preprocessing/config.py`](src/wato_li
 |---|---|---|
 | `segmentation` | `"aw"` | `"aw"` (Amanatides-Woo log-odds, `classify/`), `"mos"` (MF-MOS, `mf_mos/`), or `"union"` (fusion, `union/`). Override per-run with `--seg aw\|mos\|union`. |
 | `union.aw_static_veto` | `true` | seg=union: drop MF-MOS dynamics whose voxel aw confirmed static (the core of the method). `false` → raw MF-MOS dynamic, for A/B'ing the veto. |
-| `union.keep_aw_dynamic` | `false` | seg=union: also union in aw's own dynamic verdict (recall mode). Off by default — aw dynamics hug static surfaces. |
+| `union.keep_aw_dynamic` | `false` | seg=union: also union in aw's own dynamic verdict (recall mode, read from the `aw_dynamic_mask.npy` snapshot). Off by default — aw dynamics hug static surfaces. |
+| `union.veto_score_exempt` | `null` | seg=union: MF-MOS movers with moving probability ≥ this survive the aw-static veto (parked-then-moving objects). Needs `mf_mos.save_scores: true`; `null` = off. |
+| `union.ground_height_veto_m` | `0.25` | seg=union: drop dynamic candidates below this height over Step C's ground grid (MF-MOS road false positives are invisible to the static veto). 0.0 = off. |
+| `union.veto_dilation_voxels` | `1` | seg=union: dilate the aw-static veto by this many voxels (Chebyshev) to catch the leakage shell straddling voxel boundaries; candidates in aw's own dynamic voxels are exempt from the dilated part. 0 = exact voxel only. |
 | `voxel_size_m` | 0.15 | Voxel side length for static/dynamic classification (m) |
 | `classification_method` | `"log_odds"` | seg=aw backend: `"log_odds"` (Bayesian AW ray-casting) or `"persistence"` (sweep-count threshold) |
 
@@ -518,7 +525,7 @@ The Pydantic schema is in [`src/wato_lidar_preprocessing/config.py`](src/wato_li
 | `min_observations` | 3 | Voxels with fewer ray traversals stay "unknown" (not dynamic) |
 | `min_occupied_hits` | 1 | Voxels with `n_hits < this` are free-space-only; not dynamic |
 | `min_hit_fraction_dynamic` | 0.10 | A voxel may be DYNAMIC only if hit on ≥ this fraction of its traversals (`n_hits/n_obs`). Demotes the near-ego scan-plane shell (free space + stray returns) to CARVED_NOISE. 0.0 = off |
-| `dynamic_min_range_m` | 2.5 | Points within this horizontal range of the sensor are never dynamic (ego self-returns + max carving). 0.0 = off |
+| `dynamic_min_range_m` | 2.5 | Points within this horizontal range of the sensor are never dynamic (ego self-returns + max carving). Applies to every seg method. 0.0 = off |
 | `max_ray_length_m` | 80.0 | Rays beyond this range are truncated (noise dominates at long range) |
 | `free_space_margin_voxels` | 1.0 | Stop free-space carving N voxels before the endpoint |
 | `ground_endpoint_strategy` | `"skip_endpoint"` | `"skip_endpoint"` (traverse ground rays but skip `l_occ` at endpoint) or `"skip_ray"` (skip ground rays entirely; legacy) |
