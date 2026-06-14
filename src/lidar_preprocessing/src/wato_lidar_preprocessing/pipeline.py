@@ -105,6 +105,12 @@ def _write_chunk_summary(
         seg_n_sweeps_no_mask=getattr(seg_result, "n_sweeps_no_mask", None),
         union_n_points_vetoed=getattr(seg_result, "n_vetoed", None),
         union_n_points_ground_vetoed=getattr(seg_result, "n_ground_vetoed", None),
+        motion_filter_n_persistence_dropped=getattr(
+            seg_result, "n_persistence_dropped", None
+        ),
+        motion_filter_n_coherence_dropped=getattr(
+            seg_result, "n_coherence_dropped", None
+        ),
         mf_mos_n_processed=mf_mos_result.n_sweeps_processed if mf_mos_result else None,
         mf_mos_n_skipped=mf_mos_result.n_skipped if mf_mos_result else None,
         mf_mos_n_points_moving=mf_mos_result.n_points_moving if mf_mos_result else None,

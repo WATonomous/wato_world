@@ -140,6 +140,104 @@ class MFMosParams(BaseModel):
         return v
 
 
+class MotionFilterParams(BaseModel):
+    """Post-fusion temporal motion filter for the union dynamic cloud.
+
+    Two composable gates applied AFTER union's AW-static / ground vetoes, to
+    the accumulated per-chunk dynamic cloud. Both exploit the offline batch
+    setting and target *currently-moving* semantics:
+
+      persistence — drop a point whose voxel (persistence_voxel_m) is occupied
+                    across >= persistence_max_sweeps distinct sweeps. A moving
+                    object crosses a 0.5 m voxel in 1-2 sweeps; static
+                    structure MF-MOS mislabelled dwells in the same voxel.
+      coherence   — drop a point that doesn't belong to a cluster linking into
+                    a track of >= coherence_min_life sweeps. Removes the
+                    temporally-incoherent specks that survive persistence.
+
+    Tuning is a recall/precision trade and was set by measurement
+    (scripts/compare_seg_dynamic, on the WATO ring-road bag, mover-recall
+    proxied by distance-from-static-map):
+
+      persist<5  + coherence : on-static 3.9%,  mover-recall 34%  (over-cuts)
+      persist<20 (coherence off): on-static 12.6%, mover-recall 75%  (default)
+      no filter               : on-static 58.3%, recall 100%
+
+    The default is recall-biased: persistence alone at a loose threshold. Past
+    ~24 sweeps the on-static leakage climbs faster than recall, so 20 is the
+    recall-biased operating point before that. The persistence ceiling is
+    ~75-80% recall because an extended/slow mover (a 4.5 m car at 5 m/s dwells
+    ~9 sweeps in a 0.5 m voxel) is indistinguishable from structure by per-voxel
+    occupancy alone. Higher recall needs the learned/tracking signal downstream,
+    not more geometry here.
+
+    COHERENCE IS OFF BY DEFAULT. It cuts ~20% of real movers for <1% precision
+    on sparse (32-/64-beam) LiDAR — distant/fragmented movers don't form clean
+    per-sweep clusters that link into tracks. It is kept as an opt-in denoiser
+    for dense clouds. A velocity gate and an MF-MOS-AND-AW-dynamic intersection
+    both tested worse still (per-sweep visibility drifts a connected-component
+    centroid, faking velocity on static structure), so neither is implemented.
+
+    persistence_max_sweeps and coherence_min_life are sweep COUNTS, not times,
+    so scale them with sensor rate (NuScenes 20 Hz vs Velodyne 10 Hz).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Master switch. False = union writes the raw post-veto dynamic cloud
+    # (the pre-filter behaviour), for A/B'ing the filter's contribution.
+    enabled: bool = True
+
+    # --- persistence gate (the workhorse) ---
+    # Drop a dynamic point if its voxel is occupied across >= this many
+    # distinct sweeps. Lower = cleaner but cuts more slow/large movers; higher
+    # = more recall but more structure leaks. 20 is the recall-biased default
+    # (leakage climbs faster past ~24) on the ring-road bag (sweep COUNT —
+    # scale with sensor Hz). 0 disables.
+    persistence_max_sweeps: int = 20
+    # Voxel edge (m) for the persistence count. Coarser than voxel_size_m so a
+    # mover's returns across a sweep still land in one voxel (counts as 1-2
+    # sweeps) rather than smearing into a per-voxel count of 1 everywhere.
+    persistence_voxel_m: float = 0.5
+
+    # --- coherence gate (opt-in; OFF by default — see class docstring) ---
+    # Drop a dynamic point unless its per-sweep cluster links into a track
+    # spanning >= this many sweeps. 0 disables (default). Membership only — NOT
+    # a velocity test. Hurts recall on sparse LiDAR; enable only on dense clouds.
+    coherence_min_life: int = 0
+    # Connected-components cell (m) for per-sweep clustering.
+    coherence_cell_m: float = 0.4
+    # Max centroid step (m) between consecutive sweeps when linking clusters
+    # into a track. Generous enough for fast movers at the sensor frame rate.
+    coherence_link_gate_m: float = 3.0
+    # Per-sweep cluster extent cap (m). Clusters larger than this are treated
+    # as static structure (walls/facades), not objects, and never seed a
+    # track — the size signal that the failed velocity gate lacked.
+    coherence_max_object_m: float = 7.0
+
+    @field_validator(
+        "persistence_max_sweeps",
+        "coherence_min_life",
+    )
+    @classmethod
+    def _nonneg_int(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(f"value must be >= 0, got {v}")
+        return v
+
+    @field_validator(
+        "persistence_voxel_m",
+        "coherence_cell_m",
+        "coherence_link_gate_m",
+        "coherence_max_object_m",
+    )
+    @classmethod
+    def _positive_float(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"value must be > 0, got {v}")
+        return v
+
+
 class UnionParams(BaseModel):
     """Fusion parameters for the `union` segmentation method (`--seg union`).
 
@@ -191,6 +289,11 @@ class UnionParams(BaseModel):
     # exempt from the dilated part — AW corroborates the motion there.
     # 0 = exact-voxel veto only.
     veto_dilation_voxels: int = 1
+    # Post-veto temporal motion filter (persistence + coherence gates). This
+    # is what removes the static-structure leakage the voxel vetoes miss —
+    # MF-MOS false positives on structure the AW static map covers only
+    # sparsely (far walls, foliage). See MotionFilterParams.
+    motion_filter: MotionFilterParams = MotionFilterParams()
 
     @field_validator("veto_score_exempt")
     @classmethod

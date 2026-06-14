@@ -69,7 +69,10 @@ B.   static/dynamic decomposition — picked by `--seg aw|mos|union`
                             over Step C's ground grid (road FPs are invisible
                             to the static veto — road voxels are never
                             static). Step C therefore runs BEFORE the fusion
-                            on this path only.
+                            on this path only. A post-veto temporal motion
+                            filter (union.motion_filter) then drops the
+                            structure leakage the voxel vetoes miss — see
+                            "Motion filter" below.
     │
     ▼
 C.   ground/          aggregate per-sweep ground masks → height grid
@@ -296,6 +299,69 @@ via `np.searchsorted` — no Python dict overhead in Pass 2.
 
 ---
 
+### Step B (seg=union) — Motion filter (`union/motion_filter.py`)
+
+**Why it exists.** The AW-static and ground-height vetoes only reach MF-MOS
+false positives that land *on* the AW static map. Structure that map covers
+sparsely — far walls, foliage, below-grade returns — slips through. On real
+Velodyne data that left ~58% of the union dynamic cloud sitting within 25 cm of
+a static surface (`scripts/compare_seg_dynamic`). MF-MOS is the wrong primitive
+to fix this: it's an online per-scan model trained on SemanticKITTI (HDL-64E),
+applied out-of-domain, so it over-fires on textured static surfaces. The motion
+filter instead exploits the offline batch setting — the accumulated cloud over
+the whole chunk — and pure geometry, so it has no domain gap.
+
+**The persistence gate** (the workhorse, default on) targets *currently-moving*
+semantics — a genuinely-moving point sweeps **through** a 0.5 m voxel in a few
+sweeps, while static structure dwells in the same voxel the whole time it's in
+view. Drop any point whose voxel is occupied across ≥ `persistence_max_sweeps`
+distinct sweeps.
+
+This is a **recall/precision trade**, set by `persistence_max_sweeps`. It has a
+real recall cost: an *extended* mover is the problem — a 4.5 m car at 5 m/s
+keeps each voxel along its path occupied for ~9 sweeps (≈ car-length / speed),
+so a tight threshold cuts the bodies of normally-moving vehicles, not just
+structure. The default `20` is recall-biased; on-static leakage climbs faster
+than recall past ~24. The ceiling is ~75–80% mover-recall, because a long/slow
+mover is indistinguishable from structure by per-voxel occupancy alone — pushing
+past it needs the learned/tracking signal downstream, not more geometry here.
+
+Measured on the WATO ring-road bag (`scripts/compare_seg_dynamic`; mover-recall
+proxied by distance from the static map):
+
+| `persistence_max_sweeps` | dynamic pts | on-static | mover-recall |
+|---|---|---|---|
+| (no filter) | 360.7K | 58.3% | 100% |
+| 5 | 86.0K | 6.6% | 53% |
+| 12 | 117.6K | 9.3% | 71% |
+| **20 (default)** | **128.9K** | **12.6%** | **75%** |
+| 28 | 143.3K | 16.0% | 80% |
+
+**The coherence gate is OFF by default** (`coherence_min_life: 0`). It drops
+points whose per-sweep cluster doesn't link into a ≥ `coherence_min_life`-sweep
+track — useful as a speck denoiser on *dense* clouds, but on sparse (32-/64-beam)
+LiDAR it cuts ~20% of real movers (distant/fragmented movers don't cluster) for
+< 1% precision, so it's opt-in. It is membership-only, never a velocity test:
+per-sweep visibility makes a connected-component centroid drift as the ego
+passes structure, faking velocity — a velocity gate, and a translating-cluster
+*rescue* of persistent points, both tested *worse* (the rescue re-admitted ~77%
+structure via wall-sliding). An `MF-MOS ∩ AW-dynamic` intersection was likewise
+rejected — AW-dynamic voxels hug static surfaces, so it *raised* leakage
+(17% → 72% on NuScenes).
+
+**A/B-ing.** `motion_filter.enabled: false` writes the raw post-veto cloud;
+each gate is independently disabled by setting its threshold to 0. Raise
+`persistence_max_sweeps` for more recall (more leakage), lower it for a cleaner
+cloud (fewer movers).
+
+The filter rewrites only the dynamic side (`dynamic_map.npz`, per-sweep
+`dynamic_mask.npy`, each index row's `n_points_dynamic`); `static_map.npz` is
+untouched, so Steps C/D stay method-agnostic. Drop counts are recorded in the
+chunk summary as `motion_filter_n_persistence_dropped` /
+`motion_filter_n_coherence_dropped`.
+
+---
+
 ### Step C — Ground extraction (`ground/`)
 
 **What it does.** Aggregates the per-sweep ground masks that Step A wrote into
@@ -510,6 +576,13 @@ The Pydantic schema is in [`src/wato_lidar_preprocessing/config.py`](src/wato_li
 | `union.veto_score_exempt` | `null` | seg=union: MF-MOS movers with moving probability ≥ this survive the aw-static veto (parked-then-moving objects). Needs `mf_mos.save_scores: true`; `null` = off. |
 | `union.ground_height_veto_m` | `0.25` | seg=union: drop dynamic candidates below this height over Step C's ground grid (MF-MOS road false positives are invisible to the static veto). 0.0 = off. |
 | `union.veto_dilation_voxels` | `1` | seg=union: dilate the aw-static veto by this many voxels (Chebyshev) to catch the leakage shell straddling voxel boundaries; candidates in aw's own dynamic voxels are exempt from the dilated part. 0 = exact voxel only. |
+| `union.motion_filter.enabled` | `true` | seg=union: run the post-veto temporal motion filter (persistence + coherence). `false` → raw post-veto cloud, for A/B'ing the filter. |
+| `union.motion_filter.persistence_max_sweeps` | `20` | Drop a dynamic point whose `persistence_voxel_m` voxel is occupied across ≥ this many distinct sweeps (structure dwells; movers sweep through). The recall/precision knob — lower = cleaner but cuts more slow/large movers, higher = more recall but more leakage. Sweep count — scale with sensor Hz. 0 = off. |
+| `union.motion_filter.persistence_voxel_m` | `0.5` | Voxel edge (m) for the persistence sweep-count. |
+| `union.motion_filter.coherence_min_life` | `0` (off) | Opt-in denoiser: drop a dynamic point whose per-sweep cluster doesn't link into a track spanning ≥ this many sweeps. Membership only, not velocity. Off by default — cuts ~20% of real movers on sparse LiDAR; enable only on dense clouds. |
+| `union.motion_filter.coherence_cell_m` | `0.4` | Connected-components cell (m) for per-sweep clustering. |
+| `union.motion_filter.coherence_link_gate_m` | `3.0` | Max centroid step (m) between sweeps when linking clusters into a track. |
+| `union.motion_filter.coherence_max_object_m` | `7.0` | Per-sweep cluster extent cap (m); larger clusters are treated as structure and never tracked. |
 | `voxel_size_m` | 0.15 | Voxel side length for static/dynamic classification (m) |
 | `classification_method` | `"log_odds"` | seg=aw backend: `"log_odds"` (Bayesian AW ray-casting) or `"persistence"` (sweep-count threshold) |
 
@@ -643,6 +716,7 @@ src/lidar_preprocessing/
     ├── test_deskew.py                 # per-point world projection, 6 extrinsic configurations
     ├── test_classify.py               # persistence + log-odds classification, MF-MOS vote fusion
     ├── test_mf_mos.py                 # range projection, residuals, fusion modes (Groups 1–5)
+    ├── test_motion_filter.py          # seg=union post-veto persistence + coherence gates
     ├── test_ray_traversal.py          # AW kernel parity (Numba vs Python), voxel traversal
     ├── test_ground.py                 # flat/tilted planes, height grid, dynamic intersection
     ├── test_pipeline.py               # chunk summary, cache auto-disable, parallel workers

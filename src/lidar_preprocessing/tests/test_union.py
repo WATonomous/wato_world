@@ -36,7 +36,11 @@ from wato_common.artifact_store import (
 )
 from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.schemas import PROCESSED_SWEEPS_SCHEMA
-from wato_lidar_preprocessing.config import ComponentConfig, UnionParams
+from wato_lidar_preprocessing.config import (
+    ComponentConfig,
+    MotionFilterParams,
+    UnionParams,
+)
 from wato_lidar_preprocessing.union import classify_chunk
 from wato_lidar_preprocessing.voxel import voxel_indices
 
@@ -53,9 +57,13 @@ def tmp_env(tmp_path, monkeypatch):
 def _union_cfg(*, dynamic_min_range_m: float = 0.0, **union_kw) -> ComponentConfig:
     # The staged points sit 0.5–3.5 m from the sweep origin and on z=0, so
     # the near-ego gate, the veto dilation, and the ground-height veto are
-    # disabled here and exercised by their dedicated tests below.
+    # disabled here and exercised by their dedicated tests below. The post-veto
+    # motion filter is likewise disabled so these tests isolate the veto logic —
+    # it has its own coverage in test_motion_filter.py (the few-sweep synthetic
+    # clouds here would otherwise be wiped by the persistence/coherence gates).
     union_kw.setdefault("veto_dilation_voxels", 0)
     union_kw.setdefault("ground_height_veto_m", 0.0)
+    union_kw.setdefault("motion_filter", MotionFilterParams(enabled=False))
     return ComponentConfig(
         segmentation="union",
         voxel_size_m=VOXEL,
@@ -550,3 +558,39 @@ def test_union_mask_realigned_when_raw_longer_than_world(tmp_env):
     assert result.n_dynamic == 2
     mask = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
     assert mask.tolist() == [True, True, False, False]
+
+
+def test_union_motion_filter_drops_persistent_blob(tmp_env):
+    """Integration: with motion_filter enabled, classify_chunk drops a blob that
+    dwells in one voxel across many sweeps (which the AW-static veto can't catch
+    because the blob is never AW-static) while keeping a translating mover."""
+    bag_id, chunk_id = "bag_union_mf", "chunk0"
+    n_sweeps = 6
+    # Static map deliberately excludes both the blob and the mover, so the veto
+    # passes them through and the motion filter is the only thing that can act.
+    _write_static_map(bag_id, chunk_id, _XYZ[[1, 3]])
+    rows = []
+    for s in range(n_sweeps):
+        mover = [s * 1.0 + 0.5, 5.0, 0.0]  # distinct voxel each sweep
+        blob = [10.5, 10.5, 0.0]  # same voxel every sweep
+        xyz = np.array([mover, blob])
+        _write_world(bag_id, chunk_id, s, xyz)
+        mf_uri = _write_mf_mask(bag_id, chunk_id, s, np.array([True, True]))  # moving
+        rows.append(_proc_row(bag_id, chunk_id, s, xyz, mf_uri))
+    write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
+
+    cfg = _union_cfg()
+    # Explicit threshold (6-sweep blob must exceed it) — the shipped default is
+    # looser and recall-biased; this test pins the wiring, not the tuning.
+    cfg.union.motion_filter = MotionFilterParams(
+        enabled=True, persistence_max_sweeps=5
+    )
+    result = classify_chunk(cfg, bag_id, chunk_id)
+
+    # Mover (6 pts, one per sweep) survives; blob (6 pts, one voxel) is dropped.
+    assert result.n_dynamic == n_sweeps
+    assert result.n_persistence_dropped == n_sweeps
+    assert result.n_coherence_dropped == 0
+    dm = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
+    assert dm["xyz"].shape[0] == n_sweeps
+    assert np.all(dm["xyz"][:, 1] == 5.0), "survivors are the mover, not the blob"

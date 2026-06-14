@@ -43,6 +43,34 @@ lidar_preprocessing:
     # 0 = exact-voxel veto only.
     veto_dilation_voxels: 1
 
+    # Post-veto temporal motion filter on the accumulated dynamic cloud. The
+    # voxel vetoes above only reach MF-MOS false positives that land ON the AW
+    # static map; structure it covers sparsely (far walls, foliage, below-grade
+    # returns) slips through. The persistence gate catches it. A/B with
+    # scripts/compare_seg_dynamic. Recall/precision trade on the ring-road bag:
+    #   persist<20 (coherence off): on-static 12.6%, mover-recall 75%  <- default
+    #   persist<5 + coherence:      on-static 3.9%,  mover-recall 34%  (over-cuts)
+    #   no filter:                  on-static 58.3%, recall 100%
+    motion_filter:
+      # Master switch. false -> write the raw post-veto cloud (pre-filter
+      # behaviour), for measuring the filter's contribution.
+      enabled: true
+      # persistence gate (the workhorse): drop a point whose voxel is occupied
+      # across >= this many DISTINCT sweeps. Lower = cleaner but cuts more
+      # slow/large movers (a 4.5 m car dwells ~9 sweeps in a 0.5 m voxel);
+      # higher = more recall, more structure leaks (climbs fast past ~24).
+      # 0 disables. Sweep COUNT — scale with sensor Hz.
+      persistence_max_sweeps: 20
+      persistence_voxel_m: 0.5
+      # coherence gate: OFF by default (0). Drops points whose per-sweep cluster
+      # doesn't link into a >= N-sweep track. Membership only, never velocity.
+      # Cuts ~20% of real movers for <1% precision on sparse LiDAR (distant
+      # movers don't cluster) — enable only on dense clouds.
+      coherence_min_life: 0
+      coherence_cell_m: 0.4         # connected-components cell (m)
+      coherence_link_gate_m: 3.0    # max centroid step between sweeps (m)
+      coherence_max_object_m: 7.0   # per-sweep cluster extent cap -> structure
+
   # --- Amanatides-Woo (seg=aw) voxel static/dynamic classification ---
 
   # Edge length of the cubic voxels used for occupancy accumulation.

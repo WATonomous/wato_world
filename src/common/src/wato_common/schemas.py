@@ -341,6 +341,11 @@ class ChunkSummaryRow(BaseModel):
     union_n_points_vetoed: Optional[int] = None
     # Dynamic candidates removed by the ground-height veto (union only).
     union_n_points_ground_vetoed: Optional[int] = None
+    # Dynamic points removed by the post-veto motion filter (union only; None
+    # when the filter is disabled). persistence = voxel occupied across too
+    # many sweeps; coherence = not part of a multi-sweep cluster track.
+    motion_filter_n_persistence_dropped: Optional[int] = None
+    motion_filter_n_coherence_dropped: Optional[int] = None
     # MF-MOS step stats — None when mf_mos.enabled is False.
     mf_mos_n_processed: Optional[int] = None
     mf_mos_n_skipped: Optional[int] = None
@@ -366,6 +371,8 @@ CHUNK_SUMMARY_SCHEMA = pa.schema(
         pa.field("seg_n_sweeps_no_mask", pa.int64()),
         pa.field("union_n_points_vetoed", pa.int64()),
         pa.field("union_n_points_ground_vetoed", pa.int64()),
+        pa.field("motion_filter_n_persistence_dropped", pa.int64()),
+        pa.field("motion_filter_n_coherence_dropped", pa.int64()),
         pa.field("mf_mos_n_processed", pa.int64()),
         pa.field("mf_mos_n_skipped", pa.int64()),
         pa.field("mf_mos_n_points_moving", pa.int64()),

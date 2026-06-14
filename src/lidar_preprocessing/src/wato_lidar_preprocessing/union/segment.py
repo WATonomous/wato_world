@@ -93,6 +93,7 @@ from wato_lidar_preprocessing.mf_mos.segment import (
     load_mf_mos_world_scores,
     near_ego_mask,
 )
+from wato_lidar_preprocessing.union.motion_filter import filter_dynamic_artifacts
 from wato_lidar_preprocessing.voxel import AXIS_BITS, keys_in_sorted, voxel_indices
 
 if TYPE_CHECKING:
@@ -118,6 +119,8 @@ class UnionSegmentResult:
     n_sweeps_no_mask: int = 0
     n_vetoed: int = 0
     n_ground_vetoed: int = 0
+    n_persistence_dropped: int = 0
+    n_coherence_dropped: int = 0
     cache_auto_disabled: bool = False
     estimated_cache_bytes: int = 0
 
@@ -445,10 +448,18 @@ def classify_chunk(
         dyn_kwargs["sweep_id"] = np.empty(0, dtype=np.int32)
     np.savez_compressed(local_path(dynamic_map_path(bag_id, chunk_id)), **dyn_kwargs)
 
+    # Post-veto temporal motion filter: the voxel vetoes above only reach
+    # MF-MOS false positives that land on the AW static map; persistence +
+    # coherence over the accumulated cloud catch the structure it covers
+    # sparsely. Rewrites dynamic_map.npz / per-sweep masks / index in place.
+    mf_result = filter_dynamic_artifacts(cfg, bag_id, chunk_id)
+    if mf_result.applied:
+        total_dynamic = mf_result.n_after
+
     log.info(
         "chunk %s: union static=%d (AW) dynamic=%d (MF-MOS%s; %d vetoed by "
         "AW-static[D=%d]; %d vetoed by ground-height<%.2fm; %d sweeps had no "
-        "MF-MOS mask)",
+        "MF-MOS mask; motion filter dropped %d persistence + %d coherence)",
         chunk_id,
         total_static,
         total_dynamic,
@@ -458,6 +469,8 @@ def classify_chunk(
         total_ground_vetoed,
         min_height if ground_grid is not None else 0.0,
         n_no_mask,
+        mf_result.n_persistence_dropped,
+        mf_result.n_coherence_dropped,
     )
     return UnionSegmentResult(
         n_static=total_static,
@@ -466,6 +479,8 @@ def classify_chunk(
         n_sweeps_no_mask=n_no_mask,
         n_vetoed=total_vetoed,
         n_ground_vetoed=total_ground_vetoed,
+        n_persistence_dropped=mf_result.n_persistence_dropped,
+        n_coherence_dropped=mf_result.n_coherence_dropped,
         cache_auto_disabled=cache_auto_disabled,
         estimated_cache_bytes=estimated_cache_bytes,
     )
