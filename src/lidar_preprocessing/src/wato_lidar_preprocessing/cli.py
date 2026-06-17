@@ -223,9 +223,7 @@ def viz_cmd(
         try:
             viz_global_static_map(bag_id, **opts)
         except FileNotFoundError:
-            click.echo(
-                "global_static_map.npz not found (run 'reduce' first)"
-            )
+            click.echo("global_static_map.npz not found (run 'reduce' first)")
         return
 
     if chunk_id is not None:

@@ -90,8 +90,12 @@ def test_coherence_size_cap_drops_large_structure():
     wall = np.array([[x, 0.0, 1.0] for _ in range(8) for x in span])
     wall_sw = np.array([s for s in range(8) for _ in span])
     keep = coherence_keep(
-        wall, wall_sw.astype(np.int32), cell_m=0.4, link_gate_m=3.0,
-        min_life=3, max_object_m=7.0,
+        wall,
+        wall_sw.astype(np.int32),
+        cell_m=0.4,
+        link_gate_m=3.0,
+        min_life=3,
+        max_object_m=7.0,
     )
     assert not keep.any(), "12 m structure exceeds the size cap — must drop"
 

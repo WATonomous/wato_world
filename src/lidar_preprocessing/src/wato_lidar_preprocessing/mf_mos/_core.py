@@ -247,7 +247,10 @@ def process_chunk(
                     )
                     continue
                 past_ts, past_xyz = past_window[j]
-                if abs(cur_ts - past_ts) > max_residual_gap_ns or past_xyz.shape[0] == 0:
+                if (
+                    abs(cur_ts - past_ts) > max_residual_gap_ns
+                    or past_xyz.shape[0] == 0
+                ):
                     residuals.append(
                         np.zeros(
                             (params.range_image_h, params.range_image_w),

@@ -81,12 +81,16 @@ def main() -> None:
     shifted = dyn + np.array([args.shift_m, args.shift_m, 0.0])
     floor = 100 * _coincide_fraction(shifted, tree, stat, args.radius_m)
 
-    print(f"  z-profile: p5={np.percentile(dyn[:, 2], 5):.2f}  "
-          f"median={np.median(dyn[:, 2]):.2f}  p95={np.percentile(dyn[:, 2], 95):.2f} m")
+    print(
+        f"  z-profile: p5={np.percentile(dyn[:, 2], 5):.2f}  "
+        f"median={np.median(dyn[:, 2]):.2f}  p95={np.percentile(dyn[:, 2], 95):.2f} m"
+    )
     print(f"  on-static (<{args.radius_m:.2f} m of a static surface): {on:5.1f}%")
     print(f"  shift +{args.shift_m:.0f} m null (chance floor):          {floor:5.1f}%")
-    print(f"  leakage above chance: {on - floor:+5.1f} points-pct  "
-          f"(lower = cleaner; ~0 means movers-only)")
+    print(
+        f"  leakage above chance: {on - floor:+5.1f} points-pct  "
+        f"(lower = cleaner; ~0 means movers-only)"
+    )
 
 
 if __name__ == "__main__":

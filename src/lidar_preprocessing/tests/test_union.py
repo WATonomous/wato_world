@@ -582,9 +582,7 @@ def test_union_motion_filter_drops_persistent_blob(tmp_env):
     cfg = _union_cfg()
     # Explicit threshold (6-sweep blob must exceed it) — the shipped default is
     # looser and recall-biased; this test pins the wiring, not the tuning.
-    cfg.union.motion_filter = MotionFilterParams(
-        enabled=True, persistence_max_sweeps=5
-    )
+    cfg.union.motion_filter = MotionFilterParams(enabled=True, persistence_max_sweeps=5)
     result = classify_chunk(cfg, bag_id, chunk_id)
 
     # Mover (6 pts, one per sweep) survives; blob (6 pts, one voxel) is dropped.
