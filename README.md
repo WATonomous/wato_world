@@ -96,7 +96,7 @@ watod build
 # 4. Bring up the active components.
 watod up
 
-# 5. Run a component on a bag under data/bags/. Example: 
+# 5. Run a component on a bag under data/bags/. Example:
 watod run ingest /data/bags/my_bag
 
 # 6. Open a dev shell in an active dev container with source bind-mounted.
