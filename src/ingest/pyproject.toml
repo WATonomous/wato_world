@@ -24,4 +24,4 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.pytest.ini_options]
-addopts = "-p no:launch_testing -p no:launch_testing_ros"
+addopts = "-p no:launch_testing -p no:launch_ros"
