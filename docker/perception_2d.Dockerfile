@@ -1,5 +1,5 @@
-# Perception 2D — SAM 3.1 multiplex concept-video tracker (detect+segment+track)
-# + Depth Anything V2 + DINOv2 ReID + cross-camera merge.
+# Perception 2D — GroundingDINO detector + SAM2 video tracker (segment+track)
+# + Depth Anything V2 + DINOv2 ReID.
 # Heaviest GPU component — budget several hundred GPU-hours per hour of bag.
 #
 # Defines `source` and `dependencies` build stages. The full image
@@ -44,24 +44,25 @@ RUN uv pip install --system --break-system-packages \
         --extra-index-url https://download.pytorch.org/whl/cu128 \
         "torch==2.7.1" "torchvision==0.22.1"
 
-# HuggingFace Hub (checkpoint downloads for SAM 3.1 + Depth-Anything-V2) plus
-# einops/timm/safetensors used by Depth-Anything-V2's DPT head.
+# HuggingFace Hub + Transformers. Transformers hosts the GroundingDINO detector
+# (AutoModelForZeroShotObjectDetection, IDEA-Research/grounding-dino-base) and
+# the optional Florence-2 discovery backend — no CUDA custom-op compile, unlike
+# the standalone groundingdino package. einops/timm/safetensors are also used by
+# Depth-Anything-V2's DPT head. Checkpoints are pre-fetched by
+# scripts/fetch_models.py into HF_HOME.
 RUN uv pip install --system --break-system-packages \
-        huggingface_hub safetensors einops timm
+        huggingface_hub transformers safetensors einops timm
 
-# SAM 3.1 multiplex tracker via Meta's official `sam3` package. The published
-# checkpoint sam3.1_multiplex.pt (facebook/sam3.1) loads ONLY through this
-# code — SAM 3.1 has no HuggingFace Transformers integration. Pulls light
-# deps (ftfy/regex/iopath/numpy<2); config use_fa3=False avoids the
-# FlashAttention-3 dependency. Checkpoint is pre-fetched by
-# scripts/fetch_models.py into HF_HOME. License: SAM License.
-# Runtime deps the multiplex build path pulls (beyond sam3's light core deps):
-# hydra/omegaconf (config instantiation), open_clip_torch (text encoder),
-# pycocotools (mask RLE), psutil, and scikit-image/learn used by helpers.
+# SAM2.1 via Meta's official `sam2` package. SAM2VideoPredictor.from_pretrained
+# (facebook/sam2.1-hiera-large) downloads the checkpoint from HF and instantiates
+# it with the package's bundled hydra config. The package's setup.py pulls its
+# own light deps (hydra-core, iopath); torch is already present and satisfies its
+# >=2.5.1 floor, so it is not reinstalled. License: Apache 2.0.
+# TODO: pin @<commit> once a known-good sam2 revision is verified against this
+# torch (mirrors the sam3 pin we replaced); unpinned tracks main for now.
 RUN uv pip install --system --break-system-packages \
-        hydra-core omegaconf open_clip_torch psutil pycocotools \
-        scikit-image scikit-learn \
-        git+https://github.com/facebookresearch/sam3@8e451d5eb43c817b64ae7577fb7b9ae223db88a9
+        hydra-core iopath \
+        git+https://github.com/facebookresearch/sam2.git
 
 # Depth Anything V2 (depth.py).  The upstream Meta/ByteDance repo isn't
 # pip-installable (no pyproject.toml / setup.py); use the community PyPI

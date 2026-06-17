@@ -4,8 +4,8 @@ Extracts a per-mask DINOv2 embedding and persists it on each masklet.  This
 stage only *produces* embeddings — the actual re-identification happens
 downstream in the `tracking` component, which consumes them.
 
-Used by the SAM 3.1 concept tracker (sam3_concept_tracker.py), which calls
-extract_dino_feature every k frames per masklet.  Lazy-imports torch so the
+Used by the SAM2 tracker (sam2_tracker.py), which calls extract_dino_feature
+every k frames per masklet.  Lazy-imports torch so the
 module can be *imported* without it installed; extracting a feature without
 torch/DINOv2 raises loudly.
 """

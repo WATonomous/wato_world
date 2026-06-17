@@ -1,14 +1,14 @@
-"""Florence-2 open-vocabulary region discovery.
+"""Florence-2 open-vocabulary region discovery (optional vocabulary source).
 
 Runs the <DENSE_REGION_CAPTION> task on each image to produce noun phrases
-with rough bounding boxes.  These phrases are then passed to SAM3 for
-text-prompted segmentation, replacing the GroundingDINO fixed-vocabulary
-detection step.
+with rough bounding boxes.  When discovery.backend == "florence2", these phrases
+are pooled into the detector's text query — the open-vocab alternative to the
+fixed taxonomy.
 
 Lazy-imports Florence-2 (via transformers) so the module can be *imported*
 without it installed; calling propose() without it raises loudly.  There is no
-degraded fallback — use discovery.backend: "fixed" (FixedClassDiscovery) to run
-without Florence-2.
+degraded fallback — use discovery.backend: "fixed" to run with the closed-set
+taxonomy instead.
 """
 
 from __future__ import annotations
@@ -128,10 +128,10 @@ class FixedClassDiscovery:
     """Closed-vocabulary 'discovery' that bypasses Florence-2.
 
     Emits one RegionProposal per configured class name, each spanning the whole
-    image, so SAM 3.1 is text-prompted directly with the class names (e.g. COCO
-    classes) instead of with Florence-2's open-vocabulary phrases.  Exposes the
-    same ``propose(image)`` interface as Florence2Discovery so the pipeline can
-    swap backends without other changes.
+    image.  Exposes the same ``propose(image)`` interface as Florence2Discovery.
+    (The default fixed-vocab path now prompts the detector directly from the
+    taxonomy via ComponentConfig.concept_prompts(); this helper is retained for
+    callers that want full-image class proposals.)
     """
 
     def __init__(self, classes: list[str]) -> None:

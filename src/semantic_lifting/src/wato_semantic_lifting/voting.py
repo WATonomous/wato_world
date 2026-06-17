@@ -18,7 +18,7 @@ class PointVote:
     point_idx: int
     instance_id: str   # global_object_id from masklet
     cls: str
-    score: float       # sam3_score * depth_confidence
+    score: float       # det_score * depth_confidence
     cam_id: str
     mask_area: int     # pixel count of the source mask
 

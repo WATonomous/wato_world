@@ -399,12 +399,12 @@ class MaskletRow(BaseModel):
     mask_path: str  # path to directory of per-frame mask PNG files
     dino_feature_path: Optional[str] = None  # DINOv2 embedding NPZ
     global_object_id: Optional[str] = None  # cross-camera identity
-    # v2 fields (Florence-2 + SAM3)
-    raw_phrase: str = ""          # Florence-2 noun phrase before coarsening
-    sam3_score: float = 0.0       # SAM3 presence-token score
-    discovery_score: float = 0.0  # Florence-2 confidence
+    # detector + SAM2 fields
+    raw_phrase: str = ""          # raw detector label before canonicalisation
+    det_score: float = 0.0        # detector (× SAM2 mask) confidence
+    discovery_score: float = 0.0  # detector / Florence-2 confidence
     centroid_depth_m: float = 0.0 # metric depth at mask centroid (used for cross-cam merge)
-    tracker_backend: str = "sam3" # "sam3" or "deva"
+    tracker_backend: str = "sam2" # tracker that produced this masklet
 
 
 MASKLET_SCHEMA = pa.schema(
@@ -420,7 +420,7 @@ MASKLET_SCHEMA = pa.schema(
         pa.field("dino_feature_path", pa.string()),
         pa.field("global_object_id", pa.string()),
         pa.field("raw_phrase", pa.string()),
-        pa.field("sam3_score", pa.float64()),
+        pa.field("det_score", pa.float64()),
         pa.field("discovery_score", pa.float64()),
         pa.field("centroid_depth_m", pa.float64()),
         pa.field("tracker_backend", pa.string()),

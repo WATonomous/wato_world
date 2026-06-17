@@ -8,7 +8,8 @@ Layout produced:
 
     ${MODELS_ROOT}/
       hf/                          # HuggingFace cache (HF_HOME)
-        hub/models--facebook--sam3.1/...
+        hub/models--facebook--sam2.1-hiera-large/...
+        hub/models--IDEA-Research--grounding-dino-base/...
         hub/models--depth-anything--Depth-Anything-V2-Large/...
       torch_hub/                   # torch.hub cache (TORCH_HOME)
         hub/checkpoints/dinov2_vitl14_pretrain.pth
@@ -26,8 +27,8 @@ Usage:
     # Explicit path.
     MODELS_ROOT=/srv/wato_models python3 src/perception_2d/scripts/fetch_models.py
 
-    # Skip a model (e.g. SAM3 if not yet public on HF Hub):
-    python3 src/perception_2d/scripts/fetch_models.py --skip sam3
+    # Skip a model (e.g. depth if running with depth.enabled: false):
+    python3 src/perception_2d/scripts/fetch_models.py --skip depth_anything_v2
 
 Requires (on the host):
     pip install huggingface_hub torch
@@ -47,9 +48,11 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 HF_MODELS: dict[str, str] = {
-    # facebook/sam3.1 hosts the multiplex checkpoint (sam3.1_multiplex.pt) +
-    # config/tokenizer; loaded via the `sam3` package, not transformers.
-    "sam3": "facebook/sam3.1",                          # sam3_concept_tracker.py
+    # facebook/sam2.1-hiera-large hosts the SAM2.1 checkpoint; loaded via
+    # SAM2VideoPredictor.from_pretrained (config is bundled in the `sam2` pkg).
+    "sam2": "facebook/sam2.1-hiera-large",              # sam2_tracker.py
+    # GroundingDINO detector, loaded via transformers AutoModel/AutoProcessor.
+    "grounding_dino": "IDEA-Research/grounding-dino-base",  # detector.py
     "depth_anything_v2": "depth-anything/Depth-Anything-V2-Large",  # depth.py
 }
 

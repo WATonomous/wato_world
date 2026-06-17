@@ -1,7 +1,7 @@
 """perception_2d pipeline orchestrator.
 
 Each chunk is processed in two passes so the two heavy GPU models are never
-co-resident — critical on small-VRAM GPUs, where DA-V2-Large + SAM 3.1 + DINOv2
+co-resident — critical on small-VRAM GPUs, where DA-V2-Large + SAM2 + DINOv2
 do not all fit (e.g. ~6 GB):
 
   PASS 1 — depth (only DA-V2 in VRAM), per camera (frames batched through the
@@ -14,21 +14,22 @@ do not all fit (e.g. ~6 GB):
     6. Write depth_2d/<cam>/<frame>.npz (skipped on total fit failure)
     Then DA-V2 is unloaded and its VRAM freed before tracking starts.
 
-  PASS 2 — tracking (only SAM 3.1 + DINOv2 in VRAM), per camera stream:
-    Concept source (selected by discovery.backend):
-      fixed     → concepts come straight from config (closed-set, e.g. COCO).
+  PASS 2 — tracking (only the detector + SAM2 + DINOv2 in VRAM), per camera
+  stream:
+    Class vocabulary (selected by discovery.backend):
+      fixed     → concepts come straight from config (closed-set taxonomy).
       florence2 → Florence-2 discovers open-vocab phrases across the camera
                   stream; they're pooled + canonicalised into the concept set.
-    SAM 3.1's multiplex concept-video predictor detects + segments + tracks
-    every instance of each concept across the stream → Masklets with persistent
-    IDs, with DINOv2 appearance embeddings extracted every k frames. Then write
-    detections_2d.parquet + tracklets_2d.parquet.
+    The detector (GroundingDINO) emits class-labeled boxes on keyframes; SAM2's
+    video predictor turns each box into a mask and tracks it across the stream →
+    Masklets with persistent IDs, with DINOv2 appearance embeddings extracted
+    every k frames. Then write detections_2d.parquet + tracklets_2d.parquet.
 
 The split costs a second image decode (each pass loads the frames once) in
-exchange for halving peak VRAM. SAM 3.1 is the only tracker; model loading is
-fail-loud — a missing predictor / depth model / Florence-2 raises rather than
-emitting degraded output, and the SAM 3.1 import is checked before the depth
-pass so a missing install fails fast instead of after the whole depth pass.
+exchange for halving peak VRAM. Model loading is fail-loud — a missing detector /
+SAM2 / depth model raises rather than emitting degraded output, and the SAM2 +
+detector imports are checked before the depth pass so a missing install fails
+fast instead of after the whole depth pass.
 
 Cross-camera identity merging is intentionally NOT done here.  perception_2d's
 deliverable is per-camera masklets + masks + metric depth + DINOv2 appearance
@@ -77,18 +78,22 @@ from wato_perception_2d.io import (
     load_frame_index,
     load_static_lidar_points,
 )
-from wato_perception_2d.models._sam3_runtime import (
-    get_sam3_predictor,
-    release_sam3_predictor,
-    sam3_importable,
+from wato_perception_2d.models._sam2_runtime import (
+    get_sam2_predictor,
+    release_sam2_predictor,
+    sam2_importable,
 )
 from wato_perception_2d.models.depth import DepthAnythingV2
+from wato_perception_2d.models.detector import (
+    GroundingDinoDetector,
+    detector_importable,
+)
 from wato_perception_2d.models.discovery import Florence2Discovery
-from wato_perception_2d.models.sam3_concept_tracker import track_camera_concepts
+from wato_perception_2d.models.sam2_tracker import track_camera
 
 log = logging.getLogger(__name__)
 
-# A (text_prompt, canonical_class) concept fed to the SAM 3.1 concept tracker.
+# A (text_prompt, canonical_class) concept fed to the detector.
 Concept = tuple[str, str]
 
 
@@ -133,6 +138,7 @@ def _discover_concepts_florence2(
     phrases scoring >= ``discovery.min_confidence``, and pools them into one
     deduped concept set.  Each phrase is canonicalised through the prompts.yaml
     synonym map (unknown phrases keep their raw text as the canonical class).
+    The pooled set becomes the detector's text query for this camera.
     """
     syn2cls = cfg.synonym_to_class_map()
     step = max(1, cfg.discovery.sample_every_k)
@@ -316,9 +322,9 @@ def _free_cuda() -> None:
 def _log_vram(tag: str) -> None:
     """Log current reserved/allocated VRAM (best-effort, no-op on CPU).
 
-    Called after each camera's close_session so drift (memory not returned
-    between cameras) is visible in the logs *before* it turns into an OOM,
-    instead of only finding out by dying mid-propagation.
+    Called after each camera's tracking so drift (memory not returned between
+    cameras) is visible in the logs *before* it turns into an OOM, instead of
+    only finding out by dying mid-propagation.
     """
     try:
         import torch
@@ -338,8 +344,7 @@ def _inference_ctx():
     """torch.inference_mode() when torch is present, else a no-op context.
 
     Wrapping the tracking loop is cheap insurance against any accidental autograd
-    bookkeeping on inference tensors; it does not itself reduce VRAM (SAM 3.1
-    already manages no_grad internally for its forward passes)."""
+    bookkeeping on inference tensors; it does not itself reduce VRAM."""
     try:
         import torch
 
@@ -355,6 +360,7 @@ def _process_chunk(
     bag_id: str,
     chunk_id: str,
     discovery: Optional[Florence2Discovery],
+    detector: GroundingDinoDetector,
     fixed_concepts: list[Concept],
     device: str,
     *,
@@ -362,8 +368,8 @@ def _process_chunk(
 ) -> None:
     """Run one chunk as two VRAM-disjoint passes: depth, then tracking.
 
-    DA-V2 (depth) and SAM 3.1 (tracking) are never built at the same time, so
-    only one heavy model occupies the GPU at once.
+    DA-V2 (depth) and the detector + SAM2 (tracking) are never built at the same
+    time, so only one heavy model set occupies the GPU at once.
     """
     frames = load_frame_index(bag_id, chunk_id)
     if not frames:
@@ -371,14 +377,21 @@ def _process_chunk(
         _write_empty(bag_id, chunk_id)
         return
 
-    # Fail FAST: there are frames to track, so SAM 3.1 is required. Confirm it
-    # can import before the (expensive) depth pass, rather than discovering a
-    # missing install only after depth has already run.
-    if not sam3_importable():
+    # Fail FAST: there are frames to track, so SAM2 + the detector are required.
+    # Confirm they import before the (expensive) depth pass, rather than
+    # discovering a missing install only after depth has already run.
+    if not sam2_importable():
         raise RuntimeError(
-            f"chunk {chunk_id}: SAM 3.1 (`sam3`) is not importable but "
-            f"{len(frames)} frames need tracking. Install the `sam3` package "
-            "(+ its deps, e.g. pycocotools) and fetch facebook/sam3.1."
+            f"chunk {chunk_id}: SAM2 (`sam2`) is not importable but "
+            f"{len(frames)} frames need tracking. Install the `sam2` package and "
+            "fetch facebook/sam2.1-hiera-large into the HF cache."
+        )
+    if not detector_importable():
+        raise RuntimeError(
+            f"chunk {chunk_id}: the detector backend (`transformers`) is not "
+            f"importable but {len(frames)} frames need detection. Install "
+            "transformers and fetch the GroundingDINO checkpoint "
+            "(scripts/fetch_models.py)."
         )
 
     calibration = load_calibration(bag_id)
@@ -404,14 +417,14 @@ def _process_chunk(
     )
 
     # PASS 1 — depth. DA-V2 is the only heavy model resident; it is freed at the
-    # end of the pass, before SAM 3.1 is built.
+    # end of the pass, before the detector / SAM2 are built.
     if cfg.depth.enabled:
         _run_depth_pass(cfg, bag_id, chunk_id, frames_by_cam, calibration)
         # Depth is done; drop the per-sweep LiDAR cache so it doesn't sit in RAM
         # through tracking.
         clear_lidar_caches(bag_id, chunk_id)
 
-    # PASS 2 — tracking. SAM 3.1 (+ DINOv2) only; DA-V2's VRAM is already freed.
+    # PASS 2 — tracking. Detector + SAM2 (+ DINOv2) only; DA-V2's VRAM is freed.
     all_masklets = _run_tracking_pass(
         cfg,
         bag_id,
@@ -420,6 +433,7 @@ def _process_chunk(
         calibration,
         masks_base,
         discovery,
+        detector,
         fixed_concepts,
         device,
     )
@@ -445,9 +459,9 @@ def _run_depth_pass(
     """PASS 1: write metric depth for every frame, then free DA-V2's VRAM.
 
     DA-V2 is built here (not in run()) and unloaded in the finally block so it
-    never co-resides with SAM 3.1. Frames within a camera are pushed through the
-    backbone ``cfg.depth.batch_size`` at a time (they share one resolution); the
-    LiDAR alignment that follows each batch stays strictly sequential, so the
+    never co-resides with the tracker. Frames within a camera are pushed through
+    the backbone ``cfg.depth.batch_size`` at a time (they share one resolution);
+    the LiDAR alignment that follows each batch stays strictly sequential, so the
     fallback-window state is identical to per-frame processing.
     """
     depth_model = DepthAnythingV2(model_size=cfg.depth.model, device=None)
@@ -493,7 +507,7 @@ def _run_depth_pass(
                             )
                     pbar.update(len(batch_frames))
     finally:
-        # Drop DA-V2 from VRAM before the tracking pass builds SAM 3.1.
+        # Drop DA-V2 from VRAM before the tracking pass builds the detector/SAM2.
         depth_model.unload()
         del depth_model
         _free_cuda()
@@ -507,32 +521,22 @@ def _run_tracking_pass(
     calibration: dict[str, CalibrationInfo],
     masks_base: str,
     discovery: Optional[Florence2Discovery],
+    detector: GroundingDinoDetector,
     fixed_concepts: list[Concept],
     device: str,
 ) -> list[Masklet]:
-    """PASS 2: SAM 3.1 concept-video tracking per camera → masklets.
+    """PASS 2: detector + SAM2 video tracking per camera → masklets.
 
     Images are re-loaded here (the depth pass already discarded them) so only
     one camera's frames are resident at a time.
     """
-    predictor = get_sam3_predictor(
-        version=cfg.segmentation.version,
-        use_fa3=cfg.segmentation.use_fa3,
-        offload_output_to_cpu=cfg.segmentation.offload_output_to_cpu,
-        trim_past_non_cond_mem=cfg.segmentation.trim_past_non_cond_mem,
-        forward_backbone_per_frame=cfg.segmentation.forward_backbone_per_frame,
-        multiplex_count=cfg.segmentation.multiplex_count,
-        max_num_objects=cfg.segmentation.max_num_objects,
-        image_size=cfg.segmentation.image_size,
-        postprocess_batch_size=cfg.segmentation.postprocess_batch_size,
-        batched_grounding_batch_size=cfg.segmentation.batched_grounding_batch_size,
-    )
+    predictor = get_sam2_predictor(model_id=cfg.segmentation.model, device=device)
     if predictor is None:
-        # sam3 imports (checked before the depth pass) but the predictor still
+        # sam2 imports (checked before the depth pass) but the predictor still
         # couldn't be built — e.g. the checkpoint isn't fetched. Fail loud.
         raise RuntimeError(
-            f"chunk {chunk_id}: SAM 3.1 predictor could not be built. Fetch "
-            "facebook/sam3.1 into the HF cache (scripts/fetch_models.py)."
+            f"chunk {chunk_id}: SAM2 predictor could not be built. Fetch "
+            f"{cfg.segmentation.model} into the HF cache (scripts/fetch_models.py)."
         )
 
     all_masklets: list[Masklet] = []
@@ -569,14 +573,15 @@ def _run_tracking_pass(
                 valid_frames.append(frame)
                 valid_images.append(image)
 
-            # Concept vocabulary for this camera: open-vocab (Florence-2) or fixed.
+            # Class vocabulary for this camera: open-vocab (Florence-2) or fixed.
             if discovery is not None:
                 concepts = _discover_concepts_florence2(discovery, valid_images, cfg)
             else:
                 concepts = fixed_concepts
 
-            cam_masklets = track_camera_concepts(
+            cam_masklets = track_camera(
                 predictor,
+                detector,
                 valid_frames,
                 valid_images,
                 concepts,
@@ -587,10 +592,11 @@ def _run_tracking_pass(
                 dino_model=cfg.embeddings.model,
                 dino_every_k=cfg.embeddings.every_k_frames,
                 device=device,
-                output_prob_thresh=cfg.segmentation.output_prob_thresh,
-                offload_video_to_cpu=cfg.segmentation.offload_video_to_cpu,
-                sub_clip_frames=cfg.segmentation.sub_clip_frames,
-                min_sub_clip_frames=cfg.segmentation.min_sub_clip_frames,
+                redetect_every_k=cfg.detection.redetect_every_k,
+                iou_match_threshold=cfg.tracking.iou_match_threshold,
+                offload_video_to_cpu=cfg.tracking.offload_video_to_cpu,
+                sub_clip_frames=cfg.tracking.sub_clip_frames,
+                min_sub_clip_frames=cfg.tracking.min_sub_clip_frames,
             )
             log.info(
                 "chunk %s / %s: %d masklets from %d frames",
@@ -599,9 +605,9 @@ def _run_tracking_pass(
                 len(cam_masklets),
                 len(valid_frames),
             )
-            # track_camera_concepts has already closed its session(s); log the
-            # post-close baseline so accumulation across cameras is visible early.
-            _log_vram(f"{cam_id} close_session")
+            # Log the post-camera baseline so accumulation across cameras is
+            # visible early.
+            _log_vram(f"{cam_id} tracking")
             _save_cam_partial(bag_id, chunk_id, cam_id, cam_masklets)
             all_masklets.extend(cam_masklets)
 
@@ -633,7 +639,7 @@ def _masklet_to_row(mkl: Masklet, syn2cls: dict[str, str]) -> dict:
         dino_feature_path=dino_path,
         global_object_id=mkl.global_object_id,
         raw_phrase=mkl.cls,
-        sam3_score=mkl.score,
+        det_score=mkl.score,
         tracker_backend=mkl.tracker_backend,
     ).model_dump()
 
@@ -693,21 +699,31 @@ def run(
 
     device = _default_device()
 
-    # Concept source. The fixed list is computed once; the Florence-2 model (if
-    # used) is built lazily on first propose(). The heavy GPU models (DA-V2 and
-    # SAM 3.1) are built *inside* each chunk's passes, not here, so the two never
-    # co-reside in VRAM.
+    # Class-vocabulary source. The fixed list is computed once; the Florence-2
+    # model (if used) is built lazily on first propose(). The detector is built
+    # here but its model loads lazily on the first detect() — which happens in
+    # the tracking pass, after the depth pass — so it stays out of VRAM during
+    # depth. The heavy GPU models (DA-V2 and SAM2) are built *inside* each
+    # chunk's passes, so the two never co-reside in VRAM.
     discovery: Optional[Florence2Discovery] = None
     fixed_concepts: list[Concept] = []
     if cfg.discovery.backend == "florence2":
         discovery = Florence2Discovery(model_id=cfg.discovery.model, device=None)
-        log.info("perception_2d: open-vocabulary discovery (Florence-2)")
+        log.info("perception_2d: open-vocabulary discovery (Florence-2) → detector")
     else:
         fixed_concepts = cfg.concept_prompts()
         log.info(
-            "perception_2d: fixed-vocabulary discovery (%d concepts)",
+            "perception_2d: fixed-vocabulary detection (%d concepts)",
             len(fixed_concepts),
         )
+
+    detector = GroundingDinoDetector(
+        model_id=cfg.detection.model,
+        box_threshold=cfg.detection.box_threshold,
+        text_threshold=cfg.detection.text_threshold,
+        nms_iou=cfg.detection.nms_iou,
+        device=None,
+    )
 
     n_ok = n_skip = 0
     try:
@@ -720,12 +736,12 @@ def run(
             # Fail loud: a chunk failure (e.g. a missing model) propagates out of
             # run() rather than being swallowed into a log line.
             _process_chunk(
-                cfg, bag_id, cid, discovery, fixed_concepts, device, force=force
+                cfg, bag_id, cid, discovery, detector, fixed_concepts, device, force=force
             )
             n_ok += 1
     finally:
-        # Don't leave SAM 3.1 parked in VRAM after the bag finishes.
-        release_sam3_predictor()
+        # Don't leave SAM2 parked in VRAM after the bag finishes.
+        release_sam2_predictor()
 
     log.info(
         "perception_2d complete for bag %s: %d processed, %d skipped",

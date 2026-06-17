@@ -1,6 +1,6 @@
 """Masklet: one temporally-associated object track within a single camera view.
 
-Produced by the SAM 3.1 concept tracker (one per tracked object id) and consumed
+Produced by the detector + SAM2 tracker (one per tracked object id) and consumed
 by the parquet writer in pipeline.py.
 """
 
@@ -26,4 +26,4 @@ class Masklet:
     mask_paths: list[str]  # parallel to frames_present
     dino_feature: Optional[np.ndarray] = None  # (D,) float32 DINOv2 embedding
     global_object_id: Optional[str] = None
-    tracker_backend: str = "sam3"  # which tracker produced this masklet
+    tracker_backend: str = "sam2"  # which tracker produced this masklet

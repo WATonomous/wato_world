@@ -107,7 +107,7 @@ def empty_bag(tmp_path, monkeypatch):
 
 
 def test_pipeline_raises_when_models_unavailable(live_bag):
-    """A valid frame + no SAM 3.1 installed → loud RuntimeError."""
+    """A valid frame + no SAM2 / detector installed → loud RuntimeError."""
     bag_id, _, _ = live_bag
     cfg = ComponentConfig()  # defaults: discovery.backend=fixed, depth enabled
 
@@ -115,13 +115,13 @@ def test_pipeline_raises_when_models_unavailable(live_bag):
         run(cfg, bag_id=bag_id)
 
 
-def test_fixed_mode_raises_without_sam3(live_bag):
-    """Fixed-vocab mode skips Florence-2 but still needs SAM3 → loud failure."""
+def test_fixed_mode_raises_without_models(live_bag):
+    """Fixed-vocab mode skips Florence-2 but still needs SAM2 → loud failure."""
     bag_id, _, _ = live_bag
     cfg = ComponentConfig()
     cfg.discovery.backend = "fixed"
     cfg.discovery.fixed_classes = ["car"]
-    cfg.depth.enabled = False  # isolate the failure to segmentation
+    cfg.depth.enabled = False  # isolate the failure to tracking
 
     with pytest.raises(RuntimeError):
         run(cfg, bag_id=bag_id)

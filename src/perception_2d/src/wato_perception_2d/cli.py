@@ -14,7 +14,7 @@ from wato_perception_2d.pipeline import run as run_pipeline
 
 _SLUG = re.compile(r"[^a-zA-Z0-9_]+")
 
-# Keep tqdm (ours + SAM 3.1's internal bars) to a single live line on a
+# Keep tqdm (ours + the models' internal bars) to a single live line on a
 # terminal and silent when output is captured (watod/docker/file) instead of
 # spamming a line per update. See wato_common.progress.
 configure_tqdm()
@@ -39,7 +39,7 @@ logging.basicConfig(
 
 @click.group()
 def main() -> None:
-    """2D perception pass (Florence-2 + SAM 3.1 + Depth Anything V2 + DINOv2 + x-cam merge)."""
+    """2D perception pass (GroundingDINO + SAM2 + Depth Anything V2 + DINOv2)."""
 
 
 @main.command("run")

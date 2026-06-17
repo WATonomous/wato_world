@@ -11,7 +11,7 @@ Per-chunk steps:
        d. Run UniLiPs Eq.1 visibility test
        e. Load masks from tracklets_2d artifact
        f. Assign masks to visible points (innermost-mask heuristic)
-       g. Cast votes with score = sam3_score * depth_confidence (1.0 fallback)
+       g. Cast votes with score = det_score * depth_confidence (1.0 fallback)
     4. Accumulate cross-camera votes → final per-point labels
     5. Write lifted_labels/<sweep_id>.npz
   Write lifted_stats.parquet
