@@ -85,11 +85,7 @@ wato_world/
 ## Quickstart
 
 ```bash
-# 1. Choose active modules. Prefer a local override so committed defaults stay clean.
-test -f watod-config.local.sh || cp watod-config.sh watod-config.local.sh
-$EDITOR watod-config.local.sh
-# Example setting for ingest development:
-# export ACTIVE_MODULES="ingest:dev"
+# 1. Put local overrides in watod-config.local.sh; it is git-ignored.
 
 # 2. Symlink watod into your PATH (one-time).
 ./watod install
