@@ -85,7 +85,7 @@ wato_world/
 ## Quickstart
 
 ```bash
-# 1. Put local overrides in watod-config.local.sh; it is git-ignored.
+# 1. Put local overrides in a local config file like watod-config.local.sh and make sure it is git-ignored.
 
 # 2. Symlink watod into your PATH (one-time).
 ./watod install
