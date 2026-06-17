@@ -104,6 +104,18 @@ def dynamic_mask_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
     return _join(lidar_proc_dir(bag_id, chunk_id), f"{sweep_id:06d}_dynamic_mask.npy")
 
 
+def aw_dynamic_mask_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
+    """Snapshot of Amanatides-Woo's own per-sweep dynamic verdict.
+
+    Written only on the union path (`--seg union`), where dynamic_mask.npy is
+    later overwritten by the fused verdict — union's keep_aw_dynamic reads
+    this snapshot so re-fusing never depends on classify having just run.
+    """
+    return _join(
+        lidar_proc_dir(bag_id, chunk_id), f"{sweep_id:06d}_aw_dynamic_mask.npy"
+    )
+
+
 def mf_mos_mask_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
     """Per-sweep MF-MOS moving-object mask.  Shape (n_raw,) bool, True = moving.
 

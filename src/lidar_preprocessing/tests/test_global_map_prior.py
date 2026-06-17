@@ -270,7 +270,6 @@ def test_build_log_odds_grid_with_prior_increases_lo(tmp_env):
         origin,
         chunk_id,
         cache_xyz=False,
-        bag_id=bag_id,
     )
     keys_no, lo_no, n_obs_no, n_hits_no, *_ = lo_arrays_no_prior
 
@@ -290,7 +289,6 @@ def test_build_log_odds_grid_with_prior_increases_lo(tmp_env):
         origin,
         chunk_id,
         cache_xyz=False,
-        bag_id=bag_id,
         global_map_prior=prior,
     )
     keys_p, lo_p, n_obs_p, n_hits_p, *_ = lo_arrays_prior
@@ -379,7 +377,6 @@ def test_iwu_boost_excludes_ground_points(tmp_env):
         origin,
         chunk_id,
         cache_xyz=False,
-        bag_id=bag_id,
         global_map_prior=prior,
     )
     keys, lo_vals, _n_obs, n_hits, *_ = lo_arrays
