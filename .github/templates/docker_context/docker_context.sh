@@ -15,6 +15,7 @@ REPOSITORY="${REGISTRY_URL#*/}"
 ALL_MODULES=(
     ingest
     perception_2d
+    semantic_lifting
     lidar_preprocessing
     proposal_generation
     tracking
@@ -39,6 +40,13 @@ module_json() {
                 --arg dockerfile "docker/perception_2d.Dockerfile" \
                 --arg pkg "wato_perception_2d" \
                 --arg dir "perception_2d" \
+                '{module:$module,dockerfile:$dockerfile,pkg:$pkg,dir:$dir}'
+            ;;
+        semantic_lifting)
+            jq -nc --arg module "${module}" \
+                --arg dockerfile "docker/semantic_lifting.Dockerfile" \
+                --arg pkg "wato_semantic_lifting" \
+                --arg dir "semantic_lifting" \
                 '{module:$module,dockerfile:$dockerfile,pkg:$pkg,dir:$dir}'
             ;;
         lidar_preprocessing)

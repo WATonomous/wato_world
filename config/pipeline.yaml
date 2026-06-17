@@ -1,19 +1,16 @@
 # Per-component hyperparameters. Loaded by each component's config.py via Pydantic.
 #
 # NOTE: each component owns its own YAML inside src/<component>/config/.
-# Ingest, for example, lives entirely in src/ingest/config/ingest.yaml.
-# This file is kept temporarily for the components that haven't migrated yet.
+# Ingest lives in src/ingest/config/ingest.yaml.
+# perception_2d lives in src/perception_2d/config/perception_2d.yaml.
+# semantic_lifting lives in src/semantic_lifting/config/semantic_lifting.yaml.
+# This file is kept for components that haven't migrated yet.
 
-perception_2d:
-  detector: grounding_dino           # or "yolo_world"
-  detector_score_threshold: 0.25
-  sam2_checkpoint: sam2_hiera_large
-  reid_features:
-    model: dinov2_vitl14
-    every_k_frames: 5
-  cross_camera_match_radius_m: 1.5
+semantic_lifting:
   upstream_versions:
     ingest: v1
+    perception_2d: v1
+    lidar_preprocessing: v1
 
 proposal_generation:
   lidar_detectors:

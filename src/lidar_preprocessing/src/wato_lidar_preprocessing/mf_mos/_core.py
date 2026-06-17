@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from wato_common.artifact_store import (
+    chunks_index_path,
     ensure_local_dir,
     lidar_proc_dir,
     lidar_proc_index_path,
@@ -96,6 +97,21 @@ def process_chunk(
         )
         return MFMosResult()
 
+    # Cold-start fix: the residual sliding window resets per chunk, so the
+    # first max(residual_steps) sweeps would otherwise get zero-padded
+    # residual channels and degraded inference. Seed the window from the
+    # temporally-preceding chunk (chunks overlap, so it covers the window) and
+    # extend the pose samples backward to interpolate those primed sweeps.
+    prev_chunk_id = (
+        _previous_chunk_id(bag_id, chunk_id)
+        if params.prime_window_from_prior_chunk
+        else None
+    )
+    if prev_chunk_id is not None:
+        pose_samples = _merge_pose_samples(
+            load_pose_samples(bag_id, prev_chunk_id), pose_samples
+        )
+
     lidar_ids = {r["lidar_id"] for r in sweep_rows if r.get("valid", True) is not False}
     ego_T_lidar_by_id = load_ego_T_lidar_dict(bag_id, lidar_ids)
 
@@ -148,7 +164,27 @@ def process_chunk(
         ego_T_lidar = ego_T_lidar_by_id[lid]
 
         # Sliding window of (header_ts_ns, xyz_raw_float32) — last max_k sweeps.
+        # Primed from the prior chunk's tail (oldest→newest) so the first
+        # sweeps don't cold-start with zero residuals.
         past_window: list[tuple[int, np.ndarray]] = []
+        if prev_chunk_id is not None and lid_rows:
+            past_window = _load_prefix_window(
+                bag_id,
+                prev_chunk_id,
+                lid,
+                int(lid_rows[0]["header_timestamp_ns"]),
+                max_k,
+                cfg.filter_nonfinite_points,
+            )
+            if past_window:
+                log.info(
+                    "chunk %s lidar %s: primed residual window with %d "
+                    "prior-chunk sweeps from %s",
+                    chunk_id,
+                    lid,
+                    len(past_window),
+                    prev_chunk_id,
+                )
 
         for row in lid_rows:
             sid = int(row["sweep_id"])
@@ -297,7 +333,18 @@ def process_chunk(
                 continue
 
             pixel_mask = score_img >= params.score_threshold
-            mf_finite_mask = _unproject_mask(pixel_mask, point_to_pixel, n_finite)
+            # range_img[0] holds the winning (closest) range per pixel; gate the
+            # unprojection so occluded background behind a mover doesn't inherit
+            # the moving label (see _unproject_mask OCCLUSION GATE).
+            point_ranges_cur = np.linalg.norm(xyz_cur, axis=1).astype(np.float32)
+            mf_finite_mask = _unproject_mask(
+                pixel_mask,
+                point_to_pixel,
+                n_finite,
+                point_ranges=point_ranges_cur,
+                pixel_range=range_img[0],
+                occlusion_range_tol_m=params.occlusion_range_tol_m,
+            )
 
             # Re-expand to n_raw length so the saved mask is index-aligned
             # with the raw NPZ. NaN/inf points stay False.
@@ -345,6 +392,105 @@ def process_chunk(
         result.n_points_total,
     )
     return result
+
+
+def _previous_chunk_id(bag_id: str, chunk_id: str) -> str | None:
+    """Return the chunk_id immediately preceding `chunk_id` by t_start_ns.
+
+    None when there's no predecessor (bag's first chunk) or the index can't be
+    read — callers fall back to a cold-start window.
+    """
+    try:
+        rows = read_rows(chunks_index_path(bag_id))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not read chunks index for bag %s: %s", bag_id, exc)
+        return None
+    rows = [r for r in rows if r.get("t_start_ns") is not None]
+    rows.sort(key=lambda r: int(r["t_start_ns"]))
+    for i, r in enumerate(rows):
+        if r.get("chunk_id") == chunk_id:
+            return rows[i - 1]["chunk_id"] if i > 0 else None
+    return None
+
+
+def _merge_pose_samples(
+    older: list[PoseSample], newer: list[PoseSample]
+) -> list[PoseSample]:
+    """Union two map-frame pose-sample lists, sorted by timestamp, dropping
+    duplicate timestamps. Extends the current chunk's poses backward with the
+    prior chunk's so primed past sweeps can be interpolated (both chunks emit
+    poses in the same SLAM map frame, so concatenation is valid)."""
+    if not older:
+        return newer
+    by_ts: dict[int, PoseSample] = {s.timestamp_ns: s for s in older}
+    for s in newer:
+        by_ts[s.timestamp_ns] = s
+    return sorted(by_ts.values(), key=lambda s: s.timestamp_ns)
+
+
+def _load_prefix_window(
+    bag_id: str,
+    prev_chunk_id: str,
+    lidar_id: str,
+    before_ts_ns: int,
+    max_k: int,
+    filter_nonfinite: bool,
+) -> list[tuple[int, np.ndarray]]:
+    """Seed the residual window from the prior chunk's tail.
+
+    Returns up to `max_k` sensor-frame (header_ts_ns, xyz) sweeps from
+    prev_chunk that precede `before_ts_ns`, ordered oldest→newest so the
+    immediately-preceding sweep is last (matching the live sliding window's
+    layout). This gives the first sweeps of a chunk full residual channels
+    instead of cold-start zeros. Returns [] on any failure — the caller then
+    cold-starts, which only degrades inference rather than breaking it.
+    """
+    if max_k <= 0:
+        return []
+    try:
+        rows = read_rows(lidar_sweeps_path(bag_id, prev_chunk_id))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "prime window: cannot read prior chunk %s sweeps (%s); cold-starting",
+            prev_chunk_id,
+            exc,
+        )
+        return []
+    cand = [
+        r
+        for r in rows
+        if r.get("lidar_id") == lidar_id
+        and r.get("valid", True) is not False
+        and int(r["header_timestamp_ns"]) < before_ts_ns
+    ]
+    cand.sort(key=lambda r: int(r["header_timestamp_ns"]))
+    cand = cand[-max_k:]
+
+    window: list[tuple[int, np.ndarray]] = []
+    for r in cand:
+        try:
+            raw = np.load(local_path(r["lidar_path"]))
+            x = raw["x"].astype(np.float32)
+            y = raw["y"].astype(np.float32)
+            z = raw["z"].astype(np.float32)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "prime window: failed to load %s (%s); skipping",
+                r.get("lidar_path"),
+                exc,
+            )
+            continue
+        if filter_nonfinite:
+            finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+        else:
+            finite = np.ones(x.shape[0], dtype=bool)
+        window.append(
+            (
+                int(r["header_timestamp_ns"]),
+                np.stack([x[finite], y[finite], z[finite]], axis=1),
+            )
+        )
+    return window
 
 
 def _load_model(params: MFMosParams) -> "MFMosModel":
@@ -530,23 +676,39 @@ def _unproject_mask(
     pixel_mask: np.ndarray,
     point_to_pixel: np.ndarray,
     n_points: int,
+    point_ranges: np.ndarray | None = None,
+    pixel_range: np.ndarray | None = None,
+    occlusion_range_tol_m: float | None = None,
 ) -> np.ndarray:
     """Map (H, W) bool pixel mask back to (N,) per-point bool.
 
     Points outside the FOV (point_to_pixel == -1) default to False.
 
-    OCCLUSION CAVEAT: every in-FOV point inherits its pixel's label,
-    including points that lost the closest-range tiebreak. A static
-    surface directly behind a mover projecting to the same pixels will
-    inherit the mover's label. Intrinsic to range-image MOS — relevant
-    when investigating static structure showing up immediately behind a
-    confirmed mover in the dynamic cloud.
+    OCCLUSION GATE: a range-image pixel holds the closest return along its
+    direction, so the moving label belongs to the front surface only. Points
+    that lost the closest-range tiebreak (occluded background — e.g. a wall
+    directly behind a car — projecting to the same pixel) sit farther than the
+    pixel's winning range and must NOT inherit the mover's label. When
+    ``point_ranges`` (per-point range, aligned with ``point_to_pixel``),
+    ``pixel_range`` (the (H, W) winning-range channel), and
+    ``occlusion_range_tol_m`` are all supplied, a point keeps the moving label
+    only if ``range <= winner_range + tol``. With the args omitted the gate is
+    off and every in-FOV point inherits its pixel's label (legacy behaviour).
     """
     out = np.zeros(n_points, dtype=bool)
     in_image = (point_to_pixel[:, 0] >= 0) & (point_to_pixel[:, 1] >= 0)
     idx_h = point_to_pixel[in_image, 0]
     idx_w = point_to_pixel[in_image, 1]
-    out[in_image] = pixel_mask[idx_h, idx_w]
+    labels = pixel_mask[idx_h, idx_w]
+    if (
+        point_ranges is not None
+        and pixel_range is not None
+        and occlusion_range_tol_m is not None
+    ):
+        winner_range = pixel_range[idx_h, idx_w]
+        front_surface = point_ranges[in_image] <= winner_range + occlusion_range_tol_m
+        labels = labels & front_surface
+    out[in_image] = labels
     return out
 
 
@@ -597,14 +759,21 @@ def _write_zero_mask(
     n_raw: int,
     save_scores: bool,
 ) -> None:
+    # Write a zero-LENGTH array (not zero-filled) to signal "skipped — no data"
+    # rather than "ran inference and found no movers."  load_mf_mos_world_mask
+    # treats length-0 as None so these sweeps are excluded from the chunk-wide
+    # vote denominator (n_sweep_hits).  A full-length all-False mask would
+    # increment n_sweep_hits without adding votes, diluting the vote fraction
+    # for genuine movers seen in other sweeps and causing them to fall below
+    # min_mf_mos_votes / mf_mos_vote_fraction_threshold.
     np.save(
         local_path(mf_mos_mask_path(bag_id, chunk_id, sweep_id)),
-        np.zeros(n_raw, dtype=bool),
+        np.zeros(0, dtype=bool),
     )
     if save_scores:
         np.save(
             local_path(mf_mos_score_path(bag_id, chunk_id, sweep_id)),
-            np.zeros(n_raw, dtype=np.float32),
+            np.zeros(0, dtype=np.float32),
         )
 
 

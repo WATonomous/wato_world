@@ -102,9 +102,71 @@ services:
     environment:
       - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
       - MODELS_ROOT=${MODELS_ROOT}
+      # Point HuggingFace + torch.hub at the pre-fetched models tree
+      # (populated on the host by src/perception_2d/scripts/fetch_models.py).
+      - HF_HOME=/data/models/hf
+      - TORCH_HOME=/data/models/torch_hub
+      # Weights are pre-fetched and the mount is read-only, so default to fully
+      # offline (no hub contact, no `.no_exist` cache writes). trust_remote_code
+      # models (Florence-2) still need a writable scratch dir for their module
+      # code — the :ro weights mount can't hold it, so send it to /tmp.
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
+      - HF_MODULES_CACHE=/tmp/hf_modules
+      # Let the CUDA caching allocator grow/shrink segments instead of holding
+      # fixed reserved blocks. SAM 3.1 long-video propagation fragments VRAM
+      # (small allocs fail while hundreds of MB sit reserved-but-unallocated);
+      # expandable_segments reclaims that headroom. Must be set before torch
+      # initialises CUDA, so it lives here rather than in Python.
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
     volumes:
       - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
       - ${WATO_WORLD_DIR}/data/models:/data/models:ro
+      - ${WATO_WORLD_DIR}/config:/config:ro
+
+  # =====================================================================
+  # semantic_lifting
+  # =====================================================================
+  semantic_lifting_source:
+    profiles: ["semantic_lifting_pre"]
+    build:
+      context: ..
+      dockerfile: docker/semantic_lifting.Dockerfile
+      target: source
+      cache_from:
+        - "${SEMANTIC_LIFTING_IMAGE}:source_${TAG}"
+    image: "${SEMANTIC_LIFTING_IMAGE}:source_${TAG}"
+
+  semantic_lifting_deps:
+    profiles: ["semantic_lifting_pre"]
+    build:
+      context: ..
+      dockerfile: docker/semantic_lifting.Dockerfile
+      target: dependencies
+      cache_from:
+        - "${SEMANTIC_LIFTING_IMAGE}:deps_${TAG}"
+    image: "${SEMANTIC_LIFTING_IMAGE}:deps_${TAG}"
+
+  semantic_lifting:
+    profiles: ["semantic_lifting"]
+    init: true
+    user: "${SETUID}:${SETGID}"
+    build:
+      context: ..
+      dockerfile: docker/template.Dockerfile
+      target: deploy
+      args:
+        MODULE_SOURCE: "${SEMANTIC_LIFTING_IMAGE}:source_${TAG}"
+        MODULE_DEPS: "${SEMANTIC_LIFTING_IMAGE}:deps_${TAG}"
+        COMPONENT_PACKAGE_DIR: semantic_lifting
+        COMPONENT_PACKAGE: wato_semantic_lifting
+      cache_from:
+        - "${SEMANTIC_LIFTING_IMAGE}:${TAG}"
+    image: "${SEMANTIC_LIFTING_IMAGE}:${TAG}"
+    environment:
+      - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
+    volumes:
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
       - ${WATO_WORLD_DIR}/config:/config:ro
 
   # =====================================================================

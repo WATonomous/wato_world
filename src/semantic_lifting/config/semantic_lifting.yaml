@@ -1,0 +1,15 @@
+temporal:
+  max_offset_s: 0.05
+
+visibility:
+  tolerance_m: 0.5
+  neighborhood: 3
+
+voting:
+  min_supporting_cameras: 1
+  innermost_wins: true
+
+depth:
+  skip_on_fit_failure: true  # skip camera if depth fit_status == 2
+
+upstream_versions: {}

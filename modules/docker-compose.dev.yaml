@@ -39,12 +39,23 @@ services:
       args: { USERNAME: "${USERNAME}", USER_UID: "${SETUID}", USER_GID: "${SETGID}", CLAUDE_CODE: "${CLAUDE_CODE}" }
     image: "${PERCEPTION_2D_IMAGE}:dev_${TAG}"
     command: sleep infinity
+    # X11 / WSLg forwarding so `watod run perception_2d viz` can pop the depth
+    # viewer window onto the host display. Variables that are unset on the host
+    # expand to empty strings — harmless on Linux/Mac without WSLg.
+    environment:
+      - DISPLAY=${DISPLAY:-}
+      - WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-}
+      - XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/runtime-root}
+      - PULSE_SERVER=${PULSE_SERVER:-}
+      - QT_X11_NO_MITSHM=1
     volumes:
       - ${WATO_WORLD_DIR}/src/common:/ws/src/common
       - ${WATO_WORLD_DIR}/src/perception_2d:/ws/src/perception_2d
       - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
       - ${WATO_WORLD_DIR}/data/models:/data/models:ro
       - ${WATO_WORLD_DIR}/config:/config:ro
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /mnt/wslg:/mnt/wslg
 
   lidar_preprocessing_dev:
     profiles: ["lidar_preprocessing_dev"]

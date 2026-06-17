@@ -19,7 +19,9 @@ reference_clock: lidar       # which sensor stream defines a "frame"
 max_cam_offset_ms: 50.0      # drop a (sweep, cam) row if the camera frame is
                              # more than this far from the LiDAR sweep timestamp
 max_pose_gap_ms: 200.0       # mark valid_pose=False if the nearest pose sample is
-                             # farther than this from the sweep timestamp
+                             # farther than this from the sweep timestamp.
+                             # nuScenes /odom is ~50 Hz (~20ms spacing), so 200ms
+                             # is comfortably loose without admitting stale poses.
 
 # ---------------------------------------------------------------------------
 # rosbag2 storage backend.  Usually "sqlite3"; "mcap" if the bag was recorded

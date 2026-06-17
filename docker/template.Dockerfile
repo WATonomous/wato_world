@@ -59,6 +59,12 @@ ARG CLAUDE_CODE=false
 # user's home with the default bashrc/profile so `tmux`/`exec` shells get
 # history-search, prompt, and PATH out of the box. Mirrors
 # wato_monorepo/docker/template.Dockerfile.
+#
+# chown uses numeric ${USER_UID}:${USER_GID} rather than the monorepo's
+# ${USERNAME}:${USERNAME} on purpose: macOS hosts have GID 20 (staff), which
+# collides with Ubuntu's existing `dialout` group, so the groupadd above is
+# skipped and no group named ${USERNAME} ever exists. Numeric IDs resolve
+# regardless. Don't "re-align" this to the monorepo's by-name form.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN existing_user=$(getent passwd ${USER_UID} | cut -d: -f1 || true) \
  && if [ -n "$existing_user" ]; then userdel -r "$existing_user" 2>/dev/null || true; fi \

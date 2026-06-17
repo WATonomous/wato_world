@@ -112,8 +112,8 @@ lidar_preprocessing:
   # true  → deskew using synthesized times (required for NuScenes; without
   #         this, 7 m/s ego speed produces ~25cm intra-sweep smear that
   #         spreads static surfaces across voxels and flips them dynamic).
-  # false → all points in a sweep get the header pose (fine only if your
-  #         LiDAR driver already wrote t_offset_us into the bag).
+  # false → use real per-point t offsets written by the driver (Velodyne
+  #         ROS2 driver writes a float32 t field in seconds).
   synthesize_per_point_times: true
 
   # LiDAR rotation period (milliseconds).  Used when synthesizing per-point
@@ -228,7 +228,25 @@ lidar_preprocessing:
     # Sweeps separated by more than this skip the MF-MOS pass.
     # Higher → more coverage at the boundaries of pose-sparse regions but
     # uses less-accurate interpolated poses.
-    max_pose_gap_ms: 200
+    # Matched to ingest's max_pose_gap_ms: slam/odometry keyframes are ~1 Hz
+    # so sweeps midway between keyframes are ~500 ms from the nearest sample.
+    max_pose_gap_ms: 6000
+
+    # Occlusion gate when unprojecting the per-pixel moving mask to points.
+    # A range-image pixel keeps only its closest return, so the moving label
+    # belongs to the front surface. A point inherits its pixel's moving label
+    # only if its range is within this tolerance of the pixel's winning range;
+    # points farther back (occluded background — e.g. a wall directly behind a
+    # car) are NOT flagged. Higher → tolerate thicker movers but risk bleeding
+    # onto close background; lower → tighter front-surface gate but may clip
+    # the far side of a deep object. Raise to a large value to disable.
+    occlusion_range_tol_m: 1.0
+
+    # Seed each lidar's residual sliding window from the prior chunk's tail so
+    # the first max(residual_steps) sweeps get full residuals instead of
+    # cold-start zeros. The bag's first chunk has no predecessor and still
+    # cold-starts. true → recommended; false → legacy per-chunk cold start.
+    prime_window_from_prior_chunk: true
 
   # Voxel-level MF-MOS vote aggregation (active when fusion_mode != independent).
   # A voxel is MF-MOS-dynamic if (votes >= min_mf_mos_votes) AND
@@ -242,6 +260,19 @@ lidar_preprocessing:
   # protects against single-sweep MF-MOS noise but raises the bar for
   # transient or sparsely-sampled objects.
   min_mf_mos_votes: 4
+
+  # Transient-mover recovery. A fast object (cyclist, sprinting pedestrian)
+  # crossing in ~0.2 s touches only ~4 sweeps at 20 Hz, so the strict
+  # min_mf_mos_votes floor above drops it on any single-sweep miss. A voxel
+  # observed in at most mf_mos_transient_max_sweeps sweeps, with vote fraction
+  # >= mf_mos_transient_vote_fraction_threshold, is accepted as dynamic even
+  # below min_mf_mos_votes — provided it cleared mf_mos_transient_min_votes
+  # (kept >= 2 so single-sweep noise is still rejected). The max-sweeps gate
+  # keeps this relaxation off for long-observed voxels (where strict denoising
+  # is still wanted). Set mf_mos_transient_min_votes very high to disable.
+  mf_mos_transient_min_votes: 2
+  mf_mos_transient_vote_fraction_threshold: 0.8
+  mf_mos_transient_max_sweeps: 5
 
   # Whether the per-sweep MF-MOS mask is AND-filtered against the chunk-wide
   # vote set above.

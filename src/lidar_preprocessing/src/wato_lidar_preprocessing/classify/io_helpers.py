@@ -110,6 +110,14 @@ def load_mf_mos_world_mask(
     if n_raw == n_world:
         return mf_raw  # common case: no NaN/inf points were dropped
 
+    if n_raw == 0:
+        # Zero-length sentinel written by _write_zero_mask for pose-gap and
+        # inference-error sweeps.  Treat as "no data" so the sweep is excluded
+        # from the chunk-wide vote denominator (n_sweep_hits) — NOT as "no
+        # movers," which would dilute vote fractions for genuine movers seen
+        # in adjacent sweeps.
+        return None
+
     if n_raw < n_world:
         log.warning(
             "sweep %s: mf_mos mask len %d < world len %d — fusion skipped for this sweep",

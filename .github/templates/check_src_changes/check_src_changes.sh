@@ -12,6 +12,7 @@ if [[ "${ALL_CHANGED}" == "true" ]]; then
     echo "::notice:: Detected shared or non-src changes; testing all modules"
     add_module ingest
     add_module perception_2d
+    add_module semantic_lifting
     add_module lidar_preprocessing
     add_module proposal_generation
     add_module tracking
@@ -21,6 +22,7 @@ if [[ "${ALL_CHANGED}" == "true" ]]; then
 else
     [[ "${INGEST_CHANGED}" == "true" ]] && add_module ingest
     [[ "${PERCEPTION_2D_CHANGED}" == "true" ]] && add_module perception_2d
+    [[ "${SEMANTIC_LIFTING_CHANGED}" == "true" ]] && add_module semantic_lifting
     [[ "${LIDAR_PREPROCESSING_CHANGED}" == "true" ]] && add_module lidar_preprocessing
     [[ "${PROPOSAL_GENERATION_CHANGED}" == "true" ]] && add_module proposal_generation
     [[ "${TRACKING_CHANGED}" == "true" ]] && add_module tracking

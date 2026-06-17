@@ -22,10 +22,17 @@ ENV UV_HTTP_TIMEOUT=10000
 # libglib2.0-0 libsm6 libxext6 libxrender1 — required by OpenCV / Open3D headless
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgomp1 \
-        libegl1 libgl1 \
+        libegl1 libgl1 libosmesa6 \
         libglib2.0-0 libsm6 libxext6 libxrender1 \
+        git \
     && apt-get -qq autoremove -y && apt-get -qq clean \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc/* /usr/share/man/*
+
+# MF-MOS source (Multi-Frame Moving Object Segmentation).
+# Cloned at build time into /opt/mf_mos so no local checkout or bind-mount
+# is required.  _runtime.py adds this path to sys.path on first import.
+# License: MIT (SCNU-RISLAB/MF-MOS).
+RUN git clone --depth=1 https://github.com/SCNU-RISLAB/MF-MOS.git /opt/mf_mos
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --break-system-packages \

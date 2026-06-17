@@ -14,6 +14,7 @@ import pytest
 
 from wato_common.artifact_store import (
     calibration_path,
+    chunks_index_path,
     dynamic_map_path,
     ensure_local_dir,
     lidar_proc_dir,
@@ -28,6 +29,7 @@ from wato_common.artifact_store import (
 )
 from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.schemas import (
+    CHUNK_SCHEMA,
     LIDAR_SWEEPS_SCHEMA,
     POSES_SCHEMA,
     PROCESSED_SWEEPS_SCHEMA,
@@ -315,6 +317,64 @@ def test_unproject_mask_recovers_point_labels():
     assert bool(out[2]) is False
 
 
+def test_unproject_mask_occlusion_gate_excludes_background():
+    """Range gate keeps the moving label on the front surface only.
+
+    Two points project to the same moving pixel (1, 2): point 0 is the mover's
+    front surface at range 5 m (the pixel winner), point 1 is occluded
+    background (a wall) at range 9 m behind it. With the occlusion gate, only
+    the front point inherits the moving label; the wall stays static.
+    """
+    H_px, W_px = 4, 8
+    pixel_mask = np.zeros((H_px, W_px), dtype=bool)
+    pixel_mask[1, 2] = True
+
+    pixel_range = np.zeros((H_px, W_px), dtype=np.float32)
+    pixel_range[1, 2] = 5.0  # winning (closest) range at the moving pixel
+
+    p2px = np.array([[1, 2], [1, 2], [-1, -1]], dtype=np.int32)
+    point_ranges = np.array([5.0, 9.0, 0.0], dtype=np.float32)
+
+    out = _unproject_mask(
+        pixel_mask,
+        p2px,
+        n_points=3,
+        point_ranges=point_ranges,
+        pixel_range=pixel_range,
+        occlusion_range_tol_m=1.0,
+    )
+    assert bool(out[0]) is True, "front-surface point must keep the moving label"
+    assert bool(out[1]) is False, "occluded background must not inherit moving label"
+    assert bool(out[2]) is False, "out-of-FOV point stays False"
+
+    # Without the gate (legacy), the background point bleeds dynamic.
+    out_legacy = _unproject_mask(pixel_mask, p2px, n_points=3)
+    assert bool(out_legacy[1]) is True
+
+
+def test_unproject_mask_occlusion_gate_keeps_thick_object():
+    """A point within tol of the winner (same object's depth) stays moving."""
+    pixel_mask = np.zeros((4, 8), dtype=bool)
+    pixel_mask[1, 2] = True
+    pixel_range = np.zeros((4, 8), dtype=np.float32)
+    pixel_range[1, 2] = 5.0
+
+    p2px = np.array([[1, 2], [1, 2]], dtype=np.int32)
+    # point 1 is 0.6 m behind the winner — within the 1.0 m tolerance.
+    point_ranges = np.array([5.0, 5.6], dtype=np.float32)
+
+    out = _unproject_mask(
+        pixel_mask,
+        p2px,
+        n_points=2,
+        point_ranges=point_ranges,
+        pixel_range=pixel_range,
+        occlusion_range_tol_m=1.0,
+    )
+    assert bool(out[0]) is True
+    assert bool(out[1]) is True
+
+
 # ---------------------------------------------------------------------------
 # Group 4: process_chunk integration tests
 # ---------------------------------------------------------------------------
@@ -414,7 +474,12 @@ def test_process_chunk_first_sweep_pads_zero_residuals(tmp_env, monkeypatch):
 
 
 def test_process_chunk_pose_gap_writes_zero_mask(tmp_env, monkeypatch):
-    """Sweep beyond max_pose_gap_ms from last pose → all-False mask, skipped_pose=1."""
+    """Sweep beyond max_pose_gap_ms from last pose → zero-LENGTH sentinel mask.
+
+    _write_zero_mask writes a (0,) array (not a full-length all-False mask) so
+    the sweep is excluded from the chunk-wide vote denominator rather than
+    diluting vote fractions for genuine movers in adjacent sweeps.
+    """
     monkeypatch.setattr(mf_mos_mod, "_load_model", _stub_load_model)
 
     bag_id, chunk_id = "bag_gap", "chunk0"
@@ -431,7 +496,7 @@ def test_process_chunk_pose_gap_writes_zero_mask(tmp_env, monkeypatch):
 
     assert result.n_sweeps_skipped_pose == 1
     mask = np.load(local_path(mf_mos_mask_path(bag_id, chunk_id, 8)))
-    assert mask.shape == (n_pts,)
+    assert mask.shape == (0,)
     assert not mask.any()
 
 
@@ -899,4 +964,192 @@ def test_fusion_chunk_wide_gate_enabled_suppresses_undervoted(tmp_env):
     assert dmap["xyz"].shape[0] == 0, (
         f"gate enabled with 1/4 vote ratio (fails 0.5 fraction): expected 0 "
         f"dynamic points; got {dmap['xyz'].shape[0]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Group 8: transient-mover recovery (relaxed vote path for fast movers)
+# ---------------------------------------------------------------------------
+
+
+def test_fusion_transient_recovery_below_strict_floor(tmp_env):
+    """A fast mover seen in few sweeps with near-unanimous agreement is
+    recovered even when its vote count is below the strict min_mf_mos_votes.
+
+    Setup: 4 sweeps, the point at (5, 0, 0) flagged moving in every sweep →
+    4 votes / 4 hits = 1.0 fraction. min_mf_mos_votes=5 so the strict path
+    fails (4 < 5), but the transient path accepts it (>=2 votes, fraction
+    1.0 >= 0.8, 4 <= 5 observing sweeps).
+    """
+    bag_id, chunk_id = "bag_transient_recover", "chunk0"
+    sensor_origin = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    xyz = np.array([[5.0, 0.0, 0.0], [5.0, 1.0, 0.0], [5.0, -1.0, 0.0]])
+
+    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
+    rows = []
+    for i in range(4):
+        _write_world_sweep_with_origin(bag_id, chunk_id, i, xyz, sensor_origin)
+        mf_uri = _write_mf_mask(bag_id, chunk_id, i, np.array([True, False, False]))
+        rows.append(_proc_row_with_mask(bag_id, chunk_id, i, xyz, mf_uri))
+    write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
+
+    cfg = ComponentConfig(
+        classification_method="log_odds",
+        min_observations=1,
+        min_mf_mos_votes=5,  # strict floor NOT met (only 4 votes)
+        mf_mos_vote_fraction_threshold=0.5,
+        mf_mos_transient_min_votes=2,
+        mf_mos_transient_vote_fraction_threshold=0.8,
+        mf_mos_transient_max_sweeps=5,
+        mf_mos=MFMosParams(enabled=True, fusion_mode="mfmos_only"),
+    )
+    classify_chunk(cfg, bag_id, chunk_id)
+
+    dmap = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
+    assert dmap["xyz"].shape[0] > 0, (
+        "transient recovery: a 4/4-vote voxel must be dynamic even though "
+        "votes (4) < min_mf_mos_votes (5)"
+    )
+    assert all(
+        abs(x - 5.0) < 0.01 and abs(y) < 0.01
+        for x, y in zip(dmap["xyz"][:, 0], dmap["xyz"][:, 1])
+    )
+
+
+def test_fusion_transient_rejects_single_sweep_noise(tmp_env):
+    """The transient path still rejects single-sweep MF-MOS noise.
+
+    Same shape as the recovery test but the point is flagged in only ONE of
+    4 sweeps → 1 vote. The transient path requires >= mf_mos_transient_min_votes
+    (2), so a lone stray flag is not rescued and no point goes dynamic.
+    """
+    bag_id, chunk_id = "bag_transient_noise", "chunk0"
+    sensor_origin = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    xyz = np.array([[5.0, 0.0, 0.0], [5.0, 1.0, 0.0], [5.0, -1.0, 0.0]])
+
+    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
+    rows = []
+    for i in range(4):
+        _write_world_sweep_with_origin(bag_id, chunk_id, i, xyz, sensor_origin)
+        mask = np.array([True, False, False]) if i == 0 else np.zeros(3, dtype=bool)
+        mf_uri = _write_mf_mask(bag_id, chunk_id, i, mask)
+        rows.append(_proc_row_with_mask(bag_id, chunk_id, i, xyz, mf_uri))
+    write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
+
+    cfg = ComponentConfig(
+        classification_method="log_odds",
+        min_observations=1,
+        min_mf_mos_votes=5,
+        mf_mos_vote_fraction_threshold=0.5,
+        mf_mos_transient_min_votes=2,
+        mf_mos_transient_vote_fraction_threshold=0.8,
+        mf_mos_transient_max_sweeps=5,
+        mf_mos=MFMosParams(enabled=True, fusion_mode="mfmos_only"),
+    )
+    classify_chunk(cfg, bag_id, chunk_id)
+
+    dmap = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
+    assert dmap["xyz"].shape[0] == 0, (
+        f"single-sweep flag (1 vote) must not be rescued by the transient path; "
+        f"got {dmap['xyz'].shape[0]} dynamic points"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Group 9: residual-window priming from the prior chunk (cold-start fix)
+# ---------------------------------------------------------------------------
+
+
+def _write_chunks_index(bag_id: str, specs: list[tuple[str, int, int]]) -> None:
+    """specs: list of (chunk_id, t_start_ns, t_end_ns)."""
+    rows = [
+        {
+            "bag_id": bag_id,
+            "chunk_id": cid,
+            "t_start_ns": ts,
+            "t_end_ns": te,
+            "t_overlap_start_ns": ts,
+            "t_overlap_end_ns": te,
+        }
+        for cid, ts, te in specs
+    ]
+    write_table(rows, CHUNK_SCHEMA, chunks_index_path(bag_id))
+
+
+def _moving_scene_sweep(sid: int) -> np.ndarray:
+    """A radially-moving point (2 m/sweep outward at azimuth 0) plus static
+    filler. The mover keeps a stable pixel, so its range changes sweep-to-sweep
+    produce a non-zero residual that the stub model reads as 'moving'."""
+    mover = np.array([[5.0 + 2.0 * sid, 0.0, 0.0]], dtype=np.float32)
+    return np.vstack([mover, _make_in_fov_points(6)])
+
+
+def test_prime_window_recovers_first_sweep_residual(tmp_env, monkeypatch):
+    """chunk1's first sweep gets a non-zero residual via prior-chunk priming.
+
+    chunk0 holds sweeps 0..3, chunk1 holds sweeps 4..5, of a radially-moving
+    object. With residual_steps=[1], chunk1's first sweep (sid=4) needs the
+    sweep 1 step back (sid=3, in chunk0). Without priming that slot is a
+    cold-start zero and the mover is missed; with priming the prior chunk's
+    tail fills it and the mover is detected.
+    """
+    monkeypatch.setattr(mf_mos_mod, "_load_model", _stub_load_model)
+
+    bag_id = "bag_prime"
+    _write_calibration(bag_id)
+    # Two chunks ordered by t_start_ns; sweep header ts = sid * 50 ms.
+    _write_chunks_index(
+        bag_id,
+        [("chunk0", 0, 200_000_000), ("chunk1", 200_000_000, 400_000_000)],
+    )
+
+    chunk0_sweeps = [(sid, _moving_scene_sweep(sid)) for sid in range(4)]
+    chunk1_sweeps = [(sid, _moving_scene_sweep(sid)) for sid in (4, 5)]
+
+    # Poses (identity) at every sweep timestamp in each chunk.
+    _write_poses(bag_id, "chunk0", [sid * 50_000_000 for sid in range(4)])
+    _write_poses(bag_id, "chunk1", [sid * 50_000_000 for sid in (4, 5)])
+    _write_lidar_sweeps(bag_id, "chunk0", chunk0_sweeps)
+    _write_lidar_sweeps(bag_id, "chunk1", chunk1_sweeps)
+    _write_proc_index(bag_id, "chunk0", [sid for sid, _ in chunk0_sweeps])
+    _write_proc_index(bag_id, "chunk1", [sid for sid, _ in chunk1_sweeps])
+
+    cfg = _enabled_cfg(residual_steps=[1], prime_window_from_prior_chunk=True)
+    process_chunk(cfg, bag_id, "chunk1")
+
+    # sid=4 is chunk1's first sweep; mover is point index 0.
+    mask = np.load(local_path(mf_mos_mask_path(bag_id, "chunk1", 4)))
+    assert bool(mask[0]), (
+        "primed window: chunk1's first sweep should detect the mover using the "
+        "prior chunk's tail to fill the residual channel"
+    )
+
+
+def test_no_prime_window_first_sweep_cold_starts(tmp_env, monkeypatch):
+    """With priming disabled, chunk1's first sweep cold-starts (zero residual)
+    and misses the mover — the negative control for the priming test."""
+    monkeypatch.setattr(mf_mos_mod, "_load_model", _stub_load_model)
+
+    bag_id = "bag_no_prime"
+    _write_calibration(bag_id)
+    _write_chunks_index(
+        bag_id,
+        [("chunk0", 0, 200_000_000), ("chunk1", 200_000_000, 400_000_000)],
+    )
+    chunk0_sweeps = [(sid, _moving_scene_sweep(sid)) for sid in range(4)]
+    chunk1_sweeps = [(sid, _moving_scene_sweep(sid)) for sid in (4, 5)]
+    _write_poses(bag_id, "chunk0", [sid * 50_000_000 for sid in range(4)])
+    _write_poses(bag_id, "chunk1", [sid * 50_000_000 for sid in (4, 5)])
+    _write_lidar_sweeps(bag_id, "chunk0", chunk0_sweeps)
+    _write_lidar_sweeps(bag_id, "chunk1", chunk1_sweeps)
+    _write_proc_index(bag_id, "chunk0", [sid for sid, _ in chunk0_sweeps])
+    _write_proc_index(bag_id, "chunk1", [sid for sid, _ in chunk1_sweeps])
+
+    cfg = _enabled_cfg(residual_steps=[1], prime_window_from_prior_chunk=False)
+    process_chunk(cfg, bag_id, "chunk1")
+
+    mask = np.load(local_path(mf_mos_mask_path(bag_id, "chunk1", 4)))
+    assert not mask.any(), (
+        "no priming: chunk1's first sweep has no past scan, so the residual is "
+        "zero and the mover is missed"
     )

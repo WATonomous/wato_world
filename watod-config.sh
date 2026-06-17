@@ -11,7 +11,8 @@
 ##
 ## Possible values:
 ##   - ingest                : decode rosbags into Parquet/JSON/PNG/NPZ artifacts
-##   - perception_2d         : 2D detection + SAM 2 + DINOv2 cross-camera merge
+##   - perception_2d         : Florence-2 + SAM 3.1 + DA-V2 + DINOv2 cross-camera merge
+##   - semantic_lifting      : occlusion-aware LiDAR label lifting from 2D masks + metric depth
 ##   - lidar_preprocessing   : motion compensation, static/dynamic split, ground extraction
 ##   - proposal_generation   : LiDAR detection ensemble + Segment-Lift-Fit + fusion
 ##   - tracking              : 4D tracking with masklet association + DINOv2 ReID
@@ -26,7 +27,7 @@
 ##   ACTIVE_MODULES="all"                             # every module in deploy mode
 ##   ACTIVE_MODULES="all:dev"                         # every module in dev mode
 
-export ACTIVE_MODULES="lidar_preprocessing:dev"
+export ACTIVE_MODULES="ingest:dev lidar_preprocessing:dev perception_2d:dev"
 
 ############################## ADVANCED CONFIGURATIONS ##############################
 ## Set to "true" if the host has an NVIDIA GPU + nvidia-container-toolkit.

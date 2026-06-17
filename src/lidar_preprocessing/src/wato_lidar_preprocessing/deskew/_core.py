@@ -279,7 +279,7 @@ def _deskew_sweep(
         finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
         n_drop = int((~finite).sum())
         if n_drop > 0:
-            log.info("dropped %d non-finite points from %s", n_drop, raw_path)
+            log.debug("dropped %d non-finite points from %s", n_drop, raw_path)
             x = x[finite]
             y = y[finite]
             z = z[finite]

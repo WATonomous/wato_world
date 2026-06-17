@@ -107,7 +107,7 @@ K and distortion coefficients per camera.  Projection is straightforward.
   alignment loss (proposal_generation needs to reproject fitted boxes back
   to image space to compute dice loss against SAM masks).
 
-### 3. SAM2 / DEVA 2D mask generation
+### 3. SAM3 / DEVA 2D mask generation
 
 **What SAM4D uses**: SAM (the original or SAM2) for promptable segmentation;
 then temporal propagation across frames.
@@ -115,12 +115,12 @@ then temporal propagation across frames.
 **What to build** in `perception_2d`:
 - Run GroundingDINO on each camera frame to get class-labeled 2D bounding
   boxes (text prompts: "vehicle . pedestrian . cyclist").
-- Feed the boxes as prompts to SAM2 to get per-instance pixel masks.
+- Feed the boxes as prompts to SAM3 to get per-instance pixel masks.
 - Run DEVA to propagate the masks forward (and back) across frames using the
   per-instance DINOv2 embeddings for identity consistency.
 - For SAM4D-style cross-modal prompting: project LiDAR dynamic-mask points
   (from `dynamic_masks/*.npy`) into image space and use them as additional
-  SAM2 point prompts.  This can recover objects that GroundingDINO missed.
+  SAM3 point prompts.  This can recover objects that GroundingDINO missed.
 - Output per-chunk: `detections_2d.parquet` + `masks_2d/` directory.
 
 ### 4. Temporal memory across chunks (MCMA)
@@ -165,7 +165,7 @@ positions.  To exploit this:
    (N,3) int coords + ones) alongside existing static_map.npz.
 2. `perception_2d` / `proposal_generation`: implement `projection.py` with
    `project_lidar_to_image()` and `lift_image_to_3d()` using calibration.json.
-3. `perception_2d`: implement GroundingDINO → SAM2 → DEVA pipeline;
+3. `perception_2d`: implement GroundingDINO → SAM3 → DEVA pipeline;
    add LiDAR-dynamic-point cross-modal prompting.
 4. `perception_2d`: handle cross-chunk consistency via chunk overlap windows.
 5. Multi-LiDAR: treat merged world-frame points (all three LiDARs) as the

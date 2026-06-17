@@ -115,6 +115,22 @@ class MFMosParams(BaseModel):
     # project into non-KITTI-like range images and the model mispredicts.
     # None = run on every LiDAR; e.g. ["lidar_cc"] = centre only.
     lidar_id_allowlist: Optional[list[str]] = None
+    # Occlusion gate for unprojecting the per-pixel moving mask back to points.
+    # A moving pixel's label is assigned only to points whose range is within
+    # this tolerance of the pixel's winning (closest) range — i.e. the front
+    # surface of the mover. Points that lost the closest-range tiebreak
+    # (occluded background, e.g. a wall directly behind a car) sit farther
+    # than winner+tol and DON'T inherit the moving label. Raise toward a large
+    # value to effectively disable the gate (legacy behaviour: every in-FOV
+    # point inherits its pixel's label).
+    occlusion_range_tol_m: float = 1.0
+    # Seed each lidar's residual sliding window from the temporally-preceding
+    # chunk's sweeps so the first max(residual_steps) sweeps of a chunk get
+    # full residual channels instead of cold-start zeros. Chunks overlap, so
+    # the prior chunk amply covers the window; the bag's very first chunk has
+    # no predecessor and still cold-starts. Poses are merged across the two
+    # chunks (both live in the same SLAM map frame) for residual projection.
+    prime_window_from_prior_chunk: bool = True
 
     @field_validator("residual_steps")
     @classmethod
@@ -138,6 +154,13 @@ class MFMosParams(BaseModel):
     def _threshold_range(cls, v: float) -> float:
         if not (0.0 <= v <= 1.0):
             raise ValueError(f"score_threshold must be in [0, 1], got {v}")
+        return v
+
+    @field_validator("occlusion_range_tol_m")
+    @classmethod
+    def _positive_occlusion_tol(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"occlusion_range_tol_m must be > 0, got {v}")
         return v
 
 
@@ -244,6 +267,18 @@ class ComponentConfig(BaseModel):
     # >= min_mf_mos_votes AND vote fraction >= mf_mos_vote_fraction_threshold.
     mf_mos_vote_fraction_threshold: float = 0.5
     min_mf_mos_votes: int = 1
+    # Transient-mover recovery. The absolute min_mf_mos_votes floor is meant to
+    # reject single-sweep MF-MOS noise, but it also drops genuinely fast movers:
+    # a cyclist / sprinting pedestrian crossing in ~0.2 s touches only ~4 sweeps
+    # at 20 Hz, so a strict floor of 4 kills it on any single-sweep miss. A
+    # voxel observed in <= mf_mos_transient_max_sweeps sweeps with vote fraction
+    # >= mf_mos_transient_vote_fraction_threshold is accepted as MF-MOS-dynamic
+    # even below min_mf_mos_votes, as long as it cleared mf_mos_transient_min_votes
+    # (kept >= 2 so single-sweep noise is still rejected). Set
+    # mf_mos_transient_min_votes very high to disable this recovery path.
+    mf_mos_transient_min_votes: int = 2
+    mf_mos_transient_vote_fraction_threshold: float = 0.8
+    mf_mos_transient_max_sweeps: int = 5
     # True: a point is fused as MF-MOS-dynamic only if (a) the per-sweep mask
     # flags it AND (b) its voxel passed the chunk-wide vote.
     # False: (a) alone is enough.
@@ -301,11 +336,27 @@ class ComponentConfig(BaseModel):
             raise ValueError(f"value must be >= 1, got {v}")
         return v
 
-    @field_validator("min_mf_mos_votes")
+    @field_validator("min_mf_mos_votes", "mf_mos_transient_min_votes")
     @classmethod
     def _positive_min_mf_mos_votes(cls, v: int) -> int:
         if v < 1:
-            raise ValueError(f"min_mf_mos_votes must be >= 1, got {v}")
+            raise ValueError(f"vote-count threshold must be >= 1, got {v}")
+        return v
+
+    @field_validator("mf_mos_transient_max_sweeps")
+    @classmethod
+    def _positive_transient_max_sweeps(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"mf_mos_transient_max_sweeps must be >= 1, got {v}")
+        return v
+
+    @field_validator(
+        "mf_mos_vote_fraction_threshold", "mf_mos_transient_vote_fraction_threshold"
+    )
+    @classmethod
+    def _vote_fraction_range(cls, v: float) -> float:
+        if not (0.0 < v <= 1.0):
+            raise ValueError(f"vote fraction threshold must be in (0, 1], got {v}")
         return v
 
     @field_validator("static_sweep_fraction")
