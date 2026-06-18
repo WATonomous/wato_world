@@ -56,11 +56,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --break-system-packages \
         git+https://github.com/IDEA-Research/GroundingDINO
 
-# SAM3: uncomment and replace URL when SAM3 ships.
-# RUN --mount=type=cache,target=/root/.cache/uv \
-#     uv pip install --system --break-system-packages \
-#         git+https://github.com/facebookresearch/sam3
-
 # DINOv2 is pulled via torch.hub at runtime — no pip install needed.
 # Pre-warm the hub cache by uncommenting the line below if you want the weights
 # baked into the image (avoids a first-run download inside the container):

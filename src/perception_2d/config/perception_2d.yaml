@@ -1,9 +1,7 @@
 perception_2d:
   detector: grounding_dino
   detector_score_threshold: 0.25
-  segmenter_backend: sam2          # sam2 | sam3
   sam2_checkpoint: sam2_hiera_large
-  sam3_checkpoint: sam3_hiera_large  # placeholder — fill in when SAM3 ships
   use_lidar_prompts: true
   lidar_prompt_max_points: 50
   reid_features:

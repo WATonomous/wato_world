@@ -23,12 +23,8 @@ class ComponentConfig(BaseModel):
     detector: str = "grounding_dino"
     detector_score_threshold: float = 0.25
 
-    # Segmenter backend: "sam2" (default) or "sam3" (stub, fill in when SAM3 ships).
-    segmenter_backend: str = "sam2"
-
-    # Model checkpoint names or local paths.
+    # SAM2 checkpoint name or local path.
     sam2_checkpoint: str = "sam2_hiera_large"
-    sam3_checkpoint: str = "sam3_hiera_large"  # placeholder — update when SAM3 ships
 
     # Whether to project LiDAR dynamic-mask points into image space and pass
     # them as additional SAM2 point prompts (cross-modal prompting, SAM4D-style).
