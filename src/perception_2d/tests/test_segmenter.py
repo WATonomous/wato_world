@@ -39,7 +39,7 @@ def test_bbox_fill_fallback_filled_inside():
     det = _det(10, 10, 40, 40)
     results = SAM2Segmenter._bbox_fill_fallback([det], H, W)
     mask = results[0].mask
-    assert mask[15, 15]    # inside
+    assert mask[15, 15]  # inside
     assert not mask[5, 5]  # outside
 
 

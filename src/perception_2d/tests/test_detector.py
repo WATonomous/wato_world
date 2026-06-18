@@ -6,12 +6,10 @@ installed — the fallback / mock paths are tested instead.
 
 from __future__ import annotations
 
-import sys
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
 from wato_perception_2d.detector import Detection, GroundingDINODetector
 
@@ -109,6 +107,7 @@ def test_detect_returns_detection_objects():
 
     # Patch the inline `import torch` inside detect() without requiring torch.
     import builtins
+
     real_import = builtins.__import__
 
     def _fake_import(name, *args, **kwargs):

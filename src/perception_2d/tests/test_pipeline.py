@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -17,7 +16,7 @@ import pytest
 from PIL import Image as PILImage
 
 from wato_perception_2d.detector import Detection
-from wato_perception_2d.segmenter import SAM2Segmenter, SegmentedDetection
+from wato_perception_2d.segmenter import SegmentedDetection
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +91,7 @@ def test_chunk_complete_false_before_write(artifact_root, bag_id, chunk_id):
 
 
 def test_chunk_complete_true_after_write(artifact_root, bag_id, chunk_id):
-    from wato_common.artifact_store import detections_2d_path, local_path, tracklets_2d_path
+    from wato_common.artifact_store import detections_2d_path, tracklets_2d_path
     from wato_common.io.parquet_io import write_table
     from wato_common.schemas import MASKLET_SCHEMA
     from wato_perception_2d.pipeline import _chunk_complete
@@ -133,13 +132,9 @@ def test_process_chunk_single_frame_writes_one_row(
 
     from wato_common.artifact_store import (
         calibration_path,
-        chunks_index_path,
         detections_2d_path,
-        ensure_local_dir,
         local_path,
     )
-    from wato_common.io.parquet_io import write_table
-    from wato_common.schemas import CHUNK_SCHEMA, ChunkRow
     from wato_perception_2d.config import ComponentConfig
     from wato_perception_2d.io import CameraFrameInfo
     from wato_perception_2d.pipeline import _process_chunk
@@ -189,15 +184,22 @@ def test_process_chunk_single_frame_writes_one_row(
 
     with (
         patch("wato_perception_2d.pipeline.load_frame_index", return_value=[frame]),
-        patch("wato_perception_2d.pipeline.load_calibration", return_value={
-            "cam_front": __import__(
-                "wato_perception_2d.io", fromlist=["CalibrationInfo"]
-            ).CalibrationInfo(
-                K=np.array([[500, 0, 32], [0, 500, 32], [0, 0, 1]], dtype=np.float64),
-                ego_T_cam=np.eye(4, dtype=np.float64),
-            )
-        }),
-        patch("wato_perception_2d.pipeline.load_dynamic_lidar_points", return_value=None),
+        patch(
+            "wato_perception_2d.pipeline.load_calibration",
+            return_value={
+                "cam_front": __import__(
+                    "wato_perception_2d.io", fromlist=["CalibrationInfo"]
+                ).CalibrationInfo(
+                    K=np.array(
+                        [[500, 0, 32], [0, 500, 32], [0, 0, 1]], dtype=np.float64
+                    ),
+                    ego_T_cam=np.eye(4, dtype=np.float64),
+                )
+            },
+        ),
+        patch(
+            "wato_perception_2d.pipeline.load_dynamic_lidar_points", return_value=None
+        ),
     ):
         detector_mock.detect.return_value = [fake_det]
         _process_chunk(cfg, bag_id, chunk_id, detector_mock, segmenter_mock)

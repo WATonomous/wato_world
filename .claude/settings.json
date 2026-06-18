@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(PYTHONPATH=src/common/src:src/perception_2d/src python3 -m pytest src/perception_2d/tests/test_detector.py -v)",
-      "Bash(PYTHONPATH=src/common/src:src/perception_2d/src python3 -m pytest src/perception_2d/tests -v)"
+      "Bash(PYTHONPATH=src/common/src:src/perception_2d/src python3 -m pytest src/perception_2d/tests -v)",
+      "Bash(pre-commit run *)"
     ]
   }
 }
