@@ -33,8 +33,11 @@ detection:
   redetect_every_k: 10
 
 segmentation:
-  # SAM2.1 checkpoint on HuggingFace (SAM2VideoPredictor.from_pretrained).
-  model: "facebook/sam2.1-hiera-large"
+  # Local SAM2.1 checkpoint (data/models is mounted read-only at /data/models).
+  # Loaded via build_sam2_video_predictor — the container runs HF_HUB_OFFLINE=1,
+  # so this is a loose .pt path, not an HF model id.
+  checkpoint: "/data/models/sam2.1_hiera_large.pt"
+  config: "configs/sam2.1/sam2.1_hiera_l.yaml"  # bundled in the sam2 package
 
 tracking:
   # A re-detected box whose IoU with an already-tracked object's mask bbox is

@@ -1,484 +1,357 @@
-# perception_2d v2 — SAM3 + Florence-2 + Depth Anything V2
+# perception_2d — GroundingDINO + SAM2 + Depth Anything V2 + DINOv2
 
-**Paper reference**: UniLiPs (light.princeton.edu/unilips)
-**Supersedes**: perception_2d v1 plan (GroundingDINO + SAM2 + DEVA)
+**Status**: implemented (`src/perception_2d/`).
+**Supersedes**: the SAM3 + Florence-2 concept-everything plan. That design was
+pivoted away from — SAM3's text-prompted "segment every region matching a
+concept" produced a mask explosion (multiple synonymous detections per physical
+object) and its long-video tracker needed upstream monkeypatches to bound VRAM.
+The current design uses a *detector* (one box per object) as the box source for
+the **SAM2** video predictor, which both segments and tracks. Florence-2 is
+retained only as an optional open-vocabulary discovery backend.
 
-The v2 design replaces the GroundingDINO + SAM2 detector/segmenter pair with
-Florence-2 + SAM3, adds Depth Anything V2 as a dense depth source aligned to
-LiDAR, and prepares 2D outputs that feed a new `semantic_lifting` component.
-
-The design follows UniLiPs' camera-side methodology — open-vocabulary class
-discovery, then promptable segmentation, then occlusion-aware lifting into 3D
-— but collapses UniLiPs' five-model ensemble (SAM2 + 3×OneFormer + BLIP + CLIP
-+ CLIPSeg) into two models (Florence-2 + SAM3) by leveraging SAM3's built-in
-open-vocabulary segmentation.
-
----
-
-## What changed from v1
-
-| Stage | v1 plan | v2 plan | Reason |
-|---|---|---|---|
-| Discovery | GroundingDINO, fixed vocab | Florence-2 dense-region caption | downstream taxonomy is open-vocab; plays UniLiPs BLIP-analog role |
-| Segmentation | SAM2 prompted by boxes | SAM3 prompted by text | SAM3 collapses detection + classification + segmentation |
-| Closed-vocab classification | implicit in detector | none — SAM3 is concept-aware | one fewer model class |
-| Candidate re-ranking | n/a | n/a — SAM3 presence-token filters hallucinations | SAM3 architectural feature |
-| Phrase deduplication | n/a | NEW — synonym coarsening + NMS | Florence-2 produces synonyms |
-| Temporal tracking | DEVA | SAM 3.1 built-in tracker (DEVA available as fallback config) | one less model, shared vision encoder with detector |
-| ReID | DINOv2 | DINOv2 unchanged | — |
-| Depth | none | DA-V2 + LiDAR-anchored RANSAC affine | enables SLF L_depth and occlusion-aware lifting |
-| Cross-cam merge depth | sparse LiDAR + 20 m hardcoded fallback | metric depth artifact | reliable for objects with sparse LiDAR coverage |
-| Per-frame artifacts | masks, detections, tracklets | masks, detections, tracklets, **depth** | new input for SLF and semantic_lifting |
+This component follows UniLiPs' camera-side methodology — class discovery, then
+promptable segmentation, then dense depth aligned to LiDAR — and prepares the 2D
+artifacts that feed the downstream `semantic_lifting` component.
 
 ---
 
-## Architecture
+## Architecture — two VRAM-disjoint passes per chunk
+
+The two heavy GPU model sets (Depth Anything V2; the detector + SAM2 + DINOv2)
+are **never co-resident**. Each chunk runs as two passes so peak VRAM is roughly
+one model set, which is what lets it run on small-VRAM cards (~6 GB). The cost is
+a second image decode (each pass loads the frames once).
 
 ```
-                    ┌─── image branch ─────────────────────────────────┐
-per camera          │                                                   │
-per frame           ▼                                                   │
-  ─── undistorted image ─► Florence-2  ⟨DENSE_REGION_CAPTION⟩           │
-                          │ noun phrases + rough boxes                  │
-                          ▼                                              │
-                       SAM3  (text prompted, per phrase)                │
-                          │ masks + tight boxes + scores                │
-                          ▼                                              │
-                    phrase coarsening + NMS                             │
-                          │ deduped per-instance masks                  │
-                          ▼                                              │
-                    DINOv2 ReID embeddings ────────────────────────────►│
-                                                                         │
-                    ┌─── depth branch (parallel) ─────────────────────►│
-                    ▼                                                    │
-            Depth Anything V2 → relative depth + gradient confidence    │
-                    │                                                    │
-static LiDAR pts ──► LiDAR projection → (d_lidar, d_da) anchor pairs    │
-                    │                                                    │
-                    ▼                                                    │
-            RANSAC affine fit  d_lidar ≈ a·d_da + b                     │
-                    │                                                    │
-                    ▼                                                    │
-            metric depth + lidar_coverage mask ──────────────────────►  │
-                                                                         │
-per chunk                                                                │
-  ─────────────────► SAM 3.1 tracker (or DEVA fallback) ◄──────────────┤
-                          │ temporally-associated tracklets per camera  │
-                          ▼                                              │
-                    cross-camera merge using metric depth ◄────────────┘
-                          │ global_object_id per masklet
-                          ▼
-                    artifacts to disk
+                         ┌──────────────── PASS 1: depth (DA-V2 only) ─────────────────┐
+per camera, per frame    │                                                             │
+  ── undistorted image ──┼─► Depth Anything V2 ──► relative depth                      │
+                         │            │                                                │
+  static LiDAR points ───┼─► project into camera ──► (d_lidar, d_da) anchor pairs      │
+                         │            │                                                │
+                         │            ▼                                                │
+                         │   RANSAC affine fit  d_lidar ≈ a·d_da + b                   │
+                         │            │  (fallback to recent (a,b) on degenerate fit)  │
+                         │            ▼                                                │
+                         │   metric depth ──► depth_2d/<cam>/<frame>.npz               │
+                         └─────────────────────────────────────────────────────────────┘
+                                      DA-V2 unloaded, VRAM freed
+                         ┌──────────── PASS 2: tracking (detector + SAM2 + DINOv2) ────┐
+per camera stream        │                                                             │
+  class vocabulary ──────┼─► fixed taxonomy   OR   Florence-2 open-vocab discovery     │
+                         │            │                                                │
+                         │            ▼                                                │
+  keyframes ─────────────┼─► GroundingDINO ──► class-labeled boxes                     │
+                         │            │                                                │
+                         │            ▼                                                │
+                         │   SAM2 video predictor: box → mask, propagate across stream │
+                         │            │  (IoU merge of re-detected boxes; OOM windowing)│
+                         │            ▼                                                │
+                         │   Masklets (persistent ids) + DINOv2 embedding every k      │
+                         │            │                                                │
+                         │            ▼                                                │
+                         │   detections_2d.parquet · tracklets_2d.parquet · masks_2d/  │
+                         └─────────────────────────────────────────────────────────────┘
 ```
 
-Two branches run in parallel per camera frame (image + depth). They converge
-at the chunk-level aggregation step (SAM 3.1 tracker, cross-camera merge),
-which produces the final artifacts. Downstream `semantic_lifting` consumes
-both the masks and the depth.
+Model loading is **fail-loud**: a missing detector / SAM2 / depth model raises
+rather than emitting degraded output, and the SAM2 + detector imports are checked
+*before* the depth pass so a missing install fails fast instead of after the
+whole depth pass has run.
 
 ---
 
-## Per-frame processing — image branch
+## Class vocabulary — `discovery.backend`
 
-### Stage 1 — Florence-2 dense-region caption
+The detector is text-prompted, so it needs a class vocabulary. Two sources,
+selected by `discovery.backend`:
 
-**What it does**: takes the full image, returns a list of noun phrases each
-tagged with a rough bounding box, via the `<DENSE_REGION_CAPTION>` task.
+- **`fixed`** (default) — the closed-set taxonomy from `discovery.fixed_classes`
+  (or `prompts.yaml`, or the hardcoded fallback when neither is present). One
+  prompt phrase per class. Deterministic and fast; the right default for a known
+  AV taxonomy (car, truck, bus, motorcycle, bicycle, pedestrian, traffic cone,
+  barrier).
+- **`florence2`** — open-vocabulary. Florence-2 (`<DENSE_REGION_CAPTION>`) runs
+  on every `sample_every_k`-th frame of a camera stream; phrases scoring above
+  `min_confidence` are pooled, deduped, and canonicalised through the
+  `prompts.yaml` synonym map into one concept set for that camera, then fed to
+  the detector. Use this when the taxonomy is genuinely open / long-tail.
 
-**Why this stage exists**: SAM3 needs text prompts. Without a discovery step
-the only way to use SAM3 is to hardcode a class list — which defeats the
-open-vocab choice. Florence-2 is the modern equivalent of UniLiPs' BLIP step
-(unprompted open-vocab class proposal) but built specifically for the
-caption-then-ground workflow we need.
-
-**Why Florence-2 over BLIP-2 or larger VLMs**:
-- MIT license (BLIP-2 is BSD, larger VLMs vary)
-- 0.23B / 0.77B parameter sizes — fast enough to run per frame
-- Native task tokens for dense region captioning, no prompt engineering
-- Outputs structured noun-phrase lists, no JSON parsing of free-form text
-
-**Output**: `list[tuple[phrase: str, rough_box: tuple[x1,y1,x2,y2]]]`
-
-### Stage 2 — SAM3 grounded segmentation
-
-**What it does**: for each unique phrase from Florence-2, prompt SAM3 with the
-text → receive every mask matching that concept, with tight box and
-confidence score.
-
-**Why this replaces the UniLiPs fseg ensemble**: SAM3 was trained on 4M unique
-concepts with the SA-Co dataset. It is itself an open-vocab concept-aware
-segmenter. The UniLiPs SAM2 + 3×OneFormer + BLIP + CLIP + CLIPSeg chain is
-the workaround for *not having* SAM3 — SAM3 was published in November 2025,
-after UniLiPs was written.
-
-**The presence token**: SAM3's per-mask score uses its presence-token
-mechanism, designed to discriminate "concept actually in image" from "concept
-forced into image because we prompted for it." This is what filters Florence-2
-hallucinations and removes the need for CLIP re-ranking.
-
-**Object-only filter**: prompts are filtered against `prompts.yaml` taxonomy
-(cars, trucks, pedestrians, cyclists, traffic cones, barriers, etc.) before
-SAM3 is called. Stuff classes (road, sidewalk, building, sky) are not in
-the prompt set — they're not needed for SLF and add noise. Visibility for
-occlusion testing comes from depth, not semantics, so this is fine.
-
-**Output**: `list[(phrase, mask: H×W bool, tight_box, score)]` per image.
-
-### Stage 3 — phrase coarsening + NMS
-
-**What it does**: Florence-2 emits `"car"`, `"vehicle"`, `"sedan"` for the
-same object; SAM3 faithfully returns overlapping masks for each. Two-pass
-cleanup:
-
-1. **Synonym coarsening**: cluster phrases by CLIP text-embedding cosine
-   similarity (threshold ~0.85); within each cluster keep the highest-scored
-   mask and discard the rest.
-2. **3D-aware NMS**: once depth is available (depth branch completed in
-   parallel), back-project mask centroids to world and NMS by 3D centroid
-   proximity (1.0 m radius). Falls back to 2D IoU NMS (threshold 0.5) for
-   frames where depth alignment failed.
-
-**Why this matters**: without coarsening, the same physical car ends up with
-3-5 detections, each with a different DINOv2 embedding crop, each potentially
-starting its own track in the downstream tracker. Open-vocab is a feature,
-not a free lunch.
-
-**Output**: deduped `list[(canonical_class, mask, box, score)]` per image.
-
-### Stage 4 — DINOv2 ReID embeddings
-
-**Unchanged from v1**. Tight-crop each instance, push through DINOv2-ViT-L/14,
-store the 1024-D embedding alongside the mask. Used by the tracking stage for
-cross-frame and cross-chunk re-identification.
+Either way the output is a `(text_prompt, canonical_class)` concept list per
+camera. The detector — not SAM — is what bounds the object count: one box per
+object means one masklet per object (no synonym explosion).
 
 ---
 
-## Per-frame processing — depth branch
+## PASS 2 — detector + SAM2 tracking (per camera)
 
-This branch runs in parallel with the image branch. Its only inputs are the
-undistorted image and the static LiDAR points projected for this frame.
+1. Write the camera's frames to a temp JPEG dir and `init_state` on it (SAM2's
+   video loader takes a directory of sequentially-named JPEGs). `init_state` is
+   called with `offload_video_to_cpu=True` so the frame stack lives in host RAM
+   and streams to the GPU per frame — essential for long panoramic clips.
+2. At each keyframe (every `redetect_every_k` frames) run **GroundingDINO** →
+   class-labeled boxes. A box whose mask-bbox IoU with an already-tracked object
+   is ≥ `iou_match_threshold` is dropped as the existing object; genuinely new
+   boxes get a fresh `obj_id` via `add_new_points_or_box`. This is how objects
+   entering mid-clip are introduced without duplicating existing tracks.
+3. `propagate_in_video` forward to the next keyframe, recording per-object masks
+   into `Masklet`s (persistent ids) — per-frame mask PNGs plus a DINOv2
+   appearance embedding extracted every `embeddings.every_k_frames`.
 
-### Stage 5 — Depth Anything V2 inference
+**OOM fallback**: the whole clip is tried in one SAM2 session. On a CUDA OOM
+mid-propagation the camera is retried in windows of `sub_clip_frames` (fresh
+session each); a window that itself OOMs is recursively halved down to
+`min_sub_clip_frames` before being skipped. Object ids reset between windows —
+the same discontinuity as between chunks, which the downstream `tracking`
+component re-links via the DINOv2 embeddings. Clips that fit never touch this
+path.
 
-**What it does**: DA-V2-Large on the full image, outputs relative depth
-(arbitrary scale) plus a gradient-derived confidence map.
+**Detector backend**: GroundingDINO via HuggingFace Transformers
+(`AutoModelForZeroShotObjectDetection`, default `IDEA-Research/grounding-dino-base`),
+which needs no CUDA custom-op compile (unlike the standalone `groundingdino`
+package). Use a `-tiny` checkpoint for a lighter/faster model.
 
-**Why relative + LiDAR-anchored, not metric**: per the comparison made during
-design, DA-V2's metric checkpoint on AV scenes has MAE of ~8 m at 0-80 m
-range against UniLiPs' Table 2. The relative variant has better ordinal
-consistency and aligns cleanly to LiDAR via affine fit. The decision was
-made to trust LiDAR for scale and DA for density.
-
-**Confidence derivation**: depth-gradient magnitude per pixel — flat regions
-get high confidence, depth discontinuities get low confidence. This is a
-cheap proxy. If Framing C (L_depth loss term) shows noisy gradients during
-SLF integration, upgrade to test-time-augmentation variance.
-
-**Output**: `(relative_depth: H×W float32, confidence: H×W float32)`.
-
-### Stage 6 — LiDAR projection for anchor pairs
-
-**What it does**: project the chunk's static LiDAR points into this camera
-frame using `K`, `ego_T_cam`, and the per-frame `world_T_ego`. Records depth
-in camera frame for each projected point.
-
-**Critical: static-only filter**. Cameras run at ~12 Hz, LiDARs at ~20 Hz,
-unsynchronized (NovAtel GNSS/INS only). A camera frame at `t_cam` has its
-nearest LiDAR sweep at `t_cam ± up to ~25 ms`. A vehicle at 30 m/s moves
-75 cm in 25 ms. If dynamic LiDAR points are used as anchors, those points
-project to where the object *was* at LiDAR time, not where it is in the
-current image — the (d_lidar, d_da) pair pulled from that pixel measures
-two different objects, which wrecks the affine fit even with RANSAC.
-
-Mitigation: use only static points for anchors. The `dynamic_masks/*.npy`
-artifacts from `lidar_preprocessing` already mark this. This filter is
-**non-optional** in the first version.
-
-**Sky/upper-image filter**: DA-V2 produces enormous unreliable values for
-sky pixels. Mask out the upper ~30% of the image (or pixels where DA depth
-exceeds the 95th percentile of LiDAR depths) before fitting.
-
-**Output**: `(d_lidar: M float32, d_da: M float32)` matched pairs.
-
-### Stage 7 — RANSAC affine fit + metric depth
-
-**What it does**: solve `d_lidar = a · d_da + b` over matched pairs using
-RANSAC with inlier threshold 0.5 m. Apply to the full DA map → metric depth.
-Also compute `lidar_coverage`: True where LiDAR within 5 px contributed to
-the affine fit at that pixel, False otherwise.
-
-**Why `lidar_coverage`**: SLF needs to know which pixels are LiDAR-trusted
-vs. DA-filled. Framing A (fill LiDAR holes for L_lidar) uses this mask to
-decide which pixels to add as DA pseudo-points.
-
-**Degenerate-fit detection**: if the LiDAR depth range across anchors is
-< 5 m (camera mostly seeing a wall), the affine is underdetermined. Fall
-back to the median (a, b) of the last 5 successful frames in this chunk.
-If no successful fit exists yet, write `fit_status = failed` and downstream
-treats the depth map as relative-only.
-
-**Output**: `(metric_depth: H×W float16, lidar_coverage: H×W bool, fit_params)`.
+**Segmenter backend**: SAM2.1 via Meta's official `sam2` package,
+`build_sam2_video_predictor(config_file, ckpt_path)` pointed at a *local*
+checkpoint (`/data/models/sam2.1_hiera_large.pt`). The hydra `config_file` ships
+inside the `sam2` package, so only the `.pt` is fetched. The container runs
+`HF_HUB_OFFLINE=1`, so a loose `.pt` path is used rather than
+`from_pretrained`.
 
 ---
 
-## Per-chunk aggregation
+## PASS 1 — depth branch (DA-V2 + LiDAR affine fit)
 
-### Stage 8 — SAM 3.1 tracker
+Produces a metric depth map per frame for `semantic_lifting`'s occlusion test
+and for downstream Segment-Lift-Fit.
 
-**What it does**: temporally propagate masks across frames within a single
-camera stream. SAM 3.1's Object Multiplex update (March 2026) uses
-shared-memory multi-object tracking — designed for the AV use case of
-many simultaneous tracked objects.
+- **DA-V2 inference**: Depth Anything V2 (`depth-anything-v2-large`) on the full
+  image → *relative* depth. Frames are pushed through the backbone
+  `depth.batch_size` at a time; the LiDAR alignment that follows each batch stays
+  strictly sequential, so the fallback-window state is identical to per-frame
+  processing.
+- **Why relative + LiDAR-anchored, not metric**: DA-V2's metric checkpoint has
+  large absolute error on AV scenes; the relative variant has better ordinal
+  consistency and aligns cleanly to LiDAR via an affine fit. Trust LiDAR for
+  scale, DA for density.
+- **Static-only anchors** (`use_static_anchors_only`, non-optional): cameras
+  (~12 Hz) and LiDARs (~20 Hz) are unsynchronized. A dynamic LiDAR point
+  projects to where the object *was* at LiDAR time, not where it is in the
+  current image, which wrecks the affine fit. Only `lidar_preprocessing`'s
+  static points are used as anchors.
+- **Sky filter**: DA-V2 emits enormous unreliable values for sky; the top
+  `sky_mask_top_fraction` of the image is masked before fitting.
+- **RANSAC affine fit**: solve `d_lidar ≈ a·d_da + b` over the matched pairs
+  (`ransac_n_iter`, `ransac_inlier_threshold_m`, `min_lidar_anchors`). On a
+  degenerate fit, fall back to the median `(a, b)` of the last
+  `fallback_window` successful frames; if no successful fit exists yet, write
+  nothing (`fit_status == 2`) and downstream treats the missing artifact as
+  "relative-only / unavailable."
 
-**Why SAM 3.1 over DEVA**:
-- Already loading SAM3 for the per-frame segmentation — one fewer dependency.
-- Detector and tracker share a vision encoder, features stay consistent.
-- Concept-aware (text-prompted), which matches the open-vocab discovery flow.
-- DEVA's main strength (bidirectional propagation, decoupling from segmenter)
-  doesn't materially help here — the downstream 3D Kalman tracker handles
-  long-range ID consistency, and the segmenter is already SAM3 either way.
+DA-V2 is built inside this pass and **unloaded** in the pass's `finally` block,
+freeing its VRAM before PASS 2 builds the detector / SAM2.
 
-**DEVA fallback**: kept behind a config flag (`tracker.backend: "sam3" |
-"deva"`). If SAM 3.1 tracking quality is bottlenecking pseudo-label quality
-during early validation, swap is one config line.
+---
 
-**Output**: persistent `track_id` per masklet within each camera stream.
+## DINOv2 appearance embeddings
 
-### Stage 9 — Cross-camera merge
+DINOv2 (`embeddings.model`, default `dinov2_vitl14`) embeds a tight crop of each
+masklet every `embeddings.every_k_frames` frames; the embedding is persisted
+alongside the masklet (`dino_feature.npy` in the masklet's mask directory). It is
+**not** used for tracking here — it is the feature the downstream `tracking`
+component uses for cross-camera / cross-chunk re-identification.
 
-**What it does**: assign a `global_object_id` to masklets visible from
-multiple cameras. Logic per `cross_cam_merge.py`:
+---
 
-1. For each masklet, compute the mask centroid `(u, v)` in image space.
-2. Look up `depth_2d[u, v]` (the new metric depth artifact).
-3. Back-project to world frame using `K`, `ego_T_cam`, `world_T_ego`.
-4. Cluster centroids across cameras by 3D proximity (radius
-   `cross_camera_match_radius_m = 1.5`).
-5. Assign one `global_object_id` per cluster.
+## Cross-camera identity is deferred downstream
 
-**What changes from v1**: the `_estimate_depth_from_lidar` helper with its
-20 m hardcoded fallback is replaced by `depth_2d[u, v]` lookup. Every pixel
-has a real depth value (DA-filled where LiDAR was silent), so cross-camera
-matches no longer fail catastrophically on objects with sparse LiDAR.
-
-**Output**: `global_object_id` assigned to every masklet.
+perception_2d's deliverable is **per-camera** masklets + masks + metric depth +
+DINOv2 embeddings. Resolving the same physical object across the 12 cameras is a
+3D/4D problem that belongs in the downstream `tracking` component (gated by the
+DINOv2 features persisted here). `global_object_id` is left **null** for
+`tracking` to populate. (The earlier SAM3 plan did cross-camera merge inside
+perception_2d; that has been removed.)
 
 ---
 
 ## Output artifacts
 
 ```
-data/artifacts/raw/<bag_id>/perception_2d/v2/<chunk_id>/
-├── detections_2d.parquet              (existing schema, class from canonical_class)
-├── tracklets_2d.parquet               (existing schema)
-├── masks_2d/<cam_id>/<frame_seq>/<det_id>.png       (existing, binary PNG)
-└── depth_2d/<cam_id>/<frame_seq>.npz                (NEW)
+data/artifacts/raw/<bag_id>/perception_2d/<version>/<chunk_id>/
+├── detections_2d.parquet                         (MASKLET_SCHEMA, one row / masklet)
+├── tracklets_2d.parquet                          (MASKLET_SCHEMA, same rows)
+├── masks_2d/<cam_id>/<masklet_id>/<frame_seq>.png (per-frame binary mask PNGs)
+│                                  └ dino_feature.npy (DINOv2 embedding for the masklet)
+└── depth_2d/<cam_id>/<frame_seq>.npz             (metric depth + fit metadata)
 ```
 
-### `depth_2d/<cam>/<frame>.npz` schema
+`detections_2d.parquet` and `tracklets_2d.parquet` carry the same masklet rows —
+perception_2d does not separate per-frame detections from tracks; a masklet *is*
+the tracked detection.
 
-| Field | Dtype | Shape | Description |
-|---|---|---|---|
-| `depth_m` | float16 | (H, W) | Metric depth in meters |
-| `confidence` | float16 | (H, W) | [0, 1], DA gradient-derived |
-| `lidar_coverage` | bool | (H, W) | True where LiDAR within 5 px contributed |
-| `affine_a` | float32 | scalar | DA→metric scale factor |
-| `affine_b` | float32 | scalar | DA→metric offset |
-| `n_anchors` | int32 | scalar | Number of (d_lidar, d_da) pairs used |
-| `n_inliers` | int32 | scalar | RANSAC inliers |
-| `rmse_inliers_m` | float32 | scalar | Fit quality metric |
-| `fit_status` | int8 | scalar | 0=ok, 1=fallback to prior frame, 2=failed |
-
-Storage budget at 1920×1080: ~8 MB compressed per frame → ~5 GB per chunk
-across 12 cameras × ~100 frames. If painful, drop `confidence` or quantize
-to uint8.
-
-### `detections_2d.parquet` schema additions
+### `detections_2d.parquet` / `tracklets_2d.parquet` (`MASKLET_SCHEMA`)
 
 | Field | Type | Description |
 |---|---|---|
-| `canonical_class` | str | Post-coarsening canonical class name from `prompts.yaml` |
-| `raw_phrase` | str | Original Florence-2 noun phrase (kept for debugging open-vocab gaps) |
-| `sam3_score` | float32 | SAM3 presence-token score |
-| `discovery_score` | float32 | Florence-2 confidence |
-| `centroid_depth_m` | float32 | depth_2d at mask centroid, used for cross-cam merge |
-| `tracker_backend` | str | "sam3" or "deva" |
+| `masklet_id` | str | Stable id within the chunk/camera |
+| `bag_id`, `chunk_id`, `cam_id` | str | Provenance |
+| `cls` | str | Canonical taxonomy class |
+| `score` | float | Masklet confidence |
+| `frames_present` | str | JSON list[int] of `camera_seq` where the mask exists |
+| `mask_path` | str | Directory of per-frame mask PNGs |
+| `dino_feature_path` | str? | DINOv2 embedding `.npy` (null if not extracted) |
+| `global_object_id` | str? | **null** — populated downstream by `tracking` |
+| `raw_phrase` | str | Raw detector label before canonicalisation |
+| `det_score` | float | Detector (× SAM2 mask) confidence |
+| `discovery_score` | float | Detector / Florence-2 discovery confidence |
+| `centroid_depth_m` | float | Metric depth at the mask centroid |
+| `tracker_backend` | str | `"sam2"` |
+
+### `depth_2d/<cam>/<frame>.npz`
+
+| Field | Dtype | Shape | Description |
+|---|---|---|---|
+| `depth_m` | `depth.output_dtype` (float16) | (H, W) | Metric depth in metres |
+| `affine_a` | float32 | scalar | DA→metric scale factor |
+| `affine_b` | float32 | scalar | DA→metric offset |
+| `n_anchors` | int32 | scalar | (d_lidar, d_da) pairs available |
+| `n_inliers` | int32 | scalar | RANSAC inliers |
+| `rmse_inliers_m` | float32 | scalar | Fit quality |
+| `fit_status` | int32 | scalar | 0=ok · 1=fallback to recent (a,b) · 2=failed |
+
+A `fit_status == 2` frame writes **no** npz; downstream treats a missing depth
+artifact identically to a written `fit_status == 2`.
 
 ---
 
-## UniLiPs alignment
-
-Stages of UniLiPs that map to perception_2d v2:
-
-| UniLiPs concept | v2 implementation |
-|---|---|
-| BLIP open-vocab class proposal | Florence-2 dense-region caption |
-| SAM2 mask generation | SAM3 (text-prompted, mask + class in one) |
-| OneFormer ensemble classification | SAM3 (concept-aware by design) |
-| CLIP re-ranking | SAM3 presence-token score |
-| CLIPSeg per-pixel grounding | SAM3 mask output |
-| Majority-vote class assignment per SAM mask | SAM3 returns one class per mask directly |
-
-Stages of UniLiPs that belong to other components, **not** perception_2d:
-
-| UniLiPs concept | Where it lives |
-|---|---|
-| Occlusion-aware semantic lifting (Eq. 1) | `semantic_lifting` component |
-| Probabilistic label propagation (Algorithm 1) | future addition to `semantic_lifting` |
-| Iterative Weighted Update (Eqs. 3-4) | future addition to `semantic_lifting` |
-| Moving-object detection from map inconsistency | already done by `lidar_preprocessing/classify.py` |
-| HDBSCAN box clustering | SLF in `proposal_generation` does this better |
-| Adaptive Spherical Occlusion Culling | future, for densified depth output |
-
----
-
-## Configuration schema
+## Configuration (`src/perception_2d/config/perception_2d.yaml`)
 
 ```yaml
-# src/perception_2d/config/perception_2d.yaml
-perception_2d:
-  discovery:
-    model: florence-2-large-ft        # or florence-2-large
-    task: "<DENSE_REGION_CAPTION>"
-    min_confidence: 0.3
-  segmentation:
-    model: sam3.1
-    checkpoint: facebook/sam3.1
-    min_score: 0.5
-    object_only: true                 # filter prompts against prompts.yaml
-  phrase_dedup:
-    synonym_clip_threshold: 0.85
-    nms_3d_radius_m: 1.0
-    nms_2d_iou: 0.5
-  tracker:
-    backend: "sam3"                   # or "deva"
-    deva_model: "deva-vit-l"          # only if backend=deva
-  reid:
-    model: dinov2_vitl14
-    every_k_frames: 5
-  depth:
-    enabled: true
-    model: depth-anything-v2-large
-    min_lidar_anchors: 30
-    ransac_n_iter: 200
-    ransac_inlier_threshold_m: 0.5
-    use_static_anchors_only: true     # NON-OPTIONAL; see Stage 6
-    fallback_window: 5
-    sky_mask_top_fraction: 0.3
-    confidence_method: gradient_magnitude
-    output_dtype: float16
-  cross_cam:
-    match_radius_m: 1.5
-  upstream_versions:
-    ingest: v1
-    lidar_preprocessing: v1
+discovery:
+  backend: "fixed"                 # "fixed" | "florence2"
+  model: "microsoft/Florence-2-large-ft"
+  task: "<DENSE_REGION_CAPTION>"
+  min_confidence: 0.3
+  sample_every_k: 10               # florence2 only: discover on every k-th frame
+  fixed_classes: ["car", "truck", "bus", "motorcycle", "bicycle",
+                  "pedestrian", "traffic cone", "barrier"]
+
+detection:
+  model: "IDEA-Research/grounding-dino-base"
+  box_threshold: 0.35
+  text_threshold: 0.25
+  nms_iou: 0.5
+  redetect_every_k: 10             # re-detect to admit objects entering mid-clip
+
+segmentation:
+  checkpoint: "/data/models/sam2.1_hiera_large.pt"
+  config: "configs/sam2.1/sam2.1_hiera_l.yaml"   # bundled in the sam2 package
+
+tracking:
+  iou_match_threshold: 0.5         # re-detected box ≥ this IoU = existing object
+  offload_video_to_cpu: true       # frame stack in host RAM (long-clip safe)
+  sub_clip_frames: 150             # OOM fallback window
+  min_sub_clip_frames: 16
+
+depth:
+  enabled: true
+  model: "depth-anything-v2-large"
+  batch_size: 4                    # frames through DA-V2 backbone per GPU batch
+  min_lidar_anchors: 30
+  ransac_n_iter: 200
+  ransac_inlier_threshold_m: 0.5
+  use_static_anchors_only: true    # NON-OPTIONAL — see depth branch
+  fallback_window: 5
+  sky_mask_top_fraction: 0.3
+  output_dtype: "float16"
+
+embeddings:
+  model: "dinov2_vitl14"
+  every_k_frames: 5
+
+prompts_path: "/config/prompts.yaml"
 ```
 
 ---
 
-## File layout
+## Running it
 
+**1. Fetch the model weights on the host** (before launching the container), into
+`${MODELS_ROOT}` (bind-mounted read-only at `/data/models`):
+
+```bash
+python3 src/perception_2d/scripts/fetch_models.py        # → ./data/models
+# or a custom location:
+MODELS_ROOT=/srv/wato_models python3 src/perception_2d/scripts/fetch_models.py
+# skip a model (e.g. when depth.enabled: false):
+python3 src/perception_2d/scripts/fetch_models.py --skip depth_anything_v2
 ```
-src/perception_2d/
-├── config/
-│   └── perception_2d.yaml
-└── src/wato_perception_2d/
-    ├── __init__.py
-    ├── cli.py                       (update for v2 commands)
-    ├── config.py                    (rewrite Pydantic schemas for v2)
-    ├── io.py                        (add depth_2d artifact helpers)
-    ├── pipeline.py                  (orchestration — rewrite for new stages)
-    │
-    ├── discovery.py        NEW      Florence-2 wrapper
-    ├── sam3.py             NEW      SAM3 detector + tracker wrapper
-    ├── phrase_dedup.py     NEW      Synonym coarsening + NMS
-    ├── projection.py       NEW      LiDAR → image projection (planned in SAM4D doc)
-    ├── depth.py            NEW      Depth Anything V2 wrapper
-    ├── depth_align.py      NEW      RANSAC affine fit + apply
-    ├── reid.py                      DINOv2 (extract from existing pipeline.py)
-    ├── cross_cam_merge.py           (update to use depth_2d artifact)
-    │
-    ├── detector.py         REMOVE   GroundingDINO no longer used
-    ├── segmenter.py        REMOVE   SAM2 no longer used
-    └── tracker_2d.py       REMOVE   replaced by sam3.py (DEVA logic moves there if needed)
+
+This downloads: GroundingDINO + DA-V2 into the HF cache (`/data/models/hf`),
+the SAM2.1 checkpoint as a loose `.pt` (`/data/models/sam2.1_hiera_large.pt`),
+and DINOv2 into the torch.hub cache (`/data/models/torch_hub`). The container is
+configured with `HF_HOME` / `TORCH_HOME` pointed at those caches and runs
+`HF_HUB_OFFLINE=1`.
+
+**2. Run the component on a bag** (ingest + lidar_preprocessing must have run
+first — perception_2d reads `frame_index`, calibration, and static LiDAR):
+
+```bash
+./watod run perception_2d run --bag <bag_id>            # all chunks
+./watod run perception_2d run --bag <bag_id> --chunk <chunk_id>
+./watod run perception_2d run --bag <bag_id> --force    # ignore existing outputs
 ```
+
+Chunks whose `detections_2d.parquet` + `tracklets_2d.parquet` already exist are
+skipped unless `--force`. Within a chunk, each camera's masklets are checkpointed
+to a per-camera resume pickle, so an aborted run resumes per camera rather than
+restarting the chunk; `--force` also discards those caches.
+
+**3. Inspect the depth output** with the interactive viewer (needs a forwarded
+`DISPLAY`, or run on the host):
+
+```bash
+./watod run perception_2d viz --bag <bag_id> [--chunk <chunk_id>] [--cam <cam_id>]
+```
+
+See `src/perception_2d/README.md` for the viewer controls.
 
 ---
 
-## Migration from v1
+## File layout (`src/perception_2d/src/wato_perception_2d/`)
 
-Steps in order; each can be validated independently before the next:
-
-1. **Build `projection.py`** (prerequisite for everything else). Tests:
-   projection round-trips against existing `_estimate_depth_from_lidar` for
-   known pixels.
-2. **Build `depth.py`** standalone — DA-V2 wrapper, no LiDAR integration yet.
-   Test on single image, visualize relative depth.
-3. **Build `depth_align.py`** with synthetic anchors. Test: known affine
-   recoverable to within 0.5%.
-4. **Build `discovery.py`** — Florence-2 wrapper. Test on one image, inspect
-   noun phrases.
-5. **Build `sam3.py`** — wrapper around SAM3 image + video. Test on one
-   image, then one camera stream.
-6. **Build `phrase_dedup.py`** — synonym clustering + NMS. Unit tests on
-   synthetic phrase lists.
-7. **Wire end-to-end in `pipeline.py`** for one chunk, one camera. Visualize
-   masks + depth + alignment quality.
-8. **Scale to 12 cameras**, validate cross-camera merge.
-9. **Validate against held-out data** if any ground truth available.
-10. **Update Dockerfile** to install Florence-2, SAM3, DA-V2 instead of
-    GroundingDINO + SAM2 + DEVA.
+```
+cli.py                     click entrypoint: `run` + `viz`
+config.py                  pydantic config schemas + prompts.yaml synonym map
+pipeline.py                two-pass orchestrator (depth pass, then tracking pass)
+io.py                      frame_index / calibration / static-LiDAR loaders + caches
+viz.py                     interactive depth-vs-image viewer
+models/
+  depth.py                 Depth Anything V2 wrapper (batched infer, unload)
+  detector.py              GroundingDINO wrapper (box source for SAM2)
+  _sam2_runtime.py         shared SAM2 video-predictor loader / cache
+  sam2_tracker.py          detector + SAM2 per-camera tracking → Masklets
+  discovery.py             Florence-2 open-vocab discovery (optional backend)
+  embeddings.py            DINOv2 appearance embeddings
+fusion/
+  depth_align.py           build_anchor_pairs / ransac_affine_fit / apply_affine
+  masklet.py               Masklet dataclass
+```
 
 ---
 
 ## Risks and things to validate
 
-- **DA-V2 license**: confirm Apache 2.0 before commercial use. V1 was more
-  restrictive.
-- **SAM3 license**: "SAM License" — verify exact terms for non-research use.
-- **Florence-2 dense-region caption quality on AV scenes**: trained mostly on
-  general photos, may underperform on highway/dashcam viewpoints. Validate
-  early — if poor, fall back to RAM++ tags or a fixed taxonomy.
-- **SAM 3.1 tracker quality on long sequences**: chunks can be 30s+ at 12 Hz,
-  i.e. 360+ frames per camera stream. Object Multiplex was tested on shorter
-  videos in the SAM 3.1 release notes.
-- **Per-frame DA inference cost**: DA-V2-Large is ~0.5s/image on an A100.
-  12 cameras × 100 frames × 0.5s = 600s of GPU time per chunk just for depth.
-  May need to batch across cameras or downsample DA input resolution.
-- **Cross-camera merge cluster radius**: 1.5 m may be too tight given depth
-  noise. Tune empirically.
-
----
-
-## Open questions deferred to implementation
-
-- Should `cross_cam_merge.py` weight masklets by `sam3_score` when clustering?
-- Should the SAM 3.1 tracker run forward-only or also backward across the
-  chunk overlap window (similar to v1's DEVA bidirectional plan)?
-- Is the `lidar_coverage` mask better computed at the affine-fit step
-  (per-anchor) or post-hoc by re-projecting LiDAR after metric depth exists?
-- How should we handle the case where Florence-2 emits a phrase not in
-  `prompts.yaml` (long-tail discovery)? Drop it, route it to
-  `open_vocab_discovery`, or keep with `canonical_class = "unknown"`?
-
----
-
-## Summary of actionable steps
-
-1. Define `DepthFrame` and updated `DetectionRow` schemas in
-   `src/common/src/wato_common/schemas.py`.
-2. Add `depth_2d_dir()` and `depth_2d_path()` helpers to
-   `src/common/src/wato_common/artifact_store.py`.
-3. Build `projection.py` (prerequisite, planned in SAM4D guidance).
-4. Build `depth.py` standalone wrapper around DA-V2.
-5. Build `depth_align.py` with RANSAC affine fit.
-6. Build `discovery.py` wrapper around Florence-2.
-7. Build `sam3.py` wrapper around SAM3 detector + SAM 3.1 tracker.
-8. Build `phrase_dedup.py` with CLIP-similarity coarsening + 2D/3D NMS.
-9. Update `cross_cam_merge.py` to read `depth_2d` artifact instead of running
-   its own LiDAR depth estimation.
-10. Rewrite `pipeline.py` to orchestrate the new stages.
-11. Remove `detector.py`, `segmenter.py`, `tracker_2d.py` (and their tests).
-12. Update `docker/perception_2d.Dockerfile` with Florence-2, SAM3, DA-V2.
-13. Update `config/pipeline.yaml` and create
-    `src/perception_2d/config/perception_2d.yaml`.
+- **DA-V2 inference cost**: DA-V2-Large is ~0.5 s/image; 12 cameras × ~100
+  frames is significant per chunk. `depth.batch_size` amortises this when the
+  card has headroom.
+- **GroundingDINO recall on AV viewpoints**: zero-shot detection can miss small
+  / distant objects. `redetect_every_k` and `box_threshold` are the main knobs;
+  LiDAR-dynamic-point cross-modal prompting (see `sam4d_guidance.md`) is a future
+  recovery path.
+- **SAM2 tracker quality on long sequences**: chunks can be 360+ frames per
+  camera. The OOM windowing keeps it from dying, but very long tracks may
+  fragment — re-linked downstream via DINOv2.
+- **Cross-camera merge** is *not* validated here — it is the downstream
+  `tracking` component's responsibility.
+```

@@ -193,7 +193,7 @@ def test_empty_inputs_return_empty(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# OOM fallback (mirrors the SAM 3.1 tracker's windowing contract)
+# OOM fallback (sub-clip windowing contract)
 # ---------------------------------------------------------------------------
 
 

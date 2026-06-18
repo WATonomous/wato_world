@@ -19,7 +19,7 @@ flowchart TD
     end
 
     subgraph perception_2d["perception_2d  ·  GPU"]
-        P2["Florence-2 + SAM 3.1\nDepth Anything V2\nSAM 3.1 video tracker\nDINOv2 embeddings\ncross-camera merge"]
+        P2["GroundingDINO detector\nSAM2 video tracker\nDepth Anything V2\nDINOv2 embeddings\n(optional Florence-2 discovery)"]
     end
 
     subgraph semantic_lifting["semantic_lifting  ·  CPU"]
@@ -63,7 +63,8 @@ flowchart TD
 
 `frame_index.parquet` (written by **ingest**) is the cross-component contract: every downstream stage reads `world_T_ego_flat` (interpolated ego pose per LiDAR sweep) from it rather than consuming raw bag topics.
 
-Only **ingest** is implemented end-to-end. All other components are stubs.
+**ingest** and **perception_2d** are implemented end-to-end (and **semantic_lifting**'s
+core lifting algorithm). The remaining components are stubs.
 
 ## Layout
 
@@ -119,7 +120,7 @@ watod down all
 | Component | Purpose | Image base | GPU |
 |---|---|---|---|
 | `ingest` | Decode rosbag → frames + lidar + poses + frame_index | CPU | no |
-| `perception_2d` | Florence-2 + SAM 3.1 + Depth Anything V2 + DINOv2 + x-cam merge | CUDA | yes |
+| `perception_2d` | GroundingDINO + SAM2 video tracker + Depth Anything V2 + DINOv2 (optional Florence-2 discovery) | CUDA | yes |
 | `semantic_lifting` | Occlusion-aware 2D→3D label lifting (UniLiPs Eq.1) | CPU | no |
 | `lidar_preprocessing` | Motion comp, static/dynamic split, ground mesh | CPU | no |
 | `proposal_generation` | LiDAR detector + Segment-Lift-Fit + fusion | CUDA | yes |

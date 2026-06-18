@@ -194,9 +194,10 @@ class DepthAnythingV2:
     def unload(self) -> None:
         """Drop the GPU-resident model so its VRAM can be reclaimed.
 
-        The pipeline runs depth as its own pass and unloads DA-V2 before SAM 3.1
-        is built, so the two heavy models are never co-resident (critical on
-        small-VRAM GPUs). Caller should follow with torch.cuda.empty_cache().
+        The pipeline runs depth as its own pass and unloads DA-V2 before the
+        detector + SAM2 are built, so the two heavy model sets are never
+        co-resident (critical on small-VRAM GPUs). Caller should follow with
+        torch.cuda.empty_cache().
         """
         self._model = None
 

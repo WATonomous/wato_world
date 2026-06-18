@@ -24,6 +24,42 @@ Cross-camera identity merging is **not** done here — it belongs to the
 downstream `tracking` component (3D/4D association gated by the DINOv2 features
 persisted on each masklet). `global_object_id` is left null for `tracking`.
 
+For the full design (two-pass VRAM split, output schemas, config reference) see
+[`docs/research/perception_2d_v2.md`](../../docs/research/perception_2d_v2.md).
+
+## Running it
+
+**1. Fetch model weights on the host** (before launching the container) into
+`${MODELS_ROOT}`, bind-mounted read-only at `/data/models`:
+
+```bash
+python3 src/perception_2d/scripts/fetch_models.py        # → ./data/models
+# custom location:
+MODELS_ROOT=/srv/wato_models python3 src/perception_2d/scripts/fetch_models.py
+# skip a model (e.g. when depth.enabled: false):
+python3 src/perception_2d/scripts/fetch_models.py --skip depth_anything_v2
+```
+
+Pulls GroundingDINO + Depth Anything V2 into the HF cache, the SAM2.1 checkpoint
+as a loose `.pt`, and DINOv2 into the torch.hub cache. The container points
+`HF_HOME` / `TORCH_HOME` at those caches and runs `HF_HUB_OFFLINE=1`.
+
+**2. Run on a bag** — `ingest` and `lidar_preprocessing` must have run first
+(perception_2d reads `frame_index`, calibration, and static LiDAR points):
+
+```bash
+./watod run perception_2d run --bag <bag_id>            # all chunks
+./watod run perception_2d run --bag <bag_id> --chunk <chunk_id>
+./watod run perception_2d run --bag <bag_id> --force    # ignore existing outputs
+```
+
+Chunks whose output parquets already exist are skipped unless `--force`. Each
+camera's masklets are checkpointed to a per-camera resume cache, so an aborted
+run resumes per camera; `--force` discards those caches too.
+
+Outputs land at `data/artifacts/raw/<bag_id>/perception_2d/<version>/<chunk_id>/`:
+`detections_2d.parquet`, `tracklets_2d.parquet`, `masks_2d/`, `depth_2d/`.
+
 ## Visualizing depth
 
 `viz` opens an interactive depth-vs-image viewer (the 2D analogue of

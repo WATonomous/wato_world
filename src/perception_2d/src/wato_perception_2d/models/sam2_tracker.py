@@ -12,9 +12,8 @@ predictor to segment + propagate each detected box into a tracked masklet:
   3. ``propagate_in_video`` forward to the next keyframe, recording per-object
      masks → ``_Track`` → ``Masklet`` (per-frame PNGs + DINOv2 features every k).
 
-This replaces SAM 3.1's concept-everything multiplex tracker: the detector emits
-one box per object, so each physical object becomes a single masklet — no synonym
-explosion, far fewer masks for downstream to consume.
+The detector emits one box per object, so each physical object becomes a single
+masklet — no synonym explosion, far fewer masks for downstream to consume.
 
 Object ids reset between OOM sub-clip windows (and between chunks) — exactly the
 discontinuity the downstream `tracking` component re-links via the DINOv2
@@ -226,8 +225,7 @@ def track_camera(
     Tries the whole clip in one SAM2 session. On a CUDA OOM it falls back to
     windows of ``sub_clip_frames`` (fresh session each); a window that itself
     OOMs is recursively halved down to ``min_sub_clip_frames`` before being
-    skipped — identical graceful-degradation shape to the SAM 3.1 path this
-    replaced. Object ids reset between windows (re-linked downstream via DINOv2).
+    skipped. Object ids reset between windows (re-linked downstream via DINOv2).
 
     Returns one Masklet per tracked object that appeared in ≥1 frame.
     """

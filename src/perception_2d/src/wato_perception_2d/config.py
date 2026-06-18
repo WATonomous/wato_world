@@ -66,8 +66,13 @@ class SegmentationConfig(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    # SAM2.1 checkpoint on HuggingFace, loaded via SAM2VideoPredictor.from_pretrained.
-    model: str = "facebook/sam2.1-hiera-large"
+    # Local SAM2.1 checkpoint path. data/models is bind-mounted read-only at
+    # /data/models in the container; the checkpoint is a loose .pt (placed there
+    # by scripts/fetch_models.py), loaded via build_sam2_video_predictor — not
+    # from_pretrained, since the container runs HF_HUB_OFFLINE=1.
+    checkpoint: str = "/data/models/sam2.1_hiera_large.pt"
+    # Hydra config name bundled in the `sam2` package (matches the checkpoint).
+    config: str = "configs/sam2.1/sam2.1_hiera_l.yaml"
 
 
 class TrackingConfig(BaseModel):

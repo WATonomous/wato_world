@@ -1,6 +1,6 @@
 """configure_tqdm() must stop tqdm from spamming non-TTY output (the watod /
 docker / file-capture case) while leaving live terminal bars alone — including
-overriding SAM 3.1's explicit ``disable=False``."""
+overriding a third-party bar's explicit ``disable=False``."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ def test_auto_forces_off_on_non_tty_even_with_explicit_disable_false():
     from tqdm import tqdm
 
     stream = _NonTTY()
-    # sam3 passes disable=self.rank > 0 → disable=False on the single GPU.
+    # A third-party bar (e.g. SAM2's propagate_in_video) may pass disable=False.
     bar = tqdm(range(5), file=stream, disable=False, desc="propagate_in_video")
     for _ in bar:
         pass

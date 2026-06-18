@@ -231,13 +231,13 @@ this form. Add a config option `visibility_neighborhood` (default 3).
 
 For each visible (u, v), check which detection masks contain that pixel.
 Multiple masks can overlap (a person inside a vehicle bounding box, etc.).
-Order detections by `sam3_score` and take the *innermost* (smallest area)
+Order detections by `det_score` and take the *innermost* (smallest area)
 mask containing the pixel. This handles the "person inside car" case
 correctly — the person mask wins.
 
 Record a vote:
 ```
-vote = (instance_id, class_id, score = sam3_score × depth_confidence[u,v])
+vote = (instance_id, class_id, score = det_score × depth_confidence[u,v])
 ```
 
 ### Step 6: cross-camera vote reduction
@@ -466,7 +466,7 @@ implementation. Single source of truth for the projection math.
   conservative but slower.
 - Should `depth_confidence[u,v]` factor into the per-vote score, or only
   gate vote inclusion? Currently planned as a multiplicative factor on
-  `sam3_score`.
+  `det_score`.
 - For dynamic points, should we offer a config to *skip* the
   ego-motion-only compensation and run with raw LiDAR coordinates? This
   would let us measure how much the compensation actually buys.

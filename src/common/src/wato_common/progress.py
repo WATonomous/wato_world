@@ -6,11 +6,11 @@ But when stdout/stderr is NOT a TTY (piped through ``watod`` / ``docker compose`
 tee'd to a file, captured by CI), the ``\\r`` updates are recorded as separate
 lines and the bar "spams" hundreds of lines.
 
-This bites every bar in a run, including ones we don't own — SAM 3.1's internal
+This bites every bar in a run, including ones we don't own — SAM2's internal
 ``propagate_in_video`` / frame-loading bars use the same ``tqdm.std.tqdm`` class
-we do. We can't fix those at the call site; worse, SAM 3.1 passes an explicit
-``disable=self.rank > 0`` (i.e. ``disable=False`` on the single GPU), so a mere
-default wouldn't help. So we wrap ``tqdm.std.tqdm.__init__`` process-wide and,
+we do. We can't fix those at the call site; worse, a third-party bar may pass an
+explicit ``disable=False``, so a mere default wouldn't help. So we wrap
+``tqdm.std.tqdm.__init__`` process-wide and,
 in the default "auto" mode, *force* ``disable=True`` whenever the bar's output
 stream isn't a TTY — overriding even an explicit ``disable=False``. Result: a
 live single-line bar on a terminal, silence when the output is being captured.
@@ -46,8 +46,8 @@ def configure_tqdm() -> None:
 
     Wraps ``tqdm.std.tqdm.__init__`` to set ``disable`` per WATO_PROGRESS:
       - "auto" (default): force-disable on non-TTY output (overrides an explicit
-        ``disable=False``, which is what SAM 3.1's bars pass); leave TTY bars
-        alone so they still render live.
+        ``disable=False``, which is what some third-party bars pass); leave TTY
+        bars alone so they still render live.
       - "off": always disable.
       - "on": leave the caller's value untouched.
     Idempotent; a no-op if tqdm isn't installed.

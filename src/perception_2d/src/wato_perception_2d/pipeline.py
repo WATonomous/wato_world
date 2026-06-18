@@ -530,13 +530,17 @@ def _run_tracking_pass(
     Images are re-loaded here (the depth pass already discarded them) so only
     one camera's frames are resident at a time.
     """
-    predictor = get_sam2_predictor(model_id=cfg.segmentation.model, device=device)
+    predictor = get_sam2_predictor(
+        checkpoint=cfg.segmentation.checkpoint,
+        config_file=cfg.segmentation.config,
+        device=device,
+    )
     if predictor is None:
         # sam2 imports (checked before the depth pass) but the predictor still
-        # couldn't be built — e.g. the checkpoint isn't fetched. Fail loud.
+        # couldn't be built — e.g. the checkpoint isn't present. Fail loud.
         raise RuntimeError(
-            f"chunk {chunk_id}: SAM2 predictor could not be built. Fetch "
-            f"{cfg.segmentation.model} into the HF cache (scripts/fetch_models.py)."
+            f"chunk {chunk_id}: SAM2 predictor could not be built. Place the "
+            f"checkpoint at {cfg.segmentation.checkpoint} (scripts/fetch_models.py)."
         )
 
     all_masklets: list[Masklet] = []

@@ -1,9 +1,8 @@
 """Open-vocabulary 2D detector — the box source for SAM2.
 
-Replaces SAM 3.1's concept-everything segmentation with a detector that emits a
-*bounded, deduplicated, class-labeled* set of boxes per frame. Those boxes prompt
-SAM2 (sam2_tracker.py), so downstream gets one masklet per detected object rather
-than every region matching a text concept.
+Emits a *bounded, deduplicated, class-labeled* set of boxes per frame. Those
+boxes prompt SAM2 (sam2_tracker.py), so downstream gets one masklet per detected
+object rather than one per region matching a text concept.
 
 Default backend is GroundingDINO via HuggingFace Transformers
 (``AutoModelForZeroShotObjectDetection``, e.g. ``IDEA-Research/grounding-dino-base``),

@@ -7,8 +7,8 @@ Run on the host BEFORE launching the container so that ${MODELS_ROOT}
 Layout produced:
 
     ${MODELS_ROOT}/
+      sam2.1_hiera_large.pt        # raw SAM2.1 checkpoint (loaded by path)
       hf/                          # HuggingFace cache (HF_HOME)
-        hub/models--facebook--sam2.1-hiera-large/...
         hub/models--IDEA-Research--grounding-dino-base/...
         hub/models--depth-anything--Depth-Anything-V2-Large/...
       torch_hub/                   # torch.hub cache (TORCH_HOME)
@@ -47,13 +47,22 @@ from pathlib import Path
 # Model registry.  Edit here when adding / changing the perception_2d stack.
 # ---------------------------------------------------------------------------
 
+# HF repos snapshot-downloaded into the HF_HOME cache (loaded at runtime via
+# transformers / huggingface_hub from_pretrained, which read that cache layout).
 HF_MODELS: dict[str, str] = {
-    # facebook/sam2.1-hiera-large hosts the SAM2.1 checkpoint; loaded via
-    # SAM2VideoPredictor.from_pretrained (config is bundled in the `sam2` pkg).
-    "sam2": "facebook/sam2.1-hiera-large",              # sam2_tracker.py
     # GroundingDINO detector, loaded via transformers AutoModel/AutoProcessor.
     "grounding_dino": "IDEA-Research/grounding-dino-base",  # detector.py
     "depth_anything_v2": "depth-anything/Depth-Anything-V2-Large",  # depth.py
+}
+
+# Single-file checkpoints downloaded directly into MODELS_ROOT (NOT the HF cache):
+# their runtime loader takes a plain filesystem path. {tag: (repo_id, filename)}.
+# The file lands at ${MODELS_ROOT}/<filename> (= /data/models/<filename> in the
+# container), already-present files are left untouched.
+RAW_CHECKPOINTS: dict[str, tuple[str, str]] = {
+    # SAM2.1 — loaded by sam2_tracker via build_sam2_video_predictor(ckpt_path);
+    # the hydra config ships inside the `sam2` package, so only the .pt is needed.
+    "sam2": ("facebook/sam2.1-hiera-large", "sam2.1_hiera_large.pt"),
 }
 
 # DINOv2 weights ship via torch.hub (embeddings.py).  We pre-populate TORCH_HOME
@@ -62,7 +71,7 @@ TORCH_HUB_MODELS: list[tuple[str, str]] = [
     ("facebookresearch/dinov2", "dinov2_vitl14"),
 ]
 
-ALL_TAGS = list(HF_MODELS.keys()) + ["dinov2"]
+ALL_TAGS = list(HF_MODELS.keys()) + list(RAW_CHECKPOINTS.keys()) + ["dinov2"]
 
 
 # ---------------------------------------------------------------------------
@@ -92,19 +101,48 @@ def _du_h(path: Path) -> str:
 
 
 def _fetch_hf(repo_id: str, hf_home: Path, token: str | None) -> tuple[bool, str]:
-    """Snapshot-download one HuggingFace repo into HF_HOME's hub cache."""
+    """Snapshot-download one HuggingFace repo into HF_HOME's hub cache.
+
+    Passes cache_dir explicitly (= HF_HOME/hub) instead of relying on the
+    HF_HOME env var: huggingface_hub freezes its cache path at import time, so
+    setting os.environ here (after the import) silently falls back to the default
+    ~/.cache/huggingface. The container reads HF_HOME=/data/models/hf, so weights
+    MUST land in <models_root>/hf/hub to be visible there.
+    """
     try:
         from huggingface_hub import snapshot_download
     except ImportError:
         return False, "huggingface_hub not installed (pip install huggingface_hub)"
 
-    os.environ["HF_HOME"] = str(hf_home)
     try:
-        snapshot_download(
+        snapshot_download(repo_id=repo_id, token=token, cache_dir=str(hf_home / "hub"))
+        return True, "ok"
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+
+
+def _fetch_hf_file(
+    repo_id: str, filename: str, dest_dir: Path, token: str | None
+) -> tuple[bool, str]:
+    """Download a single file from an HF repo directly into ``dest_dir``.
+
+    Lands at ``dest_dir/filename`` (a real file, not the HF symlink cache) so a
+    runtime loader that takes a plain path finds it. Idempotent: an existing file
+    at the destination is left untouched (respects a manual drop).
+    """
+    dest = dest_dir / filename
+    if dest.exists():
+        return True, f"already present ({dest})"
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        return False, "huggingface_hub not installed (pip install huggingface_hub)"
+    try:
+        hf_hub_download(
             repo_id=repo_id,
+            filename=filename,
             token=token,
-            allow_patterns=None,
-            local_dir=None,  # use HF_HOME cache layout
+            local_dir=str(dest_dir),
         )
         return True, "ok"
     except Exception as exc:  # noqa: BLE001
@@ -180,7 +218,10 @@ def main() -> int:
         print("Would fetch:")
         for tag, repo_id in HF_MODELS.items():
             mark = "skip" if tag in skip else "fetch"
-            print(f"  [{mark}] {tag:<20} {repo_id}")
+            print(f"  [{mark}] {tag:<20} {repo_id}  → HF cache")
+        for tag, (repo_id, filename) in RAW_CHECKPOINTS.items():
+            mark = "skip" if tag in skip else "fetch"
+            print(f"  [{mark}] {tag:<20} {repo_id}::{filename}  → {models_root}")
         for repo, model in TORCH_HUB_MODELS:
             mark = "skip" if "dinov2" in skip else "fetch"
             print(f"  [{mark}] {'dinov2':<20} torch.hub :: {repo} :: {model}")
@@ -196,6 +237,18 @@ def main() -> int:
         ok, msg = _fetch_hf(repo_id, hf_home, args.hf_token)
         if ok:
             print(f"  ✓ ok")
+        else:
+            print(f"  ✗ {msg}", file=sys.stderr)
+            failures.append((tag, msg))
+
+    for tag, (repo_id, filename) in RAW_CHECKPOINTS.items():
+        if tag in skip:
+            print(f"⤬ skip   {tag:<20} ({repo_id}::{filename})")
+            continue
+        print(f"⟶ fetch  {tag:<20} ({repo_id}::{filename}) …", flush=True)
+        ok, msg = _fetch_hf_file(repo_id, filename, models_root, args.hf_token)
+        if ok:
+            print(f"  ✓ {msg}")
         else:
             print(f"  ✗ {msg}", file=sys.stderr)
             failures.append((tag, msg))

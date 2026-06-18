@@ -48,7 +48,7 @@ each in its own Docker image, communicating only through artifacts on disk
 ```
 ingest              → frames + lidar sweeps + poses + frame_index
 lidar_preprocessing → motion comp, static/dynamic split, ground extraction
-perception_2d       → Florence-2 + SAM 3.1 + Depth Anything V2 + DINOv2 + x-cam merge
+perception_2d       → GroundingDINO + SAM2 video tracker + Depth Anything V2 + DINOv2 (optional Florence-2 discovery)
 semantic_lifting    → occlusion-aware 2D→3D label lifting (UniLiPs Eq.1)
 proposal_generation → LiDAR detector ensemble + Segment-Lift-Fit + fusion
 tracking            → 4D tracking with masklet association + DINOv2 ReID
@@ -57,8 +57,9 @@ open_vocab_discovery → rare-class branch
 student_training    → BEVFusion / TransFusion student detector
 ```
 
-Only `ingest` is implemented end-to-end. `semantic_lifting` core algorithm is
-implemented (Parts 1–7). Everything else is a stub that raises NotImplementedError.
+`ingest` and `perception_2d` are implemented end-to-end. `semantic_lifting` core
+algorithm is implemented (Parts 1–7). Everything else is a stub that raises
+NotImplementedError.
 
 ## Repository conventions
 

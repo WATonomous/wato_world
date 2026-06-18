@@ -29,7 +29,7 @@ multi-view shape fitting and multi-LiDAR point density.
 ```
 ingest             ← bags + calibration + poses + chunk index
 lidar_preprocessing← SAM4D preprocessing, static/dynamic split, ground plane
-perception_2d      ← Florence-2 + SAM 3.1 text-prompted segmentation + DA-V2 depth + DINOv2 ReID
+perception_2d      ← GroundingDINO detector + SAM2 video tracker + DA-V2 depth + DINOv2 ReID
 semantic_lifting   ← occlusion-aware 2D→3D label lifting (UniLiPs Eq.1)
 proposal_generation← Segment-Lift-and-Fit, Fusion4DAL LiDAR detector ensemble
 tracking           ← Fusion4DAL 4D tracking + SAM4D temporal memory
@@ -104,9 +104,9 @@ lidar_preprocessing   reads: sweeps, poses, calibration
 
 perception_2d         reads: frames, lidar_proc_index, world/*.npz, calibration
   └─ per-chunk/
-       ├─ detections_2d.parquet      (per-frame phrase + class + SAM3 score)
-       ├─ tracklets_2d.parquet       (SAM3.1 temporal associations across frames)
-       ├─ masks_2d/                  (per-detection SAM3 masks, camera-aligned)
+       ├─ detections_2d.parquet      (per-masklet class + detector score)
+       ├─ tracklets_2d.parquet       (SAM2 temporal associations across frames)
+       ├─ masks_2d/                  (per-masklet per-frame SAM2 masks, camera-aligned)
        └─ depth_2d/<cam>/<frame>.npz (Depth Anything V2 + LiDAR affine-scaled metric depth)
 
 semantic_lifting      reads: world/*.npz, masks_2d, tracklets_2d, depth_2d, calibration
@@ -133,10 +133,10 @@ label_refinement      reads: tracks, world/*.npz, dynamic_masks
 ## Implementation priority order
 
 1. **`perception_2d`** — unblocks everything downstream
-   - Florence-2 open-vocab discovery → SAM 3.1 text-prompted segmentation
+   - GroundingDINO detector (fixed taxonomy, or optional Florence-2 open-vocab discovery)
+   - SAM2 video predictor turns each box into a tracked masklet (IoU re-detect merge)
    - Depth Anything V2 + LiDAR RANSAC affine fit → metric depth per frame
-   - SAM 3.1 Object Multiplex video tracker (IoU fallback)
-   - DINOv2 per-tracklet embedding for ReID downstream
+   - DINOv2 per-masklet embedding for ReID downstream
 
 2. **`semantic_lifting`** — once 2D masks + depth artifacts exist
    - Temporal sweep↔frame matching (max 50ms offset)
