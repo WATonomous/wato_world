@@ -85,25 +85,28 @@ wato_world/
 ## Quickstart
 
 ```bash
-# 1. Edit defaults if needed.
-$EDITOR watod-config.sh
-# Optional: cp watod-config.local.sh.example watod-config.local.sh
+# 1. Put local overrides in a local config file like watod-config.local.sh and make sure it is git-ignored.
 
 # 2. Symlink watod into your PATH (one-time).
 ./watod install
 
-# 3. Bring up a component.
-watod -c ingest up
+# 3. Build the active component images.
+watod build
 
-# 4. Run a component on a bag.
-watod run ingest my_bag
+# 4. Bring up the active components.
+watod up
 
-# 5. Open a dev shell in a component container with source bind-mounted.
-watod -c perception_2d:dev up
+# 5. Run a component on a bag under data/bags/. Example:
+watod run ingest /data/bags/my_bag
+
+# 6. Open a dev shell in an active dev container with source bind-mounted.
+# First set ACTIVE_MODULES="perception_2d:dev" in watod-config.local.sh, then:
+watod build
+watod up
 watod -t perception_2d_dev
 > pytest /ws/src/perception_2d/tests
 
-# 6. Tear everything down.
+# 7. Tear everything down.
 watod down all
 ```
 
@@ -158,7 +161,7 @@ watod test ingest
 
 ## Build order (recommended)
 
-1. Skeleton + infra (this repo as-is): `watod -c all build` succeeds.
+1. Skeleton + infra (this repo as-is): set `ACTIVE_MODULES="all"` in `watod-config.local.sh`, then run `watod build`.
 2. Ingest end-to-end on one bag.
 3. Host-side rerun viewer (notebooks/).
 4. LiDAR preprocessing (CPU).

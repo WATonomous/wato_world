@@ -74,7 +74,7 @@ RUN existing_user=$(getent passwd ${USER_UID} | cut -d: -f1 || true) \
  && apt-get -qq autoremove -y && apt-get -qq clean \
  && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc/* /usr/share/man/*
 
-RUN uv pip install --system --break-system-packages pytest pytest-cov ruff black ipython
+RUN uv pip install --system --break-system-packages "pytest>=7,<9" pytest-cov ruff black ipython
 
 # Hand /ws to the dev user so pytest can write __pycache__, ruff its cache,
 # etc. without permission errors. Mirrors the chown step in
