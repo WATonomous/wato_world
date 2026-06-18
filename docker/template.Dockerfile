@@ -53,6 +53,7 @@ ARG USERNAME=wato
 ARG USER_UID=1000
 ARG USER_GID=1000
 ARG CLAUDE_CODE=false
+ARG DEV_PYTEST_SPEC=pytest
 
 # UID 1000 is taken by the default `ubuntu` user on ubuntu24.04 — delete that
 # entry first so useradd can claim 1000 for ${USERNAME}. Also seeds the new
@@ -74,7 +75,7 @@ RUN existing_user=$(getent passwd ${USER_UID} | cut -d: -f1 || true) \
  && apt-get -qq autoremove -y && apt-get -qq clean \
  && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc/* /usr/share/man/*
 
-RUN uv pip install --system --break-system-packages "pytest>=7,<9" pytest-cov ruff black ipython
+RUN uv pip install --system --break-system-packages "${DEV_PYTEST_SPEC}" pytest-cov ruff black ipython
 
 # Hand /ws to the dev user so pytest can write __pycache__, ruff its cache,
 # etc. without permission errors. Mirrors the chown step in
