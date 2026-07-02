@@ -47,13 +47,32 @@ A.   deskew/          per-sweep motion compensation + world-frame projection
                       stored inside each world NPZ; sensor origin also stored)
     │
     ▼
-A.5  mf_mos/          learned moving-object segmentation (optional; disabled
-                      by default; produces per-sweep raw-frame boolean masks)
-    │
-    ▼
-B.   classify/        voxel-based static / dynamic decomposition
-                      (log-odds via Amanatides-Woo ray traversal, or legacy
-                      persistence counting; optionally fuses MF-MOS votes)
+B.   static/dynamic decomposition — picked by `--seg aw|mos|union`
+     (cfg.segmentation). aw and mos are independent (share no code); union
+     fuses them:
+
+       seg=aw   classify/   voxel-based decomposition via log-odds
+                            Amanatides-Woo ray traversal (or legacy
+                            persistence counting). No MF-MOS, no model.
+
+       seg=mos  mf_mos/     learned moving-object segmentation. Runs the
+                            MF-MOS model (range-image residual MOS) and
+                            derives static/dynamic purely from the per-sweep
+                            moving masks. No ray traversal.
+
+       seg=union union/     fusion. Runs aw (static basis) + mos, keeps aw's
+                            high-precision static map, takes the dynamic cloud
+                            from MF-MOS gated and vetoed:
+                            dynamic = mf_mos_moving & ~ground & ~near_ego
+                                      & ~near_ground & ~aw_static_dilated.
+                            ~near_ground = below union.ground_height_veto_m
+                            over Step C's ground grid (road FPs are invisible
+                            to the static veto — road voxels are never
+                            static). Step C therefore runs BEFORE the fusion
+                            on this path only. A post-veto temporal motion
+                            filter (union.motion_filter) then drops the
+                            structure leakage the voxel vetoes miss — see
+                            "Motion filter" below.
     │
     ▼
 C.   ground/          aggregate per-sweep ground masks → height grid
@@ -61,6 +80,11 @@ C.   ground/          aggregate per-sweep ground masks → height grid
     ▼
 D.   reduce/          [separate command] bag-level global static map
 ```
+
+All three Step-B methods write the identical artifact set (`static_map.npz`
+with `static_voxel_keys`, `dynamic_map.npz`, per-sweep `dynamic_mask.npy`,
+updated `lidar_proc_index.parquet`), so Steps C and D are method-agnostic.
+`union` rewrites only the dynamic side — it keeps aw's `static_map.npz`.
 
 ---
 
@@ -121,7 +145,7 @@ lidar rather than silently applying the wrong transform.
 | `reference_timestamp_ns` | int64 | Sweep timestamp (ns) |
 | `world_path` | str | URI to world-frame NPZ |
 | `dynamic_mask_path` | str | URI to per-point dynamic mask |
-| `mf_mos_mask_path` | str (nullable) | URI to raw-frame MF-MOS mask (null when MF-MOS disabled) |
+| `mf_mos_mask_path` | str (nullable) | URI to raw-frame MF-MOS mask (null on the `seg=aw` path) |
 | `n_points_total`, `n_points_static`, `n_points_dynamic` | int32 | Point counts |
 | `world_xmin/xmax/ymin/ymax/zmin/zmax` | float | Bounding box in world frame |
 | `has_intensity`, `deskewed` | bool | Feature flags |
@@ -129,76 +153,65 @@ lidar rather than silently applying the wrong transform.
 
 ---
 
-### Step A.5 — MF-MOS learned segmentation (`mf_mos/`)
+### Step B (seg=mos) — MF-MOS learned segmentation (`mf_mos/`)
 
-**What it does.** An optional learned moving-object segmentation step that runs
-between deskew and classify. Disabled by default (`mf_mos.enabled: false`).
-When enabled, it runs the MF-MOS (Multi-Frame Moving Object Segmentation) model
-on each sweep to produce a per-point boolean mask: `True` = the model thinks
-this point belongs to a moving object.
+**Selected with `--seg mos`.** A fully self-contained alternative to the
+Amanatides-Woo classifier below. It does **not** run when `--seg aw`, and it
+never touches the AW log-odds / ray-traversal code. It runs the MF-MOS
+(Multi-Frame Moving Object Segmentation) model on each sweep and derives the
+static/dynamic split purely from the per-sweep moving masks.
 
-**Algorithm.** MF-MOS projects each sweep's world-frame points into a range
-image (spherical projection). To detect motion, it computes residual range
-images: for each past-sweep offset in `residual_steps` (default `[1, 2, 4, 8]`),
-the current sweep's range image minus the warp of the historical sweep into the
-current viewpoint. A moving object leaves a nonzero residual after ego-motion
-correction; a static wall does not. The multi-frame residual channels are
-concatenated and fed to a lightweight encoder-decoder. Output logits above
-`score_threshold` (default 0.5) are labeled moving.
+**Two stages, both in `mf_mos/`:**
+
+1. *Inference* (`mf_mos/_core.py`) — produces a per-point moving mask per sweep.
+2. *Segmentation* (`mf_mos/segment.py`, `classify_chunk`) — turns those masks
+   into `static_map.npz` / `dynamic_map.npz` / per-sweep `dynamic_mask.npy`:
+
+   ```
+   dynamic = mf_mos_moving & ~ground     # Patchwork++ ground is authoritative
+   static  = ~mf_mos_moving & ~ground    # ground points belong to ground.npz
+   ```
+
+   This is the **pure-MOS split**: every non-ground point the model didn't flag
+   moving is static. No ray traversal, no voxel vote aggregation, no fusion.
+
+**Inference algorithm.** MF-MOS projects each sweep's points into a range image
+(spherical projection). To detect motion it computes residual range images: for
+each past-sweep offset in `residual_steps`, the current range image minus the
+ego-motion-warped historical sweep. A moving object leaves a nonzero residual
+after ego-motion correction; a static wall does not. The multi-frame residuals
+are concatenated and fed to a lightweight encoder-decoder; per-pixel moving
+probability above `score_threshold` is labeled moving and unprojected to points.
 
 **Key design points:**
-- Runs in sensor frame on raw-length point arrays (before nonfinite filtering),
-  so the mask can be aligned to raw NPZ arrays by downstream steps.
+- Masks are raw-length (before nonfinite filtering) so they align to raw NPZs.
 - Uses the stored `ego_T_lidar` extrinsic + SLAM poses to warp historical sweeps
   into the current viewpoint for residual computation.
-- Skips a sweep if the pose gap to the required historical sweep exceeds
-  `max_pose_gap_ms` — prevents bad residuals from large ego-motion jumps.
-- When `save_scores: true`, also writes a float32 `_mf_mos_score.npy` alongside
-  each mask for threshold tuning.
+- **Two distinct time caps** (do not confuse them):
+  - `max_pose_gap_ms` gates *pose-interpolation* quality when warping.
+  - `max_residual_gap_ms` caps the *sweep-to-sweep residual baseline*. A
+    residual at step `k` spans `k * sweep_dt`, which for the longer
+    `residual_steps` legitimately exceeds `max_pose_gap_ms`. These were once
+    the same knob, which silently zeroed every long residual channel and
+    collapsed multi-frame MOS to ~2 live channels; keep `max_residual_gap_ms`
+    above `max(residual_steps) * sweep_dt`.
+- A sweep with no usable mask is left entirely static (never fabricates dynamics).
+- When `save_scores: true`, also writes a float32 `_mf_mos_score.npy` per sweep.
 
-**Fusion with classify.** The relationship between MF-MOS and the AW log-odds
-classifier in Step B is controlled by `fusion_mode`:
-
-| `fusion_mode` | Behaviour |
-|---|---|
-| `independent` | MF-MOS masks are written but Step B ignores them. Both signals available independently. |
-| `union` | A voxel is dynamic if AW log-odds OR MF-MOS votes it dynamic. |
-| `mfmos_only` | Dynamic mask is derived from MF-MOS votes only; AW log-odds is used only for the static cloud. |
-
-Fusion happens at **voxel level**, not per-point. For the log-odds path, MF-MOS
-votes are accumulated during Pass 1 of classify alongside the AW log-odds:
-
-```
-For each sweep in Pass 1:
-  1. AW ray traversal updates log_odds / n_obs / n_hits dicts (as usual)
-  2. Load MF-MOS mask for this sweep (aligned to world-frame length)
-  3. For each unique endpoint voxel this sweep:
-       n_sweep_hits[voxel] += 1
-  4. For each unique endpoint voxel labeled moving this sweep:
-       mf_mos_votes[voxel] += 1
-
-After Pass 1:
-  vote_fraction = mf_mos_votes / n_sweep_hits
-  mf_mos_dynamic_arr = voxels where votes >= min_mf_mos_votes
-                       AND vote_fraction >= mf_mos_vote_fraction_threshold
-```
-
-This means a single noisy sweep cannot force a voxel dynamic — cross-sweep
-agreement is required, exactly like the AW occupancy evidence. Votes are counted
-once per SWEEP (not per point) to prevent high-density voxels from inflating
-their vote fraction. For the persistence path, fusion falls back to per-sweep
-binary OR (since there are no DDA-derived unique_keys to anchor chunk-level votes).
-
-**Outputs per sweep:**
+**Outputs per sweep (in addition to the shared static/dynamic artifacts):**
 
 | Artifact | Description |
 |---|---|
 | `lidar_proc/<sweep_id:06d>_mf_mos_mask.npy` | `bool[N_raw]`, aligned to raw sweep NPZ length |
-| `lidar_proc/<sweep_id:06d>_mf_mos_score.npy` | `float32[N_raw]`, logit scores (when `save_scores: true`) |
+| `lidar_proc/<sweep_id:06d>_mf_mos_score.npy` | `float32[N_raw]`, moving scores (when `save_scores: true`) |
+
+> **Evaluating MF-MOS on its own.** `--seg mos` is deliberately the *raw* model
+> output (per-sweep threshold only) so its quality can be A/B'd against `--seg
+> aw` without any geometric post-filtering muddying the comparison.
 
 ---
 
-### Step B — Voxel classify (`classify/`)
+### Step B (seg=aw) — Voxel classify (`classify/`)
 
 **What it does.** Treats the entire set of world-frame sweeps for a chunk as a
 4D occupancy volume and classifies every point as belonging to the static
@@ -260,13 +273,13 @@ points in memory simultaneously would require ~720 MB of float64 arrays. Both
 methods use two passes:
 
 - **Pass 1**: load each sweep's world-frame NPZ once, run the appropriate
-  accumulator (DDA or sweep-count), optionally accumulate MF-MOS votes. Only
+  accumulator (DDA or sweep-count). Only
   voxel-key dicts and arrays are kept in memory; large coordinate arrays are
   cached only when `cache_world_xyz_in_memory: true` (default) and the estimated
   size is below `WATO_LIDAR_CACHE_BYTES`.
-- **Pass 2**: apply the resulting `static_arr` / `not_dynamic_arr` /
-  `mf_mos_dynamic_arr` via searchsorted to each sweep, write the dynamic mask,
-  and accumulate static/dynamic clouds.
+- **Pass 2**: apply the resulting `static_arr` / `not_dynamic_arr` via
+  searchsorted to each sweep, write the dynamic mask, and accumulate
+  static/dynamic clouds.
 
 **Voxel key encoding.** Each voxel `(vx, vy, vz)` is encoded into a single
 `int64` as `vx << 40 | vy << 20 | vz` (20 bits per axis), supporting a ±524 km
@@ -283,6 +296,69 @@ via `np.searchsorted` — no Python dict overhead in Pass 2.
 | `voxel_occupancy.npz` | Sparse int32 voxel coords for SAM4D / MinkUNet (all sweeps aggregated). Toggle via `save_voxel_occupancy` (default: true). |
 | `voxel_occupancy_frame_NNNN.npz` | Per-frame sparse voxel coords (what `perception_2d` feeds to MinkUNet). Written when `save_per_frame_voxel_occupancy: true`. |
 | `lidar_proc_index.parquet` | Updated with `n_points_static`, `n_points_dynamic`, `dynamic_mask_path` per sweep |
+
+---
+
+### Step B (seg=union) — Motion filter (`union/motion_filter.py`)
+
+**Why it exists.** The AW-static and ground-height vetoes only reach MF-MOS
+false positives that land *on* the AW static map. Structure that map covers
+sparsely — far walls, foliage, below-grade returns — slips through. On real
+Velodyne data that left ~58% of the union dynamic cloud sitting within 25 cm of
+a static surface (`scripts/compare_seg_dynamic`). MF-MOS is the wrong primitive
+to fix this: it's an online per-scan model trained on SemanticKITTI (HDL-64E),
+applied out-of-domain, so it over-fires on textured static surfaces. The motion
+filter instead exploits the offline batch setting — the accumulated cloud over
+the whole chunk — and pure geometry, so it has no domain gap.
+
+**The persistence gate** (the workhorse, default on) targets *currently-moving*
+semantics — a genuinely-moving point sweeps **through** a 0.5 m voxel in a few
+sweeps, while static structure dwells in the same voxel the whole time it's in
+view. Drop any point whose voxel is occupied across ≥ `persistence_max_sweeps`
+distinct sweeps.
+
+This is a **recall/precision trade**, set by `persistence_max_sweeps`. It has a
+real recall cost: an *extended* mover is the problem — a 4.5 m car at 5 m/s
+keeps each voxel along its path occupied for ~9 sweeps (≈ car-length / speed),
+so a tight threshold cuts the bodies of normally-moving vehicles, not just
+structure. The default `20` is recall-biased; on-static leakage climbs faster
+than recall past ~24. The ceiling is ~75–80% mover-recall, because a long/slow
+mover is indistinguishable from structure by per-voxel occupancy alone — pushing
+past it needs the learned/tracking signal downstream, not more geometry here.
+
+Measured on the WATO ring-road bag (`scripts/compare_seg_dynamic`; mover-recall
+proxied by distance from the static map):
+
+| `persistence_max_sweeps` | dynamic pts | on-static | mover-recall |
+|---|---|---|---|
+| (no filter) | 360.7K | 58.3% | 100% |
+| 5 | 86.0K | 6.6% | 53% |
+| 12 | 117.6K | 9.3% | 71% |
+| **20 (default)** | **128.9K** | **12.6%** | **75%** |
+| 28 | 143.3K | 16.0% | 80% |
+
+**The coherence gate is OFF by default** (`coherence_min_life: 0`). It drops
+points whose per-sweep cluster doesn't link into a ≥ `coherence_min_life`-sweep
+track — useful as a speck denoiser on *dense* clouds, but on sparse (32-/64-beam)
+LiDAR it cuts ~20% of real movers (distant/fragmented movers don't cluster) for
+< 1% precision, so it's opt-in. It is membership-only, never a velocity test:
+per-sweep visibility makes a connected-component centroid drift as the ego
+passes structure, faking velocity — a velocity gate, and a translating-cluster
+*rescue* of persistent points, both tested *worse* (the rescue re-admitted ~77%
+structure via wall-sliding). An `MF-MOS ∩ AW-dynamic` intersection was likewise
+rejected — AW-dynamic voxels hug static surfaces, so it *raised* leakage
+(17% → 72% on NuScenes).
+
+**A/B-ing.** `motion_filter.enabled: false` writes the raw post-veto cloud;
+each gate is independently disabled by setting its threshold to 0. Raise
+`persistence_max_sweeps` for more recall (more leakage), lower it for a cleaner
+cloud (fewer movers).
+
+The filter rewrites only the dynamic side (`dynamic_map.npz`, per-sweep
+`dynamic_mask.npy`, each index row's `n_points_dynamic`); `static_map.npz` is
+untouched, so Steps C/D stay method-agnostic. Drop counts are recorded in the
+chunk summary as `motion_filter_n_persistence_dropped` /
+`motion_filter_n_coherence_dropped`.
 
 ---
 
@@ -420,10 +496,19 @@ All outputs are written under `data/artifacts/raw/<bag_id>/`.
 # Build the image (includes pypatchworkpp C++ build, ~3-5 min first time).
 ./watod build
 
-# Process all chunks of a bag (steps A + A.5 + B + C per chunk).
+# Process all chunks of a bag (steps A + B + C per chunk).
 # Automatically runs the bag-level reduce (step D) after all chunks finish.
 ./watod run lidar_preprocessing --bag data/bags/NuScenes-v1.0-mini-scene-1100/
 ./watod run lidar_preprocessing --bag NuScenes_v1_0_mini_scene_1100   # equivalent
+
+# Pick the Step-B segmentation method (default from config; aw if unset).
+./watod run lidar_preprocessing --bag <bag> --seg aw     # Amanatides-Woo only
+./watod run lidar_preprocessing --bag <bag> --seg mos    # MF-MOS only (needs GPU + weights)
+./watod run lidar_preprocessing --bag <bag> --seg union  # fusion: aw static + MF-MOS dynamic vetoed by it
+
+# Score how much of a method's dynamic cloud is actually static structure
+# (lower = cleaner); run after each --seg to A/B them on the same chunk:
+python -m wato_lidar_preprocessing.scripts.compare_seg_dynamic <bag> 0000
 
 # Process a single chunk only (auto-reduce is skipped on single-chunk runs).
 ./watod run lidar_preprocessing --bag data/bags/NuScenes-v1.0-mini-scene-1100/ --chunk 0000
@@ -481,14 +566,27 @@ print("global ground grid:", gg['height_grid'].shape)
 All parameters live in [`config/lidar_preprocessing.yaml`](config/lidar_preprocessing.yaml).
 The Pydantic schema is in [`src/wato_lidar_preprocessing/config.py`](src/wato_lidar_preprocessing/config.py).
 
-### Step B — Classification
+### Step B — Segmentation method
 
 | Parameter | Default | Description |
 |---|---|---|
+| `segmentation` | `"aw"` | `"aw"` (Amanatides-Woo log-odds, `classify/`), `"mos"` (MF-MOS, `mf_mos/`), or `"union"` (fusion, `union/`). Override per-run with `--seg aw\|mos\|union`. |
+| `union.aw_static_veto` | `true` | seg=union: drop MF-MOS dynamics whose voxel aw confirmed static (the core of the method). `false` → raw MF-MOS dynamic, for A/B'ing the veto. |
+| `union.keep_aw_dynamic` | `false` | seg=union: also union in aw's own dynamic verdict (recall mode, read from the `aw_dynamic_mask.npy` snapshot). Off by default — aw dynamics hug static surfaces. |
+| `union.veto_score_exempt` | `null` | seg=union: MF-MOS movers with moving probability ≥ this survive the aw-static veto (parked-then-moving objects). Needs `mf_mos.save_scores: true`; `null` = off. |
+| `union.ground_height_veto_m` | `0.25` | seg=union: drop dynamic candidates below this height over Step C's ground grid (MF-MOS road false positives are invisible to the static veto). 0.0 = off. |
+| `union.veto_dilation_voxels` | `1` | seg=union: dilate the aw-static veto by this many voxels (Chebyshev) to catch the leakage shell straddling voxel boundaries; candidates in aw's own dynamic voxels are exempt from the dilated part. 0 = exact voxel only. |
+| `union.motion_filter.enabled` | `true` | seg=union: run the post-veto temporal motion filter (persistence + coherence). `false` → raw post-veto cloud, for A/B'ing the filter. |
+| `union.motion_filter.persistence_max_sweeps` | `20` | Drop a dynamic point whose `persistence_voxel_m` voxel is occupied across ≥ this many distinct sweeps (structure dwells; movers sweep through). The recall/precision knob — lower = cleaner but cuts more slow/large movers, higher = more recall but more leakage. Sweep count — scale with sensor Hz. 0 = off. |
+| `union.motion_filter.persistence_voxel_m` | `0.5` | Voxel edge (m) for the persistence sweep-count. |
+| `union.motion_filter.coherence_min_life` | `0` (off) | Opt-in denoiser: drop a dynamic point whose per-sweep cluster doesn't link into a track spanning ≥ this many sweeps. Membership only, not velocity. Off by default — cuts ~20% of real movers on sparse LiDAR; enable only on dense clouds. |
+| `union.motion_filter.coherence_cell_m` | `0.4` | Connected-components cell (m) for per-sweep clustering. |
+| `union.motion_filter.coherence_link_gate_m` | `3.0` | Max centroid step (m) between sweeps when linking clusters into a track. |
+| `union.motion_filter.coherence_max_object_m` | `7.0` | Per-sweep cluster extent cap (m); larger clusters are treated as structure and never tracked. |
 | `voxel_size_m` | 0.15 | Voxel side length for static/dynamic classification (m) |
-| `classification_method` | `"log_odds"` | `"log_odds"` (Bayesian AW ray-casting) or `"persistence"` (sweep-count threshold) |
+| `classification_method` | `"log_odds"` | seg=aw backend: `"log_odds"` (Bayesian AW ray-casting) or `"persistence"` (sweep-count threshold) |
 
-**Log-odds parameters** (active when `classification_method: log_odds`):
+**Log-odds parameters** (seg=aw, active when `classification_method: log_odds`):
 
 | Parameter | Default | Description |
 |---|---|---|
@@ -499,6 +597,8 @@ The Pydantic schema is in [`src/wato_lidar_preprocessing/config.py`](src/wato_li
 | `p_dynamic_threshold` | 0.30 | `sigmoid(log_odds) < this` → classified dynamic (if evidenced) |
 | `min_observations` | 3 | Voxels with fewer ray traversals stay "unknown" (not dynamic) |
 | `min_occupied_hits` | 1 | Voxels with `n_hits < this` are free-space-only; not dynamic |
+| `min_hit_fraction_dynamic` | 0.10 | A voxel may be DYNAMIC only if hit on ≥ this fraction of its traversals (`n_hits/n_obs`). Demotes the near-ego scan-plane shell (free space + stray returns) to CARVED_NOISE. 0.0 = off |
+| `dynamic_min_range_m` | 2.5 | Points within this horizontal range of the sensor are never dynamic (ego self-returns + max carving). Applies to every seg method. 0.0 = off |
 | `max_ray_length_m` | 80.0 | Rays beyond this range are truncated (noise dominates at long range) |
 | `free_space_margin_voxels` | 1.0 | Stop free-space carving N voxels before the endpoint |
 | `ground_endpoint_strategy` | `"skip_endpoint"` | `"skip_endpoint"` (traverse ground rays but skip `l_occ` at endpoint) or `"skip_ray"` (skip ground rays entirely; legacy) |
@@ -510,11 +610,12 @@ The Pydantic schema is in [`src/wato_lidar_preprocessing/config.py`](src/wato_li
 | `static_sweep_fraction` | 0.30 | Fraction of chunk sweeps a voxel must be occupied in to be static |
 | `static_sweep_min` | 5 | Minimum sweep count regardless of fraction |
 
-### Step A.5 — MF-MOS
+### Step B (seg=mos) — MF-MOS
+
+Active only when `segmentation: mos` (or `--seg mos`).
 
 | Parameter | Default | Description |
 |---|---|---|
-| `mf_mos.enabled` | `false` | Enable MF-MOS inference (requires CUDA + pretrained weights) |
 | `mf_mos.checkpoint_path` | `/data/models/mf_mos/mf_mos_semantic_kitti.pt` | Path to pretrained model checkpoint |
 | `mf_mos.arch_config` | `/data/models/mf_mos/arch_cfg.yaml` | MF-MOS architecture config |
 | `mf_mos.data_config` | `/data/models/mf_mos/data_cfg.yaml` | MF-MOS data config (range image dims, FoV) |
@@ -524,12 +625,10 @@ The Pydantic schema is in [`src/wato_lidar_preprocessing/config.py`](src/wato_li
 | `mf_mos.fov_up_deg` | 10.0 | LiDAR vertical FoV upper bound (NuScenes default) |
 | `mf_mos.fov_down_deg` | -30.0 | LiDAR vertical FoV lower bound (NuScenes default) |
 | `mf_mos.device` | `"cuda"` | Inference device (`"cpu"` for smoke tests) |
-| `mf_mos.score_threshold` | 0.5 | Logit threshold for binary moving label |
+| `mf_mos.score_threshold` | 0.5 | Moving-probability threshold for the binary mask |
 | `mf_mos.save_scores` | `false` | Also write float32 `_mf_mos_score.npy` per sweep |
-| `mf_mos.fusion_mode` | `"independent"` | `"independent"` \| `"union"` \| `"mfmos_only"` |
-| `mf_mos.max_pose_gap_ms` | 200.0 | Skip sweep if pose gap to required history exceeds this |
-| `mf_mos_vote_fraction_threshold` | 0.5 | Fraction of MF-MOS-observed sweeps that must vote a voxel moving (log_odds path only) |
-| `min_mf_mos_votes` | 1 | Minimum absolute vote count required (log_odds path only) |
+| `mf_mos.max_pose_gap_ms` | 200.0 | Max pose-interpolation gap when warping a historical sweep |
+| `mf_mos.max_residual_gap_ms` | 1000.0 | Max residual time baseline. Keep above `max(residual_steps) * sweep_dt` or long channels get zeroed |
 
 ### Other parameters
 
@@ -571,7 +670,7 @@ src/lidar_preprocessing/
 │   ├── pipeline.py                    # orchestration: deskew → mf_mos → classify → ground
 │   ├── voxel.py                       # shared voxel-key packing: voxel_indices(), pack_voxel_key()
 │   ├── io.py                          # reader helpers for downstream components
-│   ├── viz.py                         # optional Open3D visualization helpers
+│   ├── viz.py                         # multi-backend (open3d/plotly/matplotlib) point-cloud viewer
 │   ├── _inputs.py                     # shared I/O: load_pose_samples(), load_ego_T_lidar()
 │   │                                  # (used by both deskew/ and mf_mos/)
 │   │
@@ -588,19 +687,21 @@ src/lidar_preprocessing/
 │   │   └── _core.py                   # implementation: per-point pose interpolation,
 │   │                                  # Patchwork++ per sweep, world NPZ writer
 │   │
-│   ├── mf_mos/                        # Step A.5 — learned moving-object segmentation
-│   │   ├── __init__.py                # public: process_chunk, MFMosResult
+│   ├── mf_mos/                        # Step B (seg=mos) — MF-MOS, self-contained
+│   │   ├── __init__.py                # public: process_chunk, MFMosResult,
+│   │   │                              #         classify_chunk, MosSegmentResult
 │   │   ├── _core.py                   # range projection, residual computation, mask writing
-│   │   └── _runtime.py                # model loading, PyTorch inference (lazy import)
+│   │   ├── _runtime.py                # model loading, PyTorch inference (lazy import)
+│   │   └── segment.py                 # classify_chunk: masks → static/dynamic clouds (no AW)
 │   │
-│   ├── classify/                      # Step B — voxel static/dynamic decomposition
+│   ├── classify/                      # Step B (seg=aw) — Amanatides-Woo, self-contained
 │   │   ├── __init__.py                # public: process_chunk, ClassifyResult
-│   │   ├── pipeline.py                # two-pass orchestration; MF-MOS fusion dispatch
-│   │   ├── log_odds.py                # build_log_odds_grid (AW Pass 1 + vote accumulation),
-│   │   │                              # classify_from_log_odds (thresholds + mf_mos_dynamic_arr)
+│   │   ├── pipeline.py                # two-pass orchestration (pure AW; no MF-MOS)
+│   │   ├── log_odds.py                # build_log_odds_grid (AW Pass 1),
+│   │   │                              # classify_from_log_odds (thresholds + classification)
 │   │   ├── masking.py                 # apply_classification_to_sweep (Pass 2 per-sweep masks)
 │   │   ├── persistence.py             # classify_persistence (sweep-count fallback)
-│   │   ├── io_helpers.py              # load_world_full, load_mf_mos_world_mask, origin_from_index
+│   │   ├── io_helpers.py              # load_world_full, origin_from_index
 │   │   └── occupancy_export.py        # write_chunk_voxel_occupancy, write_per_frame_voxel_occupancy
 │   │
 │   ├── ground/                        # Step C — ground mask aggregation + height grid
@@ -615,6 +716,7 @@ src/lidar_preprocessing/
     ├── test_deskew.py                 # per-point world projection, 6 extrinsic configurations
     ├── test_classify.py               # persistence + log-odds classification, MF-MOS vote fusion
     ├── test_mf_mos.py                 # range projection, residuals, fusion modes (Groups 1–5)
+    ├── test_motion_filter.py          # seg=union post-veto persistence + coherence gates
     ├── test_ray_traversal.py          # AW kernel parity (Numba vs Python), voxel traversal
     ├── test_ground.py                 # flat/tilted planes, height grid, dynamic intersection
     ├── test_pipeline.py               # chunk summary, cache auto-disable, parallel workers
@@ -665,9 +767,23 @@ a warning. Tests that exercise Patchwork++ are auto-skipped via
 `pytest.importorskip`.
 
 **PyTorch (MF-MOS):** `torch>=2.7` is installed in the Dockerfile matched to
-CUDA 12.8. When `mf_mos.enabled: false` (default), PyTorch is never imported at
+CUDA 12.8. On the `seg=aw` path (default), PyTorch is never imported at
 runtime. The MF-MOS runtime (`mf_mos/_runtime.py`) uses a lazy import that
-fails with a clear message if torch is absent but MF-MOS is enabled.
+fails with a clear message if torch is absent but `--seg mos` is requested.
+
+**MF-MOS vendored code is a git submodule.** The model definition lives in
+`third_party/MF-MOS` (`SCNU-RISLAB/MF-MOS`, pinned). It must be checked out
+before `--seg mos` will run — otherwise `_runtime.py` fails with
+`ModuleNotFoundError: No module named 'modules'`:
+
+```bash
+git submodule update --init src/lidar_preprocessing/third_party/MF-MOS
+```
+
+In dev mode the host checkout is bind-mounted into the container, so this is
+all you need. For a non-dev image build, run the submodule init **before**
+`./watod build` — the Dockerfile `COPY src/lidar_preprocessing` bakes in
+whatever the host has at build time. (`seg=aw` needs none of this.)
 
 **Pure Python stack:** Everything else (voxel classify persistence path, ground
 aggregation, reduce) uses only numpy, scipy, and PyArrow. Runnable in any Python

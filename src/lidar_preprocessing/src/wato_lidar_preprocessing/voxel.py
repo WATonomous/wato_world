@@ -72,3 +72,16 @@ def voxel_indices(
     rel = xyz - origin  # (N, 3) float64
     idx = np.floor(rel / voxel_size).astype(np.int64)
     return pack_voxel_key(idx[:, 0], idx[:, 1], idx[:, 2], chunk_id=chunk_id)
+
+
+def keys_in_sorted(keys: np.ndarray, sorted_keys: np.ndarray) -> np.ndarray:
+    """Boolean mask: which `keys` are present in sorted-unique `sorted_keys`.
+
+    The single membership test every voxel-set lookup must share (classify
+    pass 2, union veto) so a point resolves to the same verdict everywhere.
+    """
+    if sorted_keys.size == 0 or keys.size == 0:
+        return np.zeros(keys.shape[0], dtype=bool)
+    pos = np.searchsorted(sorted_keys, keys)
+    pos = np.clip(pos, 0, sorted_keys.size - 1)
+    return sorted_keys[pos] == keys
