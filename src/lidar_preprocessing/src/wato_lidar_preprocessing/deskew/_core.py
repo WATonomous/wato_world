@@ -199,7 +199,7 @@ def _assign_frame_ids(
 def _synthesize_t_offset_ns_from_azimuth(
     xyz_lidar: np.ndarray,
     sweep_duration_ns: float,
-    rotation_dir: str = "auto",
+    rotation_dir: str,
 ) -> np.ndarray:
     """Compute per-point time offsets [ns] from azimuth for a rotating LiDAR.
 
@@ -211,12 +211,11 @@ def _synthesize_t_offset_ns_from_azimuth(
     Args:
         xyz_lidar: (N, 3) float — sensor-frame points in firing order.
         sweep_duration_ns: full rotation duration in nanoseconds.
-        rotation_dir: "ccw" / "cw" / "auto". "auto" compares phi[0] to
-            phi[~200] to read the sign.
+        rotation_dir: "cw" / "ccw" — the scanner's spin direction, from the
+            sensor_model profile (a fixed hardware property, not probed).
 
     Returns:
-        (N,) float64 — per-point offsets in [0, sweep_duration_ns).
-        offset[0] == 0.
+        (N,) float64 — per-point offsets in [0, sweep_duration_ns); offset[0]==0.
     """
     n = xyz_lidar.shape[0]
     if n == 0:
@@ -225,23 +224,13 @@ def _synthesize_t_offset_ns_from_azimuth(
     phi = np.arctan2(xyz_lidar[:, 1], xyz_lidar[:, 0])  # (-π, π]
     phi_start = phi[0]
 
-    if rotation_dir == "auto":
-        # Probe past the same-shot block: 32-beam LiDARs emit 32 returns
-        # per shot at the same azimuth, so we need >1 shot to read the sign.
-        probe = min(200, n - 1)
-        if probe < 1:
-            rotation_dir = "ccw"  # arbitrary; can't infer from 1 point
-        else:
-            delta_ccw = (phi[probe] - phi_start) % (2.0 * np.pi)
-            rotation_dir = "ccw" if delta_ccw < np.pi else "cw"
-
     if rotation_dir == "ccw":
         delta = (phi - phi_start) % (2.0 * np.pi)
     elif rotation_dir == "cw":
         delta = (phi_start - phi) % (2.0 * np.pi)
     else:
         raise ValueError(
-            f"rotation_dir must be 'ccw', 'cw', or 'auto'; got {rotation_dir!r}"
+            f"rotation_dir must be 'ccw' or 'cw'; got {rotation_dir!r}"
         )
     frac = delta / (2.0 * np.pi)
     return (frac * sweep_duration_ns).astype(np.float64)
@@ -389,6 +378,10 @@ def process_chunk(
 
     pw = _make_patchwork(cfg.patchwork, required=cfg.require_patchwork)
 
+    # Scan rotation direction is a fixed hardware property — read it from the
+    # datasheet sensor profile rather than probing azimuth signs per sweep.
+    rotation_dir = cfg.build_sensor_model().rotation_dir
+
     results: list[DeskewResult] = []
     meta_rows: list[dict] = []
 
@@ -421,7 +414,7 @@ def process_chunk(
                 pw=pw,
                 synthesize_per_point_times=cfg.synthesize_per_point_times,
                 sweep_duration_ns=cfg.lidar_sweep_duration_ms * 1_000_000.0,
-                rotation_dir=cfg.lidar_rotation_dir,
+                rotation_dir=rotation_dir,
                 allow_uncompensated_motion=cfg.allow_uncompensated_motion,
             )
         except Exception as exc:  # noqa: BLE001 — record failure, keep going

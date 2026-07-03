@@ -49,20 +49,12 @@ def apply_classification_to_sweep(
 ) -> SweepMaskResult:
     """Compute dynamic mask for one sweep, save it, return per-sweep stats.
 
-    `keys` is always full-length (matches xyz from the world NPZ) so the
-    saved mask is length-aligned with the downstream xyz array.
+    `keys` is full-length (matches the world NPZ) so the saved mask stays
+    length-aligned with the downstream xyz array.
 
-    `sweep_mf_mos_dynamic_arr`: optional sorted int64 voxel keys MF-MOS
-    flagged dynamic FOR THIS SWEEP (built from the per-sweep mask in
-    classify/pipeline.py and optionally AND-gated against the chunk-wide
-    vote set). Fused via searchsorted, same pattern as `not_dynamic_arr`.
-
-    fusion_mode="mfmos_only" drop behaviour: a point whose voxel is
-    AW-DYNAMIC but NOT in sweep_mf_mos_dynamic_arr is dropped from both
-    static_map.npz and dynamic_map.npz (intentional — MF-MOS is treated as
-    the authoritative dynamic signal). Same drop already applies in all
-    modes for points landing in AW free_only / under_evidenced / ambiguous
-    voxels.
+    `sweep_mf_mos_dynamic_arr`: per-sweep MF-MOS-flagged voxel keys, fused via
+    searchsorted. In mfmos_only mode an AW-dynamic point not flagged by MF-MOS
+    is dropped from both maps (MF-MOS is authoritative for dynamic).
     """
     n = keys.shape[0]
     has_intensity = bool(row.get("has_intensity", False))
@@ -74,7 +66,7 @@ def apply_classification_to_sweep(
         return SweepMaskResult(n_static=0, n_dynamic=0, mask_uri=dyn_uri)
 
     # not_dynamic_arr covers static + free-only + under-evidenced-with-hits
-    # + ambiguous voxels (log_odds mode); static only (persistence mode).
+    # + ambiguous voxels.
     if not_dynamic_arr.size > 0:
         pos = np.searchsorted(not_dynamic_arr, keys)
         pos = np.clip(pos, 0, not_dynamic_arr.size - 1)
@@ -86,8 +78,8 @@ def apply_classification_to_sweep(
     # Patchwork++ ground mask is authoritative: ground points must never
     # appear in dynamic_map.npz. The not_dynamic_arr classification doesn't
     # reliably catch them — ground voxels can fall through whenever no
-    # non-ground ray traverses them (skip_endpoint), aren't traversed at all
-    # (skip_ray), or fall below the persistence threshold.
+    # non-ground ray traverses them (skip_endpoint) or aren't traversed at
+    # all (skip_ray).
     if ground_mask_cache_i is not None:
         mask &= ~ground_mask_cache_i
 

@@ -2,7 +2,10 @@
 
 Two-pass algorithm:
   Pass 1: For every sweep, discretize world-frame points to voxel keys and
-          (log_odds mode only) accumulate occupancy log-odds via ray traversal.
+          accumulate occupancy log-odds via ray traversal. All log-odds
+          constants come from the datasheet SensorModel (see sensor_model.py);
+          the carve margin additionally uses a per-bag pose-drift σ estimated
+          from poses.parquet.
   Pass 2: For every sweep, apply the static/dynamic label as a boolean mask
           and write {sweep_id:06d}_dynamic_mask.npy.
 
@@ -29,15 +32,15 @@ from wato_common.artifact_store import (
 )
 from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.schemas import PROCESSED_SWEEPS_SCHEMA, ProcessedSweepMeta
+from wato_lidar_preprocessing._inputs import load_pose_samples
 from wato_lidar_preprocessing.config import ComponentConfig
-from wato_lidar_preprocessing.voxel import voxel_indices
+from wato_lidar_preprocessing.sensor_model import estimate_pose_sigma_m
 
 from .global_map_prior import GlobalMapPrior
 from .io_helpers import (
     cache_byte_budget,
     estimate_cache_bytes,
     load_mf_mos_world_mask,
-    load_world_full,
     origin_from_index,
 )
 from .log_odds import build_log_odds_grid, classify_from_log_odds
@@ -47,7 +50,6 @@ from .occupancy_export import (
     write_chunk_voxel_occupancy,
     write_per_frame_voxel_occupancy,
 )
-from .persistence import classify_persistence
 
 log = logging.getLogger(__name__)
 
@@ -84,64 +86,17 @@ def _write_empty_outputs(
     return ClassifyResult(0, 0, out_uri)
 
 
-def _run_pass_1_persistence(
-    cfg: ComponentConfig,
-    meta_rows: list[dict],
-    origin: np.ndarray,
-    chunk_id: str,
-    *,
-    cache_xyz: bool,
-    cache_intensity: bool = True,
-) -> tuple[
-    list[np.ndarray | None],
-    list[np.ndarray | None],
-    list[np.ndarray | None],
-    list[np.ndarray],
-    dict[int, list[np.ndarray]],
-]:
-    """Pass 1 for the persistence path (no log-odds accumulators).
-
-    Returns the same 5-tuple shape as build_log_odds_grid minus the log-odds
-    arrays. ground_mask_cache is always populated regardless of cache_xyz —
-    masking.py needs it to keep ground out of dynamic_map.npz.
-    """
-    xyz_cache: list[np.ndarray | None] = []
-    intensity_cache: list[np.ndarray | None] = []
-    ground_mask_cache: list[np.ndarray | None] = []
-    sweep_keys: list[np.ndarray] = []
-    frame_keys: dict[int, list[np.ndarray]] = {}
-
-    for row in tqdm(
-        meta_rows,
-        desc=f"classify chunk {chunk_id} pass 1",
-        unit="sweep",
-    ):
-        if row.get("valid") is False:
-            xyz_cache.append(None)
-            intensity_cache.append(None)
-            ground_mask_cache.append(None)
-            sweep_keys.append(np.empty(0, dtype=np.int64))
-            continue
-
-        # load_world_full so we get ground_mask without a second NPZ read.
-        xyz, intensity, _origin, ground_mask = load_world_full(row["world_path"])
-        if xyz.shape[0] == 0:
-            xyz_cache.append(xyz if cache_xyz else None)
-            intensity_cache.append(intensity if cache_xyz and cache_intensity else None)
-            ground_mask_cache.append(ground_mask)
-            sweep_keys.append(np.empty(0, dtype=np.int64))
-            continue
-
-        keys = voxel_indices(xyz, origin, cfg.voxel_size_m, chunk_id=chunk_id)
-        sweep_keys.append(keys)
-        xyz_cache.append(xyz if cache_xyz else None)
-        intensity_cache.append(intensity if cache_xyz and cache_intensity else None)
-        ground_mask_cache.append(ground_mask)
-        fid = row.get("frame_id")
-        if fid is not None:
-            frame_keys.setdefault(int(fid), []).append(keys)
-
-    return xyz_cache, intensity_cache, ground_mask_cache, sweep_keys, frame_keys
+def _estimate_pose_sigma_m(bag_id: str, chunk_id: str, floor_m: float) -> float:
+    """Per-bag SLAM pose noise [m] from this chunk's poses.parquet jitter."""
+    try:
+        samples = load_pose_samples(bag_id, chunk_id)
+    except Exception as exc:  # noqa: BLE001 — missing/short poses → fall back
+        log.warning("chunk %s: could not load poses for σ_pose (%s); using floor", chunk_id, exc)
+        return floor_m
+    if len(samples) < 3:
+        return floor_m
+    translations = np.array([s.translation for s in samples], dtype=np.float64)
+    return estimate_pose_sigma_m(translations, floor_m=floor_m)
 
 
 def process_chunk(
@@ -155,9 +110,8 @@ def process_chunk(
 
     Args:
         global_map_prior: optional bag-level static map prior (two-pass mode).
-            When set, every sweep gets a credibility-weighted log-odds boost
-            for endpoints within match_radius_m of a known static surface.
-            Only used by the log-odds path; the persistence path ignores it.
+            When set, every map-matched endpoint gets a one-time credibility-
+            weighted prior shift derived from the sensor model.
     """
     meta_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
     if not meta_rows:
@@ -189,74 +143,36 @@ def process_chunk(
     if origin is None:
         return _write_empty_outputs(bag_id, chunk_id, cfg.voxel_size_m)
 
-    use_log_odds = cfg.classification_method == "log_odds"
-    threshold = None
-    diag: dict[str, int] = {}
+    sensor_model = cfg.build_sensor_model()
+    pose_sigma_m = _estimate_pose_sigma_m(
+        bag_id, chunk_id, floor_m=sensor_model.range_sigma_m
+    )
 
-    if use_log_odds:
-        (
-            xyz_cache,
-            intensity_cache,
-            ground_mask_cache,
-            sweep_keys,
-            frame_keys,
-            (
-                unique_keys,
-                lo_vals,
-                n_obs_vals,
-                n_hits_vals,
-                mf_mos_votes_arr,
-                n_sweep_hits_arr,
-            ),
-        ) = build_log_odds_grid(
-            meta_rows,
-            cfg,
-            origin,
-            chunk_id,
-            cache_xyz=cache_xyz,
-            bag_id=bag_id,
-            global_map_prior=global_map_prior,
-        )
-        (
-            static_arr,
-            not_dynamic_arr,
-            mf_mos_dynamic_arr,
-            classification,
-            diag,
-        ) = classify_from_log_odds(
-            unique_keys,
-            lo_vals,
-            n_obs_vals,
-            n_hits_vals,
-            cfg,
-            mf_mos_votes_arr=mf_mos_votes_arr,
-            n_sweep_hits_arr=n_sweep_hits_arr,
-        )
-    else:
-        if global_map_prior is not None:
-            log.warning(
-                "chunk %s: global_map_prior provided but classification_method="
-                "'persistence' ignores it (prior is log-odds-only).  No-op.",
-                chunk_id,
-            )
-        (
-            xyz_cache,
-            intensity_cache,
-            ground_mask_cache,
-            sweep_keys,
-            frame_keys,
-        ) = _run_pass_1_persistence(
-            cfg, meta_rows, origin, chunk_id, cache_xyz=cache_xyz
-        )
-        static_arr, not_dynamic_arr, threshold = classify_persistence(
-            sweep_keys, len(meta_rows), cfg
-        )
-        mf_mos_dynamic_arr = None
-        unique_keys = np.empty(0, dtype=np.int64)
-        lo_vals = np.empty(0, dtype=np.float32)
-        n_obs_vals = np.empty(0, dtype=np.int32)
-        n_hits_vals = np.empty(0, dtype=np.int32)
-        classification = np.empty(0, dtype=np.int8)
+    (
+        xyz_cache,
+        intensity_cache,
+        ground_mask_cache,
+        sweep_keys,
+        frame_keys,
+        (unique_keys, lo_vals, n_obs_vals, n_hits_vals),
+    ) = build_log_odds_grid(
+        meta_rows,
+        cfg,
+        origin,
+        chunk_id,
+        cache_xyz=cache_xyz,
+        pose_sigma_m=pose_sigma_m,
+        sensor_model=sensor_model,
+        global_map_prior=global_map_prior,
+    )
+    (
+        static_arr,
+        not_dynamic_arr,
+        classification,
+        diag,
+    ) = classify_from_log_odds(
+        unique_keys, lo_vals, n_obs_vals, n_hits_vals, cfg, sensor_model
+    )
 
     # Pass 2: per-sweep masks + accumulate static/dynamic clouds.
     static_xyz_chunks: list[np.ndarray] = []
@@ -281,12 +197,8 @@ def process_chunk(
             updated_meta.append(_invalid_meta_row(row, sweep_id))
             continue
 
-        # The sweep-local MF-MOS voxel set must come from the per-sweep mask
-        # — using mf_mos_dynamic_arr (chunk-wide) directly bleeds dynamic
-        # labels across time. When mf_mos_require_chunk_wide_vote is True
-        # the per-sweep set is AND-filtered against chunk-wide votes to
-        # preserve denoising. Persistence path has no chunk-wide votes so
-        # the gate is a no-op there.
+        # Fusion uses the per-sweep mask directly (already 3D-denoised at
+        # generation time); no chunk-wide vote aggregation.
         sweep_mf_mos_dynamic_arr = None
         if (
             cfg.mf_mos.enabled
@@ -297,23 +209,7 @@ def process_chunk(
                 bag_id, chunk_id, row, keys.shape[0], cfg.filter_nonfinite_points
             )
             if mf_mask is not None:
-                sweep_keys_dyn = np.unique(keys[mf_mask])
-                if (
-                    cfg.mf_mos_require_chunk_wide_vote
-                    and mf_mos_dynamic_arr is not None
-                    and sweep_keys_dyn.size > 0
-                ):
-                    if mf_mos_dynamic_arr.size == 0:
-                        sweep_keys_dyn = np.empty(0, dtype=sweep_keys_dyn.dtype)
-                    else:
-                        sweep_keys_dyn = sweep_keys_dyn[
-                            np.isin(
-                                sweep_keys_dyn,
-                                mf_mos_dynamic_arr,
-                                assume_unique=True,
-                            )
-                        ]
-                sweep_mf_mos_dynamic_arr = np.sort(sweep_keys_dyn)
+                sweep_mf_mos_dynamic_arr = np.sort(np.unique(keys[mf_mask]))
 
         result = apply_classification_to_sweep(
             row,
@@ -400,31 +296,21 @@ def process_chunk(
         local_path(dynamic_map_path(bag_id, chunk_id)), **dyn_save_kwargs
     )
 
-    if use_log_odds:
-        log.info(
-            "chunk %s: static=%d dynamic=%d "
-            "(log_odds: %d touched, %d evidenced, "
-            "%d under-evidenced-with-hits, %d ambiguous, %d free-only)",
-            chunk_id,
-            total_static,
-            total_dynamic,
-            unique_keys.size,
-            diag.get("n_evidenced", 0),
-            diag.get("n_under_evidenced_with_hits", 0),
-            diag.get("n_ambiguous", 0),
-            diag.get("n_free_only", 0),
-        )
-    else:
-        log.info(
-            "chunk %s: static=%d dynamic=%d voxel_threshold=%d/%d",
-            chunk_id,
-            total_static,
-            total_dynamic,
-            threshold,
-            len(meta_rows),
-        )
+    log.info(
+        "chunk %s: static=%d dynamic=%d "
+        "(log_odds: %d touched, %d evidenced, "
+        "%d under-evidenced-with-hits, %d ambiguous, %d free-only)",
+        chunk_id,
+        total_static,
+        total_dynamic,
+        unique_keys.size,
+        diag.get("n_evidenced", 0),
+        diag.get("n_under_evidenced_with_hits", 0),
+        diag.get("n_ambiguous", 0),
+        diag.get("n_free_only", 0),
+    )
 
-    if cfg.save_voxel_occupancy and (use_log_odds and unique_keys.size > 0):
+    if cfg.save_voxel_occupancy and unique_keys.size > 0:
         write_chunk_voxel_occupancy(
             bag_id,
             chunk_id,
@@ -435,18 +321,6 @@ def process_chunk(
             n_obs=n_obs_vals,
             n_hits=n_hits_vals,
         )
-    elif cfg.save_voxel_occupancy:
-        # Persistence path: coords-only occupancy from the union of sweep_keys.
-        all_keys_parts = [k for k in sweep_keys if k.size > 0]
-        if all_keys_parts:
-            unique_persistence_keys = np.unique(np.concatenate(all_keys_parts))
-            write_chunk_voxel_occupancy(
-                bag_id,
-                chunk_id,
-                unique_persistence_keys,
-                cfg.voxel_size_m,
-                origin,
-            )
 
     if cfg.save_per_frame_voxel_occupancy and frame_keys:
         write_per_frame_voxel_occupancy(
@@ -454,8 +328,8 @@ def process_chunk(
         )
 
     # voxel_diag.npz includes carved (log_odds < 0) voxels that
-    # voxel_occupancy.npz filters out. log_odds path only.
-    if cfg.save_voxel_diagnostics and use_log_odds and unique_keys.size > 0:
+    # voxel_occupancy.npz filters out.
+    if cfg.save_voxel_diagnostics and unique_keys.size > 0:
         write_chunk_voxel_diagnostics(
             bag_id,
             chunk_id,
@@ -466,7 +340,6 @@ def process_chunk(
             classification,
             cfg.voxel_size_m,
             origin,
-            mf_mos_dynamic_arr=mf_mos_dynamic_arr,
         )
 
     return ClassifyResult(

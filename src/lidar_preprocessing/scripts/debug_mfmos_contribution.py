@@ -13,10 +13,9 @@ Then bucket each MF-MOS rescue by what AW thought the voxel was:
   FREE_ONLY       -> voxel had no hits; MF-MOS flagging it is suspicious
   not-in-keys     -> voxel never traversed; MF-MOS flagging is uninformed
 
-Note: uses the raw per-point _mf_mos_mask.npy as a proxy for "MF-MOS thinks
-this voxel is dynamic".  The actual voxel-aggregated MF-MOS verdict
-(mf_mos_dynamic_arr) requires min_mf_mos_votes + vote_fraction agreement
-across sweeps, so this slightly over-estimates MF-MOS's contribution.
+Note: the per-point _mf_mos_mask.npy IS the MF-MOS verdict used in fusion —
+it is spatially denoised at generation time (3D cluster-size filter) and
+consumed per-sweep, with no chunk-wide vote aggregation.
 """
 
 from __future__ import annotations

@@ -91,19 +91,12 @@ def write_chunk_voxel_diagnostics(
     classification: np.ndarray,
     voxel_size: float,
     origin: np.ndarray,
-    *,
-    mf_mos_dynamic_arr: np.ndarray | None = None,
 ) -> None:
     """Write voxel_diag.npz: full per-voxel diagnostics including carved voxels.
 
     `classification` is produced by classify_from_log_odds — passing it in
     keeps the bucketing rules in one place. CLASS_* codes live in
     classify/log_odds.py.
-
-    `mf_mos_dynamic_arr` (optional): chunk-wide voxel keys MF-MOS voted
-    dynamic. When provided, an `mf_mos_dynamic` bool column is written so
-    the viz can overlay which voxels the geometric classifier labelled
-    CLASS_STATIC but MF-MOS subsequently flipped.
     """
     if unique_keys.size == 0:
         log.info("chunk %s: no voxels to diagnose, skipping voxel_diag.npz", chunk_id)
@@ -123,14 +116,6 @@ def write_chunk_voxel_diagnostics(
         "n_hits": n_hits.astype(np.int32),
         "classification": classification.astype(np.int8),
     }
-    if mf_mos_dynamic_arr is not None:
-        if mf_mos_dynamic_arr.size == 0:
-            mf_mos_dyn_overlay = np.zeros(unique_keys.shape[0], dtype=bool)
-        else:
-            mf_mos_dyn_overlay = np.isin(
-                unique_keys, mf_mos_dynamic_arr, assume_unique=True
-            )
-        save_kwargs["mf_mos_dynamic"] = mf_mos_dyn_overlay
 
     np.savez_compressed(local_path(voxel_diag_path(bag_id, chunk_id)), **save_kwargs)
 
@@ -149,15 +134,11 @@ def write_chunk_voxel_diagnostics(
         "free_only": int((classification == CLASS_FREE_ONLY).sum()),
         "dynamic": int((classification == CLASS_DYNAMIC).sum()),
     }
-    extras = ""
-    if mf_mos_dynamic_arr is not None:
-        extras = f", mf_mos_dynamic={int(save_kwargs['mf_mos_dynamic'].sum())}"
     log.info(
-        "chunk %s: wrote voxel_diag.npz (%d voxels: %s%s)",
+        "chunk %s: wrote voxel_diag.npz (%d voxels: %s)",
         chunk_id,
         unique_keys.shape[0],
         ", ".join(f"{k}={v}" for k, v in n_per_class.items()),
-        extras,
     )
 
 

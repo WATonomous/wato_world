@@ -346,6 +346,15 @@ def process_chunk(
                 occlusion_range_tol_m=params.occlusion_range_tol_m,
             )
 
+            # Per-sweep spatial denoise: remove isolated single-sweep
+            # mispredictions before the mask is saved/fused.
+            mf_finite_mask = _denoise_moving_mask_3d(
+                mf_finite_mask,
+                xyz_cur,
+                params.moving_cluster_voxel_m,
+                params.moving_min_cluster_pts,
+            )
+
             # Re-expand to n_raw length so the saved mask is index-aligned
             # with the raw NPZ. NaN/inf points stay False.
             full_mask = np.zeros(n_raw, dtype=bool)
@@ -672,6 +681,71 @@ def _compute_residual(
     return residual
 
 
+def _denoise_moving_mask_3d(
+    mask: np.ndarray,
+    xyz: np.ndarray,
+    cluster_voxel_m: float,
+    min_cluster_pts: int,
+) -> np.ndarray:
+    """Drop isolated moving points by 3D connected-component cluster size.
+
+    Cluster the moving points on a coarse grid (26-connectivity between
+    occupied voxels) and drop clusters below ``min_cluster_pts``. A genuine
+    object is a dense blob; single-sweep speckle is 1–few scattered points.
+    ``xyz`` may be in any rigid frame (clustering uses relative distances).
+    """
+    if min_cluster_pts <= 1 or not mask.any():
+        return mask
+
+    idx = np.flatnonzero(mask)
+    g = np.floor(xyz[idx] / cluster_voxel_m).astype(np.int64)  # (M, 3)
+    vkeys, inv, vcounts = np.unique(
+        g, axis=0, return_inverse=True, return_counts=True
+    )
+    inv = inv.reshape(-1)  # np.unique may return a column vector here
+    n_vox = vkeys.shape[0]
+
+    vox_index = {
+        (int(k[0]), int(k[1]), int(k[2])): i for i, k in enumerate(vkeys)
+    }
+    parent = np.arange(n_vox)
+
+    def find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    # Union each occupied voxel with its occupied 26-neighbours. Only the
+    # +half of the neighbour offsets is needed (union is symmetric).
+    forward_offsets = [
+        (dx, dy, dz)
+        for dx in (-1, 0, 1)
+        for dy in (-1, 0, 1)
+        for dz in (-1, 0, 1)
+        if (dx, dy, dz) > (0, 0, 0)
+    ]
+    for (kx, ky, kz), vid in vox_index.items():
+        for dx, dy, dz in forward_offsets:
+            nvid = vox_index.get((kx + dx, ky + dy, kz + dz))
+            if nvid is not None:
+                union(vid, nvid)
+
+    roots = np.array([find(i) for i in range(n_vox)], dtype=np.int64)
+    comp_pts = np.zeros(n_vox, dtype=np.int64)
+    np.add.at(comp_pts, roots, vcounts)
+
+    keep_vox = comp_pts[roots] >= min_cluster_pts  # per unique voxel
+    out = mask.copy()
+    out[idx] = keep_vox[inv]
+    return out
+
+
 def _unproject_mask(
     pixel_mask: np.ndarray,
     point_to_pixel: np.ndarray,
@@ -761,11 +835,8 @@ def _write_zero_mask(
 ) -> None:
     # Write a zero-LENGTH array (not zero-filled) to signal "skipped — no data"
     # rather than "ran inference and found no movers."  load_mf_mos_world_mask
-    # treats length-0 as None so these sweeps are excluded from the chunk-wide
-    # vote denominator (n_sweep_hits).  A full-length all-False mask would
-    # increment n_sweep_hits without adding votes, diluting the vote fraction
-    # for genuine movers seen in other sweeps and causing them to fall below
-    # min_mf_mos_votes / mf_mos_vote_fraction_threshold.
+    # treats length-0 as None so a skipped sweep is distinguishable from one
+    # that genuinely produced an all-False mask.
     np.save(
         local_path(mf_mos_mask_path(bag_id, chunk_id, sweep_id)),
         np.zeros(0, dtype=bool),

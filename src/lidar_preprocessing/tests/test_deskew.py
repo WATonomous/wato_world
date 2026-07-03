@@ -818,36 +818,30 @@ def test_synthesize_t_offset_anchored_at_phi_start():
     np.testing.assert_allclose(t_ns, expected_ns, atol=1.0)
 
 
-def test_synthesize_t_offset_auto_detects_cw_rotation():
-    """auto rotation_dir picks CW when azimuth decreases after phi[0].
+def test_synthesize_t_offset_cw_quarter_rotation_monotonic():
+    """Explicit CW direction: azimuth decreasing from phi[0] yields monotonic t.
 
-    NuScenes LIDAR_TOP rotates CW in the lidar frame (azimuth decreases
-    with time).  The probe at index ~200 should detect this — delta_ccw
-    wraps all the way to almost-2π, well above the π threshold.
+    NuScenes / Velodyne LIDAR_TOP rotates CW in the lidar frame (azimuth
+    decreases with time). Direction is taken from the sensor_model profile
+    (no per-sweep azimuth-sign probe), so we pass it explicitly here.
     """
     from wato_lidar_preprocessing.deskew._core import (
         _synthesize_t_offset_ns_from_azimuth,
     )
 
     # 250 points sweeping CW from phi=0 down to phi=-π/2 (quarter rotation).
-    # Azimuth strictly decreases, so auto should pick "cw".
     n = 250
     phi = np.linspace(0.0, -np.pi / 2, n)
     xyz = np.stack([np.cos(phi), np.sin(phi), np.zeros(n)], axis=1)
     t_ns = _synthesize_t_offset_ns_from_azimuth(
-        xyz, sweep_duration_ns=1_000_000_000.0, rotation_dir="auto"
+        xyz, sweep_duration_ns=1_000_000_000.0, rotation_dir="cw"
     )
     # Quarter rotation in 250 points → t goes from 0 to ~0.25 s, monotonically.
     assert t_ns[0] == 0.0
     assert 0.24e9 < t_ns[-1] < 0.26e9, (
-        f"expected ~0.25s at end of quarter-rotation, got {t_ns[-1]/1e9:.3f}s. "
-        f"auto-detect probably picked the wrong direction (would give ~0.75s)."
+        f"expected ~0.25s at end of quarter-rotation, got {t_ns[-1]/1e9:.3f}s"
     )
-    # Monotonic increase confirms direction is correct.
-    assert np.all(np.diff(t_ns) >= 0), (
-        "t_ns must be monotonic for points fired in sequence; non-monotonic "
-        "means rotation direction was detected backwards."
-    )
+    assert np.all(np.diff(t_ns) >= 0), "t_ns must be monotonic for CW firing order"
 
 
 def test_synthesize_t_offset_from_azimuth_cw_reverses():
@@ -981,11 +975,12 @@ def test_synthesis_eliminates_intra_sweep_smear_for_static_wall(tmp_env):
         ],
     )
 
-    # WITH the fix: synthesize_per_point_times=True, 1-second sweep.
+    # WITH the fix: synthesize_per_point_times=True, 1-second sweep. Rotation
+    # direction comes from the sensor_model profile; for this symmetric
+    # phi∈{0,π} pair cw and ccw both place the back point at t=0.5 s.
     cfg = ComponentConfig(
         synthesize_per_point_times=True,
         lidar_sweep_duration_ms=1_000.0,
-        lidar_rotation_dir="ccw",
     )
     results = process_chunk(cfg, bag_id, chunk_id)
     assert results, "deskew should have processed one sweep"

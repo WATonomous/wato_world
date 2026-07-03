@@ -159,7 +159,6 @@ def _pass2_chunk_worker(
     prior = classify.GlobalMapPrior.from_npz(
         global_map_path,
         match_radius_m=cfg.global_map_match_radius_m,
-        r_max_credibility_m=cfg.r_max_credibility_m,
     )
     return classify.process_chunk(cfg, bag_id, chunk_id, global_map_prior=prior)
 
@@ -194,7 +193,6 @@ def _run_classify_pass2(
         prior = classify.GlobalMapPrior.from_npz(
             global_map_path,
             match_radius_m=cfg.global_map_match_radius_m,
-            r_max_credibility_m=cfg.r_max_credibility_m,
         )
         for row in chunk_rows:
             cid = row["chunk_id"]

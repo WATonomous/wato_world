@@ -1,11 +1,10 @@
 """Global static map prior for two-pass classification (UniLiPs IWU).
 
-Wraps a cKDTree over the bag-level global_static_map.npz so each sweep in
-pass 2 can ask "is this scan point within match_radius_m of a known static
-surface, and how credible is it?" Range-credibility weight is
-r*_j = min(1, r_max / ||p_j - sensor||) (UniLiPs Eq. 2-3). The match-found
-boost applies to log-odds only — n_hits stays backed by real sweep returns
-so the has_hits gate isn't bypassed.
+cKDTree over the bag-level global_static_map.npz: query_sweep returns, per
+point, whether it matches a known static surface and its range to the sensor.
+The caller turns range into a credibility weight (SensorModel.range_weight)
+and applies a one-time prior shift (l_map_prior) to matched voxels — touching
+log_odds only, so the has_hits gate stays backed by real returns.
 """
 
 from __future__ import annotations
@@ -23,17 +22,15 @@ class GlobalMapPrior:
 
     Built once per bag (or once per worker process in pass 2). The KDTree
     is skipped when the map is empty — query_sweep then returns all-False
-    map_hit + all-ones r_star so callers don't need to special-case it.
+    map_hit so callers don't need to special-case it.
     """
 
     def __init__(
         self,
         global_map_xyz: np.ndarray,
         match_radius_m: float = 0.30,
-        r_max_credibility_m: float = 200.0,
     ) -> None:
         self.match_radius_m = float(match_radius_m)
-        self.r_max = float(r_max_credibility_m)
 
         if global_map_xyz.shape[0] == 0:
             self._tree: cKDTree | None = None
@@ -42,10 +39,9 @@ class GlobalMapPrior:
             self._tree = cKDTree(global_map_xyz.astype(np.float64))
             log.info(
                 "GlobalMapPrior: built KDTree over %d static map points "
-                "(match_radius=%.2fm, r_max=%.1fm)",
+                "(match_radius=%.2fm)",
                 global_map_xyz.shape[0],
                 self.match_radius_m,
-                self.r_max,
             )
 
     @classmethod
@@ -53,21 +49,16 @@ class GlobalMapPrior:
         cls,
         path: str,
         match_radius_m: float = 0.30,
-        r_max_credibility_m: float = 200.0,
     ) -> "GlobalMapPrior":
         data = np.load(path)
-        return cls(
-            data["xyz"],
-            match_radius_m=match_radius_m,
-            r_max_credibility_m=r_max_credibility_m,
-        )
+        return cls(data["xyz"], match_radius_m=match_radius_m)
 
     def query_sweep(
         self,
         xyz: np.ndarray,
         sensor_origin: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """For each point in xyz, determine map match and range-credibility weight.
+        """For each point, determine global-map match and range to the sensor.
 
         Args:
             xyz:           (N, 3) float, world-frame sweep points
@@ -75,27 +66,21 @@ class GlobalMapPrior:
                            (the LiDAR origin in world frame)
 
         Returns:
-            map_hit:  (N,) bool   — True iff nearest map point is within match_radius_m
-            r_star:   (N,) float32 — min(1, r_max / range_to_sensor) per UniLiPs Eq. 2.
-                                     Zero-range points get r_star = 1.0.
+            map_hit: (N,) bool    — True iff nearest map point is within match_radius_m
+            ranges:  (N,) float64 — Euclidean distance to sensor_origin. The
+                                    caller converts this to a credibility weight
+                                    via SensorModel.range_weight.
         """
         n = xyz.shape[0]
 
-        # r_star is computed regardless of tree presence so callers get a
-        # well-shaped return even when the global map is empty.
         dx = xyz[:, 0] - sensor_origin[0]
         dy = xyz[:, 1] - sensor_origin[1]
         dz = xyz[:, 2] - sensor_origin[2]
         ranges = np.sqrt(dx * dx + dy * dy + dz * dz)
-        r_star = np.where(
-            ranges > 1e-6,
-            np.minimum(1.0, self.r_max / np.maximum(ranges, 1e-6)),
-            1.0,
-        ).astype(np.float32)
 
         if self._tree is None or n == 0:
-            return np.zeros(n, dtype=bool), r_star
+            return np.zeros(n, dtype=bool), ranges
 
         dists, _ = self._tree.query(xyz, k=1, workers=-1)
         map_hit = dists <= self.match_radius_m
-        return map_hit, r_star
+        return map_hit, ranges

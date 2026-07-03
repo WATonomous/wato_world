@@ -209,9 +209,9 @@ def _voxel_diag_per_point(xyz: np.ndarray, diag) -> dict[str, np.ndarray] | None
 def _p_occ_colors(p_occ: np.ndarray) -> np.ndarray:
     """Map p_occ to RGB using RdYlBu: red = carved (low), blue = static (high).
 
-    Diverging colormap centred on 0.5: 0.0=dark red, 0.30=yellow (the
-    p_dynamic_threshold edge), 0.70=blue (p_static_threshold edge).
-    NaN points (no voxel_diag entry) get faint gray.
+    Diverging colormap centred on 0.5: 0.0=dark red, ~0.12=yellow
+    (p_dynamic_threshold = 1-p_hit), ~0.88=blue (p_static_threshold = p_hit)
+    for the default velodyne_vlp profile. NaN points get faint gray.
     """
     import matplotlib.cm as cm
 
@@ -235,7 +235,7 @@ def _classification_colors(class_arr: np.ndarray) -> np.ndarray:
 
 
 def _log_p_occ_distribution(
-    p_occ: np.ndarray, p_dynamic_threshold: float = 0.30
+    p_occ: np.ndarray, p_dynamic_threshold: float = 0.12
 ) -> None:
     """Log percentile breakdown for the currently shown p_occ values.
 

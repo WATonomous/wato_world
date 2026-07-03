@@ -21,7 +21,7 @@ def _update_sweep_python(
     is_ground: np.ndarray | None,
     chunk_origin: np.ndarray,
     voxel_size: float,
-    margin_voxels: float,
+    margin_m: float,
     max_length_m: float,
     log_odds: dict,
     n_obs: dict,
@@ -29,10 +29,18 @@ def _update_sweep_python(
     l_occ: float,
     l_free: float,
     log_odds_clamp: float,
-    r_max: float = 200.0,
-    use_range_weight: bool = False,
+    d_star: float,
+    nx: dict | None = None,
+    ny: dict | None = None,
+    nz: dict | None = None,
+    grazing_cos: float = 0.0,
 ) -> None:
-    """Reference DDA — same arithmetic as _update_sweep_numba in pure Python."""
+    """Reference DDA — same arithmetic as _update_sweep_numba in pure Python.
+
+    nx/ny/nz are per-voxel surface-normal lookups (occupied voxels only);
+    when present, a through-ray grazing an occupied voxel (|ray·n| <
+    grazing_cos) does not carve it. Pass None to disable the gate.
+    """
     ox = float(sweep_origin[0])
     oy = float(sweep_origin[1])
     oz = float(sweep_origin[2])
@@ -54,11 +62,8 @@ def _update_sweep_python(
         if length < 1e-9 or length > max_length_m:
             continue
 
-        if use_range_weight:
-            r_star_endpoint = r_max / length
-            if r_star_endpoint > 1.0:
-                r_star_endpoint = 1.0
-        else:
+        r_star_endpoint = d_star / length
+        if r_star_endpoint > 1.0:
             r_star_endpoint = 1.0
 
         inv_len = 1.0 / length
@@ -116,7 +121,7 @@ def _update_sweep_python(
             t_delta_z = INF
             t_max_z = INF
 
-        stop_t = length - margin_voxels * voxel_size
+        stop_t = length - margin_m
 
         while True:
             if t_max_x <= t_max_y and t_max_x <= t_max_z:
@@ -143,14 +148,18 @@ def _update_sweep_python(
             ):
                 continue
 
-            if use_range_weight:
-                r_star_t = r_max / t_entry
-                if r_star_t > 1.0:
-                    r_star_t = 1.0
-            else:
+            r_star_t = d_star / t_entry
+            if r_star_t > 1.0:
                 r_star_t = 1.0
 
             key = (cx << SHIFT_X) | (cy << SHIFT_Y) | cz
+
+            # Incidence gate: skip carving an occupied voxel the ray grazes.
+            if nx is not None and key in nx:
+                dot = abs(dxn * nx[key] + dyn * ny[key] + dzn * nz[key])
+                if dot < grazing_cos:
+                    continue
+
             old_lo = log_odds.get(key, 0.0)
             new_lo = np.float32(old_lo) - np.float32(l_free * r_star_t)
             if new_lo < np.float32(-log_odds_clamp):

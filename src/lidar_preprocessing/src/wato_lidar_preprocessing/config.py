@@ -1,4 +1,8 @@
-"""Pydantic-loaded config for lidar_preprocessing."""
+"""Pydantic-loaded config for lidar_preprocessing.
+
+Classifier constants are derived from the datasheet SensorModel selected by
+sensor_model.profile (see sensor_model.py), not configured as raw numbers.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +10,27 @@ from typing import Any, Literal, Optional
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from wato_lidar_preprocessing.sensor_model import SensorModel, get_sensor_model
+
+
+class SensorModelParams(BaseModel):
+    """Selects the datasheet sensor profile. The physical numbers live in
+    sensor_model.py's profile table, not in user YAML."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # "velodyne_vlp" (WATO 3-Velodyne rig) | "nuscenes" (HDL-32E-class).
+    profile: str = "velodyne_vlp"
+
+    @field_validator("profile")
+    @classmethod
+    def _known_profile(cls, v: str) -> str:
+        get_sensor_model(v)  # raises ValueError listing valid profiles
+        return v
+
+    def build(self) -> SensorModel:
+        return get_sensor_model(self.profile)
 
 
 class FrameSyncParams(BaseModel):
@@ -116,21 +141,21 @@ class MFMosParams(BaseModel):
     # None = run on every LiDAR; e.g. ["lidar_cc"] = centre only.
     lidar_id_allowlist: Optional[list[str]] = None
     # Occlusion gate for unprojecting the per-pixel moving mask back to points.
-    # A moving pixel's label is assigned only to points whose range is within
-    # this tolerance of the pixel's winning (closest) range — i.e. the front
-    # surface of the mover. Points that lost the closest-range tiebreak
-    # (occluded background, e.g. a wall directly behind a car) sit farther
-    # than winner+tol and DON'T inherit the moving label. Raise toward a large
-    # value to effectively disable the gate (legacy behaviour: every in-FOV
-    # point inherits its pixel's label).
     occlusion_range_tol_m: float = 1.0
     # Seed each lidar's residual sliding window from the temporally-preceding
     # chunk's sweeps so the first max(residual_steps) sweeps of a chunk get
-    # full residual channels instead of cold-start zeros. Chunks overlap, so
-    # the prior chunk amply covers the window; the bag's very first chunk has
-    # no predecessor and still cold-starts. Poses are merged across the two
-    # chunks (both live in the same SLAM map frame) for residual projection.
+    # full residual channels instead of cold-start zeros.
     prime_window_from_prior_chunk: bool = True
+
+    # --- Per-sweep spatial denoise (replaces the chunk-wide vote tier) ---
+    # MF-MOS speckle is removed spatially per sweep: cluster moving points on a
+    # 26-connected 3D grid and drop clusters below the size floor. Temporal
+    # confirmation of a mover is the downstream tracker's job.
+    # Cluster grid resolution [m] (~2× voxel keeps an object connected).
+    moving_cluster_voxel_m: float = 0.5
+    # Min points per moving cluster (a pedestrian at MF-MOS range is well above
+    # this; single-sweep mispredictions are 1–few points).
+    moving_min_cluster_pts: int = 8
 
     @field_validator("residual_steps")
     @classmethod
@@ -156,16 +181,26 @@ class MFMosParams(BaseModel):
             raise ValueError(f"score_threshold must be in [0, 1], got {v}")
         return v
 
-    @field_validator("occlusion_range_tol_m")
+    @field_validator("occlusion_range_tol_m", "moving_cluster_voxel_m")
     @classmethod
-    def _positive_occlusion_tol(cls, v: float) -> float:
+    def _positive_float(cls, v: float) -> float:
         if v <= 0:
-            raise ValueError(f"occlusion_range_tol_m must be > 0, got {v}")
+            raise ValueError(f"value must be > 0, got {v}")
+        return v
+
+    @field_validator("moving_min_cluster_pts")
+    @classmethod
+    def _positive_min_cluster(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"moving_min_cluster_pts must be >= 1, got {v}")
         return v
 
 
 class ComponentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    # --- Sensor model: source of all derived classifier constants ----------
+    sensor_model: SensorModelParams = SensorModelParams()
 
     # Step A — deskew filter.
     filter_nonfinite_points: bool = True
@@ -173,59 +208,30 @@ class ComponentConfig(BaseModel):
     # Step A — rolling-shutter motion compensation. When raw NPZ has no
     # per-point timestamps (t_offset_us), this synthesizes them from each
     # point's azimuth assuming uniform rotation. Disabling = all points
-    # share the header pose → ~25cm smear at 7 m/s ego on a 50ms sweep,
-    # which spreads statics across voxels and leaks them into dynamic_map.
+    # share the header pose → intra-sweep smear that spreads statics across
+    # voxels and leaks them into dynamic_map.
     synthesize_per_point_times: bool = True
-    # Velodyne HDL-32E @ 10 Hz = 100 ms; NuScenes uses same hardware @ 20 Hz = 50 ms.
+    # Velodyne VLP @ 10 Hz = 100 ms; NuScenes @ 20 Hz = 50 ms.
     lidar_sweep_duration_ms: float = 100.0
-    # "auto" detects from data by comparing phi[0] to phi[~200]. NuScenes
-    # LIDAR_TOP scans CW (counter to the common "Velodyne is CCW" assumption).
-    lidar_rotation_dir: Literal["ccw", "cw", "auto"] = "auto"
+    # Scan rotation direction comes from the sensor_model profile.
 
-    # Strictness flags — defaults make the pipeline fail loudly on missing
-    # inputs rather than silently degrade.
-    #
-    # require_patchwork=True → deskew raises if pypatchworkpp is missing.
-    # Without it, ground points pollute static_map.npz AND dynamic_map.npz.
+    # Strictness flags — fail loudly on missing inputs rather than degrade.
     require_patchwork: bool = True
-    #
-    # allow_uncompensated_motion=False → deskew raises when a sweep has no
-    # per-point timestamps and synthesize_per_point_times is also False.
     allow_uncompensated_motion: bool = False
 
     # Step B — voxel classification.
     voxel_size_m: float = 0.15
-    classification_method: Literal["log_odds", "persistence"] = "log_odds"
 
-    # Persistence-counting parameters (used when classification_method="persistence").
-    static_sweep_fraction: float = 0.3
-    static_sweep_min: int = 5
-
-    # Log-odds ray-casting parameters (used when classification_method="log_odds").
-    l_occ: float = 0.85
-    l_free: float = 0.40
-    # Must be MUCH larger than l_occ so well-observed statics can build a
-    # margin against carving — at clamp=5.0 with l_occ=1.20, the +5 ceiling
-    # is reached after ~4 hits and additional hits are wasted while carves
-    # keep subtracting. 50.0 gives ~40+ hits of headroom.
-    log_odds_clamp: float = 50.0
-    p_static_threshold: float = 0.7
-    p_dynamic_threshold: float = 0.3
+    # Evidence gates (statistical, sensor-independent).
+    # Voxels observed fewer than min_observations times stay UNKNOWN.
     min_observations: int = 3
     # Voxels with fewer endpoint hits go to free_only (never dynamic).
     min_occupied_hits: int = 1
-    # Default 200 m pairs with range-credibility weighting. Without that
-    # weighting, long rays still contribute full weight — set to 50-80 m
-    # to recover the historical "drop distant evidence" behaviour.
-    max_ray_length_m: float = 200.0
-    free_space_margin_voxels: float = 1.0
-    # UniLiPs r*_j extension. When True, every log-odds update is scaled by
-    # min(1, r_max_credibility_m / d), where d = ray length for the endpoint
-    # update and d = parametric entry distance for free-space carving.
-    # Down-weights endpoints AND distant carving while preserving near-field
-    # carving on long rays.
-    use_range_weighted_log_odds: bool = False
-    r_max_credibility_m: float = 200.0
+
+    # Optional hard cap on ray length [m]. None → sensor profile's max_range_m
+    # (a compute guard; far-field carving noise is handled by range weighting).
+    max_ray_length_m: Optional[float] = None
+
     # "skip_endpoint" → traverse ground rays for free-space evidence, no l_occ at endpoint.
     # "skip_ray"      → skip ground rays entirely (legacy).
     ground_endpoint_strategy: Literal["skip_endpoint", "skip_ray"] = "skip_endpoint"
@@ -235,21 +241,10 @@ class ComponentConfig(BaseModel):
     # Step D — global static map reduce.
     global_map_voxel_size_m: float = 0.30
 
-    # Two-pass global map prior (UniLiPs IWU). --two-pass runs single-pass,
-    # then reduce, then re-classifies every chunk using global_static_map.npz
-    # as a per-sweep KDTree prior.
-    #
-    # Match radius for the KDTree query. Should be >= global_map_voxel_size_m
-    # because reduce snaps points to voxel centres (worst-case offset is
-    # voxel_size × √3/2 ≈ 0.26 m at 0.30 m voxel). Raising the global map
-    # voxel size without also raising this silently breaks boundary matches.
+    # Two-pass global map prior (UniLiPs IWU): KDTree match radius, >=
+    # global_map_voxel_size_m (reduce snaps to voxel centres). The prior's
+    # strength + range weighting are derived from the sensor model.
     global_map_match_radius_m: float = 0.30
-    # Per-sweep log-odds boost for map-matched endpoints. Accumulates across
-    # every sweep that hits the voxel, so total ≈ l_occ_global_map * r_star
-    # * n_sweeps_hitting. Keep at ~1-5% of l_occ so the prior nudges without
-    # overriding real evidence. At 0.03, a voxel seen in every sweep of a
-    # 30-second 20 Hz chunk accumulates ~0.9 boost.
-    l_occ_global_map: float = 0.03
 
     # Unit of ingest's t_offset_us field.
     # Options: "seconds" | "microseconds" | "nanoseconds"
@@ -263,29 +258,6 @@ class ComponentConfig(BaseModel):
 
     # Step A.5 — MF-MOS learned moving-object segmentation.
     mf_mos: MFMosParams = MFMosParams()
-    # Voxel-level MF-MOS aggregation: a voxel is MF-MOS-dynamic if it got
-    # >= min_mf_mos_votes AND vote fraction >= mf_mos_vote_fraction_threshold.
-    mf_mos_vote_fraction_threshold: float = 0.5
-    min_mf_mos_votes: int = 1
-    # Transient-mover recovery. The absolute min_mf_mos_votes floor is meant to
-    # reject single-sweep MF-MOS noise, but it also drops genuinely fast movers:
-    # a cyclist / sprinting pedestrian crossing in ~0.2 s touches only ~4 sweeps
-    # at 20 Hz, so a strict floor of 4 kills it on any single-sweep miss. A
-    # voxel observed in <= mf_mos_transient_max_sweeps sweeps with vote fraction
-    # >= mf_mos_transient_vote_fraction_threshold is accepted as MF-MOS-dynamic
-    # even below min_mf_mos_votes, as long as it cleared mf_mos_transient_min_votes
-    # (kept >= 2 so single-sweep noise is still rejected). Set
-    # mf_mos_transient_min_votes very high to disable this recovery path.
-    mf_mos_transient_min_votes: int = 2
-    mf_mos_transient_vote_fraction_threshold: float = 0.8
-    mf_mos_transient_max_sweeps: int = 5
-    # True: a point is fused as MF-MOS-dynamic only if (a) the per-sweep mask
-    # flags it AND (b) its voxel passed the chunk-wide vote.
-    # False: (a) alone is enough.
-    # The chunk-wide vote denoises across sweeps; the per-sweep mask prevents
-    # the chunk-wide voxel set from bleeding dynamic labels back in time.
-    # Log-odds path only — persistence has no chunk-wide votes.
-    mf_mos_require_chunk_wide_vote: bool = True
 
     # voxel_occupancy.npz alongside static_map.npz. Includes ALL occupied
     # voxels (static + dynamic) — that's what MinkUNet consumes.
@@ -296,37 +268,21 @@ class ComponentConfig(BaseModel):
     # voxel_occupancy.npz filters out. Powers viz's p_occ color mode.
     save_voxel_diagnostics: bool = False
 
-    # One voxel_occupancy_frame_NNNN.npz per frame_id (all sweeps sharing
-    # that frame_id merged). What perception_2d feeds to MinkUNet — the
-    # per-chunk file is only useful for QA.
+    # One voxel_occupancy_frame_NNNN.npz per frame_id.
     save_per_frame_voxel_occupancy: bool = False
 
-    @field_validator("voxel_size_m", "global_map_voxel_size_m", "max_ray_length_m")
+    @field_validator("voxel_size_m", "global_map_voxel_size_m")
     @classmethod
     def _positive_voxel(cls, v: float) -> float:
         if v <= 0:
             raise ValueError(f"value must be > 0, got {v}")
         return v
 
-    @field_validator("l_occ", "l_free")
+    @field_validator("max_ray_length_m")
     @classmethod
-    def _positive_log_odds_param(cls, v: float) -> float:
-        if v <= 0:
-            raise ValueError(f"log-odds weight must be > 0, got {v}")
-        return v
-
-    @field_validator("r_max_credibility_m")
-    @classmethod
-    def _positive_r_max(cls, v: float) -> float:
-        if v <= 0:
-            raise ValueError(f"r_max_credibility_m must be > 0, got {v}")
-        return v
-
-    @field_validator("p_static_threshold", "p_dynamic_threshold")
-    @classmethod
-    def _probability_range(cls, v: float) -> float:
-        if not (0 < v < 1):
-            raise ValueError(f"probability threshold must be in (0, 1), got {v}")
+    def _positive_ray_length(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and v <= 0:
+            raise ValueError(f"max_ray_length_m must be > 0 or null, got {v}")
         return v
 
     @field_validator("min_observations", "min_occupied_hits")
@@ -334,43 +290,6 @@ class ComponentConfig(BaseModel):
     def _positive_min_obs(cls, v: int) -> int:
         if v < 1:
             raise ValueError(f"value must be >= 1, got {v}")
-        return v
-
-    @field_validator("min_mf_mos_votes", "mf_mos_transient_min_votes")
-    @classmethod
-    def _positive_min_mf_mos_votes(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError(f"vote-count threshold must be >= 1, got {v}")
-        return v
-
-    @field_validator("mf_mos_transient_max_sweeps")
-    @classmethod
-    def _positive_transient_max_sweeps(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError(f"mf_mos_transient_max_sweeps must be >= 1, got {v}")
-        return v
-
-    @field_validator(
-        "mf_mos_vote_fraction_threshold", "mf_mos_transient_vote_fraction_threshold"
-    )
-    @classmethod
-    def _vote_fraction_range(cls, v: float) -> float:
-        if not (0.0 < v <= 1.0):
-            raise ValueError(f"vote fraction threshold must be in (0, 1], got {v}")
-        return v
-
-    @field_validator("static_sweep_fraction")
-    @classmethod
-    def _fraction_range(cls, v: float) -> float:
-        if not (0 < v <= 1):
-            raise ValueError(f"static_sweep_fraction must be in (0, 1], got {v}")
-        return v
-
-    @field_validator("static_sweep_min")
-    @classmethod
-    def _positive_min(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError(f"static_sweep_min must be >= 1, got {v}")
         return v
 
     def point_time_scale_to_ns(self) -> float:
@@ -381,6 +300,16 @@ class ComponentConfig(BaseModel):
                 f"point_time_unit must be one of {list(scales)}, got {self.point_time_unit!r}"
             )
         return scales[self.point_time_unit]
+
+    def build_sensor_model(self) -> SensorModel:
+        """The datasheet SensorModel selected by sensor_model.profile."""
+        return self.sensor_model.build()
+
+    def effective_max_ray_length_m(self) -> float:
+        """Compute guard: explicit override, else the sensor's max range."""
+        if self.max_ray_length_m is not None:
+            return float(self.max_ray_length_m)
+        return self.build_sensor_model().max_range_m
 
 
 def load_config(path: str) -> ComponentConfig:

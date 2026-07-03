@@ -92,6 +92,9 @@ def _stub_load_model(_params):
 
 
 def _enabled_cfg(**kw) -> ComponentConfig:
+    # Detection/projection tests use synthetic single-point movers; disable the
+    # per-sweep 3D cluster denoise (min cluster = 1) so it doesn't drop them.
+    kw.setdefault("moving_min_cluster_pts", 1)
     return ComponentConfig(
         mf_mos=MFMosParams(
             enabled=True,
@@ -629,24 +632,23 @@ def _proc_row_with_mask(
 
 
 def test_fusion_independent_preserves_voxel_mask(tmp_env):
-    """fusion_mode='independent': MF-MOS mask saying all-moving doesn't change classify."""
+    """fusion_mode='independent': an all-moving MF-MOS mask doesn't change classify."""
     bag_id, chunk_id = "bag_fus_ind", "chunk0"
     n_sweeps = 6
-    # Three points seen in every sweep → static by voxel.
-    static_xyz = np.array([[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]])
+    sensor = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    # Three points seen in every sweep → static by ray-casting.
+    static_xyz = np.array([[5.0, 0.0, 0.0], [5.0, 1.0, 0.0], [5.0, -1.0, 0.0]])
 
     ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
     rows = []
     for i in range(n_sweeps):
-        _write_world_sweep(bag_id, chunk_id, i, static_xyz)
+        _write_world_sweep_with_origin(bag_id, chunk_id, i, static_xyz, sensor)
         mf_uri = _write_mf_mask(bag_id, chunk_id, i, np.ones(3, dtype=bool))
         rows.append(_proc_row_with_mask(bag_id, chunk_id, i, static_xyz, mf_uri))
     write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
 
     cfg = ComponentConfig(
-        static_sweep_fraction=0.3,
-        static_sweep_min=2,
-        classification_method="persistence",
+        min_observations=2,
         mf_mos=MFMosParams(enabled=True, fusion_mode="independent"),
     )
     classify_chunk(cfg, bag_id, chunk_id)
@@ -658,34 +660,33 @@ def test_fusion_independent_preserves_voxel_mask(tmp_env):
 
 
 def test_fusion_union_ors_signals(tmp_env):
-    """fusion_mode='union': voxel-static but MF-MOS-moving point lands in dynamic_map."""
+    """fusion_mode='union': a voxel-static but MF-MOS-moving point lands in dynamic_map."""
     bag_id, chunk_id = "bag_fus_union", "chunk0"
     n_sweeps = 6
-    # Three points seen in every sweep → static by voxel.
-    static_xyz = np.array([[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]])
+    sensor = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    static_xyz = np.array([[5.0, 0.0, 0.0], [5.0, 1.0, 0.0], [5.0, -1.0, 0.0]])
 
     ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
     rows = []
     for i in range(n_sweeps):
-        _write_world_sweep(bag_id, chunk_id, i, static_xyz)
-        # MF-MOS says point 0 (x=1.0) is moving; points 1 and 2 are not.
+        _write_world_sweep_with_origin(bag_id, chunk_id, i, static_xyz, sensor)
+        # MF-MOS says point 0 (5, 0, 0) is moving; points 1 and 2 are not.
         mf_uri = _write_mf_mask(bag_id, chunk_id, i, np.array([True, False, False]))
         rows.append(_proc_row_with_mask(bag_id, chunk_id, i, static_xyz, mf_uri))
     write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
 
     cfg = ComponentConfig(
-        static_sweep_fraction=0.3,
-        static_sweep_min=2,
-        classification_method="persistence",
+        min_observations=2,
         mf_mos=MFMosParams(enabled=True, fusion_mode="union"),
     )
     classify_chunk(cfg, bag_id, chunk_id)
 
     dmap = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
     assert dmap["xyz"].shape[0] > 0, "at least one point should be in dynamic_map"
-    assert (
-        pytest.approx(float(dmap["xyz"][:, 0].min()), abs=0.01) == 1.0
-    ), "point at x=1.0 (MF-MOS moving) should be in dynamic_map"
+    assert all(
+        abs(x - 5.0) < 0.01 and abs(y) < 0.01
+        for x, y in zip(dmap["xyz"][:, 0], dmap["xyz"][:, 1])
+    ), "only the MF-MOS-moving point at (5,0,0) should be in dynamic_map"
 
 
 def test_fusion_union_log_odds_path(tmp_env):
@@ -716,9 +717,6 @@ def test_fusion_union_log_odds_path(tmp_env):
     write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
 
     cfg = ComponentConfig(
-        classification_method="log_odds",
-        min_mf_mos_votes=3,
-        mf_mos_vote_fraction_threshold=0.5,
         mf_mos=MFMosParams(enabled=True, fusion_mode="union"),
     )
     classify_chunk(cfg, bag_id, chunk_id)
@@ -726,7 +724,7 @@ def test_fusion_union_log_odds_path(tmp_env):
     dmap = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
     assert (
         dmap["xyz"].shape[0] > 0
-    ), "union mode: MF-MOS-voted point in a log_odds-static voxel must appear in dynamic_map"
+    ), "union mode: MF-MOS-flagged point in a log_odds-static voxel must appear in dynamic_map"
     xs, ys = dmap["xyz"][:, 0], dmap["xyz"][:, 1]
     assert any(
         abs(x - 5.0) < 0.01 and abs(y) < 0.01 for x, y in zip(xs, ys)
@@ -751,9 +749,6 @@ def test_fusion_independent_log_odds_path(tmp_env):
     write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
 
     cfg = ComponentConfig(
-        classification_method="log_odds",
-        min_mf_mos_votes=3,
-        mf_mos_vote_fraction_threshold=0.5,
         mf_mos=MFMosParams(enabled=True, fusion_mode="independent"),
     )
     classify_chunk(cfg, bag_id, chunk_id)
@@ -868,10 +863,7 @@ def test_fusion_no_temporal_bleed_log_odds(tmp_env):
     write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
 
     cfg = ComponentConfig(
-        classification_method="log_odds",
         min_observations=1,
-        min_mf_mos_votes=1,
-        mf_mos_vote_fraction_threshold=0.5,
         mf_mos=MFMosParams(enabled=True, fusion_mode="mfmos_only"),
     )
     classify_chunk(cfg, bag_id, chunk_id)
@@ -879,8 +871,7 @@ def test_fusion_no_temporal_bleed_log_odds(tmp_env):
     dmap = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
     assert dmap["xyz"].shape[0] == 1, (
         f"expected 1 dynamic point (sweep 0's MF-MOS-flagged point only); "
-        f"got {dmap['xyz'].shape[0]} — chunk-wide mf_mos_dynamic_arr is "
-        f"bleeding across sweeps"
+        f"got {dmap['xyz'].shape[0]} — per-sweep mask must not bleed across sweeps"
     )
     assert int(dmap["sweep_id"][0]) == 0, (
         f"the surviving dynamic point must be from sweep 0 (the MF-MOS-flagged "
@@ -888,17 +879,16 @@ def test_fusion_no_temporal_bleed_log_odds(tmp_env):
     )
 
 
-def test_fusion_chunk_wide_gate_disabled_log_odds(tmp_env):
-    """mf_mos_require_chunk_wide_vote=False: a voxel that fails chunk-wide
-    thresholds can still be MF-MOS-dynamic if the per-sweep mask flags it.
+def test_fusion_per_sweep_flag_flips_single_point(tmp_env):
+    """A per-sweep MF-MOS flag flips exactly that sweep's point, no vote tier.
 
-    Setup:
-      - 4 sweeps, 1 vote across the chunk → fraction 0.25.
-      - Default thresholds (min_mf_mos_votes=2, fraction>=0.5) would reject.
-      - With chunk-wide gate disabled, the per-sweep flag in sweep 0 alone
-        is enough to flip that one point to dynamic.
+    4 sweeps; only sweep 0 flags the (5,0,0) point. The (denoised) per-sweep
+    mask drives fusion directly — so exactly one dynamic point survives, from
+    sweep 0. There is no chunk-wide vote/fraction threshold to satisfy: a fast
+    mover seen briefly is not suppressed here (temporal confirmation is the
+    tracker's job downstream).
     """
-    bag_id, chunk_id = "bag_chunkwide_gate_off", "chunk0"
+    bag_id, chunk_id = "bag_per_sweep_flag", "chunk0"
     sensor_origin = np.array([0.0, 0.0, 0.0], dtype=np.float64)
     xyz = np.array([[5.0, 0.0, 0.0], [5.0, 1.0, 0.0]])
 
@@ -912,147 +902,51 @@ def test_fusion_chunk_wide_gate_disabled_log_odds(tmp_env):
     write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
 
     cfg = ComponentConfig(
-        classification_method="log_odds",
         min_observations=1,
-        min_mf_mos_votes=2,
-        mf_mos_vote_fraction_threshold=0.5,
-        mf_mos_require_chunk_wide_vote=False,
         mf_mos=MFMosParams(enabled=True, fusion_mode="mfmos_only"),
     )
     classify_chunk(cfg, bag_id, chunk_id)
 
     dmap = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
     assert dmap["xyz"].shape[0] == 1, (
-        f"gate disabled: expected 1 dynamic point from sweep 0's per-sweep flag; "
+        f"expected 1 dynamic point from sweep 0's per-sweep flag; "
         f"got {dmap['xyz'].shape[0]}"
     )
     assert int(dmap["sweep_id"][0]) == 0
 
 
-def test_fusion_chunk_wide_gate_enabled_suppresses_undervoted(tmp_env):
-    """mf_mos_require_chunk_wide_vote=True (default): a per-sweep MF-MOS flag
-    that doesn't pass the chunk-wide vote thresholds is suppressed.
-
-    Same setup as test_fusion_chunk_wide_gate_disabled_log_odds, but with the
-    gate enabled (default) → 1/4 vote ratio fails the 0.5 fraction threshold
-    → mf_mos_dynamic_arr empty → no dynamic points.
-    """
-    bag_id, chunk_id = "bag_chunkwide_gate_on", "chunk0"
-    sensor_origin = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-    xyz = np.array([[5.0, 0.0, 0.0], [5.0, 1.0, 0.0]])
-
-    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
-    rows = []
-    for i in range(4):
-        _write_world_sweep_with_origin(bag_id, chunk_id, i, xyz, sensor_origin)
-        mask = np.array([True, False]) if i == 0 else np.zeros(2, dtype=bool)
-        mf_uri = _write_mf_mask(bag_id, chunk_id, i, mask)
-        rows.append(_proc_row_with_mask(bag_id, chunk_id, i, xyz, mf_uri))
-    write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
-
-    cfg = ComponentConfig(
-        classification_method="log_odds",
-        min_observations=1,
-        min_mf_mos_votes=2,
-        mf_mos_vote_fraction_threshold=0.5,
-        # mf_mos_require_chunk_wide_vote defaults to True.
-        mf_mos=MFMosParams(enabled=True, fusion_mode="mfmos_only"),
-    )
-    classify_chunk(cfg, bag_id, chunk_id)
-
-    dmap = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
-    assert dmap["xyz"].shape[0] == 0, (
-        f"gate enabled with 1/4 vote ratio (fails 0.5 fraction): expected 0 "
-        f"dynamic points; got {dmap['xyz'].shape[0]}"
-    )
-
-
 # ---------------------------------------------------------------------------
-# Group 8: transient-mover recovery (relaxed vote path for fast movers)
+# Group 8: per-sweep 3D cluster denoise (replaces the old chunk-wide vote tier)
 # ---------------------------------------------------------------------------
 
 
-def test_fusion_transient_recovery_below_strict_floor(tmp_env):
-    """A fast mover seen in few sweeps with near-unanimous agreement is
-    recovered even when its vote count is below the strict min_mf_mos_votes.
+def test_denoise_moving_mask_drops_isolated_points_keeps_blobs():
+    """The 3D cluster filter removes isolated moving points and keeps dense blobs."""
+    from wato_lidar_preprocessing.mf_mos._core import _denoise_moving_mask_3d
 
-    Setup: 4 sweeps, the point at (5, 0, 0) flagged moving in every sweep →
-    4 votes / 4 hits = 1.0 fraction. min_mf_mos_votes=5 so the strict path
-    fails (4 < 5), but the transient path accepts it (>=2 votes, fraction
-    1.0 >= 0.8, 4 <= 5 observing sweeps).
-    """
-    bag_id, chunk_id = "bag_transient_recover", "chunk0"
-    sensor_origin = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-    xyz = np.array([[5.0, 0.0, 0.0], [5.0, 1.0, 0.0], [5.0, -1.0, 0.0]])
+    # A 10-point dense blob near the origin, plus two far isolated speckle
+    # points. cluster_voxel=0.5, min_cluster_pts=4.
+    blob = np.random.RandomState(0).uniform(-0.2, 0.2, size=(10, 3))
+    speckle = np.array([[50.0, 0.0, 0.0], [-50.0, 0.0, 0.0]])
+    xyz = np.vstack([blob, speckle])
+    mask = np.ones(xyz.shape[0], dtype=bool)
 
-    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
-    rows = []
-    for i in range(4):
-        _write_world_sweep_with_origin(bag_id, chunk_id, i, xyz, sensor_origin)
-        mf_uri = _write_mf_mask(bag_id, chunk_id, i, np.array([True, False, False]))
-        rows.append(_proc_row_with_mask(bag_id, chunk_id, i, xyz, mf_uri))
-    write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
-
-    cfg = ComponentConfig(
-        classification_method="log_odds",
-        min_observations=1,
-        min_mf_mos_votes=5,  # strict floor NOT met (only 4 votes)
-        mf_mos_vote_fraction_threshold=0.5,
-        mf_mos_transient_min_votes=2,
-        mf_mos_transient_vote_fraction_threshold=0.8,
-        mf_mos_transient_max_sweeps=5,
-        mf_mos=MFMosParams(enabled=True, fusion_mode="mfmos_only"),
-    )
-    classify_chunk(cfg, bag_id, chunk_id)
-
-    dmap = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
-    assert dmap["xyz"].shape[0] > 0, (
-        "transient recovery: a 4/4-vote voxel must be dynamic even though "
-        "votes (4) < min_mf_mos_votes (5)"
-    )
-    assert all(
-        abs(x - 5.0) < 0.01 and abs(y) < 0.01
-        for x, y in zip(dmap["xyz"][:, 0], dmap["xyz"][:, 1])
+    out = _denoise_moving_mask_3d(
+        mask, xyz, cluster_voxel_m=0.5, min_cluster_pts=4
     )
 
+    assert out[:10].all(), "the 10-point blob must survive the size filter"
+    assert not out[10] and not out[11], "isolated speckle points must be dropped"
 
-def test_fusion_transient_rejects_single_sweep_noise(tmp_env):
-    """The transient path still rejects single-sweep MF-MOS noise.
 
-    Same shape as the recovery test but the point is flagged in only ONE of
-    4 sweeps → 1 vote. The transient path requires >= mf_mos_transient_min_votes
-    (2), so a lone stray flag is not rescued and no point goes dynamic.
-    """
-    bag_id, chunk_id = "bag_transient_noise", "chunk0"
-    sensor_origin = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-    xyz = np.array([[5.0, 0.0, 0.0], [5.0, 1.0, 0.0], [5.0, -1.0, 0.0]])
+def test_denoise_moving_mask_min_cluster_one_is_noop():
+    """min_cluster_pts<=1 leaves the mask unchanged (denoise disabled)."""
+    from wato_lidar_preprocessing.mf_mos._core import _denoise_moving_mask_3d
 
-    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
-    rows = []
-    for i in range(4):
-        _write_world_sweep_with_origin(bag_id, chunk_id, i, xyz, sensor_origin)
-        mask = np.array([True, False, False]) if i == 0 else np.zeros(3, dtype=bool)
-        mf_uri = _write_mf_mask(bag_id, chunk_id, i, mask)
-        rows.append(_proc_row_with_mask(bag_id, chunk_id, i, xyz, mf_uri))
-    write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
-
-    cfg = ComponentConfig(
-        classification_method="log_odds",
-        min_observations=1,
-        min_mf_mos_votes=5,
-        mf_mos_vote_fraction_threshold=0.5,
-        mf_mos_transient_min_votes=2,
-        mf_mos_transient_vote_fraction_threshold=0.8,
-        mf_mos_transient_max_sweeps=5,
-        mf_mos=MFMosParams(enabled=True, fusion_mode="mfmos_only"),
-    )
-    classify_chunk(cfg, bag_id, chunk_id)
-
-    dmap = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
-    assert dmap["xyz"].shape[0] == 0, (
-        f"single-sweep flag (1 vote) must not be rescued by the transient path; "
-        f"got {dmap['xyz'].shape[0]} dynamic points"
-    )
+    xyz = np.array([[50.0, 0.0, 0.0], [-50.0, 0.0, 0.0]])
+    mask = np.array([True, True])
+    out = _denoise_moving_mask_3d(mask, xyz, cluster_voxel_m=0.5, min_cluster_pts=1)
+    assert out.tolist() == [True, True]
 
 
 # ---------------------------------------------------------------------------

@@ -1,10 +1,7 @@
 """Log-odds ray-casting classifier.
 
-build_log_odds_grid:    Pass 1 — loops sweeps through the ray_traversal
-                        kernel, returns sorted per-voxel arrays.
-classify_from_log_odds: applies thresholds to return static_arr,
-                        not_dynamic_arr, mf_mos_dynamic_arr, classification,
-                        and diagnostic counts.
+All log-odds increments, thresholds, range weighting and carve margin come
+from the datasheet SensorModel (see sensor_model.py) — no hand-tuned knobs.
 """
 
 from __future__ import annotations
@@ -16,15 +13,19 @@ from tqdm import tqdm
 
 from wato_lidar_preprocessing.config import ComponentConfig
 from wato_lidar_preprocessing.ray_traversal import (
+    accumulate_cov,
     apply_global_map_boost,
+    compute_normals,
     extract_log_odds_arrays,
+    make_cov_dicts,
     make_log_odds_dicts,
     update_sweep_log_odds,
 )
+from wato_lidar_preprocessing.sensor_model import SensorModel
 from wato_lidar_preprocessing.voxel import voxel_indices
 
 from .global_map_prior import GlobalMapPrior
-from .io_helpers import load_mf_mos_world_mask, load_world_full, sigmoid
+from .io_helpers import load_world_full, sigmoid
 
 log = logging.getLogger(__name__)
 
@@ -46,7 +47,8 @@ def build_log_odds_grid(
     *,
     cache_xyz: bool,
     cache_intensity: bool = True,
-    bag_id: str | None = None,
+    pose_sigma_m: float,
+    sensor_model: SensorModel,
     global_map_prior: GlobalMapPrior | None = None,
 ) -> tuple[
     list[np.ndarray | None],
@@ -54,55 +56,70 @@ def build_log_odds_grid(
     list[np.ndarray | None],
     list[np.ndarray],
     dict[int, list[np.ndarray]],
-    tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
 ]:
-    """Pass 1 for the log-odds path.
+    """Pass 1: sub-pass 1a estimates per-voxel surface normals, sub-pass 1b
+    ray-casts the log-odds grid with the incidence gate. Caches xyz/intensity/
+    ground/origin/keys per sweep for Pass 2.
 
-    Loads each sweep once, populates the typed-dict log_odds accumulators
-    via ray_traversal, builds sweep_keys for Pass 2, and (optionally) caches
-    xyz/intensity/ground_mask in memory so Pass 2 doesn't re-read the NPZs.
+    pose_sigma_m: per-bag SLAM pose noise (poses.parquet); sets the carve margin.
+    global_map_prior: two-pass mode — map-matched endpoints get a one-time
+        credibility-weighted prior shift; touches log_odds only.
 
-    Args:
-        global_map_prior: optional GlobalMapPrior (two-pass mode). Endpoints
-            within match_radius_m of the global map get a credibility-weighted
-            log-odds boost (UniLiPs IWU Eq. 2-3). Touches log_odds only —
-            n_hits stays backed by real sweep returns so has_hits is not
-            bypassed.
-
-    Returns:
-        xyz_cache, intensity_cache, ground_mask_cache: per-sweep caches
-            (entries are None when the sweep was invalid or caching is off).
-        sweep_keys: per-sweep int64 voxel-key arrays, always full length so
-            dynamic_mask.npy stays length-aligned with the world NPZ.
-        frame_keys: frame_id → list of key arrays for per-frame voxel
-            occupancy export.
-        log_odds_arrays: (unique_keys, lo_vals, n_obs_vals, n_hits_vals,
-            mf_mos_votes_arr, n_sweep_hits_arr) sorted by key.
+    Returns the caches + log_odds_arrays = (unique_keys, lo, n_obs, n_hits).
     """
     log_odds_dict, n_obs_dict, n_hits_dict = make_log_odds_dicts()
-    mf_mos_votes: dict[int, int] = {}
-    n_sweep_hits: dict[int, int] = {}
-    accumulate_votes = (
-        bag_id is not None
-        and cfg.mf_mos.enabled
-        and cfg.mf_mos.fusion_mode != "independent"
+    cov_dicts = make_cov_dicts()
+
+    voxel_size = cfg.voxel_size_m
+    l_occ = sensor_model.l_occ
+    l_free = sensor_model.l_free
+    clamp = sensor_model.log_odds_clamp
+    d_star = sensor_model.credibility_crossover_m(voxel_size)
+    margin_m = sensor_model.carve_margin_m(pose_sigma_m)
+    grazing_cos = sensor_model.grazing_cos_threshold(voxel_size)
+    max_len = cfg.effective_max_ray_length_m()
+    log.info(
+        "chunk %s log-odds model (%s): l_occ=%.3f l_free=%.3f clamp=%.3f "
+        "d*=%.1fm carve_margin=%.3fm grazing_cos=%.2f (σ_range=%.3f "
+        "σ_pose=%.3f) max_ray=%.1fm",
+        chunk_id,
+        sensor_model.name,
+        l_occ,
+        l_free,
+        clamp,
+        d_star,
+        margin_m,
+        grazing_cos,
+        sensor_model.range_sigma_m,
+        pose_sigma_m,
+        max_len,
     )
+
+    # Two-pass global prior: accumulate per-voxel max credibility across all
+    # sweeps, applied ONCE after the carve pass (a prior shift, not gain).
+    prior_keys_parts: list[np.ndarray] = []
+    prior_cred_parts: list[np.ndarray] = []
 
     xyz_cache: list[np.ndarray | None] = []
     intensity_cache: list[np.ndarray | None] = []
     ground_mask_cache: list[np.ndarray | None] = []
+    origin_cache: list[np.ndarray | None] = []
     sweep_keys: list[np.ndarray] = []
     frame_keys: dict[int, list[np.ndarray]] = {}
 
+    # --- Sub-pass 1a: load sweeps, build caches/keys, accumulate per-voxel
+    # point moments (non-ground returns) for surface-normal estimation. ------
     for row in tqdm(
         meta_rows,
-        desc=f"classify chunk {chunk_id} pass 1",
+        desc=f"classify chunk {chunk_id} pass 1a",
         unit="sweep",
     ):
         if row.get("valid") is False:
             xyz_cache.append(None)
             intensity_cache.append(None)
             ground_mask_cache.append(None)
+            origin_cache.append(None)
             sweep_keys.append(np.empty(0, dtype=np.int64))
             continue
 
@@ -112,6 +129,7 @@ def build_log_odds_grid(
             xyz_cache.append(xyz if cache_xyz else None)
             intensity_cache.append(intensity if cache_xyz and cache_intensity else None)
             ground_mask_cache.append(ground_mask)
+            origin_cache.append(sweep_origin)
             sweep_keys.append(np.empty(0, dtype=np.int64))
             continue
 
@@ -122,32 +140,43 @@ def build_log_odds_grid(
                 f"missing 'origin' field — re-run deskew to regenerate."
             )
 
-        keys = voxel_indices(xyz, origin, cfg.voxel_size_m, chunk_id=chunk_id)
+        keys = voxel_indices(xyz, origin, voxel_size, chunk_id=chunk_id)
         sweep_keys.append(keys)
         xyz_cache.append(xyz if cache_xyz else None)
         intensity_cache.append(intensity if cache_xyz and cache_intensity else None)
-        # ground_mask is always cached — masking.py needs it regardless of
-        # cache_xyz, and it's 1 bit per point (cheap even on big chunks).
+        # ground_mask + origin always cached — cheap, and Pass 2 / sub-pass 1b
+        # need them regardless of cache_xyz.
         ground_mask_cache.append(ground_mask)
+        origin_cache.append(sweep_origin)
 
         fid = row.get("frame_id")
         if fid is not None:
             frame_keys.setdefault(int(fid), []).append(keys)
 
-        if accumulate_votes:
-            mf_mask = load_mf_mos_world_mask(
-                bag_id, chunk_id, row, xyz.shape[0], cfg.filter_nonfinite_points
-            )
-            if mf_mask is not None:
-                for k in np.unique(keys):
-                    n_sweep_hits[int(k)] = n_sweep_hits.get(int(k), 0) + 1
-                for k in np.unique(keys[mf_mask]):
-                    mf_mos_votes[int(k)] = mf_mos_votes.get(int(k), 0) + 1
+        # Normals from non-ground returns (kernel skips ground internally).
+        accumulate_cov(xyz, ground_mask, origin, voxel_size, cov_dicts)
+
+    # Estimate one surface normal per planar, sufficiently-observed voxel.
+    normal_dicts = compute_normals(cov_dicts, min_pts=cfg.min_observations)
+
+    # --- Sub-pass 1b: ray traversal with the incidence gate + global prior. --
+    for i, row in enumerate(
+        tqdm(meta_rows, desc=f"classify chunk {chunk_id} pass 1b", unit="sweep")
+    ):
+        if row.get("valid") is False:
+            continue
+        keys = sweep_keys[i]
+        if keys.shape[0] == 0:
+            continue
+        sweep_origin = origin_cache[i]
+        ground_mask = ground_mask_cache[i]
+        if xyz_cache[i] is not None:
+            xyz = xyz_cache[i]
+        else:
+            xyz, _, _, _ = load_world_full(row["world_path"])
 
         if cfg.ground_endpoint_strategy == "skip_endpoint":
-            # Traverse all rays; the kernel skips +l_occ at ground endpoints
-            # so road-surface voxels keep n_hits==0 while air voxels above
-            # the road still accumulate free-space evidence.
+            # Kernel skips +l_occ at ground endpoints but still carves the ray.
             endpoints_arr = xyz
             is_ground_arr = ground_mask
         else:  # "skip_ray" — drop ground rays entirely.
@@ -160,24 +189,22 @@ def build_log_odds_grid(
                 endpoints_arr,
                 is_ground_arr,
                 origin,
-                cfg.voxel_size_m,
-                cfg.free_space_margin_voxels,
-                cfg.max_ray_length_m,
+                voxel_size,
+                margin_m,
+                max_len,
                 log_odds_dict,
                 n_obs_dict,
                 n_hits_dict,
-                cfg.l_occ,
-                cfg.l_free,
-                cfg.log_odds_clamp,
-                r_max=cfg.r_max_credibility_m,
-                use_range_weight=cfg.use_range_weighted_log_odds,
+                l_occ,
+                l_free,
+                clamp,
+                d_star,
+                normal_dicts=normal_dicts,
+                grazing_cos=grazing_cos,
             )
 
-        # UniLiPs IWU boost. Applied AFTER update_sweep_log_odds so it adds
-        # to whatever ray traversal already wrote. Ground points are excluded:
-        # the global static map encodes above-ground structure, and boosting
-        # untraversed ground voxels creates phantom entries with n_obs=0.
-        if global_map_prior is not None and xyz.shape[0] > 0:
+        # Collect global-map matches for the one-time prior (non-ground only).
+        if global_map_prior is not None:
             if ground_mask is not None:
                 boost_select = ~ground_mask
                 boost_xyz = xyz[boost_select]
@@ -186,24 +213,24 @@ def build_log_odds_grid(
                 boost_xyz = xyz
                 boost_keys = keys
             if boost_xyz.shape[0] > 0:
-                map_hit, r_star = global_map_prior.query_sweep(boost_xyz, sweep_origin)
+                map_hit, ranges = global_map_prior.query_sweep(boost_xyz, sweep_origin)
                 if map_hit.any():
-                    apply_global_map_boost(
-                        boost_keys[map_hit],
-                        r_star[map_hit],
-                        cfg.l_occ_global_map,
-                        cfg.log_odds_clamp,
-                        log_odds_dict,
-                    )
+                    cred = sensor_model.range_weight(ranges[map_hit], voxel_size)
+                    prior_keys_parts.append(boost_keys[map_hit])
+                    prior_cred_parts.append(cred.astype(np.float32))
+
+    # One-time global-map prior shift over the chunk-wide matched voxel set.
+    if prior_keys_parts:
+        apply_global_map_boost(
+            np.concatenate(prior_keys_parts),
+            np.concatenate(prior_cred_parts),
+            sensor_model.l_map_prior,
+            clamp,
+            log_odds_dict,
+        )
 
     unique_keys, lo_vals, n_obs_vals, n_hits_vals = extract_log_odds_arrays(
         log_odds_dict, n_obs_dict, n_hits_dict
-    )
-    mf_mos_votes_arr = np.array(
-        [mf_mos_votes.get(int(k), 0) for k in unique_keys], dtype=np.int32
-    )
-    n_sweep_hits_arr = np.array(
-        [n_sweep_hits.get(int(k), 0) for k in unique_keys], dtype=np.int32
     )
     return (
         xyz_cache,
@@ -211,14 +238,7 @@ def build_log_odds_grid(
         ground_mask_cache,
         sweep_keys,
         frame_keys,
-        (
-            unique_keys,
-            lo_vals,
-            n_obs_vals,
-            n_hits_vals,
-            mf_mos_votes_arr,
-            n_sweep_hits_arr,
-        ),
+        (unique_keys, lo_vals, n_obs_vals, n_hits_vals),
     )
 
 
@@ -228,27 +248,20 @@ def classify_from_log_odds(
     n_obs_vals: np.ndarray,
     n_hits_vals: np.ndarray,
     cfg: ComponentConfig,
-    mf_mos_votes_arr: np.ndarray | None = None,
-    n_sweep_hits_arr: np.ndarray | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray, dict[str, int]]:
-    """Return (static_arr, not_dynamic_arr, mf_mos_dynamic_arr, classification, diag).
+    sensor_model: SensorModel,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, int]]:
+    """Return (static_arr, not_dynamic_arr, classification, diag).
 
-    static_arr:         voxels confident enough to label static.
-    not_dynamic_arr:    sorted union of (static + free_only + under-with-hits
-                        + ambiguous). Points in any of these voxels get
-                        mask=False in Pass 2.
-    mf_mos_dynamic_arr: sorted voxel keys where MF-MOS votes exceed thresholds,
-                        or None when vote aggregation was not active.
-    classification:     int8 array per unique_keys with CLASS_* codes —
-                        produced here so write_chunk_voxel_diagnostics doesn't
-                        re-derive the bucketing and silently diverge.
+    static if p_occ ≥ p_static (= p_hit), dynamic if p_occ < p_dynamic
+    (= 1-p_hit); the band between is AMBIGUOUS → not-dynamic (conservative).
+    not_dynamic_arr is the union of (static + free_only + under-with-hits +
+    ambiguous); points in any of those get mask=False.
     """
     if unique_keys.size == 0:
         empty = np.empty(0, dtype=np.int64)
         return (
             empty,
             empty,
-            None,
             np.empty(0, dtype=np.int8),
             {
                 "n_evidenced": 0,
@@ -258,11 +271,14 @@ def classify_from_log_odds(
             },
         )
 
+    p_static_threshold = sensor_model.p_static_threshold
+    p_dynamic_threshold = sensor_model.p_dynamic_threshold
+
     p_occ = sigmoid(lo_vals)
     evidenced = n_obs_vals >= cfg.min_observations
     has_hits = n_hits_vals >= cfg.min_occupied_hits
 
-    static_mask = evidenced & has_hits & (p_occ >= cfg.p_static_threshold)
+    static_mask = evidenced & has_hits & (p_occ >= p_static_threshold)
     static_arr = unique_keys[static_mask]
 
     free_only_mask = n_hits_vals < cfg.min_occupied_hits
@@ -274,8 +290,8 @@ def classify_from_log_odds(
     ambiguous_mask = (
         evidenced
         & has_hits
-        & (p_occ < cfg.p_static_threshold)
-        & (p_occ >= cfg.p_dynamic_threshold)
+        & (p_occ < p_static_threshold)
+        & (p_occ >= p_dynamic_threshold)
     )
     ambiguous_arr = unique_keys[ambiguous_mask]
 
@@ -289,51 +305,9 @@ def classify_from_log_odds(
     else:
         not_dynamic_arr = np.unique(np.concatenate(parts))
 
-    mf_mos_dynamic_arr = None
-    if (
-        mf_mos_votes_arr is not None
-        and n_sweep_hits_arr is not None
-        and cfg.mf_mos.enabled
-        and cfg.mf_mos.fusion_mode != "independent"
-    ):
-        denom = np.maximum(n_sweep_hits_arr, 1)
-        vote_fraction = mf_mos_votes_arr / denom
-        strict_mask = (mf_mos_votes_arr >= cfg.min_mf_mos_votes) & (
-            vote_fraction >= cfg.mf_mos_vote_fraction_threshold
-        )
-        # Transient-mover recovery: a fast object (cyclist / sprinting
-        # pedestrian) crossing in ~0.2 s touches only ~4 sweeps at 20 Hz, so
-        # the absolute min_mf_mos_votes floor drops it on any single-sweep
-        # miss. Accept a voxel observed in few sweeps (n_sweep_hits <=
-        # mf_mos_transient_max_sweeps) with near-unanimous agreement
-        # (vote_fraction >= mf_mos_transient_vote_fraction_threshold) even
-        # below the floor, keeping a >= mf_mos_transient_min_votes guard so
-        # genuine single-sweep noise is still rejected.
-        transient_mask = (
-            (mf_mos_votes_arr >= cfg.mf_mos_transient_min_votes)
-            & (vote_fraction >= cfg.mf_mos_transient_vote_fraction_threshold)
-            & (n_sweep_hits_arr <= cfg.mf_mos_transient_max_sweeps)
-        )
-        mf_mos_mask = strict_mask | transient_mask
-        mf_mos_dynamic_arr = np.sort(unique_keys[mf_mos_mask])
-        log.info(
-            "mf_mos vote aggregation: %d voxels with votes, %d pass strict "
-            "(min_votes=%d, fraction>=%.2f), +%d recovered transient "
-            "(>=%d votes, fraction>=%.2f, <=%d sweeps) → %d mf_mos-dynamic voxels",
-            int((mf_mos_votes_arr > 0).sum()),
-            int(strict_mask.sum()),
-            cfg.min_mf_mos_votes,
-            cfg.mf_mos_vote_fraction_threshold,
-            int((transient_mask & ~strict_mask).sum()),
-            cfg.mf_mos_transient_min_votes,
-            cfg.mf_mos_transient_vote_fraction_threshold,
-            cfg.mf_mos_transient_max_sweeps,
-            mf_mos_dynamic_arr.size,
-        )
-
     # CLASS_FREE_ONLY is the default; predicates below are mutually
     # exclusive partitions of (evidenced, has_hits, p_occ) space.
-    dynamic_mask = evidenced & has_hits & (p_occ < cfg.p_dynamic_threshold)
+    dynamic_mask = evidenced & has_hits & (p_occ < p_dynamic_threshold)
     classification = np.full(unique_keys.shape[0], CLASS_FREE_ONLY, dtype=np.int8)
     classification[under_evidenced_with_hits_mask] = CLASS_UNDER_EVIDENCED
     classification[dynamic_mask] = CLASS_DYNAMIC
@@ -346,4 +320,4 @@ def classify_from_log_odds(
         "n_ambiguous": int(ambiguous_mask.sum()),
         "n_free_only": int(free_only_mask.sum()),
     }
-    return static_arr, not_dynamic_arr, mf_mos_dynamic_arr, classification, diag
+    return static_arr, not_dynamic_arr, classification, diag
