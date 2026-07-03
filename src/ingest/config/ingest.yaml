@@ -1,7 +1,12 @@
-# wato_ingest configuration.
+# wato_ingest configuration — nuScenes rosbag profile (the default).
 #
-# This file is the single source of truth for ingest's parameters.  It is
-# loaded by `wato_ingest.config.load_config()` (called from cli.py).
+# Loaded by `wato_ingest.config.load_config()` (called from cli.py) whenever
+# --config is omitted.  Its companion, ingest.wato.yaml, is the same schema
+# tuned for WATO panoramic-rig recordings.
+#
+# Switch datasets per run via --config, e.g. for a WATO bag:
+#   ./watod run ingest /data/bags/<wato_bag>.mcap \
+#       --config /ws/src/ingest/config/ingest.wato.yaml
 #
 # Edit these values per recording — especially the `topics` map, which depends
 # on how the bag was recorded.  Override per host/run with --config path/to/other.yaml.

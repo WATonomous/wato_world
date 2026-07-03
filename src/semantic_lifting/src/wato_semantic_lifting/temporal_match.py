@@ -1,8 +1,15 @@
 """Temporal matching between LiDAR sweeps and camera frames.
 
 Associates each sweep to the nearest camera frame per camera within a
-configurable time tolerance, and computes the time-corrected cam_T_lidar
-transform to account for ego motion between sweep and frame timestamps.
+configurable time tolerance, and computes the ``cam_T_world`` transform that
+projects a sweep's (already world-registered) points into that camera.
+
+Note on ego motion: ``lidar_preprocessing`` deskews every sweep and expresses
+its points in the SLAM world frame at each point's own sensor timestamp (see
+``deskew/_core.py``). The sweep→frame ego motion is therefore *already* baked
+into the point coordinates, so lifting only needs the camera's world pose at
+the matched frame time — there is no residual ego motion left to compensate,
+and no LiDAR-frame / sweep-pose term is involved.
 """
 
 from __future__ import annotations
@@ -63,30 +70,28 @@ def match_sweep_to_frames(
     return matched
 
 
-def compute_cam_T_lidar(
-    world_T_ego_sweep: np.ndarray,
+def compute_cam_T_world(
     world_T_ego_frame: np.ndarray,
-    ego_T_lidar: np.ndarray,
     ego_T_cam: np.ndarray,
 ) -> np.ndarray:
-    """Compute the time-corrected cam_T_lidar transform.
+    """Compute the transform that projects world-frame points into a camera.
 
-    Accounts for ego motion between the LiDAR sweep time and the camera frame
-    time — critical at 25ms desync where dynamic points shift ~75cm.
+    The sweep's points are already in the SLAM world frame (deskewed per-point
+    at their own timestamps upstream), so the only pose that matters is the
+    camera's world pose at the matched frame time:
 
-    Formula:
-        cam_T_lidar = inv(ego_T_cam) @ inv(world_T_ego_frame)
-                      @ world_T_ego_sweep @ ego_T_lidar
+        cam_T_world = inv(ego_T_cam) @ inv(world_T_ego_frame)
+
+    Ego motion between sweep and frame is already accounted for by the upstream
+    world registration; there is no LiDAR-frame or sweep-pose term here. Residual
+    error on *dynamic* objects (scene motion over the sweep↔frame offset) is not
+    addressed by this transform — see "Dynamic-point handling" in the design doc.
 
     Args:
-        world_T_ego_sweep: ego pose at sweep timestamp, (4, 4) float64.
         world_T_ego_frame: ego pose at camera frame timestamp, (4, 4) float64.
-        ego_T_lidar: fixed LiDAR extrinsic, (4, 4) float64.
-        ego_T_cam: fixed camera extrinsic, (4, 4) float64.
+        ego_T_cam: fixed camera extrinsic (cam frame → ego frame), (4, 4) float64.
 
     Returns:
-        (4, 4) float64 SE3 transform: LiDAR frame → camera frame.
+        (4, 4) float64 SE3 transform: world frame → camera frame.
     """
-    cam_T_ego_frame = invert_se3(ego_T_cam)
-    ego_T_world_frame = invert_se3(world_T_ego_frame)
-    return cam_T_ego_frame @ ego_T_world_frame @ world_T_ego_sweep @ ego_T_lidar
+    return invert_se3(ego_T_cam) @ invert_se3(world_T_ego_frame)

@@ -5,8 +5,9 @@ Per-chunk steps:
     1. Temporal match: find nearest camera frame per camera within max_offset_s
     2. Load all LiDAR points for the sweep
     3. For each matched camera:
-       a. Compute time-corrected cam_T_lidar (accounts for ego motion)
-       b. Project LiDAR points to image
+       a. Compute cam_T_world at the matched frame time (points are already
+          world-registered upstream, so no sweep-pose / ego-motion term)
+       b. Project world-frame points to image
        c. Load depth_2d artifact; skip camera if fit_status == 2
        d. Run UniLiPs Eq.1 visibility test
        e. Load masks from tracklets_2d artifact
@@ -39,7 +40,7 @@ from wato_semantic_lifting.io import (
 )
 from wato_semantic_lifting.projection import assign_masks_to_points, project_and_clip
 from wato_semantic_lifting.stats import build_stats_row
-from wato_semantic_lifting.temporal_match import CameraFrameRef, compute_cam_T_lidar, match_sweep_to_frames
+from wato_semantic_lifting.temporal_match import compute_cam_T_world, match_sweep_to_frames
 from wato_semantic_lifting.visibility import visibility_test
 from wato_semantic_lifting.voting import LabeledPoint, PointVote, accumulate_votes
 
@@ -102,16 +103,14 @@ def _process_chunk(
             if cfg.depth.skip_on_fit_failure and depth_info["fit_status"] == 2:
                 continue
 
-            cam_T_lidar = compute_cam_T_lidar(
-                world_T_ego_sweep=_approx_ego_at_sweep(sweep, frame_refs),
+            cam_T_world = compute_cam_T_world(
                 world_T_ego_frame=frame_ref.world_T_ego,
-                ego_T_lidar=calib.ego_T_lidar,
                 ego_T_cam=calib.ego_T_cam,
             )
 
             H, W = depth_info["depth_m"].shape
             uv, depth_cam, valid = project_and_clip(
-                pts_world, calib.K, cam_T_lidar, (W, H)
+                pts_world, calib.K, cam_T_world, (W, H)
             )
 
             if not valid.any():
@@ -138,7 +137,7 @@ def _process_chunk(
             if uv_vis.shape[0] == 0:
                 continue
 
-            masks, instance_ids, classes = load_masks_for_frame(
+            masks, instance_ids, classes, scores = load_masks_for_frame(
                 bag_id, chunk_id, cam_id, frame_ref.camera_seq
             )
             if not masks:
@@ -151,8 +150,11 @@ def _process_chunk(
                 if mask_idx < 0:
                     continue
                 n_in_any_mask += 1
-                score = float(d_cam_vis[local_i]) if d_cam_vis[local_i] > 0 else 1.0
-                score = 1.0 / (1.0 + score / 50.0)  # crude depth confidence proxy
+                # Vote weight is the detector confidence of the mask that claimed
+                # this point (design doc's ``det_score``). The depth artifact has
+                # no per-pixel confidence to fold in, so det_score is the signal;
+                # a small floor keeps a zero-scored mask able to break ties.
+                score = max(scores[mask_idx], 1e-3)
                 all_votes.append(
                     PointVote(
                         point_idx=int(pt_idx),
@@ -185,17 +187,6 @@ def _process_chunk(
         "semantic_lifting: chunk %s done — %d sweeps, %d total stats rows",
         chunk_id, len(sweeps), len(stats_rows),
     )
-
-
-def _approx_ego_at_sweep(sweep, frame_refs: list[CameraFrameRef]) -> np.ndarray:
-    """Use the ego pose from the nearest frame ref as sweep-time ego pose.
-
-    Falls back to identity when no frame ref is available.
-    """
-    if not frame_refs:
-        return np.eye(4, dtype=np.float64)
-    best = min(frame_refs, key=lambda f: abs(f.timestamp_ns - sweep.timestamp_ns))
-    return best.world_T_ego
 
 
 def _write_sweep_labels(

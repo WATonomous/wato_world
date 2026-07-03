@@ -7,7 +7,7 @@ import pytest
 
 from wato_semantic_lifting.temporal_match import (
     CameraFrameRef,
-    compute_cam_T_lidar,
+    compute_cam_T_world,
     match_sweep_to_frames,
 )
 
@@ -65,34 +65,41 @@ def test_match_exact_timestamp_zero_offset():
 
 
 # ---------------------------------------------------------------------------
-# compute_cam_T_lidar
+# compute_cam_T_world
 # ---------------------------------------------------------------------------
 
 
-def test_compute_cam_T_lidar_identity_transforms():
-    """When all transforms are identity, cam_T_lidar should also be identity."""
+def test_compute_cam_T_world_identity_transforms():
+    """When ego pose and extrinsic are identity, cam_T_world is identity."""
     I = np.eye(4, dtype=np.float64)
-    result = compute_cam_T_lidar(I, I, I, I)
+    result = compute_cam_T_world(I, I)
     np.testing.assert_allclose(result, I, atol=1e-10)
 
 
-def test_compute_cam_T_lidar_pure_translation():
-    """Sweep ego shifted by (1, 0, 0) relative to frame ego → lidar shifted accordingly."""
+def test_compute_cam_T_world_ego_translation():
+    """Ego 1 m forward in world → a world point maps 1 m back in the camera."""
     I = np.eye(4, dtype=np.float64)
-    world_T_ego_sweep = I.copy()
-    world_T_ego_sweep[0, 3] = 1.0  # sweep ego 1 m forward in world
+    world_T_ego_frame = I.copy()
+    world_T_ego_frame[0, 3] = 1.0  # ego 1 m forward in world
 
-    result = compute_cam_T_lidar(world_T_ego_sweep, I, I, I)
-    # cam_T_lidar = inv(I) @ inv(I) @ world_T_ego_sweep @ I = world_T_ego_sweep
-    np.testing.assert_allclose(result, world_T_ego_sweep, atol=1e-10)
+    result = compute_cam_T_world(world_T_ego_frame, I)
+    # cam_T_world = inv(I) @ inv(world_T_ego_frame) = translation of -1 on x.
+    expected = I.copy()
+    expected[0, 3] = -1.0
+    np.testing.assert_allclose(result, expected, atol=1e-10)
 
 
-def test_compute_cam_T_lidar_no_ego_motion_equals_static():
-    """When sweep and frame have the same ego pose, the dynamic compensation cancels."""
+def test_compute_cam_T_world_round_trips_a_point():
+    """A world point at the ego origin projects to the camera's own offset."""
     I = np.eye(4, dtype=np.float64)
-    ego_T_lidar = I.copy()
-    ego_T_lidar[0, 3] = 0.5  # LiDAR is 0.5 m forward of ego
+    world_T_ego_frame = I.copy()
+    world_T_ego_frame[:3, 3] = [10.0, 5.0, 0.0]  # ego somewhere in the world
+    ego_T_cam = I.copy()
+    ego_T_cam[:3, 3] = [0.5, 0.0, 1.2]  # camera mounted forward + up of ego
 
-    # Same ego pose at both timestamps.
-    result = compute_cam_T_lidar(I, I, ego_T_lidar, I)
-    np.testing.assert_allclose(result, ego_T_lidar, atol=1e-10)
+    cam_T_world = compute_cam_T_world(world_T_ego_frame, ego_T_cam)
+    # The world point coincident with the ego origin should land at -ego_T_cam
+    # translation in the camera frame.
+    p_world = np.array([10.0, 5.0, 0.0, 1.0])
+    p_cam = cam_T_world @ p_world
+    np.testing.assert_allclose(p_cam[:3], [-0.5, 0.0, -1.2], atol=1e-10)

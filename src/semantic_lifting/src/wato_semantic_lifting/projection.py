@@ -12,17 +12,22 @@ from wato_common.geometry import project_lidar_to_image
 
 
 def project_and_clip(
-    points_lidar: np.ndarray,
+    points_world: np.ndarray,
     K: np.ndarray,
-    cam_T_lidar: np.ndarray,
+    cam_T_world: np.ndarray,
     image_size: tuple[int, int],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Project LiDAR points and return pixel coords, depths, and valid mask.
+    """Project world-frame points and return pixel coords, depths, valid mask.
+
+    The sweep's points are already registered in the SLAM world frame upstream,
+    so ``cam_T_world`` (not a LiDAR-frame transform) carries them into the camera.
+    ``project_lidar_to_image`` is frame-agnostic — it applies whatever ``cam_T_*``
+    it is given — so it is reused here unchanged.
 
     Args:
-        points_lidar: (N, 3) float64 points in LiDAR frame.
+        points_world: (N, 3) float64 points in the SLAM world frame.
         K: (3, 3) intrinsic matrix.
-        cam_T_lidar: (4, 4) SE3 transform from LiDAR to camera.
+        cam_T_world: (4, 4) SE3 transform from world to camera.
         image_size: (W, H) in pixels.
 
     Returns:
@@ -32,7 +37,7 @@ def project_and_clip(
                positive depth.
     """
     uv, depth_cam, valid = project_lidar_to_image(
-        points_lidar, K, cam_T_lidar, image_size
+        points_world, K, cam_T_world, image_size
     )
     return uv, depth_cam, valid
 

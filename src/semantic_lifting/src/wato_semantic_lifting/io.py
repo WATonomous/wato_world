@@ -137,13 +137,15 @@ def load_depth_map(
 
 def load_masks_for_frame(
     bag_id: str, chunk_id: str, cam_id: str, camera_seq: int
-) -> tuple[list[np.ndarray], list[str], list[str]]:
+) -> tuple[list[np.ndarray], list[str], list[str], list[float]]:
     """Load per-detection masks for one camera frame.
 
     Returns:
         masks: list of (H, W) bool arrays.
         instance_ids: list of global_object_id strings.
         classes: list of cls strings.
+        scores: list of detector confidences (``det_score``, falling back to the
+            masklet ``score``) used to weight this mask's vote.
     """
     rows = read_rows(tracklets_2d_path(bag_id, chunk_id))
     cam_rows = [
@@ -153,7 +155,7 @@ def load_masks_for_frame(
     ]
 
     masks_base = local_path(masks_2d_dir(bag_id, chunk_id))
-    masks, instance_ids, classes = [], [], []
+    masks, instance_ids, classes, scores = [], [], [], []
     for r in cam_rows:
         masklet_id = str(r.get("masklet_id", ""))
         mask_path = os.path.join(masks_base, masklet_id, f"{camera_seq:06d}.png")
@@ -168,8 +170,12 @@ def load_masks_for_frame(
         masks.append(mask)
         instance_ids.append(str(r.get("global_object_id") or r.get("masklet_id", "")))
         classes.append(str(r.get("cls", "")))
+        det_score = r.get("det_score")
+        if det_score is None:
+            det_score = r.get("score", 0.0)
+        scores.append(float(det_score or 0.0))
 
-    return masks, instance_ids, classes
+    return masks, instance_ids, classes, scores
 
 
 def _decode_frames_present(encoded) -> list[int]:
