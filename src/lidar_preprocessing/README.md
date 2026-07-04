@@ -151,8 +151,15 @@ concatenated and fed to a lightweight encoder-decoder. Output logits above
   so the mask can be aligned to raw NPZ arrays by downstream steps.
 - Uses the stored `ego_T_lidar` extrinsic + SLAM poses to warp historical sweeps
   into the current viewpoint for residual computation.
-- Skips a sweep if the pose gap to the required historical sweep exceeds
-  `max_pose_gap_ms` — prevents bad residuals from large ego-motion jumps.
+- Skips any sweep that **deskew** already flagged invalid (`valid=False` in the
+  proc index) — most commonly the start-of-bag window with no usable ego pose.
+  deskew is the single source of truth for per-sweep pose validity (it honors
+  ingest's `frame_index` `valid_pose`), so MF-MOS defers to it rather than
+  re-checking, which also avoids a per-sweep pose-gap warning flood over that
+  transient window. These sweeps get no mask; classify skips them regardless.
+- Still guards its own residual pairs: skips a sweep if the pose gap to the
+  required historical sweep exceeds `max_pose_gap_ms` — prevents bad residuals
+  from large ego-motion jumps on sweeps deskew did accept.
 - When `save_scores: true`, also writes a float32 `_mf_mos_score.npy` alongside
   each mask for threshold tuning.
 

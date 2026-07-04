@@ -189,7 +189,15 @@ def _write_lidar_sweeps(
     write_table(rows, LIDAR_SWEEPS_SCHEMA, lidar_sweeps_path(bag_id, chunk_id))
 
 
-def _write_proc_index(bag_id: str, chunk_id: str, sweep_ids: list[int]) -> None:
+def _write_proc_index(
+    bag_id: str,
+    chunk_id: str,
+    sweep_ids: list[int],
+    invalid_sweep_ids: set[int] | None = None,
+) -> None:
+    """Write a proc index. Sweeps in `invalid_sweep_ids` get valid=False, as
+    deskew emits for sweeps with no usable ego pose."""
+    invalid = invalid_sweep_ids or set()
     ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
     rows = [
         {
@@ -205,9 +213,12 @@ def _write_proc_index(bag_id: str, chunk_id: str, sweep_ids: list[int]) -> None:
             "world_path": "",
             "dynamic_mask_path": "",
             "has_intensity": False,
-            "deskewed": True,
-            "valid": True,
-            "drop_reason": None,
+            "deskewed": sid not in invalid,
+            "valid": sid not in invalid,
+            "drop_reason": "pose_invalid: no interpolatable ego pose "
+            "(valid_pose=False in frame_index)"
+            if sid in invalid
+            else None,
             "world_xmin": None,
             "world_xmax": None,
             "world_ymin": None,
@@ -501,6 +512,35 @@ def test_process_chunk_pose_gap_writes_zero_mask(tmp_env, monkeypatch):
     mask = np.load(local_path(mf_mos_mask_path(bag_id, chunk_id, 8)))
     assert mask.shape == (0,)
     assert not mask.any()
+
+
+def test_process_chunk_skips_deskew_invalid_sweeps(tmp_env, monkeypatch, caplog):
+    """Sweeps deskew flagged valid=False (no usable pose) are skipped by MF-MOS
+    without hitting the per-sweep pose-gap path, and get no mask written."""
+    monkeypatch.setattr(mf_mos_mod, "_load_model", _stub_load_model)
+
+    bag_id, chunk_id = "bag_deskew_invalid", "chunk0"
+    xyz = _make_in_fov_points(5)
+    _write_calibration(bag_id)
+    _write_poses(bag_id, chunk_id, [0, 1_000_000_000])
+    # Sweep 0 is deskew-invalid (no pose); sweep 1 is fine.
+    _write_lidar_sweeps(bag_id, chunk_id, [(0, xyz), (1, xyz)])
+    _write_proc_index(bag_id, chunk_id, [0, 1], invalid_sweep_ids={0})
+
+    cfg = _enabled_cfg()
+    with caplog.at_level("WARNING"):
+        result = process_chunk(cfg, bag_id, chunk_id)
+
+    # Sweep 0 skipped (counted as invalid, deferred to deskew), sweep 1 processed.
+    assert result.n_sweeps_processed == 1
+    assert result.n_sweeps_skipped_invalid == 1
+    assert result.n_sweeps_skipped_pose == 0
+    assert any(sid == 0 for sid, _ in result.skip_reasons)
+    # No mask for the skipped sweep; the valid one gets one.
+    assert not os.path.exists(local_path(mf_mos_mask_path(bag_id, chunk_id, 0)))
+    assert os.path.exists(local_path(mf_mos_mask_path(bag_id, chunk_id, 1)))
+    # The noisy per-sweep pose-gap WARNING must NOT fire for the skipped sweep.
+    assert "writing zero mask" not in caplog.text
 
 
 def test_process_chunk_empty_pointcloud_writes_zero_length_mask(tmp_env, monkeypatch):

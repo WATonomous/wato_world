@@ -158,13 +158,71 @@ frame_index.parquet                   ← artifacts/frame_index.py
     └─ each row carries world_T_ego_flat (16 floats, row-major 4×4)
 ```
 
-Every downstream component reads `world_T_ego_flat` from `frame_index.parquet`
-— never `poses.parquet` directly:
+Downstream components consume ego pose through the frame index:
 
-- `lidar_preprocessing` uses it for sweep deskewing and multi-sweep aggregation in the world frame.
-- `proposal_generation` uses it to project LiDAR points into camera images and lift 2D masks into 3D.
-- `tracking` uses it to track in the world frame and stitch tracks across chunk boundaries.
-- `label_refinement` uses it to smooth box trajectories.
+- `lidar_preprocessing` reads `poses.parquet` directly and re-interpolates
+  per-point for deskewing (it needs the raw sparse samples, not the per-sweep
+  snapshot), but honors `frame_index.parquet`'s `valid_pose` flag to skip
+  sweeps with no interpolatable pose. See [Frame validity & dropping](#frame-validity--dropping).
+- `proposal_generation` reads `world_T_ego_flat` from `frame_index.parquet` to
+  project LiDAR points into camera images and lift 2D masks into 3D.
+- `tracking` reads it to track in the world frame and stitch tracks across chunk boundaries.
+- `label_refinement` reads it to smooth box trajectories.
+
+## Frame validity & dropping
+
+Ingest never deletes frames. When people say a chunk "dropped N frames" (e.g.
+the `dropped` column in `quality`'s summary), they mean `frame_index.parquet`
+rows flagged **invalid** — the row is still written, with a reason, so nothing
+is silently lost and downstream stages decide whether to skip it.
+
+Two **independent** validity flags live on every `frame_index` row, one per
+alignment concern:
+
+| Flag | Set by | Meaning |
+|---|---|---|
+| `valid_camera` | camera↔sweep pairing in [`artifacts/frame_index.py`](src/wato_ingest/artifacts/frame_index.py) | The sweep has a usable image for this camera. |
+| `valid_pose` | pose interpolation in [`decoders/pose_interpolation.py`](src/wato_ingest/decoders/pose_interpolation.py) | An ego pose could be interpolated at the sweep timestamp. |
+
+They are computed separately: a row can have a valid camera but no pose, or a
+valid pose but no camera. `dropped_camera_count` counts only
+`valid_camera=False` rows.
+
+### `valid_camera` and `camera_drop_reason`
+
+For each LiDAR sweep, ingest finds the nearest camera frame **per camera** and
+compares the timestamp offset against `max_cam_offset_ms`. Invalid rows carry a
+human-readable `camera_drop_reason`:
+
+- `no_camera_frames_for_camera` — that camera has no images in the chunk window
+  at all (`image_path` and `camera_offset_ms` are null).
+- `offset_<N>ms_exceeds_threshold` — the nearest image exists but is farther
+  than `max_cam_offset_ms` from the sweep. The image is still recorded in the
+  row (with its `camera_offset_ms`), just flagged unusable.
+
+Valid rows have `camera_drop_reason = null`.
+
+### `valid_pose`
+
+`interpolate_at()` marks `valid_pose=False` when the nearest pose sample is more
+than `max_pose_gap_ms` from the sweep timestamp (or when there are no pose
+samples at all). Invalid rows leave `world_T_ego_flat`, `pose_timestamp_ns`, and
+`pose_interp_error` null.
+
+### Relationship to quality tags
+
+The per-row flags roll up into the chunk-level tags in `quality.json`:
+
+- **`POSE_MISSING`** — the fraction of `valid_pose=True` rows falls below
+  `quality_thresholds.min_pose_availability`.
+- **`STATIONARY`** — mean ego speed over the chunk is below
+  `quality_thresholds.stationary_speed_mps`.
+
+These commonly co-occur on the **first chunk of a bag**: the vehicle is still
+idling (→ `STATIONARY`) and eidos SLAM has not converged yet, so early sweeps
+have no interpolatable pose (→ `POSE_MISSING`, and those same pose-less rows
+inflate the dropped count). Mid-drive chunks with converged SLAM and a moving
+ego typically tag `OK`. See [Configuration](#configuration) for the thresholds.
 
 ## How To Run
 
@@ -233,7 +291,10 @@ What lives in the YAML:
 
 - `chunk_seconds` and `chunk_overlap_seconds` — virtual chunk size and overlap.
 - `reference_clock` — sensor stream used as the alignment reference.
-- `max_cam_offset_ms` — maximum allowed camera-to-LiDAR pairing delta.
+- `max_cam_offset_ms` — maximum allowed camera-to-LiDAR pairing delta; beyond
+  it a `(sweep, cam)` row is flagged `valid_camera=False`.
+- `max_pose_gap_ms` — maximum allowed gap to the nearest pose sample; beyond it
+  a row is flagged `valid_pose=False`.
 - `storage_id` — rosbag2 storage backend, usually `sqlite3`.
 - `topics` — mapping from logical sensor names (used in artifact paths) to
   bag topic names.  **Edit this section per recording** if your bag uses

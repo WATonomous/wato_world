@@ -75,6 +75,12 @@ def configure_tqdm() -> None:
     _orig_init = _tqdm.__init__
 
     def _patched_init(self, *args, **kwargs):
+        # Adapt the bar width to the live terminal size. Without this tqdm
+        # measures the width once at creation; inside a docker pty that width
+        # is often mis-detected (or the line grows past it via set_postfix), so
+        # each `\r` redraw leaves the wrapped remainder behind — the bar "spams"
+        # a new line on every update instead of overwriting in place.
+        kwargs.setdefault("dynamic_ncols", True)
         if force_off:
             kwargs["disable"] = True
         else:  # auto: disable only when the target stream isn't a terminal

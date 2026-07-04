@@ -10,9 +10,11 @@ Outputs per sweep (when cfg.mf_mos.enabled):
 Mask length matches the RAW sweep (before deskew's nonfinite filter) so
 consumers loading raw NPZs get index-aligned arrays.
 
-Skipped sweeps (valid=False, pose gap, empty, inference error) leave
-mf_mos_mask_path=None in the index. enabled=False makes the whole step
-a no-op.
+Skipped sweeps leave mf_mos_mask_path=None in the index. A sweep is skipped
+when deskew already flagged it invalid (valid=False — e.g. the start-of-bag
+window with no usable ego pose; MF-MOS defers to deskew rather than re-checking
+the pose gap itself), or for an empty sweep or inference error. enabled=False
+makes the whole step a no-op.
 """
 
 from __future__ import annotations
@@ -121,15 +123,39 @@ def process_chunk(
     max_gap_ns = int(params.max_pose_gap_ms * 1_000_000)
 
     # Group by lidar_id + sort by timestamp to build the residual sliding window.
+    # Skip sweeps deskew already flagged invalid (valid=False in the proc index)
+    # — most commonly the transient start-of-bag window before SLAM emits poses.
+    # deskew is the single source of truth for per-sweep pose validity (it honors
+    # ingest's frame_index valid_pose); deferring to it here keeps the stages
+    # consistent and avoids a per-sweep pose-gap WARNING flood over the very same
+    # sweeps. deskew-invalid sweeps get no mask; classify skips them regardless.
+    result = MFMosResult()
     rows_by_lidar: dict[str, list[dict]] = {}
+    skipped_invalid: list[int] = []
     for r in sweep_rows:
         if r.get("valid", True) is False:
+            continue
+        sid = int(r["sweep_id"])
+        meta = meta_by_sid.get(sid)
+        if meta is not None and meta.get("valid", True) is False:
+            skipped_invalid.append(sid)
+            result.n_sweeps_skipped_invalid += 1
+            result.skip_reasons.append(
+                (sid, meta.get("drop_reason") or "deskew marked sweep invalid")
+            )
             continue
         rows_by_lidar.setdefault(r["lidar_id"], []).append(r)
     for rows in rows_by_lidar.values():
         rows.sort(key=lambda r: int(r["header_timestamp_ns"]))
 
-    result = MFMosResult()
+    if skipped_invalid:
+        log.info(
+            "chunk %s: MF-MOS skipping %d sweep(s) deskew flagged invalid "
+            "(e.g. no usable ego pose); deferring to deskew's decision",
+            chunk_id,
+            len(skipped_invalid),
+        )
+
     max_k = max(params.residual_steps) if params.residual_steps else 0
 
     for lid, lid_rows in rows_by_lidar.items():

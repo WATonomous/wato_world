@@ -61,7 +61,7 @@ flowchart TD
     ovd -- "rare-class labels" --> student
 ```
 
-`frame_index.parquet` (written by **ingest**) is the cross-component contract: every downstream stage reads `world_T_ego_flat` (interpolated ego pose per LiDAR sweep) from it rather than consuming raw bag topics.
+`frame_index.parquet` (written by **ingest**) is the cross-component contract: downstream stages read interpolated ego pose (`world_T_ego_flat`) and per-sweep validity (`valid_pose`) from it rather than consuming raw bag topics. Most stages read `world_T_ego_flat` directly; **lidar_preprocessing** re-interpolates from `poses.parquet` for per-point deskewing but honors `frame_index`'s `valid_pose` flag to skip sweeps with no usable pose (e.g. the start-of-bag window before SLAM converges), and that skip propagates to MF-MOS and classify.
 
 **ingest** and **perception_2d** are implemented end-to-end (and **semantic_lifting**'s
 core lifting algorithm). The remaining components are stubs.

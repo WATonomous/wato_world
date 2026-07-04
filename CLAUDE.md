@@ -75,6 +75,14 @@ NotImplementedError.
   base injection layers at `docker/base/inject_{cpu,cuda}_base.Dockerfile`.
 - Compose stack: `modules/docker-compose.yaml` (deploy) + `.dev.yaml` (dev) +
   `.gpu.yaml` (gpu host overrides).
+- **Keep docs in lockstep with code.** Every time you add or change a feature,
+  update the relevant documentation in the same change — the component
+  `README.md`, this `CLAUDE.md`, config comments, and any docstrings describing
+  the affected behavior. A change that alters observable behavior, a contract
+  (artifact schema, `frame_index` fields, flags), or a cross-component
+  assumption is not complete until the corresponding markdown reflects it.
+  When you touch a component, verify its `README.md` still matches reality and
+  fix any drift you find.
 
 ## watod CLI
 

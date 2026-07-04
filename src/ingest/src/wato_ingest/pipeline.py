@@ -77,9 +77,15 @@ def run_bag(
             raise ValueError(f"chunk_id {only_chunk} not found")
 
     results: list[ChunkRunResult] = []
-    bar = tqdm(chunk_rows, desc="chunks", unit="chunk", leave=True)
-    for c in bar:
-        bar.set_postfix(chunk=c.chunk_id, step="cameras")
+    steps_per_chunk = 5
+    bar = tqdm(
+        total=len(chunk_rows) * steps_per_chunk,
+        desc="ingest",
+        unit="step",
+        leave=True,
+    )
+    for c in chunk_rows:
+        bar.set_description(f"ingest {c.chunk_id} cameras")
         cameras.decode_chunk(
             bag_path,
             bag_id,
@@ -88,7 +94,8 @@ def run_bag(
             t_end_ns=c.t_overlap_end_ns,
             cfg=cfg,
         )
-        bar.set_postfix(chunk=c.chunk_id, step="lidar")
+        bar.update()
+        bar.set_description(f"ingest {c.chunk_id} lidar")
         lidar.decode_chunk(
             bag_path,
             bag_id,
@@ -97,7 +104,8 @@ def run_bag(
             t_end_ns=c.t_overlap_end_ns,
             cfg=cfg,
         )
-        bar.set_postfix(chunk=c.chunk_id, step="poses")
+        bar.update()
+        bar.set_description(f"ingest {c.chunk_id} poses")
         poses.extract(
             bag_path,
             bag_id,
@@ -106,14 +114,16 @@ def run_bag(
             t_end_ns=c.t_overlap_end_ns,
             cfg=cfg,
         )
-        bar.set_postfix(chunk=c.chunk_id, step="frame_index")
+        bar.update()
+        bar.set_description(f"ingest {c.chunk_id} frame_index")
         frame_index_result = frame_index.build(
             bag_id,
             c.chunk_id,
             max_cam_offset_ms=cfg.max_cam_offset_ms,
             max_pose_gap_ns=int(cfg.max_pose_gap_ms * 1e6),
         )
-        bar.set_postfix(chunk=c.chunk_id, step="quality")
+        bar.update()
+        bar.set_description(f"ingest {c.chunk_id} quality")
         report = quality.compute(bag_id, c.chunk_id, cfg)
 
         manifest.write(
@@ -146,7 +156,9 @@ def run_bag(
                 dropped_camera_count=frame_index_result.dropped_camera_count,
             )
         )
+        bar.update()  # quality + manifest done — chunk complete
 
+    bar.close()
     return results
 
 

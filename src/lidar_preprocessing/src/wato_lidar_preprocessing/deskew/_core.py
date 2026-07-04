@@ -30,7 +30,11 @@ from wato_common.artifact_store import (
 from wato_common.geometry import PoseSample, batch_interpolate_poses
 from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.schemas import PROCESSED_SWEEPS_SCHEMA, ProcessedSweepMeta
-from wato_lidar_preprocessing._inputs import load_ego_T_lidar, load_pose_samples
+from wato_lidar_preprocessing._inputs import (
+    load_ego_T_lidar,
+    load_pose_samples,
+    load_pose_valid_sweep_ids,
+)
 from wato_lidar_preprocessing.config import (
     ComponentConfig,
     FrameSyncParams,
@@ -364,6 +368,11 @@ def process_chunk(
         write_table([], PROCESSED_SWEEPS_SCHEMA, index_uri)
         return []
 
+    # Sweeps ingest flagged as pose-invalid (no interpolatable pose within
+    # max_pose_gap_ms — e.g. before SLAM converges at bag start) are skipped
+    # rather than clamped to a stale pose. None = no frame_index → process all.
+    pose_valid_sweep_ids = load_pose_valid_sweep_ids(bag_id, chunk_id)
+
     unit_scale = cfg.point_time_scale_to_ns()
 
     sweep_rows = read_rows(lidar_sweeps_path(bag_id, chunk_id))
@@ -398,6 +407,33 @@ def process_chunk(
 
         sweep_id = int(row["sweep_id"])
         header_ts = int(row["header_timestamp_ns"])
+
+        # Honor ingest's per-sweep valid_pose: skip sweeps with no interpolatable
+        # pose instead of clamping them to a stale one. Record an explicit
+        # valid=False row so downstream distinguishes this from a missing sweep.
+        if pose_valid_sweep_ids is not None and sweep_id not in pose_valid_sweep_ids:
+            meta_rows.append(
+                ProcessedSweepMeta(
+                    bag_id=bag_id,
+                    chunk_id=chunk_id,
+                    sweep_id=sweep_id,
+                    lidar_id=lid,
+                    reference_timestamp_ns=header_ts,
+                    n_points_total=0,
+                    n_points_static=0,
+                    n_points_dynamic=0,
+                    n_points_ground=0,
+                    world_path="",
+                    dynamic_mask_path="",
+                    has_intensity=False,
+                    deskewed=False,
+                    valid=False,
+                    drop_reason="pose_invalid: no interpolatable ego pose "
+                    "(valid_pose=False in frame_index)",
+                ).model_dump()
+            )
+            continue
+
         has_pt = bool(row.get("has_point_time", False))
         raw_path = row["lidar_path"]
         ego_T_lidar = ego_T_lidar_by_id[lid]
