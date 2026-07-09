@@ -3,8 +3,10 @@
 build_log_odds_grid:    Pass 1 — loops sweeps through the ray_traversal
                         kernel, returns sorted per-voxel arrays.
 classify_from_log_odds: applies thresholds to return static_arr,
-                        not_dynamic_arr, mf_mos_dynamic_arr, classification,
-                        and diagnostic counts.
+                        not_dynamic_arr, classification, and diagnostic counts.
+
+Pure Amanatides-Woo: no MF-MOS here. The MF-MOS method is a separate,
+self-contained module (mf_mos/), selected with `--seg mos`.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from wato_lidar_preprocessing.ray_traversal import (
 from wato_lidar_preprocessing.voxel import voxel_indices
 
 from .global_map_prior import GlobalMapPrior
-from .io_helpers import load_mf_mos_world_mask, load_world_full, sigmoid
+from .io_helpers import load_world_full, sigmoid
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +37,10 @@ CLASS_STATIC = 0
 CLASS_AMBIGUOUS = 1  # evidenced + has_hits + p_dynamic ≤ p_occ < p_static
 CLASS_UNDER_EVIDENCED = 2  # has_hits but n_obs < min_observations
 CLASS_FREE_ONLY = 3  # n_hits < min_occupied_hits
-CLASS_DYNAMIC = 4  # evidenced + has_hits + p_occ < p_dynamic_threshold
+CLASS_DYNAMIC = 4  # evidenced + has_hits + p_occ < p_dynamic + hit-ratio ok
+CLASS_CARVED_NOISE = 5  # carved like dynamic but hit on too few passes
+# (n_hits/n_obs < min_hit_fraction_dynamic): free space with stray returns,
+# e.g. the near-ego scan-plane shell. Not dynamic, not static — points drop.
 
 
 def build_log_odds_grid(
@@ -46,15 +51,15 @@ def build_log_odds_grid(
     *,
     cache_xyz: bool,
     cache_intensity: bool = True,
-    bag_id: str | None = None,
     global_map_prior: GlobalMapPrior | None = None,
 ) -> tuple[
     list[np.ndarray | None],
     list[np.ndarray | None],
     list[np.ndarray | None],
+    list[np.ndarray | None],
     list[np.ndarray],
     dict[int, list[np.ndarray]],
-    tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
 ]:
     """Pass 1 for the log-odds path.
 
@@ -72,25 +77,21 @@ def build_log_odds_grid(
     Returns:
         xyz_cache, intensity_cache, ground_mask_cache: per-sweep caches
             (entries are None when the sweep was invalid or caching is off).
+        origin_cache: per-sweep sensor origin (None for invalid/empty sweeps),
+            used by Pass 2's near-range dynamic gate. Always cached (3 floats).
         sweep_keys: per-sweep int64 voxel-key arrays, always full length so
             dynamic_mask.npy stays length-aligned with the world NPZ.
         frame_keys: frame_id → list of key arrays for per-frame voxel
             occupancy export.
-        log_odds_arrays: (unique_keys, lo_vals, n_obs_vals, n_hits_vals,
-            mf_mos_votes_arr, n_sweep_hits_arr) sorted by key.
+        log_odds_arrays: (unique_keys, lo_vals, n_obs_vals, n_hits_vals)
+            sorted by key.
     """
     log_odds_dict, n_obs_dict, n_hits_dict = make_log_odds_dicts()
-    mf_mos_votes: dict[int, int] = {}
-    n_sweep_hits: dict[int, int] = {}
-    accumulate_votes = (
-        bag_id is not None
-        and cfg.mf_mos.enabled
-        and cfg.mf_mos.fusion_mode != "independent"
-    )
 
     xyz_cache: list[np.ndarray | None] = []
     intensity_cache: list[np.ndarray | None] = []
     ground_mask_cache: list[np.ndarray | None] = []
+    origin_cache: list[np.ndarray | None] = []
     sweep_keys: list[np.ndarray] = []
     frame_keys: dict[int, list[np.ndarray]] = {}
 
@@ -103,6 +104,7 @@ def build_log_odds_grid(
             xyz_cache.append(None)
             intensity_cache.append(None)
             ground_mask_cache.append(None)
+            origin_cache.append(None)
             sweep_keys.append(np.empty(0, dtype=np.int64))
             continue
 
@@ -112,6 +114,7 @@ def build_log_odds_grid(
             xyz_cache.append(xyz if cache_xyz else None)
             intensity_cache.append(intensity if cache_xyz and cache_intensity else None)
             ground_mask_cache.append(ground_mask)
+            origin_cache.append(sweep_origin)
             sweep_keys.append(np.empty(0, dtype=np.int64))
             continue
 
@@ -129,20 +132,11 @@ def build_log_odds_grid(
         # ground_mask is always cached — masking.py needs it regardless of
         # cache_xyz, and it's 1 bit per point (cheap even on big chunks).
         ground_mask_cache.append(ground_mask)
+        origin_cache.append(sweep_origin)
 
         fid = row.get("frame_id")
         if fid is not None:
             frame_keys.setdefault(int(fid), []).append(keys)
-
-        if accumulate_votes:
-            mf_mask = load_mf_mos_world_mask(
-                bag_id, chunk_id, row, xyz.shape[0], cfg.filter_nonfinite_points
-            )
-            if mf_mask is not None:
-                for k in np.unique(keys):
-                    n_sweep_hits[int(k)] = n_sweep_hits.get(int(k), 0) + 1
-                for k in np.unique(keys[mf_mask]):
-                    mf_mos_votes[int(k)] = mf_mos_votes.get(int(k), 0) + 1
 
         if cfg.ground_endpoint_strategy == "skip_endpoint":
             # Traverse all rays; the kernel skips +l_occ at ground endpoints
@@ -199,26 +193,14 @@ def build_log_odds_grid(
     unique_keys, lo_vals, n_obs_vals, n_hits_vals = extract_log_odds_arrays(
         log_odds_dict, n_obs_dict, n_hits_dict
     )
-    mf_mos_votes_arr = np.array(
-        [mf_mos_votes.get(int(k), 0) for k in unique_keys], dtype=np.int32
-    )
-    n_sweep_hits_arr = np.array(
-        [n_sweep_hits.get(int(k), 0) for k in unique_keys], dtype=np.int32
-    )
     return (
         xyz_cache,
         intensity_cache,
         ground_mask_cache,
+        origin_cache,
         sweep_keys,
         frame_keys,
-        (
-            unique_keys,
-            lo_vals,
-            n_obs_vals,
-            n_hits_vals,
-            mf_mos_votes_arr,
-            n_sweep_hits_arr,
-        ),
+        (unique_keys, lo_vals, n_obs_vals, n_hits_vals),
     )
 
 
@@ -228,17 +210,13 @@ def classify_from_log_odds(
     n_obs_vals: np.ndarray,
     n_hits_vals: np.ndarray,
     cfg: ComponentConfig,
-    mf_mos_votes_arr: np.ndarray | None = None,
-    n_sweep_hits_arr: np.ndarray | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray, dict[str, int]]:
-    """Return (static_arr, not_dynamic_arr, mf_mos_dynamic_arr, classification, diag).
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, int]]:
+    """Return (static_arr, not_dynamic_arr, classification, diag).
 
     static_arr:         voxels confident enough to label static.
     not_dynamic_arr:    sorted union of (static + free_only + under-with-hits
                         + ambiguous). Points in any of these voxels get
                         mask=False in Pass 2.
-    mf_mos_dynamic_arr: sorted voxel keys where MF-MOS votes exceed thresholds,
-                        or None when vote aggregation was not active.
     classification:     int8 array per unique_keys with CLASS_* codes —
                         produced here so write_chunk_voxel_diagnostics doesn't
                         re-derive the bucketing and silently diverge.
@@ -248,7 +226,6 @@ def classify_from_log_odds(
         return (
             empty,
             empty,
-            None,
             np.empty(0, dtype=np.int8),
             {
                 "n_evidenced": 0,
@@ -261,6 +238,11 @@ def classify_from_log_odds(
     p_occ = sigmoid(lo_vals)
     evidenced = n_obs_vals >= cfg.min_observations
     has_hits = n_hits_vals >= cfg.min_occupied_hits
+    # Occupancy ratio: fraction of traversals that were endpoint hits. Low for
+    # free space caught by stray returns (the near-ego scan-plane shell),
+    # high for genuine surfaces / movers actually present in the voxel.
+    hit_fraction = n_hits_vals / np.maximum(n_obs_vals, 1)
+    occupied_enough = hit_fraction >= cfg.min_hit_fraction_dynamic
 
     static_mask = evidenced & has_hits & (p_occ >= cfg.p_static_threshold)
     static_arr = unique_keys[static_mask]
@@ -279,8 +261,21 @@ def classify_from_log_odds(
     )
     ambiguous_arr = unique_keys[ambiguous_mask]
 
+    # Carved voxels split by the occupancy-ratio gate:
+    #   dynamic       — carved AND hit on enough passes (a real mover).
+    #   carved_noise  — carved but barely hit (free space + stray returns).
+    carved_mask = evidenced & has_hits & (p_occ < cfg.p_dynamic_threshold)
+    dynamic_mask = carved_mask & occupied_enough
+    carved_noise_mask = carved_mask & ~occupied_enough
+    carved_noise_arr = unique_keys[carved_noise_mask]
+
+    # carved_noise joins not_dynamic so its points are NOT flagged dynamic; it
+    # stays out of static_arr so it also never enters static_map.npz (the
+    # points simply drop from both clouds, like free_only/under/ambiguous).
     parts = [
-        a for a in (static_arr, free_only_arr, under_arr, ambiguous_arr) if a.size > 0
+        a
+        for a in (static_arr, free_only_arr, under_arr, ambiguous_arr, carved_noise_arr)
+        if a.size > 0
     ]
     if not parts:
         not_dynamic_arr = np.empty(0, dtype=np.int64)
@@ -289,34 +284,11 @@ def classify_from_log_odds(
     else:
         not_dynamic_arr = np.unique(np.concatenate(parts))
 
-    mf_mos_dynamic_arr = None
-    if (
-        mf_mos_votes_arr is not None
-        and n_sweep_hits_arr is not None
-        and cfg.mf_mos.enabled
-        and cfg.mf_mos.fusion_mode != "independent"
-    ):
-        denom = np.maximum(n_sweep_hits_arr, 1)
-        vote_fraction = mf_mos_votes_arr / denom
-        mf_mos_mask = (mf_mos_votes_arr >= cfg.min_mf_mos_votes) & (
-            vote_fraction >= cfg.mf_mos_vote_fraction_threshold
-        )
-        mf_mos_dynamic_arr = np.sort(unique_keys[mf_mos_mask])
-        log.info(
-            "mf_mos vote aggregation: %d voxels with votes, %d pass thresholds "
-            "(min_votes=%d, fraction>=%.2f) → %d mf_mos-dynamic voxels",
-            int((mf_mos_votes_arr > 0).sum()),
-            int(mf_mos_mask.sum()),
-            cfg.min_mf_mos_votes,
-            cfg.mf_mos_vote_fraction_threshold,
-            mf_mos_dynamic_arr.size,
-        )
-
     # CLASS_FREE_ONLY is the default; predicates below are mutually
     # exclusive partitions of (evidenced, has_hits, p_occ) space.
-    dynamic_mask = evidenced & has_hits & (p_occ < cfg.p_dynamic_threshold)
     classification = np.full(unique_keys.shape[0], CLASS_FREE_ONLY, dtype=np.int8)
     classification[under_evidenced_with_hits_mask] = CLASS_UNDER_EVIDENCED
+    classification[carved_noise_mask] = CLASS_CARVED_NOISE
     classification[dynamic_mask] = CLASS_DYNAMIC
     classification[ambiguous_mask] = CLASS_AMBIGUOUS
     classification[static_mask] = CLASS_STATIC
@@ -326,5 +298,7 @@ def classify_from_log_odds(
         "n_under_evidenced_with_hits": int(under_evidenced_with_hits_mask.sum()),
         "n_ambiguous": int(ambiguous_mask.sum()),
         "n_free_only": int(free_only_mask.sum()),
+        "n_dynamic": int(dynamic_mask.sum()),
+        "n_carved_noise": int(carved_noise_mask.sum()),
     }
-    return static_arr, not_dynamic_arr, mf_mos_dynamic_arr, classification, diag
+    return static_arr, not_dynamic_arr, classification, diag

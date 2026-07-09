@@ -1,5 +1,77 @@
 lidar_preprocessing:
-  # Step B — voxel static/dynamic classification.
+  # Step B — segmentation method for the static/dynamic split.
+  # Two independent base methods (no shared code) + one fusion method:
+  #   "aw"    → Amanatides-Woo log-odds voxel ray-casting (classify/). No MF-MOS.
+  #   "mos"   → MF-MOS learned moving-object segmentation (mf_mos/). No ray
+  #             traversal; static/dynamic comes purely from the per-sweep masks.
+  #   "union" → fusion (union/): keep AW's high-precision static map, take the
+  #             dynamic cloud from MF-MOS with that static map as a veto. Runs
+  #             both AW and MF-MOS. Tuned by the `union:` block below.
+  # Override per-run at the CLI: `./watod run lidar_preprocessing --seg union`.
+  segmentation: aw
+
+  # --- Fusion (seg=union) ---
+  union:
+    # Drop MF-MOS-moving points whose voxel AW confirmed static. This is the
+    # core of the method: AW's static map vetoes MF-MOS false positives that
+    # hug static structure (parked cars, facades, poles). false → union is
+    # just raw MF-MOS dynamic (still ground-removed), for A/B'ing the veto.
+    aw_static_veto: true
+    # Recall mode: also union in AW's own dynamic verdict (still ground-removed
+    # and static-vetoed). Off by default — AW dynamics are high-recall but
+    # low-precision (they hug static surfaces), so the default is MF-MOS-only.
+    keep_aw_dynamic: false
+    # Veto exemption for high-confidence MF-MOS movers (handles parked-then-
+    # moving objects: AW's chunk-aggregate evidence calls their voxels static,
+    # which would delete MF-MOS's correct verdict). Points with MF-MOS moving
+    # probability >= this survive the veto. Requires mf_mos.save_scores: true;
+    # null disables the exemption. Suggested starting point: 0.9.
+    veto_score_exempt: null
+    # Drop dynamic candidates below this height (m) over Step C's ground.npz
+    # height grid. The AW static set is structurally blind to the road
+    # (skip_endpoint keeps road voxels at n_hits == 0, never static), so
+    # MF-MOS road false positives — half the union dynamic cloud on
+    # NuScenes 0061, median height -0.36 m — pass every voxel veto; height
+    # over the aggregated ground surface catches them. Costs the bottom
+    # slice of real movers (wheels/feet below the threshold). 0.0 disables.
+    ground_height_veto_m: 0.25
+    # Dilate the AW-static veto to voxels within this Chebyshev distance of a
+    # static voxel — surface returns straddle voxel boundaries, so the exact
+    # test misses the leakage shell one voxel off the structure. Candidates
+    # whose own voxel AW classed dynamic are exempt from the dilated part (AW
+    # corroborates the motion; movers brushing structure must survive).
+    # 0 = exact-voxel veto only.
+    veto_dilation_voxels: 1
+
+    # Post-veto temporal motion filter on the accumulated dynamic cloud. The
+    # voxel vetoes above only reach MF-MOS false positives that land ON the AW
+    # static map; structure it covers sparsely (far walls, foliage, below-grade
+    # returns) slips through. The persistence gate catches it. A/B with
+    # scripts/compare_seg_dynamic. Recall/precision trade on the ring-road bag:
+    #   persist<20 (coherence off): on-static 12.6%, mover-recall 75%  <- default
+    #   persist<5 + coherence:      on-static 3.9%,  mover-recall 34%  (over-cuts)
+    #   no filter:                  on-static 58.3%, recall 100%
+    motion_filter:
+      # Master switch. false -> write the raw post-veto cloud (pre-filter
+      # behaviour), for measuring the filter's contribution.
+      enabled: true
+      # persistence gate (the workhorse): drop a point whose voxel is occupied
+      # across >= this many DISTINCT sweeps. Lower = cleaner but cuts more
+      # slow/large movers (a 4.5 m car dwells ~9 sweeps in a 0.5 m voxel);
+      # higher = more recall, more structure leaks (climbs fast past ~24).
+      # 0 disables. Sweep COUNT — scale with sensor Hz.
+      persistence_max_sweeps: 20
+      persistence_voxel_m: 0.5
+      # coherence gate: OFF by default (0). Drops points whose per-sweep cluster
+      # doesn't link into a >= N-sweep track. Membership only, never velocity.
+      # Cuts ~20% of real movers for <1% precision on sparse LiDAR (distant
+      # movers don't cluster) — enable only on dense clouds.
+      coherence_min_life: 0
+      coherence_cell_m: 0.4         # connected-components cell (m)
+      coherence_link_gate_m: 3.0    # max centroid step between sweeps (m)
+      coherence_max_object_m: 7.0   # per-sweep cluster extent cap -> structure
+
+  # --- Amanatides-Woo (seg=aw) voxel static/dynamic classification ---
 
   # Edge length of the cubic voxels used for occupancy accumulation.
   # Smaller → finer spatial fidelity but more sensitive to pose drift and
@@ -53,6 +125,23 @@ lidar_preprocessing:
   # called dynamic.  Higher → more conservative (lose transients seen in
   # only 1-2 sweeps); lower → more recall, more noise.
   min_occupied_hits: 1
+
+  # Occupancy-ratio gate for the DYNAMIC class: a voxel may be dynamic only if
+  # it was actually hit on >= this fraction of the rays that traversed it
+  # (n_hits / n_obs).  Near the ego, scan-plane voxels are pierced by thousands
+  # of through-rays while catching only a few stray returns (ego self-returns,
+  # near clutter), so raw p_occ alone drives them DYNAMIC — a dense false shell
+  # at sensor height.  Real movers are hit on a meaningful fraction of in-view
+  # passes (~0.2-0.6) vs ~0.01-0.04 for that shell, so this separates them.
+  # 0.0 = legacy behaviour (no gate).  0.10 is a conservative default.
+  min_hit_fraction_dynamic: 0.10
+
+  # Points within this horizontal range (m) of the sensor are never labelled
+  # dynamic.  Inside a few metres the return is dominated by the ego's own
+  # body and free-space carving is maximal, so no method can reliably call
+  # motion there.  Applies to every segmentation method (aw, mos, union).
+  # 0.0 disables.  Mirrors patchwork.min_range and mf_mos.min_range_m.
+  dynamic_min_range_m: 2.5
 
   # Cap on accepted ray length (metres).  Rays longer than this are dropped
   # before traversal.
@@ -153,8 +242,8 @@ lidar_preprocessing:
 
   # Export voxel_diag.npz with per-voxel log_odds / n_obs / n_hits /
   # classification for EVERY classified voxel (including carved ones).
-  # Required for the viz's p_occ color mode (lets you distinguish
-  # threshold-edge leakage from deep-carving leakage in the dynamic cloud).
+  # Consumed by the scripts/debug_*.py leakage tools to distinguish
+  # threshold-edge leakage from deep-carving leakage in the dynamic cloud.
   save_voxel_diagnostics: true
 
   # Export one voxel_occupancy_frame_NNNN.npz per frame_id.
@@ -171,14 +260,12 @@ lidar_preprocessing:
     canonical_lidar: null
     tolerance_ms: 25.0
 
-  # Step A.5 — MF-MOS learned moving-object segmentation.
-  # Outputs are independent of the voxel-occupancy classifier; the two are
-  # combined later via fusion_mode below.
+  # --- MF-MOS (seg=mos) learned moving-object segmentation ---
+  # Used only when segmentation == "mos". Self-contained: runs the model and
+  # derives static/dynamic purely from the per-sweep moving masks (no AW).
   # Weights: https://github.com/SCNU-RISLAB/MF-MOS/releases — drop at
   # /data/models/mf_mos/ (mounted via docker-compose.yaml).
   mf_mos:
-    # Master switch.  false → no MF-MOS pass; fusion_mode is ignored.
-    enabled: true
     checkpoint_path: /data/models/mf_mos/mf_mos_semantic_kitti.pt
     arch_config:   /data/models/mf_mos/arch_cfg.yaml
     data_config:   /data/models/mf_mos/data_cfg.yaml
@@ -217,39 +304,15 @@ lidar_preprocessing:
     # Useful for downstream re-thresholding without re-running inference.
     save_scores: true
 
-    # How MF-MOS masks combine with the voxel-occupancy classifier.
-    # "independent" → MF-MOS output is exported but not fused; classifier
-    #                 alone drives static/dynamic.
-    # "union"       → a voxel is DYNAMIC if either signal flags it.
-    # "mfmos_only"  → ignore the classifier's dynamic call; use MF-MOS only.
-    fusion_mode: mfmos_only
-
-    # Maximum pose-interpolation gap (ms) when assembling residual frames.
-    # Sweeps separated by more than this skip the MF-MOS pass.
-    # Higher → more coverage at the boundaries of pose-sparse regions but
-    # uses less-accurate interpolated poses.
+    # Maximum POSE-interpolation gap (ms) when warping a historical sweep
+    # into the current frame for a residual. Gates pose quality only.
+    # Higher → more coverage in pose-sparse regions but less-accurate poses.
     max_pose_gap_ms: 200
 
-  # Voxel-level MF-MOS vote aggregation (active when fusion_mode != independent).
-  # A voxel is MF-MOS-dynamic if (votes >= min_mf_mos_votes) AND
-  # (votes / observing_sweeps >= mf_mos_vote_fraction_threshold).
-
-  # Higher fraction → require stronger majority agreement across observing
-  # sweeps; suppresses transient false positives but loses briefly-seen movers.
-  mf_mos_vote_fraction_threshold: 0.6
-
-  # Higher minimum vote count → require more independent confirmations;
-  # protects against single-sweep MF-MOS noise but raises the bar for
-  # transient or sparsely-sampled objects.
-  min_mf_mos_votes: 4
-
-  # Whether the per-sweep MF-MOS mask is AND-filtered against the chunk-wide
-  # vote set above.
-  # true  → strictest; per-sweep dynamic call only fires inside voxels that
-  #         also passed the chunk-wide vote (denoises single-sweep flickers).
-  # false → trust per-sweep MF-MOS confidence directly; transients sampled
-  #         in only a few sweeps survive at the cost of more noise.
-  # Note: fusion in Pass 2 ALWAYS uses the per-sweep mask — a chunk-wide-only
-  # set would bleed dynamic labels across time (a voxel a car passed through
-  # in sweeps 100-105 would flag static points in sweeps 1-99).
-  mf_mos_require_chunk_wide_vote: true
+    # Maximum sweep-to-sweep time BASELINE (ms) accepted for a residual
+    # channel. Distinct from max_pose_gap_ms: residual step k spans
+    # k * sweep_dt, which for the longer residual_steps legitimately exceeds
+    # the pose-gap cap. Must sit above max(residual_steps) * sweep_dt
+    # (16 * 50 ms @ 20 Hz = 800 ms) or the long channels get zeroed — the
+    # historical bug that silently reduced multi-frame MOS to ~2 channels.
+    max_residual_gap_ms: 1000

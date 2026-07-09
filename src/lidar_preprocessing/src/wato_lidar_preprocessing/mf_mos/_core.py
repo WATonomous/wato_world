@@ -1,9 +1,10 @@
 """Step A.5 — MF-MOS learned moving-object segmentation.
 
-Range-image-based deep MOS as an additional dynamic-point signal alongside
-the voxel classifier. Runs between deskew and classify.
+Range-image-based deep MOS. The inference half of the `--seg mos` method;
+the segmentation half (masks → static/dynamic clouds) lives in segment.py.
+Runs after deskew on the mos path only — never on `--seg aw`.
 
-Outputs per sweep (when cfg.mf_mos.enabled):
+Outputs per sweep:
   <sweep_id:06d>_mf_mos_mask.npy   (n_raw,) bool   True == moving
   <sweep_id:06d>_mf_mos_score.npy  (n_raw,) float32 [optional]
 
@@ -74,16 +75,13 @@ def process_chunk(
     bag_id: str,
     chunk_id: str,
 ) -> MFMosResult:
-    """Run MF-MOS for every valid sweep in a chunk.
+    """Run MF-MOS inference for every valid sweep in a chunk.
 
-    No-op when cfg.mf_mos.enabled is False.
+    Called only on the `mos` segmentation path (`--seg mos`); the orchestrator
+    never invokes it under `--seg aw`. Writes per-sweep moving masks consumed
+    by mf_mos.segment.classify_chunk.
     """
     params = cfg.mf_mos
-
-    if not params.enabled:
-        meta_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
-        n = sum(1 for r in meta_rows if r.get("valid", True) is not False)
-        return MFMosResult(n_sweeps_skipped_disabled=n)
 
     sweep_rows = read_rows(lidar_sweeps_path(bag_id, chunk_id))
     meta_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
@@ -103,6 +101,10 @@ def process_chunk(
 
     model = _load_model(params)
     max_gap_ns = int(params.max_pose_gap_ms * 1_000_000)
+    # Separate cap for the residual time baseline. A residual at step k spans
+    # k * sweep_dt and legitimately exceeds the pose-gap cap for the longer
+    # steps; gating it on max_gap_ns (the old bug) zeroed most channels.
+    max_residual_gap_ns = int(params.max_residual_gap_ms * 1_000_000)
 
     # Group by lidar_id + sort by timestamp to build the residual sliding window.
     rows_by_lidar: dict[str, list[dict]] = {}
@@ -245,7 +247,10 @@ def process_chunk(
                     )
                     continue
                 past_ts, past_xyz = past_window[j]
-                if abs(cur_ts - past_ts) > max_gap_ns or past_xyz.shape[0] == 0:
+                if (
+                    abs(cur_ts - past_ts) > max_residual_gap_ns
+                    or past_xyz.shape[0] == 0
+                ):
                     residuals.append(
                         np.zeros(
                             (params.range_image_h, params.range_image_w),
