@@ -70,80 +70,10 @@ done
 # shellcheck disable=SC2206
 COMPOSE_FILES=(${COMPOSE_FILES_STR})
 
-HOST_OPEN_HTML=0
-if [[ "${TARGET}" == "lidar_preprocessing" && "${SUBCMD}" == "viz" ]]; then
-    FILTERED_EXTRA_ARGS=()
-    for arg in "${EXTRA_ARGS[@]}"; do
-        if [[ "${arg}" == "--open" ]]; then
-            HOST_OPEN_HTML=1
-            continue
-        fi
-        FILTERED_EXTRA_ARGS+=("${arg}")
-    done
-    EXTRA_ARGS=("${FILTERED_EXTRA_ARGS[@]}")
-fi
-
 ARGS=("${SUBCMD}" --bag "${BAG}" "${EXTRA_ARGS[@]}")
 
-DOCKER_CMD=(
-    docker compose
+exec docker compose \
     --env-file "${WATO_WORLD_DIR}/modules/.env" \
     "${COMPOSE_FILES[@]}" \
     --profile "${TARGET}" \
     run --rm "${SERVICE}" python3 -m "${PKG}" "${ARGS[@]}"
-)
-
-open_host_file() {
-    local path="$1"
-
-    if command -v explorer.exe >/dev/null 2>&1; then
-        if command -v wslpath >/dev/null 2>&1; then
-            explorer.exe "$(wslpath -w "${path}")" >/dev/null 2>&1
-        else
-            explorer.exe "${path}" >/dev/null 2>&1
-        fi
-        return $?
-    fi
-    if command -v xdg-open >/dev/null 2>&1; then
-        xdg-open "${path}" >/dev/null 2>&1
-        return $?
-    fi
-    if command -v open >/dev/null 2>&1; then
-        open "${path}" >/dev/null 2>&1
-        return $?
-    fi
-    return 1
-}
-
-host_path_for_container_path() {
-    local path="$1"
-    case "${path}" in
-        /data/artifacts/*) echo "${WATO_WORLD_DIR}/data/artifacts/${path#/data/artifacts/}" ;;
-        /data/bags/*) echo "${WATO_WORLD_DIR}/data/bags/${path#/data/bags/}" ;;
-        /*) echo "${path}" ;;
-        *) echo "${PWD}/${path}" ;;
-    esac
-}
-
-if [[ ${HOST_OPEN_HTML} -eq 0 ]]; then
-    exec "${DOCKER_CMD[@]}"
-fi
-
-LOG_PATH="$(mktemp)"
-set +e
-"${DOCKER_CMD[@]}" 2>&1 | tee "${LOG_PATH}"
-STATUS=${PIPESTATUS[0]}
-set -e
-
-if [[ ${STATUS} -eq 0 ]]; then
-    while IFS= read -r container_path; do
-        host_path="$(host_path_for_container_path "${container_path}")"
-        if open_host_file "${host_path}"; then
-            echo "opened ${host_path}"
-        else
-            echo "could not open automatically; open ${host_path}"
-        fi
-    done < <(awk '/^wrote .*\.html$/ {sub(/^wrote /, ""); print}' "${LOG_PATH}")
-fi
-
-exit "${STATUS}"
