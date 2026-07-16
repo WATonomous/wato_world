@@ -82,7 +82,9 @@ def open_html_file(path: str | Path) -> bool:
             capture_output=True,
             text=True,
         )
-        target = converted.stdout.strip() if converted.returncode == 0 else str(resolved)
+        target = (
+            converted.stdout.strip() if converted.returncode == 0 else str(resolved)
+        )
         return subprocess.run(["explorer.exe", target], check=False).returncode == 0
     except OSError:
         return False
@@ -192,7 +194,11 @@ def write_html_viewer(
         if sweep_id is not None
         else _load_chunk_payload(bag_id, chunk_id)
     )
-    out = Path(out_path) if out_path is not None else _default_output_path(bag_id, chunk_id, sweep_id)
+    out = (
+        Path(out_path)
+        if out_path is not None
+        else _default_output_path(bag_id, chunk_id, sweep_id)
+    )
     if out.suffix.lower() != ".html":
         out.mkdir(parents=True, exist_ok=True)
         name = f"sweep_{sweep_id:06d}.html" if sweep_id is not None else "chunk.html"

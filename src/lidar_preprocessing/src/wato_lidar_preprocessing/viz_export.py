@@ -65,12 +65,16 @@ def export_ply(
     Extra scalar fields are designed for CloudCompare/ParaView-style inspection.
     Missing optional values use -1 so external viewers can color/filter them.
     """
-    out = Path(out_path) if out_path is not None else _default_export_path(
-        bag_id, chunk_id, sweep_id
+    out = (
+        Path(out_path)
+        if out_path is not None
+        else _default_export_path(bag_id, chunk_id, sweep_id)
     )
     if out.suffix.lower() != ".ply":
         out.mkdir(parents=True, exist_ok=True)
-        out = out / (f"sweep_{sweep_id:06d}.ply" if sweep_id is not None else "chunk.ply")
+        out = out / (
+            f"sweep_{sweep_id:06d}.ply" if sweep_id is not None else "chunk.ply"
+        )
 
     dtype = np.dtype(
         [

@@ -45,7 +45,9 @@ _AXIS_BITS = 20
 _AXIS_RANGE = 1 << _AXIS_BITS
 
 
-def _load_optional_voxel_diag(bag_id: str, chunk_id: str) -> dict[str, np.ndarray] | None:
+def _load_optional_voxel_diag(
+    bag_id: str, chunk_id: str
+) -> dict[str, np.ndarray] | None:
     from wato_lidar_preprocessing.io import load_voxel_diag
 
     try:
@@ -65,7 +67,9 @@ def _load_optional_voxel_diag(bag_id: str, chunk_id: str) -> dict[str, np.ndarra
     }
 
 
-def _voxel_diag_per_point(xyz: np.ndarray, diag: dict[str, np.ndarray] | None) -> dict[str, np.ndarray] | None:
+def _voxel_diag_per_point(
+    xyz: np.ndarray, diag: dict[str, np.ndarray] | None
+) -> dict[str, np.ndarray] | None:
     if diag is None or xyz.shape[0] == 0:
         return None
 

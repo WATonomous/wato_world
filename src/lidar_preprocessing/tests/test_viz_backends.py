@@ -105,7 +105,9 @@ def test_open_html_file_resolves_relative_paths(tmp_path, monkeypatch):
     html.write_text("<html></html>", encoding="utf-8")
 
     opened = []
-    monkeypatch.setattr("webbrowser.open", lambda url, new=0: opened.append((url, new)) or True)
+    monkeypatch.setattr(
+        "webbrowser.open", lambda url, new=0: opened.append((url, new)) or True
+    )
 
     assert open_html_file(html) is True
     assert opened == [(html.resolve().as_uri(), 2)]
