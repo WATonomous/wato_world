@@ -49,7 +49,6 @@ services:
         MODULE_DEPS: "${INGEST_IMAGE}:deps_${TAG}"
         COMPONENT_PACKAGE_DIR: ingest
         COMPONENT_PACKAGE: wato_ingest
-        DEV_PYTEST_SPEC: "pytest>=7,<9"
       cache_from:
         - "${INGEST_IMAGE}:${TAG}"
     image: "${INGEST_IMAGE}:${TAG}"
