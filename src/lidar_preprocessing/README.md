@@ -81,164 +81,50 @@ C.   ground/          aggregate per-sweep ground masks → height grid
 D.   reduce/          [separate command] bag-level global static map
 ```
 
-## Visualization workflow
+## Visualization
 
-The `viz` command is the shared entrypoint for native, browser, and external
-viewer workflows:
-
-```bash
-wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id>
-wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id> --backend html
-wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id> --backend web --port 8765
-wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id> --export ply
-```
-
-Use the default Open3D backend when native windows are working. It provides the
-full stage viewer: deskewed per-sweep inspection (`--stage A --sweep N`),
-static/dynamic accumulated views, ground-grid plots, and the bag-level reduced
-map (`--stage D`).
-
-Use `--backend html` for the cleaner debug loop. It writes a standalone WebGL
-viewer under `<chunk>/viz/chunk.html` by default, with static/dynamic toggles,
-dynamic sweep scrubbing, trail/all modes, point-size controls, and color modes
-for sweep id, height, and intensity. No Open3D, DISPLAY forwarding, or X server
-is required; open the emitted HTML file in a browser. For a single processed
-sweep, add `--sweep N` and it writes `sweep_<N>.html` colored by static vs
-dynamic classification.
-
-Use `--backend web` for the most dynamic local workflow. It starts a local
-browser app, serves point buffers over HTTP, and supports the same sweep
-scrubbing/playback controls without embedding the whole cloud into one HTML
-file. Voxel diagnostic color modes (`p_occ`, `n_obs`, `n_hits`,
-`classification`) appear automatically when `voxel_diag.npz` exists.
-
-Use `--export ply` for external tools such as CloudCompare or ParaView. The
-binary PLY includes scalar fields for `dynamic`, `sweep_id`, `intensity`,
-`p_occ`, `n_obs`, `n_hits`, and `classification`, so those viewers can color
-and filter by WATO classifier state.
-
-### How to use the viewers
-
-**Open3D backend**
+The default viewer is a standalone HTML file. It shows static and dynamic
+points together and does not require Open3D, DISPLAY forwarding, or an X server.
 
 ```bash
-wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id>
-wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id> --stage A --sweep <N>
-wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id> --stage B --sweep <N>
-wato_lidar_preprocessing viz --bag <bag_id> --stage D
+./watod run lidar_preprocessing viz \
+  --bag <bag_id> --chunk <chunk_id> --open
 ```
 
-Use this when you need the full current pipeline viewer. Stage A shows one
-deskewed sweep, with ground points highlighted when `ground_mask` is present.
-Stage B shows static vs dynamic classification. Stage C opens the ground grid
-matplotlib view. Stage D opens the bag-level reduced static map after `reduce`
-has produced `global_static_map.npz`.
-
-Common Open3D controls:
-
-- `1`, `2`, `3`, `4`: snap to top/front/side/isometric views.
-- Mouse drag: rotate/orbit.
-- Mouse wheel: zoom.
-- Stage/sweep windows support layer toggles shown in the terminal log, such as
-  static/dynamic/ground/ego overlays where available.
-- The dynamic chunk viewer includes sweep playback, mode selection, optional
-  static backdrop, optional ego path, and color modes such as `p_occ`,
-  `classification`, `n_obs`, `n_hits`, `intensity`, and `sweep_id` when those
-  fields exist.
-
-**Standalone HTML backend**
-
-```bash
-wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id> --backend html
-wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id> --sweep <N> --backend html
-wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id> --backend html --out /tmp/lidar_viz
-wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id> --backend html --out viz_outputs --open
-./watod run lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id> --backend html --open
-```
-
-This writes a self-contained `.html` file and prints its path. Add `--open` to
-open the generated file in the default browser after writing; relative `--out`
-paths are resolved from the current working directory. Use it when you want
-something shareable or do not want DISPLAY/X11 or Open3D GUI support.
-When invoked through `./watod run lidar_preprocessing viz ... --open`, the
-host wrapper maps generated `/data/artifacts/...` HTML back to `data/artifacts`
-and opens it from the host, so it also works from Docker on WSL.
+Without `--open`, the command prints the generated file path. Use `--sweep N`
+to inspect one classified sweep or `--out PATH` to choose the output location.
 
 Browser controls:
 
-- `view`: top, iso, side, or front camera preset.
-- `mode`: `single sweep`, `trail`, or `all dynamic`.
-- `color`: static/dynamic, sweep id, height, or intensity when available.
-- `sweep` slider: scrub the dynamic sweep.
-- `prev`, `next`, `play`: step or animate sweeps.
-- `static`, `dynamic`: toggle point layers.
-- `point`: adjust point size.
+- `view`: top, isometric, side, or front.
+- `mode`: one sweep, a five-sweep trail, or all dynamic points.
+- `color`: static/dynamic, sweep ID, height, or intensity.
+- `prev`, `next`, `play`, and the sweep slider: move through time.
+- `static`, `dynamic`, and `point`: toggle layers and change point size.
 
-**Local web backend**
+Other workflows remain available from the same command:
 
 ```bash
+# Serve larger point buffers from a local HTTP server.
 wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id> --backend web
-wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id> --backend web --host 0.0.0.0 --port 8765
-```
 
-This starts a local HTTP server and prints a URL. Open that URL in a browser.
-It serves binary point buffers over HTTP instead of embedding the whole cloud
-into one HTML file, so it is the better local interaction loop for larger
-chunks.
-
-The controls match the standalone HTML viewer, with additional diagnostic color
-modes when `voxel_diag.npz` exists:
-
-- `p_occ`: voxel occupancy probability, useful for distinguishing
-  threshold-edge dynamics from heavily carved space.
-- `n_obs`: number of sweeps that observed/touched the voxel.
-- `n_hits`: endpoint hits in the voxel.
-- `classification`: classifier bucket code from the voxel diagnostics.
-
-Stop the server with `Ctrl-C` in the terminal.
-
-**PLY export**
-
-```bash
+# Export classifier fields for CloudCompare or ParaView.
 wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id> --export ply
-wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id> --sweep <N> --export ply
-wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id> --export ply --out /tmp/lidar_exports
+
+# Use a native viewer for an individual pipeline artifact.
+wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id> \
+  --backend open3d --layer dynamic
+wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id> \
+  --backend matplotlib --layer ground
+wato_lidar_preprocessing viz --bag <bag_id> \
+  --backend plotly --layer global
 ```
 
-Open the resulting `.ply` in CloudCompare, ParaView, or another point-cloud
-tool. Use scalar-field coloring/filtering on:
-
-- `dynamic`: `0` static, `1` dynamic.
-- `sweep_id`: originating sweep for dynamic chunk points, `-1` for accumulated
-  static chunk points.
-- `intensity`: LiDAR intensity, `-1` when absent.
-- `p_occ`, `n_obs`, `n_hits`, `classification`: voxel diagnostics, `-1` when
-  `voxel_diag.npz` is unavailable or the point has no matching voxel entry.
-
-### Current usability gaps
-
-The visualization stack is now usable, but it is still a debugging v1 rather
-than a polished inspection app.
-
-- The web backend is chunk-level only. Per-sweep inspection still uses
-  `--backend html --sweep N`, `--export ply --sweep N`, or Open3D.
-- Stage C ground-grid visualization and Stage D global-map visualization are
-  still Open3D/matplotlib-only.
-- The local web backend preloads and downsamples point buffers at server start;
-  it does not yet stream individual sweeps on demand from disk.
-- Browser viewers support coloring and playback, but not point picking,
-  measurement tools, box drawing, DBSCAN cluster controls, or selected-point
-  metadata panels.
-- `p_occ` and classification controls are visualization-only. They do not
-  re-run classification or preview threshold changes interactively.
-- Camera projection and image overlays are not implemented yet.
-- External integrations are PLY-only today. Rerun, Foxglove/MCAP, Potree, and
-  LAS/LAZ export are still future work.
-- PLY chunk export gives scalar fields, not a full temporal playback format.
-  Use the web/Open3D viewers when sweep timing matters.
-- The web frontend is embedded in Python for zero new build tooling. That keeps
-  deployment simple, but makes UI iteration less comfortable than a dedicated
-  frontend asset structure.
+HTML is the default because it covers the normal classification-debugging loop.
+The native backends remain for ground-grid and global-map views that the HTML
+viewer does not yet implement. PLY files include `dynamic`, `sweep_id`,
+`intensity`, `p_occ`, `n_obs`, `n_hits`, and `classification` scalar fields;
+missing optional values are `-1`.
 
 ---
 
