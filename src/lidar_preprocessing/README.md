@@ -81,10 +81,50 @@ C.   ground/          aggregate per-sweep ground masks → height grid
 D.   reduce/          [separate command] bag-level global static map
 ```
 
-All three Step-B methods write the identical artifact set (`static_map.npz`
-with `static_voxel_keys`, `dynamic_map.npz`, per-sweep `dynamic_mask.npy`,
-updated `lidar_proc_index.parquet`), so Steps C and D are method-agnostic.
-`union` rewrites only the dynamic side — it keeps aw's `static_map.npz`.
+## Visualization
+
+The default viewer is a standalone HTML file. It shows static and dynamic
+points together and does not require Open3D, DISPLAY forwarding, or an X server.
+
+```bash
+./watod run lidar_preprocessing viz \
+  --bag <bag_id> --chunk <chunk_id> --open
+```
+
+Without `--open`, the command prints the generated file path. Use `--sweep N`
+to inspect one classified sweep or `--out PATH` to choose the output location.
+
+Browser controls:
+
+- `view`: top, isometric, side, or front.
+- `mode`: one sweep, a five-sweep trail, or all dynamic points.
+- `color`: static/dynamic, sweep ID, height, or intensity.
+- `prev`, `next`, `play`, and the sweep slider: move through time.
+- `static`, `dynamic`, and `point`: toggle layers and change point size.
+
+Other workflows remain available from the same command:
+
+```bash
+# Serve larger point buffers from a local HTTP server.
+wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id> --backend web
+
+# Export classifier fields for CloudCompare or ParaView.
+wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id> --export ply
+
+# Use a native viewer for an individual pipeline artifact.
+wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id> \
+  --backend open3d --layer dynamic
+wato_lidar_preprocessing viz --bag <bag_id> --chunk <chunk_id> \
+  --backend matplotlib --layer ground
+wato_lidar_preprocessing viz --bag <bag_id> \
+  --backend plotly --layer global
+```
+
+HTML is the default because it covers the normal classification-debugging loop.
+The native backends remain for ground-grid and global-map views that the HTML
+viewer does not yet implement. PLY files include `dynamic`, `sweep_id`,
+`intensity`, `p_occ`, `n_obs`, `n_hits`, and `classification` scalar fields;
+missing optional values are `-1`.
 
 ---
 
