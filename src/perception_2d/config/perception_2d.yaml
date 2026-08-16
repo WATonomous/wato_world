@@ -1,0 +1,14 @@
+perception_2d:
+  detector: grounding_dino
+  detector_score_threshold: 0.25
+  sam2_checkpoint: sam2_hiera_large
+  use_lidar_prompts: true
+  lidar_prompt_max_points: 50
+  reid_features:
+    model: dinov2_vitl14
+    every_k_frames: 5
+  cross_camera_match_radius_m: 1.5
+  prompts_path: /config/prompts.yaml
+  upstream_versions:
+    ingest: "1"
+    lidar_preprocessing: "1"

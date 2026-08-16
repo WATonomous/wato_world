@@ -4,8 +4,7 @@ Associates per-frame detections into masklets (temporally consistent tracks)
 using IoU-based matching.  Extracts DINOv2 embeddings for each tracklet at
 configurable intervals for downstream cross-camera ReID.
 
-DEVA (the paper's choice for propagation) is optionally used if installed;
-IoU matching is the reliable fallback that requires no extra dependencies.
+DEVA propagation is not yet implemented; IoU matching is the production tracker.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
@@ -23,6 +22,18 @@ from wato_perception_2d.segmenter import SegmentedDetection
 log = logging.getLogger(__name__)
 
 _dino_warned = False
+_dino_models: dict[tuple, Any] = {}
+
+
+def _get_dino_model(model_name: str, device: str) -> Any:
+    """Load DINOv2 once per (model_name, device) pair and cache module-wide."""
+    key = (model_name, device)
+    if key not in _dino_models:
+        import torch
+
+        m = torch.hub.load("facebookresearch/dinov2", model_name)
+        _dino_models[key] = m.eval().to(device)
+    return _dino_models[key]
 
 
 @dataclass
@@ -72,8 +83,7 @@ def _extract_dino_feature(
         c0, c1 = np.where(cols)[0][[0, -1]]
         crop = image_rgb[r0 : r1 + 1, c0 : c1 + 1]
 
-        model = torch.hub.load("facebookresearch/dinov2", model_name)
-        model.eval().to(device)
+        model = _get_dino_model(model_name, device)
 
         transform = T.Compose(
             [

@@ -4,6 +4,7 @@ Given per-frame bounding boxes (from detector.py) and optional LiDAR point
 prompts (cross-modal, SAM4D-style), produces per-detection binary masks.
 
 Lazy-imports sam2 so the module can be imported without it installed.
+Missing packages fall back to bbox-fill masks with a one-time warning.
 """
 
 from __future__ import annotations
@@ -85,16 +86,6 @@ class SAM2Segmenter:
         detections: list[Detection],
         lidar_point_prompts: Optional[np.ndarray] = None,
     ) -> list[SegmentedDetection]:
-        """Segment each detection in image_rgb.
-
-        Args:
-            image_rgb: (H, W, 3) uint8 RGB image.
-            detections: list of Detection with bbox_xyxy in pixels.
-            lidar_point_prompts: optional (M, 2) float32 pixel coordinates of
-                projected LiDAR dynamic points (all treated as foreground hints).
-
-        Returns list of SegmentedDetection (same order as detections).
-        """
         if not detections:
             return []
 
@@ -109,11 +100,9 @@ class SAM2Segmenter:
         for det in detections:
             boxes = det.bbox_xyxy[None].astype(np.float32)  # (1, 4)
 
-            # Merge LiDAR points into the point prompt set for this detection.
             point_coords: Optional[np.ndarray] = None
             point_labels: Optional[np.ndarray] = None
             if lidar_point_prompts is not None and lidar_point_prompts.shape[0] > 0:
-                # Keep only points inside this box.
                 x1, y1, x2, y2 = det.bbox_xyxy
                 inside = (
                     (lidar_point_prompts[:, 0] >= x1)
@@ -132,7 +121,6 @@ class SAM2Segmenter:
                 box=boxes,
                 multimask_output=False,
             )
-            # masks_t: (1, H, W) bool tensor
             mask = (
                 masks_t[0].cpu().numpy().astype(bool)
                 if hasattr(masks_t, "cpu")
@@ -146,7 +134,6 @@ class SAM2Segmenter:
     def _bbox_fill_fallback(
         detections: list[Detection], H: int, W: int
     ) -> list[SegmentedDetection]:
-        """Fill the bounding box rectangle as the mask (used when SAM2 is absent)."""
         results: list[SegmentedDetection] = []
         for det in detections:
             mask = np.zeros((H, W), dtype=bool)

@@ -13,6 +13,14 @@ dependencies = [
 [project.scripts]
 wato_perception_2d = "wato_perception_2d.cli:main"
 
+[project.optional-dependencies]
+gpu = [
+    "torch",
+    "torchvision",
+    "xformers",
+    # sam2, GroundingDINO, sam3 installed via Dockerfile git URLs — not pinnable here
+]
+
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
