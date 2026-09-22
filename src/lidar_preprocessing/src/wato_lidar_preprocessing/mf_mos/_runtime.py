@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 import sys
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -19,7 +18,7 @@ import yaml
 
 log = logging.getLogger(__name__)
 
-_MFMOS_ROOT = str(Path(__file__).parent.parent.parent.parent / "third_party" / "MF-MOS")
+_MFMOS_ROOT = "/opt/mf_mos"
 
 if _MFMOS_ROOT not in sys.path:
     sys.path.insert(0, _MFMOS_ROOT)

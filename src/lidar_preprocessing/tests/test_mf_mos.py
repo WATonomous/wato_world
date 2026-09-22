@@ -14,6 +14,7 @@ import pytest
 
 from wato_common.artifact_store import (
     calibration_path,
+    chunks_index_path,
     dynamic_map_path,
     dynamic_mask_path,
     ensure_local_dir,
@@ -29,6 +30,7 @@ from wato_common.artifact_store import (
 )
 from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.schemas import (
+    CHUNK_SCHEMA,
     LIDAR_SWEEPS_SCHEMA,
     POSES_SCHEMA,
     PROCESSED_SWEEPS_SCHEMA,
@@ -42,13 +44,19 @@ from wato_lidar_preprocessing.mf_mos import (
     classify_chunk,
     process_chunk,
 )
+from wato_lidar_preprocessing.sensor_model import get_sensor_model
 
 # ---------------------------------------------------------------------------
 # Stub model — CPU-only; pixels where sum-of-|residuals| > 0.1 are moving.
 # ---------------------------------------------------------------------------
 
-H, W = 32, 1024
-FOV_UP, FOV_DOWN = 10.0, -30.0
+# Projection geometry is no longer configurable: it comes from the lidar's
+# sensor profile (rows = channels, bounds = datasheet FoV) and the
+# checkpoint's own image width. The tests read the same source the code does.
+_PROFILE = "hdl32e"
+_SENSOR = get_sensor_model(_PROFILE)
+H, W = _SENSOR.beams, mf_mos_mod.RANGE_IMAGE_W
+FOV_UP, FOV_DOWN = _SENSOR.fov_up_deg, _SENSOR.fov_down_deg
 
 
 class _StubModel:
@@ -90,6 +98,28 @@ def _stub_load_model(_params):
     return _StubModel()
 
 
+def _enabled_cfg(**kw) -> ComponentConfig:
+    # Detection/projection tests use synthetic single-point movers; disable the
+    # per-sweep 3D cluster denoise (min cluster = 1) so it doesn't drop them.
+    kw.setdefault("moving_min_cluster_pts", 1)
+    return ComponentConfig(
+        sensor_model={"profile": _PROFILE},
+        mf_mos=MFMosParams(device="cpu", **kw),
+    )
+
+
+def _pin_residual_steps(monkeypatch, steps: list[int]) -> None:
+    """Pin the derived residual offsets for tests about window mechanics.
+
+    Real offsets scale with the scanner's spin rate (see residual_steps_for);
+    these tests are about the sliding window and mask alignment, so they fix
+    the offsets rather than re-deriving the scaling in the assertions.
+    """
+    monkeypatch.setattr(
+        mf_mos_mod, "residual_steps_for", lambda sensor, n_scans: list(steps)
+    )
+
+
 def _mos_cfg(dynamic_min_range_m: float = 0.0, **kw) -> ComponentConfig:
     """ComponentConfig on the MF-MOS path (segmentation='mos').
 
@@ -97,17 +127,9 @@ def _mos_cfg(dynamic_min_range_m: float = 0.0, **kw) -> ComponentConfig:
     near-ego gate (default 2.5 m) is disabled here and exercised explicitly
     by test_mos_near_ego_gate_suppresses_close_movers.
     """
-    return ComponentConfig(
-        segmentation="mos",
-        dynamic_min_range_m=dynamic_min_range_m,
-        mf_mos=MFMosParams(
-            range_image_h=H,
-            range_image_w=W,
-            fov_up_deg=FOV_UP,
-            fov_down_deg=FOV_DOWN,
-            device="cpu",
-            **kw,
-        ),
+    cfg = _enabled_cfg(**kw)
+    return cfg.model_copy(
+        update={"segmentation": "mos", "dynamic_min_range_m": dynamic_min_range_m}
     )
 
 
@@ -192,7 +214,15 @@ def _write_lidar_sweeps(
     write_table(rows, LIDAR_SWEEPS_SCHEMA, lidar_sweeps_path(bag_id, chunk_id))
 
 
-def _write_proc_index(bag_id: str, chunk_id: str, sweep_ids: list[int]) -> None:
+def _write_proc_index(
+    bag_id: str,
+    chunk_id: str,
+    sweep_ids: list[int],
+    invalid_sweep_ids: set[int] | None = None,
+) -> None:
+    """Write a proc index. Sweeps in `invalid_sweep_ids` get valid=False, as
+    deskew emits for sweeps with no usable ego pose."""
+    invalid = invalid_sweep_ids or set()
     ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
     rows = [
         {
@@ -208,9 +238,12 @@ def _write_proc_index(bag_id: str, chunk_id: str, sweep_ids: list[int]) -> None:
             "world_path": "",
             "dynamic_mask_path": "",
             "has_intensity": False,
-            "deskewed": True,
-            "valid": True,
-            "drop_reason": None,
+            "deskewed": sid not in invalid,
+            "valid": sid not in invalid,
+            "drop_reason": "pose_invalid: no interpolatable ego pose "
+            "(valid_pose=False in frame_index)"
+            if sid in invalid
+            else None,
             "world_xmin": None,
             "world_xmax": None,
             "world_ymin": None,
@@ -323,24 +356,81 @@ def test_unproject_mask_recovers_point_labels():
     assert bool(out[2]) is False
 
 
+def test_unproject_mask_occlusion_gate_excludes_background():
+    """Range gate keeps the moving label on the front surface only.
+
+    Two points project to the same moving pixel (1, 2): point 0 is the mover's
+    front surface at range 5 m (the pixel winner), point 1 is occluded
+    background (a wall) at range 9 m behind it. With the occlusion gate, only
+    the front point inherits the moving label; the wall stays static.
+    """
+    H_px, W_px = 4, 8
+    pixel_mask = np.zeros((H_px, W_px), dtype=bool)
+    pixel_mask[1, 2] = True
+
+    pixel_range = np.zeros((H_px, W_px), dtype=np.float32)
+    pixel_range[1, 2] = 5.0  # winning (closest) range at the moving pixel
+
+    p2px = np.array([[1, 2], [1, 2], [-1, -1]], dtype=np.int32)
+    point_ranges = np.array([5.0, 9.0, 0.0], dtype=np.float32)
+
+    out = _unproject_mask(
+        pixel_mask,
+        p2px,
+        n_points=3,
+        point_ranges=point_ranges,
+        pixel_range=pixel_range,
+        occlusion_range_tol_m=1.0,
+    )
+    assert bool(out[0]) is True, "front-surface point must keep the moving label"
+    assert bool(out[1]) is False, "occluded background must not inherit moving label"
+    assert bool(out[2]) is False, "out-of-FOV point stays False"
+
+    # Without the gate (legacy), the background point bleeds dynamic.
+    out_legacy = _unproject_mask(pixel_mask, p2px, n_points=3)
+    assert bool(out_legacy[1]) is True
+
+
+def test_unproject_mask_occlusion_gate_keeps_thick_object():
+    """A point within tol of the winner (same object's depth) stays moving."""
+    pixel_mask = np.zeros((4, 8), dtype=bool)
+    pixel_mask[1, 2] = True
+    pixel_range = np.zeros((4, 8), dtype=np.float32)
+    pixel_range[1, 2] = 5.0
+
+    p2px = np.array([[1, 2], [1, 2]], dtype=np.int32)
+    # point 1 is 0.6 m behind the winner — within the 1.0 m tolerance.
+    point_ranges = np.array([5.0, 5.6], dtype=np.float32)
+
+    out = _unproject_mask(
+        pixel_mask,
+        p2px,
+        n_points=2,
+        point_ranges=point_ranges,
+        pixel_range=pixel_range,
+        occlusion_range_tol_m=1.0,
+    )
+    assert bool(out[0]) is True
+    assert bool(out[1]) is True
+
+
 # ---------------------------------------------------------------------------
 # Group 4: process_chunk integration tests
 # ---------------------------------------------------------------------------
 
 
-def test_process_chunk_lidar_id_allowlist_skips_others(tmp_env, monkeypatch):
-    """LiDARs not in mf_mos.lidar_id_allowlist are skipped wholesale.
+def test_process_chunk_skips_lidar_with_too_few_beams(tmp_env, monkeypatch):
+    """A scanner with fewer channels than MIN_BEAMS is skipped wholesale.
 
-    The fov_up/fov_down/range_image_h/w params are global, so running MF-MOS
-    on a LiDAR with a different mount geometry would project sweeps into a
-    range image that doesn't resemble KITTI training data. Allowlist gives
-    the user a knob to restrict inference to validated LiDARs without
-    disabling MF-MOS entirely.
+    This replaced the old lidar_id_allowlist knob. The reason a LiDAR gets
+    skipped is a property of the LiDAR, not a list someone maintained: the
+    checkpoint is KITTI-64 trained, and a 16-row range image leaves most of
+    its input blank. Naming the scanner's profile is now the only thing the
+    config does, and the skip follows from it.
 
-    Setup: single sweep on LIDAR_TOP, allowlist=["lidar_cc"] (LIDAR_TOP not
-    listed). Expected: no mask file is written, n_sweeps_skipped_disabled
-    counts the rejection (not skipped_invalid, since this is a deliberate
-    opt-out — not a pipeline failure).
+    Setup: single sweep on LIDAR_TOP, mapped to the 16-channel vlp16 profile.
+    Expected: no mask file written, and the rejection counts as
+    skipped_unsupported — deliberate, so not in n_skipped (failures).
     """
     monkeypatch.setattr(mf_mos_mod, "_load_model", _stub_load_model)
 
@@ -351,21 +441,29 @@ def test_process_chunk_lidar_id_allowlist_skips_others(tmp_env, monkeypatch):
     _write_lidar_sweeps(bag_id, chunk_id, [(0, xyz)])
     _write_proc_index(bag_id, chunk_id, [0])
 
-    # LIDAR_TOP is not in the allowlist — should be skipped entirely.
-    cfg = _mos_cfg(lidar_id_allowlist=["lidar_cc"])
+    cfg = _enabled_cfg()
+    cfg = cfg.model_copy(
+        update={
+            "sensor_model": cfg.sensor_model.model_copy(
+                update={"per_lidar": {"LIDAR_TOP": "vlp16"}}
+            )
+        }
+    )
+    assert cfg.build_sensor_model("LIDAR_TOP").beams < mf_mos_mod.MIN_BEAMS
     result = process_chunk(cfg, bag_id, chunk_id)
 
     assert result.n_sweeps_processed == 0
-    assert result.n_sweeps_skipped_disabled == 1
+    assert result.n_sweeps_skipped_unsupported == 1
+    assert result.n_skipped == 0
     proc_dir = local_path(lidar_proc_dir(bag_id, chunk_id))
     mask_files = [f for f in os.listdir(proc_dir) if "mf_mos_mask" in f]
     assert (
         mask_files == []
-    ), f"allowlisted-out LiDAR must write no mask files; got {mask_files}"
+    ), f"unprojectable LiDAR must write no mask files; got {mask_files}"
 
 
-def test_process_chunk_lidar_id_allowlist_none_runs_all(tmp_env, monkeypatch):
-    """lidar_id_allowlist=None (default) runs MF-MOS on every LiDAR seen."""
+def test_process_chunk_runs_every_projectable_lidar(tmp_env, monkeypatch):
+    """A scanner with enough channels runs without anything opting it in."""
     monkeypatch.setattr(mf_mos_mod, "_load_model", _stub_load_model)
 
     bag_id, chunk_id = "bag_allowlist_none", "chunk0"
@@ -375,12 +473,12 @@ def test_process_chunk_lidar_id_allowlist_none_runs_all(tmp_env, monkeypatch):
     _write_lidar_sweeps(bag_id, chunk_id, [(0, xyz)])
     _write_proc_index(bag_id, chunk_id, [0])
 
-    cfg = _mos_cfg()  # lidar_id_allowlist defaults to None
-    assert cfg.mf_mos.lidar_id_allowlist is None
+    cfg = _enabled_cfg()
+    assert cfg.build_sensor_model("LIDAR_TOP").beams >= mf_mos_mod.MIN_BEAMS
     result = process_chunk(cfg, bag_id, chunk_id)
 
     assert result.n_sweeps_processed == 1
-    assert result.n_sweeps_skipped_disabled == 0
+    assert result.n_sweeps_skipped_unsupported == 0
 
 
 def test_process_chunk_first_sweep_pads_zero_residuals(tmp_env, monkeypatch):
@@ -394,7 +492,8 @@ def test_process_chunk_first_sweep_pads_zero_residuals(tmp_env, monkeypatch):
     _write_lidar_sweeps(bag_id, chunk_id, [(0, xyz)])
     _write_proc_index(bag_id, chunk_id, [0])
 
-    cfg = _mos_cfg(residual_steps=[1, 2])
+    _pin_residual_steps(monkeypatch, [1, 2])
+    cfg = _enabled_cfg()
     result = process_chunk(cfg, bag_id, chunk_id)
 
     assert result.n_sweeps_processed == 1
@@ -405,7 +504,12 @@ def test_process_chunk_first_sweep_pads_zero_residuals(tmp_env, monkeypatch):
 
 
 def test_process_chunk_pose_gap_writes_zero_mask(tmp_env, monkeypatch):
-    """Sweep beyond max_pose_gap_ms from last pose → all-False mask, skipped_pose=1."""
+    """Sweep beyond max_pose_gap_ms from last pose → zero-LENGTH sentinel mask.
+
+    _write_zero_mask writes a (0,) array (not a full-length all-False mask) so
+    the sweep is excluded from the chunk-wide vote denominator rather than
+    diluting vote fractions for genuine movers in adjacent sweeps.
+    """
     monkeypatch.setattr(mf_mos_mod, "_load_model", _stub_load_model)
 
     bag_id, chunk_id = "bag_gap", "chunk0"
@@ -422,8 +526,37 @@ def test_process_chunk_pose_gap_writes_zero_mask(tmp_env, monkeypatch):
 
     assert result.n_sweeps_skipped_pose == 1
     mask = np.load(local_path(mf_mos_mask_path(bag_id, chunk_id, 8)))
-    assert mask.shape == (n_pts,)
+    assert mask.shape == (0,)
     assert not mask.any()
+
+
+def test_process_chunk_skips_deskew_invalid_sweeps(tmp_env, monkeypatch, caplog):
+    """Sweeps deskew flagged valid=False (no usable pose) are skipped by MF-MOS
+    without hitting the per-sweep pose-gap path, and get no mask written."""
+    monkeypatch.setattr(mf_mos_mod, "_load_model", _stub_load_model)
+
+    bag_id, chunk_id = "bag_deskew_invalid", "chunk0"
+    xyz = _make_in_fov_points(5)
+    _write_calibration(bag_id)
+    _write_poses(bag_id, chunk_id, [0, 1_000_000_000])
+    # Sweep 0 is deskew-invalid (no pose); sweep 1 is fine.
+    _write_lidar_sweeps(bag_id, chunk_id, [(0, xyz), (1, xyz)])
+    _write_proc_index(bag_id, chunk_id, [0, 1], invalid_sweep_ids={0})
+
+    cfg = _enabled_cfg()
+    with caplog.at_level("WARNING"):
+        result = process_chunk(cfg, bag_id, chunk_id)
+
+    # Sweep 0 skipped (counted as invalid, deferred to deskew), sweep 1 processed.
+    assert result.n_sweeps_processed == 1
+    assert result.n_sweeps_skipped_invalid == 1
+    assert result.n_sweeps_skipped_pose == 0
+    assert any(sid == 0 for sid, _ in result.skip_reasons)
+    # No mask for the skipped sweep; the valid one gets one.
+    assert not os.path.exists(local_path(mf_mos_mask_path(bag_id, chunk_id, 0)))
+    assert os.path.exists(local_path(mf_mos_mask_path(bag_id, chunk_id, 1)))
+    # The noisy per-sweep pose-gap WARNING must NOT fire for the skipped sweep.
+    assert "writing zero mask" not in caplog.text
 
 
 def test_process_chunk_empty_pointcloud_writes_zero_length_mask(tmp_env, monkeypatch):
@@ -459,7 +592,8 @@ def test_mask_length_equals_raw_point_count(tmp_env, monkeypatch):
     _write_lidar_sweeps(bag_id, chunk_id, sweeps)
     _write_proc_index(bag_id, chunk_id, [sid for sid, _ in sweeps])
 
-    cfg = _mos_cfg(residual_steps=[1])
+    _pin_residual_steps(monkeypatch, [1])
+    cfg = _enabled_cfg()
     result = process_chunk(cfg, bag_id, chunk_id)
 
     assert result.n_sweeps_processed == len(sweeps)
@@ -500,6 +634,7 @@ def test_residual_baseline_decoupled_from_pose_gap(tmp_env, monkeypatch):
     max_residual_gap_ms=200 the same point is missed.
     """
     monkeypatch.setattr(mf_mos_mod, "_load_model", _stub_load_model)
+    _pin_residual_steps(monkeypatch, [1])
 
     # Dense poses so interpolation succeeds at both 0 ms and 300 ms.
     poses = [0, 100_000_000, 200_000_000, 300_000_000]
@@ -516,7 +651,7 @@ def test_residual_baseline_decoupled_from_pose_gap(tmp_env, monkeypatch):
     _write_lidar_sweeps(bag_ok, chunk_id, sweeps)
     _write_proc_index(bag_ok, chunk_id, [0, 6])
     process_chunk(
-        _mos_cfg(residual_steps=[1], max_pose_gap_ms=200, max_residual_gap_ms=1000),
+        _mos_cfg(max_pose_gap_ms=200, max_residual_gap_ms=1000),
         bag_ok,
         chunk_id,
     )
@@ -533,7 +668,7 @@ def test_residual_baseline_decoupled_from_pose_gap(tmp_env, monkeypatch):
     _write_lidar_sweeps(bag_zero, chunk_id, sweeps)
     _write_proc_index(bag_zero, chunk_id, [0, 6])
     process_chunk(
-        _mos_cfg(residual_steps=[1], max_pose_gap_ms=200, max_residual_gap_ms=200),
+        _mos_cfg(max_pose_gap_ms=200, max_residual_gap_ms=200),
         bag_zero,
         chunk_id,
     )
@@ -786,3 +921,137 @@ def test_pipeline_seg_aw_produces_no_mf_mos_artifacts(tmp_env):
     proc_dir = local_path(lidar_proc_dir(bag_id, chunk_id))
     mf_files = [f for f in os.listdir(proc_dir) if "mf_mos" in f]
     assert mf_files == [], f"unexpected mf_mos files: {mf_files}"
+
+
+# ---------------------------------------------------------------------------
+# Group 8: per-sweep 3D cluster denoise (replaces the old chunk-wide vote tier)
+# ---------------------------------------------------------------------------
+
+
+def test_denoise_moving_mask_drops_isolated_points_keeps_blobs():
+    """The 3D cluster filter removes isolated moving points and keeps dense blobs."""
+    from wato_lidar_preprocessing.mf_mos._core import _denoise_moving_mask_3d
+
+    # A 10-point dense blob near the origin, plus two far isolated speckle
+    # points. cluster_voxel=0.5, min_cluster_pts=4.
+    blob = np.random.RandomState(0).uniform(-0.2, 0.2, size=(10, 3))
+    speckle = np.array([[50.0, 0.0, 0.0], [-50.0, 0.0, 0.0]])
+    xyz = np.vstack([blob, speckle])
+    mask = np.ones(xyz.shape[0], dtype=bool)
+
+    out = _denoise_moving_mask_3d(mask, xyz, cluster_voxel_m=0.5, min_cluster_pts=4)
+
+    assert out[:10].all(), "the 10-point blob must survive the size filter"
+    assert not out[10] and not out[11], "isolated speckle points must be dropped"
+
+
+def test_denoise_moving_mask_min_cluster_one_is_noop():
+    """min_cluster_pts<=1 leaves the mask unchanged (denoise disabled)."""
+    from wato_lidar_preprocessing.mf_mos._core import _denoise_moving_mask_3d
+
+    xyz = np.array([[50.0, 0.0, 0.0], [-50.0, 0.0, 0.0]])
+    mask = np.array([True, True])
+    out = _denoise_moving_mask_3d(mask, xyz, cluster_voxel_m=0.5, min_cluster_pts=1)
+    assert out.tolist() == [True, True]
+
+
+# ---------------------------------------------------------------------------
+# Group 9: residual-window priming from the prior chunk (cold-start fix)
+# ---------------------------------------------------------------------------
+
+
+def _write_chunks_index(bag_id: str, specs: list[tuple[str, int, int]]) -> None:
+    """specs: list of (chunk_id, t_start_ns, t_end_ns)."""
+    rows = [
+        {
+            "bag_id": bag_id,
+            "chunk_id": cid,
+            "t_start_ns": ts,
+            "t_end_ns": te,
+            "t_overlap_start_ns": ts,
+            "t_overlap_end_ns": te,
+        }
+        for cid, ts, te in specs
+    ]
+    write_table(rows, CHUNK_SCHEMA, chunks_index_path(bag_id))
+
+
+def _moving_scene_sweep(sid: int) -> np.ndarray:
+    """A radially-moving point (2 m/sweep outward at azimuth 0) plus static
+    filler. The mover keeps a stable pixel, so its range changes sweep-to-sweep
+    produce a non-zero residual that the stub model reads as 'moving'."""
+    mover = np.array([[5.0 + 2.0 * sid, 0.0, 0.0]], dtype=np.float32)
+    return np.vstack([mover, _make_in_fov_points(6)])
+
+
+def test_prime_window_recovers_first_sweep_residual(tmp_env, monkeypatch):
+    """chunk1's first sweep gets a non-zero residual via prior-chunk priming.
+
+    chunk0 holds sweeps 0..3, chunk1 holds sweeps 4..5, of a radially-moving
+    object. With residual_steps=[1], chunk1's first sweep (sid=4) needs the
+    sweep 1 step back (sid=3, in chunk0). Without priming that slot is a
+    cold-start zero and the mover is missed; with priming the prior chunk's
+    tail fills it and the mover is detected.
+    """
+    monkeypatch.setattr(mf_mos_mod, "_load_model", _stub_load_model)
+
+    bag_id = "bag_prime"
+    _write_calibration(bag_id)
+    # Two chunks ordered by t_start_ns; sweep header ts = sid * 50 ms.
+    _write_chunks_index(
+        bag_id,
+        [("chunk0", 0, 200_000_000), ("chunk1", 200_000_000, 400_000_000)],
+    )
+
+    chunk0_sweeps = [(sid, _moving_scene_sweep(sid)) for sid in range(4)]
+    chunk1_sweeps = [(sid, _moving_scene_sweep(sid)) for sid in (4, 5)]
+
+    # Poses (identity) at every sweep timestamp in each chunk.
+    _write_poses(bag_id, "chunk0", [sid * 50_000_000 for sid in range(4)])
+    _write_poses(bag_id, "chunk1", [sid * 50_000_000 for sid in (4, 5)])
+    _write_lidar_sweeps(bag_id, "chunk0", chunk0_sweeps)
+    _write_lidar_sweeps(bag_id, "chunk1", chunk1_sweeps)
+    _write_proc_index(bag_id, "chunk0", [sid for sid, _ in chunk0_sweeps])
+    _write_proc_index(bag_id, "chunk1", [sid for sid, _ in chunk1_sweeps])
+
+    _pin_residual_steps(monkeypatch, [1])
+    cfg = _enabled_cfg(prime_window_from_prior_chunk=True)
+    process_chunk(cfg, bag_id, "chunk1")
+
+    # sid=4 is chunk1's first sweep; mover is point index 0.
+    mask = np.load(local_path(mf_mos_mask_path(bag_id, "chunk1", 4)))
+    assert bool(mask[0]), (
+        "primed window: chunk1's first sweep should detect the mover using the "
+        "prior chunk's tail to fill the residual channel"
+    )
+
+
+def test_no_prime_window_first_sweep_cold_starts(tmp_env, monkeypatch):
+    """With priming disabled, chunk1's first sweep cold-starts (zero residual)
+    and misses the mover — the negative control for the priming test."""
+    monkeypatch.setattr(mf_mos_mod, "_load_model", _stub_load_model)
+
+    bag_id = "bag_no_prime"
+    _write_calibration(bag_id)
+    _write_chunks_index(
+        bag_id,
+        [("chunk0", 0, 200_000_000), ("chunk1", 200_000_000, 400_000_000)],
+    )
+    chunk0_sweeps = [(sid, _moving_scene_sweep(sid)) for sid in range(4)]
+    chunk1_sweeps = [(sid, _moving_scene_sweep(sid)) for sid in (4, 5)]
+    _write_poses(bag_id, "chunk0", [sid * 50_000_000 for sid in range(4)])
+    _write_poses(bag_id, "chunk1", [sid * 50_000_000 for sid in (4, 5)])
+    _write_lidar_sweeps(bag_id, "chunk0", chunk0_sweeps)
+    _write_lidar_sweeps(bag_id, "chunk1", chunk1_sweeps)
+    _write_proc_index(bag_id, "chunk0", [sid for sid, _ in chunk0_sweeps])
+    _write_proc_index(bag_id, "chunk1", [sid for sid, _ in chunk1_sweeps])
+
+    _pin_residual_steps(monkeypatch, [1])
+    cfg = _enabled_cfg(prime_window_from_prior_chunk=False)
+    process_chunk(cfg, bag_id, "chunk1")
+
+    mask = np.load(local_path(mf_mos_mask_path(bag_id, "chunk1", 4)))
+    assert not mask.any(), (
+        "no priming: chunk1's first sweep has no past scan, so the residual is "
+        "zero and the mover is missed"
+    )

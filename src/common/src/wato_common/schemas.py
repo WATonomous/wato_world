@@ -216,7 +216,7 @@ FRAME_INDEX_SCHEMA = pa.schema(
         pa.field("valid_camera", pa.bool_()),
         pa.field("camera_drop_reason", pa.string()),
         pa.field("pose_timestamp_ns", pa.int64()),
-        pa.field("world_T_ego_flat", pa.list_(pa.float64(), 16)),
+        pa.field("world_T_ego_flat", pa.list_(pa.float64())),
         pa.field("pose_interp_error", pa.float64()),
         pa.field("valid_pose", pa.bool_()),
         pa.field("calibration_path", pa.string()),
@@ -270,8 +270,8 @@ class ProcessedSweepMeta(BaseModel):
     # (canonical_lidar=None in config) just get frame_id = sweep ordinal.
     # Nullable: orphan sweeps outside any window are None.
     frame_id: Optional[int] = None
-    # Step A.5 — MF-MOS mask path.  Populated by mf_mos.process_chunk when
-    # cfg.mf_mos.enabled is True; None otherwise.  Points to a (n_raw,) bool
+    # Step A.5 — MF-MOS mask path.  Populated by mf_mos.process_chunk on the
+    # `--seg mos` / `--seg union` paths; None otherwise (and on `--seg aw`).  Points to a (n_raw,) bool
     # NPY file aligned to the raw sweep (same length as the raw lidar NPZ).
     mf_mos_mask_path: Optional[str] = None
 
@@ -346,9 +346,10 @@ class ChunkSummaryRow(BaseModel):
     # many sweeps; coherence = not part of a multi-sweep cluster track.
     motion_filter_n_persistence_dropped: Optional[int] = None
     motion_filter_n_coherence_dropped: Optional[int] = None
-    # MF-MOS step stats — None when mf_mos.enabled is False.
+    # MF-MOS step stats — None when MF-MOS didn't run (`--seg aw`).
     mf_mos_n_processed: Optional[int] = None
-    mf_mos_n_skipped: Optional[int] = None
+    mf_mos_n_skipped: Optional[int] = None  # failures (pose gap, empty, infer error)
+    mf_mos_n_unsupported: Optional[int] = None  # scanner below MIN_BEAMS; by design
     mf_mos_n_points_moving: Optional[int] = None
 
 
@@ -375,6 +376,7 @@ CHUNK_SUMMARY_SCHEMA = pa.schema(
         pa.field("motion_filter_n_coherence_dropped", pa.int64()),
         pa.field("mf_mos_n_processed", pa.int64()),
         pa.field("mf_mos_n_skipped", pa.int64()),
+        pa.field("mf_mos_n_unsupported", pa.int64()),
         pa.field("mf_mos_n_points_moving", pa.int64()),
     ]
 )
@@ -423,6 +425,14 @@ class MaskletRow(BaseModel):
     mask_path: str  # path to directory of per-frame mask PNG files
     dino_feature_path: Optional[str] = None  # DINOv2 embedding NPZ
     global_object_id: Optional[str] = None  # cross-camera identity
+    # detector + SAM2 fields
+    raw_phrase: str = ""  # raw detector label before canonicalisation
+    det_score: float = 0.0  # detector (× SAM2 mask) confidence
+    discovery_score: float = 0.0  # detector / Florence-2 confidence
+    centroid_depth_m: float = (
+        0.0  # metric depth at mask centroid (used for cross-cam merge)
+    )
+    tracker_backend: str = "sam2"  # tracker that produced this masklet
 
 
 MASKLET_SCHEMA = pa.schema(
@@ -437,6 +447,90 @@ MASKLET_SCHEMA = pa.schema(
         pa.field("mask_path", pa.string()),
         pa.field("dino_feature_path", pa.string()),
         pa.field("global_object_id", pa.string()),
+        pa.field("raw_phrase", pa.string()),
+        pa.field("det_score", pa.float64()),
+        pa.field("discovery_score", pa.float64()),
+        pa.field("centroid_depth_m", pa.float64()),
+        pa.field("tracker_backend", pa.string()),
+    ]
+)
+
+
+# ---------------------------------------------------------------------------
+# perception_2d v2 — depth branch (Depth Anything V2 + LiDAR affine align).
+# ---------------------------------------------------------------------------
+
+
+class DepthFrameRow(BaseModel):
+    """Per-frame metadata for the depth_2d artifact (the actual arrays live in npz).
+
+    fit_status: 0=ok, 1=fell back to prior-frame affine, 2=fit failed entirely.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    bag_id: str
+    chunk_id: str
+    cam_id: str
+    frame_seq: int
+    affine_a: float  # scale: d_lidar = a * d_da + b
+    affine_b: float  # offset
+    n_anchors: int  # (d_lidar, d_da) pairs before RANSAC
+    n_inliers: int  # RANSAC inliers
+    rmse_inliers_m: float
+    fit_status: int
+
+
+DEPTH_FRAME_SCHEMA = pa.schema(
+    [
+        pa.field("bag_id", pa.string()),
+        pa.field("chunk_id", pa.string()),
+        pa.field("cam_id", pa.string()),
+        pa.field("frame_seq", pa.int64()),
+        pa.field("affine_a", pa.float64()),
+        pa.field("affine_b", pa.float64()),
+        pa.field("n_anchors", pa.int64()),
+        pa.field("n_inliers", pa.int64()),
+        pa.field("rmse_inliers_m", pa.float64()),
+        pa.field("fit_status", pa.int32()),
+    ]
+)
+
+
+# ---------------------------------------------------------------------------
+# semantic_lifting — per-sweep diagnostics (actual labels in npz).
+# ---------------------------------------------------------------------------
+
+
+class LiftedStatsRow(BaseModel):
+    """One row per sweep in lifted_stats.parquet."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sweep_id: str
+    bag_id: str
+    chunk_id: str
+    n_points_total: int
+    n_points_labeled: int
+    n_points_in_any_mask: int
+    n_points_failed_visibility: int
+    n_points_disagreement: int
+    mean_confidence_labeled: float
+    n_cameras_used: int
+
+
+LIFTED_STATS_SCHEMA = pa.schema(
+    [
+        pa.field("sweep_id", pa.string()),
+        pa.field("bag_id", pa.string()),
+        pa.field("chunk_id", pa.string()),
+        pa.field("n_points_total", pa.int64()),
+        pa.field("n_points_labeled", pa.int64()),
+        pa.field("n_points_in_any_mask", pa.int64()),
+        pa.field("n_points_failed_visibility", pa.int64()),
+        pa.field("n_points_disagreement", pa.int64()),
+        pa.field("mean_confidence_labeled", pa.float64()),
+        pa.field("n_cameras_used", pa.int64()),
     ]
 )
 

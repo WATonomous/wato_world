@@ -1,10 +1,16 @@
-"""Measure MF-MOS's marginal contribution under union/mfmos_only fusion.
+"""Measure what MF-MOS would add to the voxel classifier under union fusion.
+
+Run it on a ``--seg union`` output (which writes both the MF-MOS masks and
+AW's voxel_diag) before making union the default for a rig.
 
 For each sweep, partition the points by what made them dynamic:
-  - AW alone: point's voxel is AW-DYNAMIC (or absent) AND raw MF-MOS mask = False
+  - AW alone: point's voxel is AW-DYNAMIC AND raw MF-MOS mask = False
   - MF-MOS rescue: AW says not-dynamic, MF-MOS raw mask = True
   - Both agree: AW says dynamic, MF-MOS raw mask = True
   - Neither (sanity): both say static — should be 0 in the dynamic_mask
+
+Note: voxels absent from voxel_diag (not-in-keys) are NOT AW-dynamic — the
+classifier defaults never-observed voxels to not-dynamic.
 
 Then bucket each MF-MOS rescue by what AW thought the voxel was:
   STATIC          -> likely MF-MOS false positive (overruling confident static)
@@ -13,10 +19,9 @@ Then bucket each MF-MOS rescue by what AW thought the voxel was:
   FREE_ONLY       -> voxel had no hits; MF-MOS flagging it is suspicious
   not-in-keys     -> voxel never traversed; MF-MOS flagging is uninformed
 
-Note: uses the raw per-point _mf_mos_mask.npy as a proxy for "MF-MOS thinks
-this voxel is dynamic".  The actual voxel-aggregated MF-MOS verdict
-(mf_mos_dynamic_arr) requires min_mf_mos_votes + vote_fraction agreement
-across sweeps, so this slightly over-estimates MF-MOS's contribution.
+Note: the per-point _mf_mos_mask.npy IS the MF-MOS verdict used in fusion —
+it is spatially denoised at generation time (3D cluster-size filter) and
+consumed per-sweep, with no chunk-wide vote aggregation.
 """
 
 from __future__ import annotations
@@ -100,13 +105,14 @@ def main() -> None:
             if xyz.shape[0] == 0:
                 continue
 
-        # AW per-voxel verdict: voxel.classification == DYNAMIC OR voxel absent
+        # AW per-voxel verdict: voxel.classification == DYNAMIC only.
+        # Absent voxels (-1) default to not-dynamic in the classifier.
         keys = voxel_indices(xyz, diag_origin, voxel_size)
         pos = np.searchsorted(keys_diag, keys)
         pos = np.clip(pos, 0, keys_diag.size - 1)
         found = keys_diag[pos] == keys
         aw_class = np.where(found, cls[pos], -1)  # -1 = not in keys
-        is_aw_dyn = (aw_class == 4) | (aw_class == -1)
+        is_aw_dyn = aw_class == 4
 
         # MF-MOS per-point flag (raw, pre-voxel-aggregation)
         is_mf_dyn = mfmos_mask.astype(bool)

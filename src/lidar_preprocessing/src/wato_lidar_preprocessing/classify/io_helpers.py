@@ -1,4 +1,4 @@
-"""I/O helpers shared by the log-odds and persistence classifier paths."""
+"""I/O helpers for the log-odds classifier path."""
 
 from __future__ import annotations
 

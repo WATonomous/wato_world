@@ -121,7 +121,6 @@ def write_chunk_voxel_diagnostics(
 
     from .log_odds import (
         CLASS_AMBIGUOUS,
-        CLASS_CARVED_NOISE,
         CLASS_DYNAMIC,
         CLASS_FREE_ONLY,
         CLASS_STATIC,
@@ -133,7 +132,6 @@ def write_chunk_voxel_diagnostics(
         "ambiguous": int((classification == CLASS_AMBIGUOUS).sum()),
         "under_evidenced": int((classification == CLASS_UNDER_EVIDENCED).sum()),
         "free_only": int((classification == CLASS_FREE_ONLY).sum()),
-        "carved_noise": int((classification == CLASS_CARVED_NOISE).sum()),
         "dynamic": int((classification == CLASS_DYNAMIC).sum()),
     }
     log.info(

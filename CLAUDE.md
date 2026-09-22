@@ -41,23 +41,35 @@ helper, **first grep the monorepo for the equivalent and copy its shape.**
 
 ## What this repo is
 
-Offline batch 3D auto-labeling pipeline for WATonomous. Eight components,
+Offline batch 3D auto-labeling pipeline for WATonomous. Nine components,
 each in its own Docker image, communicating only through artifacts on disk
 (Parquet/JSON/PNG/NPZ). No runtime ROS messaging, no database.
 
 ```
-ingest             → frames + lidar sweeps + poses + frame_index
+ingest              → frames + lidar sweeps + poses + frame_index
 lidar_preprocessing → motion comp, static/dynamic split, ground extraction
-perception_2d      → GroundingDINO + SAM 2 + DEVA + DINOv2 + x-cam merge
+perception_2d       → GroundingDINO + SAM2 video tracker + Depth Anything V2 + DINOv2 (optional Florence-2 discovery)
+semantic_lifting    → occlusion-aware 2D→3D label lifting (UniLiPs Eq.1)
 proposal_generation → LiDAR detector ensemble + Segment-Lift-Fit + fusion
-tracking           → 4D tracking with masklet association + DINOv2 ReID
-label_refinement   → multimodal LabelFormer (bootstrap → learned)
+tracking            → 4D tracking with masklet association + DINOv2 ReID
+label_refinement    → multimodal LabelFormer (bootstrap → learned)
 open_vocab_discovery → rare-class branch
-student_training   → BEVFusion / TransFusion student detector
+student_training    → BEVFusion / TransFusion student detector
 ```
 
-Only `ingest` is implemented end-to-end. Everything else is a stub that prints
-"not implemented yet".
+`ingest`, `lidar_preprocessing`, and `perception_2d` are implemented
+end-to-end. `semantic_lifting` core algorithm is implemented (Parts 1–7).
+Everything else is a stub that raises NotImplementedError.
+
+**Dataset profiles**: `ingest` and `lidar_preprocessing` each ship two config
+profiles — the default (nuScenes) and a `.wato.yaml` variant for the
+3-Velodyne rig (per-corner lidar topics, per-lidar sensor profiles —
+`vlp32c` for `lidar_cc`, `vlp16` for `lidar_ne`/`lidar_nw` — and
+`frame_sync.canonical_lidar: lidar_cc`). Valid profiles are `vlp32c`, `vlp16`,
+`hdl32e`; physics lives in `sensor_model.py`, not YAML. WATO bags must be ingested with the
+per-corner topics, NOT `/lidar/all/points_merged`: classify's ray traversal
+assumes one sensor origin per sweep, and merged clouds leak static structure
+into `dynamic_map.npz`.
 
 ## Repository conventions
 
@@ -73,6 +85,14 @@ Only `ingest` is implemented end-to-end. Everything else is a stub that prints
   base injection layers at `docker/base/inject_{cpu,cuda}_base.Dockerfile`.
 - Compose stack: `modules/docker-compose.yaml` (deploy) + `.dev.yaml` (dev) +
   `.gpu.yaml` (gpu host overrides).
+- **Keep docs in lockstep with code.** Every time you add or change a feature,
+  update the relevant documentation in the same change — the component
+  `README.md`, this `CLAUDE.md`, config comments, and any docstrings describing
+  the affected behavior. A change that alters observable behavior, a contract
+  (artifact schema, `frame_index` fields, flags), or a cross-component
+  assumption is not complete until the corresponding markdown reflects it.
+  When you touch a component, verify its `README.md` still matches reality and
+  fix any drift you find.
 
 ## watod CLI
 
@@ -201,6 +221,115 @@ docker rmi ghcr.io/watonomous/wato_world/base:cpu-ubuntu24.04
 echo $GH_PAT | docker login ghcr.io -u <username> --password-stdin
 # PAT needs at least: read:packages
 ```
+
+## Reproducibility — pinning and provenance
+
+**The pipeline's output is training data.** A rebuild that silently resolves a
+different dependency set, model revision, or base image is a *different
+labeler*, and its labels are not comparable to the previous run's. Everything
+below exists to make that impossible to do by accident.
+
+### What is pinned
+
+| Surface | Where | Mechanism |
+|---|---|---|
+| Python deps | `docker/requirements/{ingest,lidar_preprocessing,perception_2d}.txt` | exact `==` for the full transitive closure, installed `--no-deps` |
+| `sam2` | `docker/perception_2d.Dockerfile` | `ARG SAM2_COMMIT` — upstream has no PyPI release, `main` moves |
+| MF-MOS | `docker/lidar_preprocessing.Dockerfile` | `ARG MF_MOS_COMMIT` — decides the static/dynamic split |
+| Model weights | `src/perception_2d/src/wato_perception_2d/model_registry.py` | HF `revision=` / torch.hub `repo:<sha>` |
+| Component bases | `docker/{ingest,lidar_preprocessing,perception_2d}.Dockerfile` | `base:<tag>@sha256:...` |
+| Upstream bases | `docker/base/inject_*.Dockerfile` | `ubuntu`/`nvcr.io` by digest, plus `ARG UV_VERSION` |
+
+**Only the three implemented components are pinned.** The other six
+Dockerfiles — including `semantic_lifting`, whose core algorithm is
+implemented — still use a mutable `base:<tag>`, have no lockfile, set no
+`WATO_BASE_IMAGE`, and write no manifest. A CI republish of the base silently
+changes them. Pin each one (digest + lockfile + manifest) when it stops being
+a stub.
+
+Also not pinned: the ROS 2 Jazzy **apt** packages in `ingest`. apt has no
+lockfile. Known gap, documented at the bottom of `docker/requirements/ingest.txt`.
+
+### Regenerating a lockfile
+
+Lockfiles are **generated, not hand-edited**. Change the intent comment in the
+component Dockerfile, build the deps stage, then re-freeze:
+
+```bash
+docker run --rm --entrypoint uv \
+    ghcr.io/watonomous/wato_world/<component>:deps_<tag> pip freeze --system \
+    | grep -v '^Using Python'
+```
+
+Commit the Dockerfile change and the lockfile together. Bumping a pin by hand
+without rebuilding is wrong — the transitive set moves with it.
+
+**`--index-strategy unsafe-first-match`** is required for the two GPU
+components. uv's default considers only the first index carrying a package
+name, and `download.pytorch.org/whl/cu128` mirrors common packages (certifi,
+etc.) at its own versions, so the default refuses to fall back to PyPI and the
+resolve fails. Rationale is recorded in the lockfile headers — don't remove it.
+
+### Provenance — what actually produced an artifact
+
+Pinning only makes a rebuild deterministic; it can't tell you *which* pinned
+configuration produced the labels in front of you. That's `wato_common/`:
+
+- `provenance.py` — reads build-time facts baked into the image as env vars
+  (`WATO_GIT_COMMIT`, `WATO_GIT_DIRTY`, `WATO_BUILD_TIME`, `WATO_BASE_IMAGE`)
+  plus a hash of the lockfile kept at `/opt/watonomous/requirements.lock.txt`.
+- `manifest.py` — one manifest per (bag, chunk) per component, recording
+  provenance, **content-hashed inputs**, and outputs.
+
+Input hashes are what make staleness detectable: if perception_2d's manifest
+records the `frame_index.parquet` it consumed and that hash no longer matches,
+its outputs are stale. Files over 64 MB record size+mtime instead — hashing
+every lidar sweep would cost minutes per chunk.
+
+Manifest filenames: ingest writes `manifest.json` (historical);
+lidar_preprocessing and perception_2d write `manifest_<component>.json` into
+the same chunk directory. semantic_lifting and the stubs write none yet.
+
+Gotchas that already cost time here:
+
+- **`WATO_GIT_COMMIT` must be baked in at build time**, not discovered at
+  runtime. Deploy images have no `.git`, so `git rev-parse` in a container
+  silently returns `""`. `watod_scripts/watod-setup-env.sh` writes it to
+  `modules/.env`; compose passes it as a build arg.
+- **`ARG BASE_IMAGE` must be re-declared inside the `dependencies` stage.**
+  It's a global ARG (declared before the first `FROM`), and global args are
+  not in scope inside a stage until re-declared — without the bare
+  `ARG BASE_IMAGE`, `ENV WATO_BASE_IMAGE=${BASE_IMAGE}` expands to empty.
+- **Build `_pre` profiles before the runtime profile.** Building
+  `<comp>_source` and `<comp>` in one `docker compose build` runs them in
+  parallel, so the template stage resolves `FROM ${MODULE_SOURCE}` against the
+  *previous* source image and silently ships stale code. `watod build` does
+  the two phases in order; ad-hoc compose invocations must too.
+
+### Verifying a lock still reproduces
+
+```bash
+docker run --rm --entrypoint uv <image>:deps_<tag> pip freeze --system \
+    | grep -v '^Using Python' | sort | diff - <(sort docker/requirements/<c>.txt | grep -v '^#')
+```
+All three implemented components were verified byte-identical after locking.
+
+### Known drift frozen into the current locks
+
+Locking captured a set that *works*, which also froze some accidents. These are
+documented in each lockfile header and are worth cleaning up as a separate,
+testable change — not by hand-editing a lock:
+
+- `lidar_preprocessing` floated to `torch==2.11.0` and pulled the multi-GB
+  `cuda-toolkit` meta-wheel that `perception_2d` pins `torch==2.7.1`
+  specifically to avoid. The two GPU components are on different
+  torch/cuDNN/NCCL builds.
+- `perception_2d` declares `numpy<2` but ships `numpy==2.5.3` — a later layer
+  upgraded it and the stated constraint (for the since-removed `sam3`) no
+  longer holds.
+- `perception_2d` has both `opencv-python` and `opencv-python-headless`.
+- `depth-anything-v2` drags in `gradio`, `fastapi`, `uvicorn`, `starlette` —
+  a web-app stack inside a batch labeler.
 
 ## Pre-commit gotchas
 

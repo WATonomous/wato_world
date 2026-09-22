@@ -307,6 +307,14 @@ def test_chunk_summary_written(tmp_env):
     assert row["segmentation_method"] == "aw"
     assert row["seg_n_sweeps_no_mask"] is None
     assert row["union_n_points_vetoed"] is None
+    # MF-MOS never runs under seg=aw → its fields are null, not zero.
+    for k in (
+        "mf_mos_n_processed",
+        "mf_mos_n_skipped",
+        "mf_mos_n_unsupported",
+        "mf_mos_n_points_moving",
+    ):
+        assert row[k] is None, k
 
 
 def test_cache_auto_disable_logged_in_summary(tmp_env, monkeypatch):

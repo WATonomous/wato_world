@@ -1,7 +1,7 @@
 [project]
 name = "wato-world-perception-2d"
 version = "0.1.0"
-description = "2D perception pass with GroundingDINO, SAM 2, DEVA, DINOv2, and cross-camera merge."
+description = "2D perception pass with GroundingDINO, SAM 3, DEVA, DINOv2, and cross-camera merge."
 requires-python = ">=3.11"
 dependencies = [
     "wato-world-common",

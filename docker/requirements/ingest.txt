@@ -1,0 +1,37 @@
+# Locked Python dependency set for the ingest component.
+#
+# GENERATED, NOT HAND-EDITED. Frozen on 2026-09-21 from the deps image that was
+# known-good at that time:
+#     docker run --rm --entrypoint uv \
+#         ghcr.io/watonomous/wato_world/ingest:deps_<tag> pip freeze --system
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# This pipeline's output is training data. A rebuild that silently resolves a
+# different dependency set is a different labeler, and labels produced by it
+# are not comparable to labels produced by this one. Every version here is
+# exact so that an image rebuilt in a year behaves identically.
+#
+# TO CHANGE A DEPENDENCY
+# ----------------------
+# Edit the *unpinned* intent in docker/ingest.Dockerfile's comment block, build
+# the deps stage, re-freeze into this file, and commit both together. Do not
+# bump a pin here by hand without rebuilding — the transitive set moves with it.
+#
+# NOT COVERED HERE: the ROS 2 Jazzy apt packages installed in the same stage.
+# apt has no lockfile; `ros-jazzy-*` tracks the Ubuntu/ROS archives and can
+# move under us. See docker/ingest.Dockerfile.
+
+annotated-types==0.8.0
+click==8.5.0
+fsspec==2026.7.0
+numpy==2.5.3
+pillow==12.3.0
+pyarrow==25.0.1
+pydantic==2.13.5
+pydantic-core==2.46.5
+pyyaml==6.0.3
+scipy==1.18.1
+tqdm==4.70.1
+typing-extensions==4.16.0
+typing-inspection==0.4.4

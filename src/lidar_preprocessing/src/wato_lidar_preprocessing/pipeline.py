@@ -34,14 +34,18 @@ import os
 import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+from wato_common import manifest as common_manifest
 from wato_common.artifact_store import (
     chunks_index_path,
+    dynamic_map_path,
+    frame_index_path,
     ground_path,
     lidar_proc_index_path,
     lidar_proc_summary_path,
     lidar_sweeps_path,
     local_path,
     poses_path,
+    static_map_path,
 )
 from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.schemas import CHUNK_SUMMARY_SCHEMA, ChunkSummaryRow
@@ -113,6 +117,9 @@ def _write_chunk_summary(
         ),
         mf_mos_n_processed=mf_mos_result.n_sweeps_processed if mf_mos_result else None,
         mf_mos_n_skipped=mf_mos_result.n_skipped if mf_mos_result else None,
+        mf_mos_n_unsupported=(
+            mf_mos_result.n_sweeps_skipped_unsupported if mf_mos_result else None
+        ),
         mf_mos_n_points_moving=mf_mos_result.n_points_moving if mf_mos_result else None,
     )
     write_table(
@@ -174,15 +181,51 @@ def _validate_chunk_inputs(bag_id: str, chunk_id: str) -> None:
         )
 
 
+def _write_chunk_manifest(bag_id: str, chunk_id: str, config_path: str | None) -> None:
+    """Record what this chunk was produced from, and by what.
+
+    Best-effort: a manifest failure must never fail a chunk that otherwise
+    succeeded — losing traceability for one chunk is better than discarding
+    the compute that produced it.
+    """
+    try:
+        common_manifest.write(
+            component="lidar_preprocessing",
+            bag_id=bag_id,
+            chunk_id=chunk_id,
+            inputs={
+                "lidar_sweeps": lidar_sweeps_path(bag_id, chunk_id),
+                "poses": poses_path(bag_id, chunk_id),
+                "frame_index": frame_index_path(bag_id, chunk_id),
+            },
+            outputs={
+                "static_map": static_map_path(bag_id, chunk_id),
+                "dynamic_map": dynamic_map_path(bag_id, chunk_id),
+                "ground": ground_path(bag_id, chunk_id),
+                "lidar_proc_index": lidar_proc_index_path(bag_id, chunk_id),
+                "lidar_proc_summary": lidar_proc_summary_path(bag_id, chunk_id),
+            },
+            config_path=config_path,
+            filename=common_manifest.component_manifest_name("lidar_preprocessing"),
+        )
+    except Exception:  # noqa: BLE001
+        log.warning("failed to write manifest for chunk %s", chunk_id, exc_info=True)
+
+
 def _process_one_chunk(
     cfg: ComponentConfig,
     bag_id: str,
     chunk_id: str,
+    config_path: str | None = None,
 ) -> tuple[str, bool, str]:
     """Run A → A.5 → B → C for a single chunk.
 
     Returns (chunk_id, ok, error_msg). error_msg carries the full traceback
     so it survives the ProcessPoolExecutor worker boundary.
+
+    On success, writes manifest_lidar_preprocessing.json recording the ingest
+    artifacts consumed (hashed, so a later re-ingest is detectable) and the
+    image provenance that produced the outputs.
     """
     try:
         _validate_chunk_inputs(bag_id, chunk_id)
@@ -225,9 +268,12 @@ def _process_one_chunk(
             log.info("=== chunk %s: step C — ground ===", chunk_id)
             ground_result = ground.process_chunk(cfg, bag_id, chunk_id)
 
+        # A disabled step reports None, not zeros — "didn't run" and "ran and
+        # found nothing" must stay distinguishable in the summary.
         _write_chunk_summary(
             bag_id, chunk_id, cfg.segmentation, seg_result, ground_result, mf_mos_result
         )
+        _write_chunk_manifest(bag_id, chunk_id, config_path)
         return (chunk_id, True, "")
     except Exception as exc:  # noqa: BLE001 — one chunk failing must not stop the rest
         log.exception("chunk %s failed", chunk_id)
@@ -264,10 +310,11 @@ def _pass2_chunk_worker(
     picklable). Each worker rebuilds the KDTree from disk rather than pickling
     a large cKDTree across the pool pipe.
     """
+    # Match radius = the map's own voxel size: reduce snaps map points to
+    # voxel centres, so "within one map voxel" is what a match means.
     prior = classify.GlobalMapPrior.from_npz(
         global_map_path,
-        match_radius_m=cfg.global_map_match_radius_m,
-        r_max_credibility_m=cfg.r_max_credibility_m,
+        match_radius_m=cfg.global_map_voxel_size_m,
     )
     return _classify_then_maybe_fuse(cfg, bag_id, chunk_id, prior)
 
@@ -303,8 +350,7 @@ def _run_classify_pass2(
         # Build the KDTree once and reuse across chunks in this process.
         prior = classify.GlobalMapPrior.from_npz(
             global_map_path,
-            match_radius_m=cfg.global_map_match_radius_m,
-            r_max_credibility_m=cfg.r_max_credibility_m,
+            match_radius_m=cfg.global_map_voxel_size_m,
         )
         for row in chunk_rows:
             cid = row["chunk_id"]
@@ -359,6 +405,7 @@ def run(
     force: bool = False,
     workers: int = 1,
     two_pass: bool = True,
+    config_path: str | None = None,
 ) -> None:
     """Process all chunks (or one) for a bag.
 
@@ -373,6 +420,10 @@ def run(
             on every chunk using that map as a per-sweep KDTree prior
             (UniLiPs IWU). Roughly doubles wall time; improves static recall
             on long-range structure sparsely observed in any one chunk.
+        config_path: path to the config file that produced ``cfg``. Recorded
+            (as a hash) in each chunk's manifest so a label can be traced back
+            to the exact parameters that produced it. Optional only so the
+            existing tests can call run() without one.
     """
     # The global-map prior (UniLiPs IWU) is an Amanatides-Woo log-odds boost.
     # `mos` has no log-odds to boost, so it runs single-pass. `union` does have
@@ -425,7 +476,7 @@ def run(
 
     if workers <= 1:
         for cid in pending:
-            _, ok, err = _process_one_chunk(cfg, bag_id, cid)
+            _, ok, err = _process_one_chunk(cfg, bag_id, cid, config_path)
             if ok:
                 n_ok += 1
             else:
@@ -434,7 +485,7 @@ def run(
         log.info("running %d chunks across %d workers", n_total, workers)
         with ProcessPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(_process_one_chunk, cfg, bag_id, cid): cid
+                pool.submit(_process_one_chunk, cfg, bag_id, cid, config_path): cid
                 for cid in pending
             }
             for fut in as_completed(futures):

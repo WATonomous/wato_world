@@ -11,9 +11,19 @@ Outputs per sweep:
 Mask length matches the RAW sweep (before deskew's nonfinite filter) so
 consumers loading raw NPZs get index-aligned arrays.
 
-Skipped sweeps (valid=False, pose gap, empty, inference error) leave
-mf_mos_mask_path=None in the index. enabled=False makes the whole step
-a no-op.
+Skipped sweeps leave mf_mos_mask_path=None in the index. A sweep is skipped
+when deskew already flagged it invalid (valid=False — e.g. the start-of-bag
+window with no usable ego pose; MF-MOS defers to deskew rather than re-checking
+the pose gap itself), for an empty sweep or inference error, or because its
+scanner has too few channels to project (see MIN_BEAMS). The step only runs
+on `--seg mos` / `--seg union`.
+
+The spherical projection is geometry, not preference: rows = the scanner's
+channel count, vertical bounds = its datasheet FoV, intensity divisor = its
+raw intensity range. All of it comes from the lidar's sensor profile. The
+remaining numbers below are properties of the released checkpoint — the
+resolution and range window it was trained at — and belong to the model, not
+to any rig.
 """
 
 from __future__ import annotations
@@ -25,6 +35,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from wato_common.artifact_store import (
+    chunks_index_path,
     ensure_local_dir,
     lidar_proc_dir,
     lidar_proc_index_path,
@@ -38,20 +49,84 @@ from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.schemas import PROCESSED_SWEEPS_SCHEMA
 from wato_lidar_preprocessing._inputs import load_ego_T_lidar_dict, load_pose_samples
 from wato_lidar_preprocessing.config import ComponentConfig, MFMosParams
+from wato_lidar_preprocessing.sensor_model import SensorModel
 
 if TYPE_CHECKING:
     from ._runtime import MFMosModel
 
 log = logging.getLogger(__name__)
 
+# --- Properties of the released MF-MOS checkpoint, not of any sensor. ---
+
+# Azimuth columns in the projected range image. The checkpoint was trained on
+# KITTI at 64x2048; _runtime resizes between this and the model resolution, so
+# this is a sampling choice: 1024 keeps roughly one column per 0.35 deg, finer
+# than any Velodyne's azimuth step at 20 Hz, without paying for empty columns.
+RANGE_IMAGE_W = 1024
+
+# Range window used by MF-MOS's own training preprocessing
+# (data_preparing.yaml). Points outside it were never seen by the model.
+TRAIN_MIN_RANGE_M = 2.0
+TRAIN_MAX_RANGE_M = 50.0
+
+# KITTI's scan rate. Residual channels are defined as "the scan k frames ago",
+# so on a faster-spinning rig the frame offsets must scale to span the same
+# wall-clock motion the model was trained to see.
+KITTI_SWEEP_RATE_HZ = 10.0
+
+# Residual channels the checkpoint consumes (arch_cfg's n_input_scans). Read
+# from the arch config when available; this is the released model's value.
+DEFAULT_N_RESIDUAL_SCANS = 8
+
+# Fewest channels a scanner can have and still project into something the
+# model recognises. The checkpoint is KITTI-64 trained; a 32-row image already
+# stretches it, and a 16-row image leaves most of the input blank. On the WATO
+# rig this is what confines MF-MOS to the VLP-32C centre scanner.
+MIN_BEAMS = 32
+
 # Cache key: (checkpoint_path, arch_cfg, data_cfg, device).
 _MODEL_CACHE: dict[tuple[str, str, str, str], "MFMosModel"] = {}
+
+
+def _n_residual_scans(params: MFMosParams) -> int:
+    """Residual channel count the checkpoint expects, from its arch config."""
+    try:
+        import yaml
+
+        with open(params.arch_config, "r", encoding="utf-8") as fh:
+            arch = yaml.safe_load(fh) or {}
+        return int(arch["dataset"]["sensor"]["n_input_scans"])
+    except Exception:  # noqa: BLE001 — arch cfg absent in tests / CPU runs
+        log.debug(
+            "could not read n_input_scans from %s; assuming %d",
+            params.arch_config,
+            DEFAULT_N_RESIDUAL_SCANS,
+        )
+        return DEFAULT_N_RESIDUAL_SCANS
+
+
+def residual_steps_for(sensor: SensorModel, n_scans: int) -> list[int]:
+    """Frame offsets for the residual channels on a scanner spinning at
+    ``sensor.sweep_rate_hz``.
+
+    MF-MOS residual k is "the scan k frames back". At KITTI's 10 Hz that is
+    100 ms of ego/object motion per step. A 20 Hz scanner must step two frames
+    to see the same motion, or every residual channel shows half the
+    displacement the model was trained on and slow movers vanish into the
+    noise floor.
+    """
+    scale = max(1, round(sensor.sweep_rate_hz / KITTI_SWEEP_RATE_HZ))
+    return [k * scale for k in range(1, n_scans + 1)]
 
 
 @dataclass
 class MFMosResult:
     n_sweeps_processed: int = 0
-    n_sweeps_skipped_disabled: int = 0
+    # Scanner has fewer than MIN_BEAMS channels, so it can't be projected into
+    # an image the checkpoint recognises. Deliberate, not a failure — kept out
+    # of n_skipped, but counted so processed + skipped + unsupported adds up to
+    # the valid sweeps and a rig whose corners never run MF-MOS is visible.
+    n_sweeps_skipped_unsupported: int = 0
     n_sweeps_skipped_invalid: int = 0
     n_sweeps_skipped_pose: int = 0
     n_sweeps_skipped_empty: int = 0
@@ -62,6 +137,7 @@ class MFMosResult:
 
     @property
     def n_skipped(self) -> int:
+        """Sweeps MF-MOS should have processed but couldn't (failures only)."""
         return (
             self.n_sweeps_skipped_invalid
             + self.n_sweeps_skipped_pose
@@ -94,6 +170,21 @@ def process_chunk(
         )
         return MFMosResult()
 
+    # Cold-start fix: the residual sliding window resets per chunk, so the
+    # first sweeps of the window would otherwise get zero-padded
+    # residual channels and degraded inference. Seed the window from the
+    # temporally-preceding chunk (chunks overlap, so it covers the window) and
+    # extend the pose samples backward to interpolate those primed sweeps.
+    prev_chunk_id = (
+        _previous_chunk_id(bag_id, chunk_id)
+        if params.prime_window_from_prior_chunk
+        else None
+    )
+    if prev_chunk_id is not None:
+        pose_samples = _merge_pose_samples(
+            load_pose_samples(bag_id, prev_chunk_id), pose_samples
+        )
+
     lidar_ids = {r["lidar_id"] for r in sweep_rows if r.get("valid", True) is not False}
     ego_T_lidar_by_id = load_ego_T_lidar_dict(bag_id, lidar_ids)
 
@@ -107,36 +198,77 @@ def process_chunk(
     max_residual_gap_ns = int(params.max_residual_gap_ms * 1_000_000)
 
     # Group by lidar_id + sort by timestamp to build the residual sliding window.
+    # Skip sweeps deskew already flagged invalid (valid=False in the proc index)
+    # — most commonly the transient start-of-bag window before SLAM emits poses.
+    # deskew is the single source of truth for per-sweep pose validity (it honors
+    # ingest's frame_index valid_pose); deferring to it here keeps the stages
+    # consistent and avoids a per-sweep pose-gap WARNING flood over the very same
+    # sweeps. deskew-invalid sweeps get no mask; classify skips them regardless.
+    result = MFMosResult()
     rows_by_lidar: dict[str, list[dict]] = {}
+    skipped_invalid: list[int] = []
     for r in sweep_rows:
         if r.get("valid", True) is False:
+            continue
+        sid = int(r["sweep_id"])
+        meta = meta_by_sid.get(sid)
+        if meta is not None and meta.get("valid", True) is False:
+            skipped_invalid.append(sid)
+            result.n_sweeps_skipped_invalid += 1
+            result.skip_reasons.append(
+                (sid, meta.get("drop_reason") or "deskew marked sweep invalid")
+            )
             continue
         rows_by_lidar.setdefault(r["lidar_id"], []).append(r)
     for rows in rows_by_lidar.values():
         rows.sort(key=lambda r: int(r["header_timestamp_ns"]))
 
-    result = MFMosResult()
-    max_k = max(params.residual_steps) if params.residual_steps else 0
+    if skipped_invalid:
+        log.info(
+            "chunk %s: MF-MOS skipping %d sweep(s) deskew flagged invalid "
+            "(e.g. no usable ego pose); deferring to deskew's decision",
+            chunk_id,
+            len(skipped_invalid),
+        )
+
+    n_scans = _n_residual_scans(params)
 
     for lid, lid_rows in rows_by_lidar.items():
-        # Allowlist filter must come BEFORE the calibration check: fov_up/down
-        # and H/W are global, so running on a LiDAR with different mount
-        # geometry would project into a non-KITTI-like range image and the
-        # model mispredicts. Allowlist rejections count as disabled (not
-        # invalid) so the result reflects "deliberately skipped" vs. "failed".
-        if (
-            params.lidar_id_allowlist is not None
-            and lid not in params.lidar_id_allowlist
-        ):
+        # Projection geometry is this scanner's, not the rig's. A scanner with
+        # too few channels cannot be projected into an image the checkpoint
+        # recognises at all — skip it rather than feed the model a mostly
+        # blank input and trust whatever comes back. This check comes BEFORE
+        # the calibration check so it counts as "deliberately skipped".
+        sensor = cfg.build_sensor_model(lid)
+        if sensor.beams < MIN_BEAMS:
             log.info(
-                "lidar %s: not in mf_mos.lidar_id_allowlist=%s; skipping its %d sweeps",
+                "lidar %s: %s has %d channels (< %d); MF-MOS cannot project it, "
+                "skipping its %d sweeps",
                 lid,
-                params.lidar_id_allowlist,
+                sensor.name,
+                sensor.beams,
+                MIN_BEAMS,
                 len(lid_rows),
             )
-            for r in lid_rows:
-                result.n_sweeps_skipped_disabled += 1
+            result.n_sweeps_skipped_unsupported += len(lid_rows)
             continue
+
+        range_image_h = sensor.beams
+        residual_steps = residual_steps_for(sensor, n_scans)
+        max_k = max(residual_steps)
+        log.info(
+            "lidar %s: MF-MOS projecting %s at %dx%d, FoV +%.2f/%.2f deg, "
+            "residual steps %s (%.1f Hz vs KITTI %.0f Hz)",
+            lid,
+            sensor.name,
+            range_image_h,
+            RANGE_IMAGE_W,
+            sensor.fov_up_deg,
+            sensor.fov_down_deg,
+            residual_steps,
+            sensor.sweep_rate_hz,
+            KITTI_SWEEP_RATE_HZ,
+        )
 
         if lid not in ego_T_lidar_by_id:
             log.warning("lidar %s: no calibration; skipping MF-MOS for its sweeps", lid)
@@ -150,7 +282,27 @@ def process_chunk(
         ego_T_lidar = ego_T_lidar_by_id[lid]
 
         # Sliding window of (header_ts_ns, xyz_raw_float32) — last max_k sweeps.
+        # Primed from the prior chunk's tail (oldest→newest) so the first
+        # sweeps don't cold-start with zero residuals.
         past_window: list[tuple[int, np.ndarray]] = []
+        if prev_chunk_id is not None and lid_rows:
+            past_window = _load_prefix_window(
+                bag_id,
+                prev_chunk_id,
+                lid,
+                int(lid_rows[0]["header_timestamp_ns"]),
+                max_k,
+                cfg.filter_nonfinite_points,
+            )
+            if past_window:
+                log.info(
+                    "chunk %s lidar %s: primed residual window with %d "
+                    "prior-chunk sweeps from %s",
+                    chunk_id,
+                    lid,
+                    len(past_window),
+                    prev_chunk_id,
+                )
 
         for row in lid_rows:
             sid = int(row["sweep_id"])
@@ -206,8 +358,8 @@ def process_chunk(
             # KITTI remission is [0, 1]; NuScenes raw is [0, 255]. Rescale to
             # match training distribution — img_means/img_stds otherwise send
             # NuScenes intensity ~1000× out of range.
-            if intensity_cur is not None and params.intensity_scale != 1.0:
-                intensity_cur = intensity_cur / np.float32(params.intensity_scale)
+            if intensity_cur is not None and sensor.intensity_scale != 1.0:
+                intensity_cur = intensity_cur / np.float32(sensor.intensity_scale)
             n_finite = xyz_cur.shape[0]
 
             try:
@@ -226,22 +378,22 @@ def process_chunk(
             range_img, pixel_to_point_idx, point_to_pixel = _range_project(
                 xyz_cur,
                 intensity_cur,
-                params.range_image_h,
-                params.range_image_w,
-                params.fov_up_deg,
-                params.fov_down_deg,
-                min_range_m=params.min_range_m,
-                max_range_m=params.max_range_m,
+                range_image_h,
+                RANGE_IMAGE_W,
+                sensor.fov_up_deg,
+                sensor.fov_down_deg,
+                min_range_m=TRAIN_MIN_RANGE_M,
+                max_range_m=TRAIN_MAX_RANGE_M,
             )
 
-            # One residual per configured step (zero image when unavailable).
+            # One residual per derived step (zero image when unavailable).
             residuals: list[np.ndarray] = []
-            for k in params.residual_steps:
+            for k in residual_steps:
                 j = len(past_window) - k
                 if j < 0:
                     residuals.append(
                         np.zeros(
-                            (params.range_image_h, params.range_image_w),
+                            (range_image_h, RANGE_IMAGE_W),
                             dtype=np.float32,
                         )
                     )
@@ -253,7 +405,7 @@ def process_chunk(
                 ):
                     residuals.append(
                         np.zeros(
-                            (params.range_image_h, params.range_image_w),
+                            (range_image_h, RANGE_IMAGE_W),
                             dtype=np.float32,
                         )
                     )
@@ -263,7 +415,7 @@ def process_chunk(
                 except _PoseGapError:
                     residuals.append(
                         np.zeros(
-                            (params.range_image_h, params.range_image_w),
+                            (range_image_h, RANGE_IMAGE_W),
                             dtype=np.float32,
                         )
                     )
@@ -274,13 +426,13 @@ def process_chunk(
                         pose_cur,
                         pose_past,
                         ego_T_lidar,
-                        params.range_image_h,
-                        params.range_image_w,
-                        params.fov_up_deg,
-                        params.fov_down_deg,
+                        range_image_h,
+                        RANGE_IMAGE_W,
+                        sensor.fov_up_deg,
+                        sensor.fov_down_deg,
                         range_img[0],
-                        min_range_m=params.min_range_m,
-                        max_range_m=params.max_range_m,
+                        min_range_m=TRAIN_MIN_RANGE_M,
+                        max_range_m=TRAIN_MAX_RANGE_M,
                     )
                 )
 
@@ -302,7 +454,27 @@ def process_chunk(
                 continue
 
             pixel_mask = score_img >= params.score_threshold
-            mf_finite_mask = _unproject_mask(pixel_mask, point_to_pixel, n_finite)
+            # range_img[0] holds the winning (closest) range per pixel; gate the
+            # unprojection so occluded background behind a mover doesn't inherit
+            # the moving label (see _unproject_mask OCCLUSION GATE).
+            point_ranges_cur = np.linalg.norm(xyz_cur, axis=1).astype(np.float32)
+            mf_finite_mask = _unproject_mask(
+                pixel_mask,
+                point_to_pixel,
+                n_finite,
+                point_ranges=point_ranges_cur,
+                pixel_range=range_img[0],
+                occlusion_range_tol_m=params.occlusion_range_tol_m,
+            )
+
+            # Per-sweep spatial denoise: remove isolated single-sweep
+            # mispredictions before the mask is saved/fused.
+            mf_finite_mask = _denoise_moving_mask_3d(
+                mf_finite_mask,
+                xyz_cur,
+                params.moving_cluster_voxel_m,
+                params.moving_min_cluster_pts,
+            )
 
             # Re-expand to n_raw length so the saved mask is index-aligned
             # with the raw NPZ. NaN/inf points stay False.
@@ -350,6 +522,105 @@ def process_chunk(
         result.n_points_total,
     )
     return result
+
+
+def _previous_chunk_id(bag_id: str, chunk_id: str) -> str | None:
+    """Return the chunk_id immediately preceding `chunk_id` by t_start_ns.
+
+    None when there's no predecessor (bag's first chunk) or the index can't be
+    read — callers fall back to a cold-start window.
+    """
+    try:
+        rows = read_rows(chunks_index_path(bag_id))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not read chunks index for bag %s: %s", bag_id, exc)
+        return None
+    rows = [r for r in rows if r.get("t_start_ns") is not None]
+    rows.sort(key=lambda r: int(r["t_start_ns"]))
+    for i, r in enumerate(rows):
+        if r.get("chunk_id") == chunk_id:
+            return rows[i - 1]["chunk_id"] if i > 0 else None
+    return None
+
+
+def _merge_pose_samples(
+    older: list[PoseSample], newer: list[PoseSample]
+) -> list[PoseSample]:
+    """Union two map-frame pose-sample lists, sorted by timestamp, dropping
+    duplicate timestamps. Extends the current chunk's poses backward with the
+    prior chunk's so primed past sweeps can be interpolated (both chunks emit
+    poses in the same SLAM map frame, so concatenation is valid)."""
+    if not older:
+        return newer
+    by_ts: dict[int, PoseSample] = {s.timestamp_ns: s for s in older}
+    for s in newer:
+        by_ts[s.timestamp_ns] = s
+    return sorted(by_ts.values(), key=lambda s: s.timestamp_ns)
+
+
+def _load_prefix_window(
+    bag_id: str,
+    prev_chunk_id: str,
+    lidar_id: str,
+    before_ts_ns: int,
+    max_k: int,
+    filter_nonfinite: bool,
+) -> list[tuple[int, np.ndarray]]:
+    """Seed the residual window from the prior chunk's tail.
+
+    Returns up to `max_k` sensor-frame (header_ts_ns, xyz) sweeps from
+    prev_chunk that precede `before_ts_ns`, ordered oldest→newest so the
+    immediately-preceding sweep is last (matching the live sliding window's
+    layout). This gives the first sweeps of a chunk full residual channels
+    instead of cold-start zeros. Returns [] on any failure — the caller then
+    cold-starts, which only degrades inference rather than breaking it.
+    """
+    if max_k <= 0:
+        return []
+    try:
+        rows = read_rows(lidar_sweeps_path(bag_id, prev_chunk_id))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "prime window: cannot read prior chunk %s sweeps (%s); cold-starting",
+            prev_chunk_id,
+            exc,
+        )
+        return []
+    cand = [
+        r
+        for r in rows
+        if r.get("lidar_id") == lidar_id
+        and r.get("valid", True) is not False
+        and int(r["header_timestamp_ns"]) < before_ts_ns
+    ]
+    cand.sort(key=lambda r: int(r["header_timestamp_ns"]))
+    cand = cand[-max_k:]
+
+    window: list[tuple[int, np.ndarray]] = []
+    for r in cand:
+        try:
+            raw = np.load(local_path(r["lidar_path"]))
+            x = raw["x"].astype(np.float32)
+            y = raw["y"].astype(np.float32)
+            z = raw["z"].astype(np.float32)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "prime window: failed to load %s (%s); skipping",
+                r.get("lidar_path"),
+                exc,
+            )
+            continue
+        if filter_nonfinite:
+            finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+        else:
+            finite = np.ones(x.shape[0], dtype=bool)
+        window.append(
+            (
+                int(r["header_timestamp_ns"]),
+                np.stack([x[finite], y[finite], z[finite]], axis=1),
+            )
+        )
+    return window
 
 
 def _load_model(params: MFMosParams) -> "MFMosModel":
@@ -531,27 +802,104 @@ def _compute_residual(
     return residual
 
 
+def _denoise_moving_mask_3d(
+    mask: np.ndarray,
+    xyz: np.ndarray,
+    cluster_voxel_m: float,
+    min_cluster_pts: int,
+) -> np.ndarray:
+    """Drop isolated moving points by 3D connected-component cluster size.
+
+    Cluster the moving points on a coarse grid (26-connectivity between
+    occupied voxels) and drop clusters below ``min_cluster_pts``. A genuine
+    object is a dense blob; single-sweep speckle is 1–few scattered points.
+    ``xyz`` may be in any rigid frame (clustering uses relative distances).
+    """
+    if min_cluster_pts <= 1 or not mask.any():
+        return mask
+
+    idx = np.flatnonzero(mask)
+    g = np.floor(xyz[idx] / cluster_voxel_m).astype(np.int64)  # (M, 3)
+    vkeys, inv, vcounts = np.unique(g, axis=0, return_inverse=True, return_counts=True)
+    inv = inv.reshape(-1)  # np.unique may return a column vector here
+    n_vox = vkeys.shape[0]
+
+    vox_index = {(int(k[0]), int(k[1]), int(k[2])): i for i, k in enumerate(vkeys)}
+    parent = np.arange(n_vox)
+
+    def find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    # Union each occupied voxel with its occupied 26-neighbours. Only the
+    # +half of the neighbour offsets is needed (union is symmetric).
+    forward_offsets = [
+        (dx, dy, dz)
+        for dx in (-1, 0, 1)
+        for dy in (-1, 0, 1)
+        for dz in (-1, 0, 1)
+        if (dx, dy, dz) > (0, 0, 0)
+    ]
+    for (kx, ky, kz), vid in vox_index.items():
+        for dx, dy, dz in forward_offsets:
+            nvid = vox_index.get((kx + dx, ky + dy, kz + dz))
+            if nvid is not None:
+                union(vid, nvid)
+
+    roots = np.array([find(i) for i in range(n_vox)], dtype=np.int64)
+    comp_pts = np.zeros(n_vox, dtype=np.int64)
+    np.add.at(comp_pts, roots, vcounts)
+
+    keep_vox = comp_pts[roots] >= min_cluster_pts  # per unique voxel
+    out = mask.copy()
+    out[idx] = keep_vox[inv]
+    return out
+
+
 def _unproject_mask(
     pixel_mask: np.ndarray,
     point_to_pixel: np.ndarray,
     n_points: int,
+    point_ranges: np.ndarray | None = None,
+    pixel_range: np.ndarray | None = None,
+    occlusion_range_tol_m: float | None = None,
 ) -> np.ndarray:
     """Map (H, W) bool pixel mask back to (N,) per-point bool.
 
     Points outside the FOV (point_to_pixel == -1) default to False.
 
-    OCCLUSION CAVEAT: every in-FOV point inherits its pixel's label,
-    including points that lost the closest-range tiebreak. A static
-    surface directly behind a mover projecting to the same pixels will
-    inherit the mover's label. Intrinsic to range-image MOS — relevant
-    when investigating static structure showing up immediately behind a
-    confirmed mover in the dynamic cloud.
+    OCCLUSION GATE: a range-image pixel holds the closest return along its
+    direction, so the moving label belongs to the front surface only. Points
+    that lost the closest-range tiebreak (occluded background — e.g. a wall
+    directly behind a car — projecting to the same pixel) sit farther than the
+    pixel's winning range and must NOT inherit the mover's label. When
+    ``point_ranges`` (per-point range, aligned with ``point_to_pixel``),
+    ``pixel_range`` (the (H, W) winning-range channel), and
+    ``occlusion_range_tol_m`` are all supplied, a point keeps the moving label
+    only if ``range <= winner_range + tol``. With the args omitted the gate is
+    off and every in-FOV point inherits its pixel's label (legacy behaviour).
     """
     out = np.zeros(n_points, dtype=bool)
     in_image = (point_to_pixel[:, 0] >= 0) & (point_to_pixel[:, 1] >= 0)
     idx_h = point_to_pixel[in_image, 0]
     idx_w = point_to_pixel[in_image, 1]
-    out[in_image] = pixel_mask[idx_h, idx_w]
+    labels = pixel_mask[idx_h, idx_w]
+    if (
+        point_ranges is not None
+        and pixel_range is not None
+        and occlusion_range_tol_m is not None
+    ):
+        winner_range = pixel_range[idx_h, idx_w]
+        front_surface = point_ranges[in_image] <= winner_range + occlusion_range_tol_m
+        labels = labels & front_surface
+    out[in_image] = labels
     return out
 
 
@@ -602,14 +950,18 @@ def _write_zero_mask(
     n_raw: int,
     save_scores: bool,
 ) -> None:
+    # Write a zero-LENGTH array (not zero-filled) to signal "skipped — no data"
+    # rather than "ran inference and found no movers."  load_mf_mos_world_mask
+    # treats length-0 as None so a skipped sweep is distinguishable from one
+    # that genuinely produced an all-False mask.
     np.save(
         local_path(mf_mos_mask_path(bag_id, chunk_id, sweep_id)),
-        np.zeros(n_raw, dtype=bool),
+        np.zeros(0, dtype=bool),
     )
     if save_scores:
         np.save(
             local_path(mf_mos_score_path(bag_id, chunk_id, sweep_id)),
-            np.zeros(n_raw, dtype=np.float32),
+            np.zeros(0, dtype=np.float32),
         )
 
 

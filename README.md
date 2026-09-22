@@ -19,7 +19,11 @@ flowchart TD
     end
 
     subgraph perception_2d["perception_2d  ·  GPU"]
-        P2["GroundingDINO + SAM 2\nDEVA temporal tracking\nDINOv2 embeddings\ncross-camera merge"]
+        P2["GroundingDINO detector\nSAM2 video tracker\nDepth Anything V2\nDINOv2 embeddings\n(optional Florence-2 discovery)"]
+    end
+
+    subgraph semantic_lifting["semantic_lifting  ·  CPU"]
+        SL["UniLiPs Eq.1 occlusion test\ncross-camera vote accumulation\nper-point instance labels"]
     end
 
     subgraph proposal_gen["proposal_generation  ·  GPU"]
@@ -45,8 +49,11 @@ flowchart TD
     BAG --> ingest
     ingest -- "frame_index · camera_frames\ncalibration" --> perception_2d
     ingest -- "frame_index · lidar_sweeps · poses" --> lidar_prep
+    lidar_prep -- "preprocessed sweeps · ground mesh" --> perception_2d
+    lidar_prep -- "preprocessed sweeps · ground mesh" --> semantic_lifting
+    perception_2d -- "masks_2d · depth_2d · tracklets_2d" --> semantic_lifting
+    semantic_lifting -- "lifted_labels · DINOv2 embeddings" --> proposal_gen
     lidar_prep -- "preprocessed sweeps · ground mesh" --> proposal_gen
-    perception_2d -- "2D masks · DINOv2 embeddings" --> proposal_gen
     proposal_gen -- "3D proposals" --> tracking
     tracking -- "3D tracks" --> label_ref
     tracking -- "rare-class track candidates" --> ovd
@@ -54,9 +61,10 @@ flowchart TD
     ovd -- "rare-class labels" --> student
 ```
 
-`frame_index.parquet` (written by **ingest**) is the cross-component contract: every downstream stage reads `world_T_ego_flat` (interpolated ego pose per LiDAR sweep) from it rather than consuming raw bag topics.
+`frame_index.parquet` (written by **ingest**) is the cross-component contract: downstream stages read interpolated ego pose (`world_T_ego_flat`) and per-sweep validity (`valid_pose`) from it rather than consuming raw bag topics. Most stages read `world_T_ego_flat` directly; **lidar_preprocessing** re-interpolates from `poses.parquet` for per-point deskewing but honors `frame_index`'s `valid_pose` flag to skip sweeps with no usable pose (e.g. the start-of-bag window before SLAM converges), and that skip propagates to MF-MOS and classify.
 
-Only **ingest** is implemented end-to-end. All other components are stubs.
+**ingest** and **perception_2d** are implemented end-to-end (and **semantic_lifting**'s
+core lifting algorithm). The remaining components are stubs.
 
 ## Layout
 
@@ -115,7 +123,8 @@ watod down all
 | Component | Purpose | Image base | GPU |
 |---|---|---|---|
 | `ingest` | Decode rosbag → frames + lidar + poses + frame_index | CPU | no |
-| `perception_2d` | GroundingDINO + SAM 2 + DEVA + DINOv2 + x-cam merge | CUDA | yes |
+| `perception_2d` | GroundingDINO + SAM2 video tracker + Depth Anything V2 + DINOv2 (optional Florence-2 discovery) | CUDA | yes |
+| `semantic_lifting` | Occlusion-aware 2D→3D label lifting (UniLiPs Eq.1) | CPU | no |
 | `lidar_preprocessing` | Motion comp, static/dynamic split, ground mesh | CPU | no |
 | `proposal_generation` | LiDAR detector + Segment-Lift-Fit + fusion | CUDA | yes |
 | `tracking` | 3D Kalman + masklet association + DINOv2 ReID | CUDA | yes (light) |

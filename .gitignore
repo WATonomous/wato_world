@@ -8,9 +8,11 @@ watod-config.local.sh
 data/bags/*
 data/artifacts/*
 data/models/*
+data/wheels/*
 !data/bags/.gitkeep
 !data/artifacts/.gitkeep
 !data/models/.gitkeep
+!data/wheels/.gitkeep
 
 # Python
 __pycache__/
@@ -30,4 +32,4 @@ dist/
 *.swp
 .DS_Store
 
-.venv-test
+venv

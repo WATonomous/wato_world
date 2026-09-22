@@ -4,9 +4,13 @@ Reads each world-frame sweep NPZ. Sweeps carrying a `ground_mask` contribute
 their ground points to the chunk-level ground cloud, which is then binned
 into a 2D height grid + surface-normal grid.
 
-Each candidate ground point is intersected against the static-voxel set
-from Step B (classify) — points in non-static voxels are dropped, which
-removes vehicle-underside contamination.
+Each candidate ground point is checked against the carved-dynamic voxel set
+from Step B (classify) — points whose voxel classify marked DYNAMIC are
+dropped, which removes vehicle-underside contamination (low-riding movers
+that fooled Patchwork++). Points in any other voxel class pass through:
+classify credits no endpoint hit to a ground return, so ground voxels can
+never be static — intersecting with the STATIC set (the old behaviour)
+silently discarded ~all ground points.
 
 When no sweep carries a ground mask (Patchwork++ unavailable upstream),
 writes a sentinel ground.npz with status="skipped_no_ground_mask" so
@@ -45,17 +49,17 @@ class GroundResult:
     n_nonground: int
     ground_path: str
     status: str = "ok"  # "ok" | "skipped_no_ground_mask" | "empty"
-    n_dropped_dynamic: int = 0  # rejected by static-voxel intersection
+    n_dropped_dynamic: int = 0  # rejected by dynamic-voxel intersection
 
 
-def _load_static_voxel_set(
+def _load_dynamic_voxel_set(
     bag_id: str, chunk_id: str
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Load classify's static-voxel keys + origin/voxel_size.
+    """Load classify's carved-dynamic voxel keys + origin/voxel_size.
 
     Returns (sorted_keys, origin_xyz, voxel_size).
     Raises FileNotFoundError if classify hasn't run; KeyError if the file
-    predates the static-voxel-keys / origin / voxel_size export (re-run
+    predates the dynamic-voxel-keys / origin / voxel_size export (re-run
     classify with --force).
     """
     path = local_path(static_map_path(bag_id, chunk_id))
@@ -65,40 +69,40 @@ def _load_static_voxel_set(
         )
     data = np.load(path)
     missing = [
-        k for k in ("static_voxel_keys", "origin", "voxel_size") if k not in data
+        k for k in ("dynamic_voxel_keys", "origin", "voxel_size") if k not in data
     ]
     if missing:
         raise KeyError(
             f"static_map.npz for chunk {chunk_id!r} is missing keys {missing} — "
-            "predates the ground/static-intersection feature; "
+            "predates the ground/dynamic-intersection feature; "
             "re-run lidar_preprocessing with --force on this chunk."
         )
-    keys = np.asarray(data["static_voxel_keys"], dtype=np.int64)
+    keys = np.asarray(data["dynamic_voxel_keys"], dtype=np.int64)
     keys.sort()
     origin = np.asarray(data["origin"], dtype=np.float64)
     voxel_size = float(data["voxel_size"])
     return keys, origin, voxel_size
 
 
-def _filter_by_static_voxels(
+def _drop_dynamic_voxel_points(
     xyz: np.ndarray,
-    static_keys: np.ndarray,
+    dynamic_keys: np.ndarray,
     origin: np.ndarray,
     voxel_size: float,
     *,
     chunk_id: str,
 ) -> np.ndarray:
-    """Keep only rows of `xyz` whose voxel key is in `static_keys`.
+    """Drop rows of `xyz` whose voxel key is in `dynamic_keys`; keep the rest.
 
     Uses the same voxel_indices helper as classify so keys align bit-for-bit.
     """
-    if xyz.shape[0] == 0 or static_keys.size == 0:
-        return np.empty((0, 3), dtype=xyz.dtype)
+    if xyz.shape[0] == 0 or dynamic_keys.size == 0:
+        return xyz
     keys = voxel_indices(xyz, origin, voxel_size, chunk_id=chunk_id)
-    pos = np.searchsorted(static_keys, keys)
-    pos = np.clip(pos, 0, static_keys.size - 1)
-    keep = static_keys[pos] == keys
-    return xyz[keep]
+    pos = np.searchsorted(dynamic_keys, keys)
+    pos = np.clip(pos, 0, dynamic_keys.size - 1)
+    is_dynamic = dynamic_keys[pos] == keys
+    return xyz[~is_dynamic]
 
 
 def _build_height_grid(
@@ -204,7 +208,7 @@ def process_chunk(
     n_with_mask = 0
     n_dropped_dynamic = 0
 
-    static_keys, static_origin, static_voxel_size = _load_static_voxel_set(
+    dynamic_keys, classify_origin, classify_voxel_size = _load_dynamic_voxel_set(
         bag_id, chunk_id
     )
 
@@ -231,11 +235,11 @@ def process_chunk(
             axis=1,
         ).astype(np.float64)
         n_before = xyz.shape[0]
-        xyz = _filter_by_static_voxels(
+        xyz = _drop_dynamic_voxel_points(
             xyz,
-            static_keys,
-            static_origin,
-            static_voxel_size,
+            dynamic_keys,
+            classify_origin,
+            classify_voxel_size,
             chunk_id=chunk_id,
         )
         n_dropped_dynamic += n_before - xyz.shape[0]

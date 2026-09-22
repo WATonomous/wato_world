@@ -126,6 +126,11 @@ def _align_raw_to_world(
     if n_raw == n_world:
         return raw_arr  # common case: no NaN/inf points were dropped
 
+    if n_raw == 0:
+        # Zero-length sentinel written by _core._write_zero_mask for pose-gap
+        # and inference-error sweeps. "No data", not a genuine all-False mask.
+        return None
+
     if n_raw < n_world:
         log.warning(
             "sweep %s: mf_mos %s len %d < world len %d — discarded",

@@ -1,0 +1,21 @@
+[project]
+name = "wato-world-semantic-lifting"
+version = "0.1.0"
+description = "Occlusion-aware LiDAR label lifting from 2D masks and metric depth."
+requires-python = ">=3.11"
+dependencies = [
+    "wato-world-common",
+    "click>=8",
+    "pyyaml>=6",
+    "pydantic>=2",
+]
+
+[project.scripts]
+wato_semantic_lifting = "wato_semantic_lifting.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

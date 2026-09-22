@@ -1,0 +1,150 @@
+# Locked Python dependency set for the perception_2d component.
+#
+# GENERATED, NOT HAND-EDITED. Frozen on 2026-09-21 from the deps image that was
+# known-good at that time:
+#     docker run --rm --entrypoint uv \
+#         ghcr.io/watonomous/wato_world/perception_2d:deps_<tag> pip freeze --system
+#
+# See docker/requirements/ingest.txt for why these lockfiles exist and how to
+# regenerate one.
+#
+# This is the component where floating versions hurt most: GroundingDINO, SAM2,
+# Depth-Anything-V2 and DINOv2 jointly determine every 2D label the pipeline
+# emits. `sam2` in particular was installed from git main and is pinned to an
+# exact commit below.
+#
+# KNOWN DRIFT CAPTURED IN THIS LOCK — clean up separately, do not hand-edit here
+# ------------------------------------------------------------------------------
+#   1. numpy==2.5.3, but the Dockerfile asks for "numpy<2". A later layer
+#      upgraded it and the constraint silently stopped holding. The stated
+#      reason for the pin ("the `sam3` package requires it") is stale — sam3
+#      was replaced by sam2. Either drop the <2 pin from the Dockerfile as
+#      obsolete, or re-establish it and rebuild; right now the file claims a
+#      constraint the image does not satisfy.
+#
+#   2. Both opencv-python==4.14.0.94 AND opencv-python-headless==5.0.0.93 are
+#      installed. The Dockerfile only asks for headless; depth-anything-v2
+#      pulls the full build. Two cv2 module trees in one site-packages — which
+#      one wins depends on install order. Worth resolving.
+#
+#   3. gradio==6.27.0, fastapi, uvicorn, starlette, typer, pydub, brotli are
+#      present. These come from depth-anything-v2's dependency list (it ships a
+#      demo app) and are dead weight in a batch labeler — a few hundred MB and
+#      a web-server attack surface for code that is never imported. Candidates
+#      for a --no-deps install of depth-anything-v2 plus explicit deps.
+#
+#   4. transformers==5.17.0 is a major version past the 4.x API the Dockerfile
+#      comments describe. It works today; it was not a deliberate upgrade.
+#
+# INDEX RESOLUTION
+# ----------------
+# Installed with `--index-strategy unsafe-first-match`. uv's default strategy
+# considers only the FIRST index that carries a given package name, which
+# breaks here: download.pytorch.org/whl/cu128 mirrors common packages like
+# certifi at its own versions, so the default strategy refuses to fall back to
+# PyPI for them and the install fails to resolve. unsafe-first-match walks the
+# indexes in order and takes the first that has the *requested version* — PyPI
+# for ordinary packages, the cu128 index only for the wheels PyPI lacks
+# (torch==...+cu128 and friends).
+#
+# The "unsafe" in the name refers to dependency confusion, where an attacker
+# publishes a same-named package on another index. That risk is much reduced
+# here: every version is exactly pinned and installed with --no-deps, so a
+# hostile index cannot introduce a package or a version this file does not
+# already name. Both indexes are also first-party (PyPI, pytorch.org).
+
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+annotated-doc==0.0.5
+annotated-types==0.8.0
+antlr4-python3-runtime==4.9.3
+anyio==4.15.1
+brotli==1.2.0
+certifi==2026.7.22
+click==8.5.0
+contourpy==1.4.0
+cycler==0.12.1
+depth-anything-v2==0.1.0
+einops==0.8.2
+fastapi==0.141.1
+filelock==3.32.3
+fonttools==4.65.0
+fsspec==2026.7.0
+gradio==6.27.0
+gradio-client==2.7.0
+gradio-imageslider==0.0.20
+groovy==0.1.2
+h11==0.16.0
+hf-gradio==0.4.1
+hf-xet==1.6.0
+httpcore==1.0.9
+httpx==0.28.1
+huggingface-hub==1.31.0
+hydra-core==1.3.6
+idna==3.19
+iopath==0.1.10
+jinja2==3.1.6
+kiwisolver==1.5.1
+markdown-it-py==4.2.0
+markupsafe==3.0.3
+matplotlib==3.11.2
+mdurl==0.1.2
+mpmath==1.3.0
+networkx==3.6.1
+numpy==2.5.3
+nvidia-cublas-cu12==12.8.3.14
+nvidia-cuda-cupti-cu12==12.8.57
+nvidia-cuda-nvrtc-cu12==12.8.61
+nvidia-cuda-runtime-cu12==12.8.57
+nvidia-cudnn-cu12==9.7.1.26
+nvidia-cufft-cu12==11.3.3.41
+nvidia-cufile-cu12==1.13.0.11
+nvidia-curand-cu12==10.3.9.55
+nvidia-cusolver-cu12==11.7.2.55
+nvidia-cusparse-cu12==12.5.7.53
+nvidia-cusparselt-cu12==0.6.3
+nvidia-nccl-cu12==2.26.2
+nvidia-nvjitlink-cu12==12.8.61
+nvidia-nvtx-cu12==12.8.55
+omegaconf==2.3.1
+opencv-python==4.14.0.94
+opencv-python-headless==5.0.0.93
+orjson==3.12.0
+packaging==26.3
+pandas==3.0.5
+pillow==12.3.0
+portalocker==4.3.0
+pyarrow==25.0.1
+pydantic==2.13.5
+pydantic-core==2.46.5
+pydub==0.25.1
+pygments==2.21.0
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0
+python-multipart==0.0.32
+pytz==2026.3.post1
+pyyaml==6.0.3
+regex==2026.9.10
+rich==15.0.0
+safehttpx==0.1.7
+safetensors==0.8.0
+scipy==1.17.1
+semantic-version==2.10.0
+setuptools==78.1.0
+shellingham==1.5.4
+six==1.17.0
+starlette==1.6.0
+sympy==1.14.0
+timm==1.0.29
+tokenizers==0.23.2
+tomlkit==0.14.0
+torch==2.7.1+cu128
+torchvision==0.22.1+cu128
+tqdm==4.70.1
+transformers==5.17.0
+triton==3.3.1
+typer==0.27.2
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+uvicorn==0.52.4
+xformers==0.0.31

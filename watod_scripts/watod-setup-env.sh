@@ -33,6 +33,28 @@ fi
 
 TAG="$(sanitize_tag "${TAG:-${BRANCH}}")"
 
+# --- Build provenance ------------------------------------------------------
+# Baked into component images by docker/template.Dockerfile and read back at
+# runtime by wato_common.provenance, so every artifact records which source
+# revision produced it.
+#
+# This has to happen here, on the host: a deploy image has no .git directory,
+# so a container that tried to discover its own revision would silently record
+# nothing. WATO_GIT_DIRTY matters as much as the commit — artifacts built from
+# a dirty tree are not reproducible and should be treated as provisional.
+if git -C "${WATO_WORLD_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    WATO_GIT_COMMIT="$(git -C "${WATO_WORLD_DIR}" rev-parse HEAD)"
+    if [[ -n "$(git -C "${WATO_WORLD_DIR}" status --porcelain)" ]]; then
+        WATO_GIT_DIRTY="true"
+    else
+        WATO_GIT_DIRTY="false"
+    fi
+else
+    WATO_GIT_COMMIT=""
+    WATO_GIT_DIRTY="false"
+fi
+WATO_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
 # --- Host user mapping (for the develop target). ---------------------------
 SETUID="$(id -u)"
 SETGID="$(id -g)"
@@ -42,6 +64,7 @@ COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-watod_world_${USERNAME}}"
 # --- Component image names. -----------------------------------------------
 INGEST_IMAGE="${REGISTRY}/ingest"
 PERCEPTION_2D_IMAGE="${REGISTRY}/perception_2d"
+SEMANTIC_LIFTING_IMAGE="${REGISTRY}/semantic_lifting"
 LIDAR_PREPROCESSING_IMAGE="${REGISTRY}/lidar_preprocessing"
 PROPOSAL_GENERATION_IMAGE="${REGISTRY}/proposal_generation"
 TRACKING_IMAGE="${REGISTRY}/tracking"
@@ -64,9 +87,14 @@ SETGID=${SETGID}
 CLAUDE_CODE=${CLAUDE_CODE}
 GPU_AVAILABLE=${GPU_AVAILABLE}
 
+WATO_GIT_COMMIT=${WATO_GIT_COMMIT}
+WATO_GIT_DIRTY=${WATO_GIT_DIRTY}
+WATO_BUILD_TIME=${WATO_BUILD_TIME}
+
 REGISTRY=${REGISTRY}
 INGEST_IMAGE=${INGEST_IMAGE}
 PERCEPTION_2D_IMAGE=${PERCEPTION_2D_IMAGE}
+SEMANTIC_LIFTING_IMAGE=${SEMANTIC_LIFTING_IMAGE}
 LIDAR_PREPROCESSING_IMAGE=${LIDAR_PREPROCESSING_IMAGE}
 PROPOSAL_GENERATION_IMAGE=${PROPOSAL_GENERATION_IMAGE}
 TRACKING_IMAGE=${TRACKING_IMAGE}

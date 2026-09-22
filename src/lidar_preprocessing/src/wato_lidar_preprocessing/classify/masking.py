@@ -38,7 +38,7 @@ def apply_classification_to_sweep(
     sweep_id: int,
     keys: np.ndarray,
     static_arr: np.ndarray,
-    not_dynamic_arr: np.ndarray,
+    dynamic_arr: np.ndarray,
     xyz_cache_i: np.ndarray | None,
     intensity_cache_i: np.ndarray | None,
     ground_mask_cache_i: np.ndarray | None,
@@ -55,9 +55,10 @@ def apply_classification_to_sweep(
     `keys` is always full-length (matches xyz from the world NPZ) so the
     saved mask is length-aligned with the downstream xyz array.
 
-    Pure Amanatides-Woo: a point is dynamic iff its voxel is not in
-    not_dynamic_arr (static + free_only + under_evidenced + ambiguous + the
-    carved-noise bucket) and not flagged ground by Patchwork++. Then, when
+    Pure Amanatides-Woo: a point is dynamic IFF its voxel key is in
+    `dynamic_arr` (the explicit carved-dynamic voxel set) and it is not
+    flagged ground by Patchwork++. Voxels that were never observed default to
+    NOT dynamic — absence of evidence is not motion evidence. Then, when
     dynamic_min_range_m > 0, points within that horizontal range of the
     sensor (`sweep_origin`) are forced non-dynamic — near the ego the return
     is ego self-returns / near clutter and carving is maximal, so AW can't
@@ -80,15 +81,12 @@ def apply_classification_to_sweep(
             np.save(local_path(aw_dynamic_mask_path(bag_id, chunk_id, sweep_id)), mask)
         return SweepMaskResult(n_static=0, n_dynamic=0, mask_uri=dyn_uri)
 
-    # not_dynamic_arr covers static + free-only + under-evidenced-with-hits
-    # + ambiguous voxels (log_odds mode); static only (persistence mode).
-    mask = ~keys_in_sorted(keys, not_dynamic_arr)
+    # AW verdict: explicit membership in the carved-dynamic voxel set.
+    mask = keys_in_sorted(keys, dynamic_arr)
 
     # Patchwork++ ground mask is authoritative: ground points must never
-    # appear in dynamic_map.npz. The not_dynamic_arr classification doesn't
-    # reliably catch them — ground voxels can fall through whenever no
-    # non-ground ray traverses them (skip_endpoint), aren't traversed at all
-    # (skip_ray), or fall below the persistence threshold.
+    # appear in dynamic_map.npz. Ground voxels can share keys with carved
+    # voxels (e.g. a mover's wheels touching the road surface).
     if ground_mask_cache_i is not None:
         mask &= ~ground_mask_cache_i
 

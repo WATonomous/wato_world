@@ -1,12 +1,11 @@
 """Log-odds ray-casting classifier.
 
-build_log_odds_grid:    Pass 1 — loops sweeps through the ray_traversal
-                        kernel, returns sorted per-voxel arrays.
-classify_from_log_odds: applies thresholds to return static_arr,
-                        not_dynamic_arr, classification, and diagnostic counts.
+All log-odds increments, thresholds, range weighting and carve margin come
+from the datasheet SensorModel (see sensor_model.py) — no hand-tuned knobs.
 
 Pure Amanatides-Woo: no MF-MOS here. The MF-MOS method is a separate,
-self-contained module (mf_mos/), selected with `--seg mos`.
+self-contained module (mf_mos/), selected with `--seg mos`; `--seg union`
+fuses the two in union/.
 """
 
 from __future__ import annotations
@@ -18,11 +17,15 @@ from tqdm import tqdm
 
 from wato_lidar_preprocessing.config import ComponentConfig
 from wato_lidar_preprocessing.ray_traversal import (
+    accumulate_cov,
     apply_global_map_boost,
+    compute_normals,
     extract_log_odds_arrays,
+    make_cov_dicts,
     make_log_odds_dicts,
     update_sweep_log_odds,
 )
+from wato_lidar_preprocessing.sensor_model import SensorModel
 from wato_lidar_preprocessing.voxel import voxel_indices
 
 from .global_map_prior import GlobalMapPrior
@@ -36,11 +39,8 @@ log = logging.getLogger(__name__)
 CLASS_STATIC = 0
 CLASS_AMBIGUOUS = 1  # evidenced + has_hits + p_dynamic ≤ p_occ < p_static
 CLASS_UNDER_EVIDENCED = 2  # has_hits but n_obs < min_observations
-CLASS_FREE_ONLY = 3  # n_hits < min_occupied_hits
-CLASS_DYNAMIC = 4  # evidenced + has_hits + p_occ < p_dynamic + hit-ratio ok
-CLASS_CARVED_NOISE = 5  # carved like dynamic but hit on too few passes
-# (n_hits/n_obs < min_hit_fraction_dynamic): free space with stray returns,
-# e.g. the near-ego scan-plane shell. Not dynamic, not static — points drop.
+CLASS_FREE_ONLY = 3  # traversed but never hit (n_hits == 0)
+CLASS_DYNAMIC = 4  # evidenced + has_hits + p_occ < p_dynamic_threshold
 
 
 def build_log_odds_grid(
@@ -51,6 +51,8 @@ def build_log_odds_grid(
     *,
     cache_xyz: bool,
     cache_intensity: bool = True,
+    pose_sigma_m: float,
+    sensor_model: SensorModel,
     global_map_prior: GlobalMapPrior | None = None,
 ) -> tuple[
     list[np.ndarray | None],
@@ -61,32 +63,51 @@ def build_log_odds_grid(
     dict[int, list[np.ndarray]],
     tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
 ]:
-    """Pass 1 for the log-odds path.
+    """Pass 1: sub-pass 1a estimates per-voxel surface normals, sub-pass 1b
+    ray-casts the log-odds grid with the incidence gate. Caches xyz/intensity/
+    ground/origin/keys per sweep for Pass 2.
 
-    Loads each sweep once, populates the typed-dict log_odds accumulators
-    via ray_traversal, builds sweep_keys for Pass 2, and (optionally) caches
-    xyz/intensity/ground_mask in memory so Pass 2 doesn't re-read the NPZs.
+    pose_sigma_m: per-bag SLAM pose noise (poses.parquet); sets the carve margin.
+    global_map_prior: two-pass mode — map-matched endpoints get a one-time
+        credibility-weighted prior shift; touches log_odds only.
 
-    Args:
-        global_map_prior: optional GlobalMapPrior (two-pass mode). Endpoints
-            within match_radius_m of the global map get a credibility-weighted
-            log-odds boost (UniLiPs IWU Eq. 2-3). Touches log_odds only —
-            n_hits stays backed by real sweep returns so has_hits is not
-            bypassed.
-
-    Returns:
-        xyz_cache, intensity_cache, ground_mask_cache: per-sweep caches
-            (entries are None when the sweep was invalid or caching is off).
-        origin_cache: per-sweep sensor origin (None for invalid/empty sweeps),
-            used by Pass 2's near-range dynamic gate. Always cached (3 floats).
-        sweep_keys: per-sweep int64 voxel-key arrays, always full length so
-            dynamic_mask.npy stays length-aligned with the world NPZ.
-        frame_keys: frame_id → list of key arrays for per-frame voxel
-            occupancy export.
-        log_odds_arrays: (unique_keys, lo_vals, n_obs_vals, n_hits_vals)
-            sorted by key.
+    Returns (xyz_cache, intensity_cache, ground_mask_cache, origin_cache,
+    sweep_keys, frame_keys, log_odds_arrays) where log_odds_arrays =
+    (unique_keys, lo, n_obs, n_hits). origin_cache feeds Pass 2's near-range
+    dynamic gate (cfg.dynamic_min_range_m).
     """
     log_odds_dict, n_obs_dict, n_hits_dict = make_log_odds_dicts()
+    cov_dicts = make_cov_dicts()
+
+    voxel_size = cfg.voxel_size_m
+    l_occ = sensor_model.l_occ
+    l_free = sensor_model.l_free
+    clamp = sensor_model.log_odds_clamp
+    d_star = sensor_model.credibility_crossover_m(voxel_size)
+    margin_m = sensor_model.carve_margin_m(pose_sigma_m)
+    grazing_cos = sensor_model.grazing_cos_threshold(voxel_size)
+    max_len = sensor_model.max_range_m
+    log.info(
+        "chunk %s log-odds model (%s): l_occ=%.3f l_free=%.3f clamp=%.3f "
+        "d*=%.1fm carve_margin=%.3fm grazing_cos=%.2f (σ_range=%.3f "
+        "σ_pose=%.3f) max_ray=%.1fm",
+        chunk_id,
+        sensor_model.name,
+        l_occ,
+        l_free,
+        clamp,
+        d_star,
+        margin_m,
+        grazing_cos,
+        sensor_model.range_sigma_m,
+        pose_sigma_m,
+        max_len,
+    )
+
+    # Two-pass global prior: accumulate per-voxel max credibility across all
+    # sweeps, applied ONCE after the carve pass (a prior shift, not gain).
+    prior_keys_parts: list[np.ndarray] = []
+    prior_cred_parts: list[np.ndarray] = []
 
     xyz_cache: list[np.ndarray | None] = []
     intensity_cache: list[np.ndarray | None] = []
@@ -95,9 +116,11 @@ def build_log_odds_grid(
     sweep_keys: list[np.ndarray] = []
     frame_keys: dict[int, list[np.ndarray]] = {}
 
+    # --- Sub-pass 1a: load sweeps, build caches/keys, accumulate per-voxel
+    # point moments (non-ground returns) for surface-normal estimation. ------
     for row in tqdm(
         meta_rows,
-        desc=f"classify chunk {chunk_id} pass 1",
+        desc=f"classify chunk {chunk_id} pass 1a",
         unit="sweep",
     ):
         if row.get("valid") is False:
@@ -125,12 +148,12 @@ def build_log_odds_grid(
                 f"missing 'origin' field — re-run deskew to regenerate."
             )
 
-        keys = voxel_indices(xyz, origin, cfg.voxel_size_m, chunk_id=chunk_id)
+        keys = voxel_indices(xyz, origin, voxel_size, chunk_id=chunk_id)
         sweep_keys.append(keys)
         xyz_cache.append(xyz if cache_xyz else None)
         intensity_cache.append(intensity if cache_xyz and cache_intensity else None)
-        # ground_mask is always cached — masking.py needs it regardless of
-        # cache_xyz, and it's 1 bit per point (cheap even on big chunks).
+        # ground_mask + origin always cached — cheap, and Pass 2 / sub-pass 1b
+        # need them regardless of cache_xyz.
         ground_mask_cache.append(ground_mask)
         origin_cache.append(sweep_origin)
 
@@ -138,15 +161,34 @@ def build_log_odds_grid(
         if fid is not None:
             frame_keys.setdefault(int(fid), []).append(keys)
 
-        if cfg.ground_endpoint_strategy == "skip_endpoint":
-            # Traverse all rays; the kernel skips +l_occ at ground endpoints
-            # so road-surface voxels keep n_hits==0 while air voxels above
-            # the road still accumulate free-space evidence.
-            endpoints_arr = xyz
-            is_ground_arr = ground_mask
-        else:  # "skip_ray" — drop ground rays entirely.
-            endpoints_arr = xyz[~ground_mask] if ground_mask is not None else xyz
-            is_ground_arr = None
+        # Normals from non-ground returns (kernel skips ground internally).
+        accumulate_cov(xyz, ground_mask, origin, voxel_size, cov_dicts)
+
+    # Estimate one surface normal per planar, sufficiently-observed voxel.
+    normal_dicts = compute_normals(cov_dicts, min_pts=cfg.min_observations)
+
+    # --- Sub-pass 1b: ray traversal with the incidence gate + global prior. --
+    for i, row in enumerate(
+        tqdm(meta_rows, desc=f"classify chunk {chunk_id} pass 1b", unit="sweep")
+    ):
+        if row.get("valid") is False:
+            continue
+        keys = sweep_keys[i]
+        if keys.shape[0] == 0:
+            continue
+        sweep_origin = origin_cache[i]
+        ground_mask = ground_mask_cache[i]
+        if xyz_cache[i] is not None:
+            xyz = xyz_cache[i]
+        else:
+            xyz, _, _, _ = load_world_full(row["world_path"])
+
+        # Ground rays are traversed for their free-space evidence but add no
+        # +l_occ at the endpoint: the road is not a mover, and crediting it
+        # with occupancy makes every drive-over reinforce a surface that
+        # Patchwork++ has already claimed. The kernel applies this per point.
+        endpoints_arr = xyz
+        is_ground_arr = ground_mask
 
         if endpoints_arr.shape[0] > 0:
             update_sweep_log_odds(
@@ -154,24 +196,22 @@ def build_log_odds_grid(
                 endpoints_arr,
                 is_ground_arr,
                 origin,
-                cfg.voxel_size_m,
-                cfg.free_space_margin_voxels,
-                cfg.max_ray_length_m,
+                voxel_size,
+                margin_m,
+                max_len,
                 log_odds_dict,
                 n_obs_dict,
                 n_hits_dict,
-                cfg.l_occ,
-                cfg.l_free,
-                cfg.log_odds_clamp,
-                r_max=cfg.r_max_credibility_m,
-                use_range_weight=cfg.use_range_weighted_log_odds,
+                l_occ,
+                l_free,
+                clamp,
+                d_star,
+                normal_dicts=normal_dicts,
+                grazing_cos=grazing_cos,
             )
 
-        # UniLiPs IWU boost. Applied AFTER update_sweep_log_odds so it adds
-        # to whatever ray traversal already wrote. Ground points are excluded:
-        # the global static map encodes above-ground structure, and boosting
-        # untraversed ground voxels creates phantom entries with n_obs=0.
-        if global_map_prior is not None and xyz.shape[0] > 0:
+        # Collect global-map matches for the one-time prior (non-ground only).
+        if global_map_prior is not None:
             if ground_mask is not None:
                 boost_select = ~ground_mask
                 boost_xyz = xyz[boost_select]
@@ -180,15 +220,21 @@ def build_log_odds_grid(
                 boost_xyz = xyz
                 boost_keys = keys
             if boost_xyz.shape[0] > 0:
-                map_hit, r_star = global_map_prior.query_sweep(boost_xyz, sweep_origin)
+                map_hit, ranges = global_map_prior.query_sweep(boost_xyz, sweep_origin)
                 if map_hit.any():
-                    apply_global_map_boost(
-                        boost_keys[map_hit],
-                        r_star[map_hit],
-                        cfg.l_occ_global_map,
-                        cfg.log_odds_clamp,
-                        log_odds_dict,
-                    )
+                    cred = sensor_model.range_weight(ranges[map_hit], voxel_size)
+                    prior_keys_parts.append(boost_keys[map_hit])
+                    prior_cred_parts.append(cred.astype(np.float32))
+
+    # One-time global-map prior shift over the chunk-wide matched voxel set.
+    if prior_keys_parts:
+        apply_global_map_boost(
+            np.concatenate(prior_keys_parts),
+            np.concatenate(prior_cred_parts),
+            sensor_model.l_map_prior,
+            clamp,
+            log_odds_dict,
+        )
 
     unique_keys, lo_vals, n_obs_vals, n_hits_vals = extract_log_odds_arrays(
         log_odds_dict, n_obs_dict, n_hits_dict
@@ -210,16 +256,22 @@ def classify_from_log_odds(
     n_obs_vals: np.ndarray,
     n_hits_vals: np.ndarray,
     cfg: ComponentConfig,
+    sensor_model: SensorModel,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, int]]:
-    """Return (static_arr, not_dynamic_arr, classification, diag).
+    """Return (static_arr, dynamic_arr, classification, diag).
 
-    static_arr:         voxels confident enough to label static.
-    not_dynamic_arr:    sorted union of (static + free_only + under-with-hits
-                        + ambiguous). Points in any of these voxels get
-                        mask=False in Pass 2.
-    classification:     int8 array per unique_keys with CLASS_* codes —
-                        produced here so write_chunk_voxel_diagnostics doesn't
-                        re-derive the bucketing and silently diverge.
+    static if p_occ ≥ p_static (= p_hit), dynamic if p_occ < p_dynamic
+    (= 1-p_hit) AND the voxel is evidenced with hits; the band between is
+    AMBIGUOUS → not dynamic (conservative).
+
+    A point is dynamic IFF its voxel is in dynamic_arr. Everything else —
+    static, ambiguous, under-evidenced, free-only, and voxels never observed
+    at all — is not dynamic: absence of evidence is not motion evidence.
+    (The old formulation defaulted never-observed voxels to dynamic, which
+    dumped every return outside the observed grid into dynamic_map.npz.)
+
+    Both returned key arrays are sorted (unique_keys is sorted; boolean
+    masking preserves order), so callers may use np.searchsorted directly.
     """
     if unique_keys.size == 0:
         empty = np.empty(0, dtype=np.int64)
@@ -232,63 +284,39 @@ def classify_from_log_odds(
                 "n_under_evidenced_with_hits": 0,
                 "n_ambiguous": 0,
                 "n_free_only": 0,
+                "n_dynamic_voxels": 0,
             },
         )
 
+    p_static_threshold = sensor_model.p_static_threshold
+    p_dynamic_threshold = sensor_model.p_dynamic_threshold
+
     p_occ = sigmoid(lo_vals)
     evidenced = n_obs_vals >= cfg.min_observations
-    has_hits = n_hits_vals >= cfg.min_occupied_hits
-    # Occupancy ratio: fraction of traversals that were endpoint hits. Low for
-    # free space caught by stray returns (the near-ego scan-plane shell),
-    # high for genuine surfaces / movers actually present in the voxel.
-    hit_fraction = n_hits_vals / np.maximum(n_obs_vals, 1)
-    occupied_enough = hit_fraction >= cfg.min_hit_fraction_dynamic
+    # "Was anything ever measured here?" — a yes/no question, not a threshold.
+    has_hits = n_hits_vals > 0
 
-    static_mask = evidenced & has_hits & (p_occ >= cfg.p_static_threshold)
+    static_mask = evidenced & has_hits & (p_occ >= p_static_threshold)
     static_arr = unique_keys[static_mask]
 
-    free_only_mask = n_hits_vals < cfg.min_occupied_hits
-    free_only_arr = unique_keys[free_only_mask]
+    free_only_mask = ~has_hits
 
     under_evidenced_with_hits_mask = (~evidenced) & has_hits
-    under_arr = unique_keys[under_evidenced_with_hits_mask]
 
     ambiguous_mask = (
         evidenced
         & has_hits
-        & (p_occ < cfg.p_static_threshold)
-        & (p_occ >= cfg.p_dynamic_threshold)
+        & (p_occ < p_static_threshold)
+        & (p_occ >= p_dynamic_threshold)
     )
-    ambiguous_arr = unique_keys[ambiguous_mask]
 
-    # Carved voxels split by the occupancy-ratio gate:
-    #   dynamic       — carved AND hit on enough passes (a real mover).
-    #   carved_noise  — carved but barely hit (free space + stray returns).
-    carved_mask = evidenced & has_hits & (p_occ < cfg.p_dynamic_threshold)
-    dynamic_mask = carved_mask & occupied_enough
-    carved_noise_mask = carved_mask & ~occupied_enough
-    carved_noise_arr = unique_keys[carved_noise_mask]
-
-    # carved_noise joins not_dynamic so its points are NOT flagged dynamic; it
-    # stays out of static_arr so it also never enters static_map.npz (the
-    # points simply drop from both clouds, like free_only/under/ambiguous).
-    parts = [
-        a
-        for a in (static_arr, free_only_arr, under_arr, ambiguous_arr, carved_noise_arr)
-        if a.size > 0
-    ]
-    if not parts:
-        not_dynamic_arr = np.empty(0, dtype=np.int64)
-    elif len(parts) == 1:
-        not_dynamic_arr = parts[0]
-    else:
-        not_dynamic_arr = np.unique(np.concatenate(parts))
+    dynamic_mask = evidenced & has_hits & (p_occ < p_dynamic_threshold)
+    dynamic_arr = unique_keys[dynamic_mask]
 
     # CLASS_FREE_ONLY is the default; predicates below are mutually
     # exclusive partitions of (evidenced, has_hits, p_occ) space.
     classification = np.full(unique_keys.shape[0], CLASS_FREE_ONLY, dtype=np.int8)
     classification[under_evidenced_with_hits_mask] = CLASS_UNDER_EVIDENCED
-    classification[carved_noise_mask] = CLASS_CARVED_NOISE
     classification[dynamic_mask] = CLASS_DYNAMIC
     classification[ambiguous_mask] = CLASS_AMBIGUOUS
     classification[static_mask] = CLASS_STATIC
@@ -298,7 +326,6 @@ def classify_from_log_odds(
         "n_under_evidenced_with_hits": int(under_evidenced_with_hits_mask.sum()),
         "n_ambiguous": int(ambiguous_mask.sum()),
         "n_free_only": int(free_only_mask.sum()),
-        "n_dynamic": int(dynamic_mask.sum()),
-        "n_carved_noise": int(carved_noise_mask.sum()),
+        "n_dynamic_voxels": int(dynamic_mask.sum()),
     }
-    return static_arr, not_dynamic_arr, classification, diag
+    return static_arr, dynamic_arr, classification, diag
