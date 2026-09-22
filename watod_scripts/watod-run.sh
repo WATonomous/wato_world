@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One-shot module runner.  Usage:
-#   watod run <module> <bag-or-bag-id> [chunk_id]
+#   watod run <module> --bag <bag-or-bag-id> [extra-flags]
+#   watod run <module> <subcommand> --bag <bag-or-bag-id> [extra-flags]
 # Runs the requested module in a fresh container, with artifacts/bags bind-mounted.
 
 set -euo pipefail
@@ -9,8 +10,8 @@ set -euo pipefail
 : "${COMPOSE_FILES_STR:?COMPOSE_FILES_STR must be set}"
 
 if [[ $# -lt 2 ]]; then
-    echo "Usage: watod run <module> [--bag] <bag-or-bag-id> [extra-flags]" >&2
-    echo "       watod run <module> <subcommand> [--bag] <bag-or-bag-id> [extra-flags]" >&2
+    echo "Usage: watod run <module> --bag <bag-or-bag-id> [extra-flags]" >&2
+    echo "       watod run <module> <subcommand> --bag <bag-or-bag-id> [extra-flags]" >&2
     exit 64
 fi
 
@@ -25,8 +26,8 @@ case "${1:-}" in
 esac
 
 # Accept both positional and flag-style bag argument:
-#   watod run <module> <bag>
 #   watod run <module> --bag <bag>
+#   watod run <module> <bag>
 if [[ "${1:-}" == "--bag" ]]; then
     shift 1
 fi

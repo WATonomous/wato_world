@@ -83,7 +83,8 @@ Commands:
                            hasn't published them yet (CI normally does this).
   up                       docker compose up -d for active modules.
   down [SERVICE|all]       Stop containers.
-  run MODULE BAG [CHUNK]   One-shot module run.
+  run MODULE --bag BAG [ARGS...]
+                           One-shot module run.
   test [MODULE] [ARGS...]  Run pytest inside the module's dev container.
   <docker-compose-cmd>     Passthrough (ps, logs, pull, exec, ...).
 
@@ -95,7 +96,7 @@ Examples:
   watod build              # pulls base + builds ingest dev image
   watod up                 # brings up ingest_dev
   watod -t ingest_dev      # shell into the ingest dev container
-  watod run ingest /data/bags/scene-0001.mcap
+  watod run ingest --bag /data/bags/scene-0001.mcap
 EOF
 }
 

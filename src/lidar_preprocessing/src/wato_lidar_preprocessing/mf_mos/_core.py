@@ -1,9 +1,10 @@
 """Step A.5 — MF-MOS learned moving-object segmentation.
 
-Range-image-based deep MOS as an additional dynamic-point signal alongside
-the voxel classifier. Runs between deskew and classify.
+Range-image-based deep MOS. The inference half of the `--seg mos` method;
+the segmentation half (masks → static/dynamic clouds) lives in segment.py.
+Runs after deskew on the mos path only — never on `--seg aw`.
 
-Outputs per sweep (when cfg.mf_mos.enabled):
+Outputs per sweep:
   <sweep_id:06d>_mf_mos_mask.npy   (n_raw,) bool   True == moving
   <sweep_id:06d>_mf_mos_score.npy  (n_raw,) float32 [optional]
 
@@ -14,8 +15,8 @@ Skipped sweeps leave mf_mos_mask_path=None in the index. A sweep is skipped
 when deskew already flagged it invalid (valid=False — e.g. the start-of-bag
 window with no usable ego pose; MF-MOS defers to deskew rather than re-checking
 the pose gap itself), for an empty sweep or inference error, or because its
-scanner has too few channels to project (see MIN_BEAMS). enabled=False makes
-the whole step a no-op.
+scanner has too few channels to project (see MIN_BEAMS). The step only runs
+on `--seg mos` / `--seg union`.
 
 The spherical projection is geometry, not preference: rows = the scanner's
 channel count, vertical bounds = its datasheet FoV, intensity divisor = its
@@ -121,8 +122,6 @@ def residual_steps_for(sensor: SensorModel, n_scans: int) -> list[int]:
 @dataclass
 class MFMosResult:
     n_sweeps_processed: int = 0
-    # enabled=False: the whole step is off.
-    n_sweeps_skipped_disabled: int = 0
     # Scanner has fewer than MIN_BEAMS channels, so it can't be projected into
     # an image the checkpoint recognises. Deliberate, not a failure — kept out
     # of n_skipped, but counted so processed + skipped + unsupported adds up to
@@ -152,16 +151,13 @@ def process_chunk(
     bag_id: str,
     chunk_id: str,
 ) -> MFMosResult:
-    """Run MF-MOS for every valid sweep in a chunk.
+    """Run MF-MOS inference for every valid sweep in a chunk.
 
-    No-op when cfg.mf_mos.enabled is False.
+    Called only on the `mos` segmentation path (`--seg mos`); the orchestrator
+    never invokes it under `--seg aw`. Writes per-sweep moving masks consumed
+    by mf_mos.segment.classify_chunk.
     """
     params = cfg.mf_mos
-
-    if not params.enabled:
-        meta_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
-        n = sum(1 for r in meta_rows if r.get("valid", True) is not False)
-        return MFMosResult(n_sweeps_skipped_disabled=n)
 
     sweep_rows = read_rows(lidar_sweeps_path(bag_id, chunk_id))
     meta_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
@@ -196,6 +192,10 @@ def process_chunk(
 
     model = _load_model(params)
     max_gap_ns = int(params.max_pose_gap_ms * 1_000_000)
+    # Separate cap for the residual time baseline. A residual at step k spans
+    # k * sweep_dt and legitimately exceeds the pose-gap cap for the longer
+    # steps; gating it on max_gap_ns (the old bug) zeroed most channels.
+    max_residual_gap_ns = int(params.max_residual_gap_ms * 1_000_000)
 
     # Group by lidar_id + sort by timestamp to build the residual sliding window.
     # Skip sweeps deskew already flagged invalid (valid=False in the proc index)
@@ -399,7 +399,10 @@ def process_chunk(
                     )
                     continue
                 past_ts, past_xyz = past_window[j]
-                if abs(cur_ts - past_ts) > max_gap_ns or past_xyz.shape[0] == 0:
+                if (
+                    abs(cur_ts - past_ts) > max_residual_gap_ns
+                    or past_xyz.shape[0] == 0
+                ):
                     residuals.append(
                         np.zeros(
                             (range_image_h, RANGE_IMAGE_W),

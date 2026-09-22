@@ -1,7 +1,7 @@
 """Measure what MF-MOS would add to the voxel classifier under union fusion.
 
-Run it before switching a rig from ``fusion_mode: independent`` to ``union``.
-(``mfmos_only`` no longer exists — config rejects it.)
+Run it on a ``--seg union`` output (which writes both the MF-MOS masks and
+AW's voxel_diag) before making union the default for a rig.
 
 For each sweep, partition the points by what made them dynamic:
   - AW alone: point's voxel is AW-DYNAMIC AND raw MF-MOS mask = False

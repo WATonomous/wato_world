@@ -12,15 +12,15 @@ import os
 
 import numpy as np
 import pytest
-from pydantic import ValidationError
 
 from wato_common.artifact_store import (
     dynamic_map_path,
     dynamic_mask_path,
+    ensure_local_dir,
+    lidar_proc_dir,
     lidar_proc_index_path,
     lidar_world_path,
     local_path,
-    mf_mos_mask_path,
     static_map_path,
     voxel_occupancy_path,
 )
@@ -445,188 +445,6 @@ def test_skip_endpoint_isolated_ground_voxel_not_dynamic(tmp_env):
 # ---------------------------------------------------------------------------
 
 
-def _write_mf_mos_mask(
-    bag_id: str, chunk_id: str, sweep_id: int, mask: np.ndarray
-) -> str:
-    uri = mf_mos_mask_path(bag_id, chunk_id, sweep_id)
-    path = local_path(uri)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    np.save(path, mask.astype(bool))
-    return uri
-
-
-def _proc_row_mf_mos(
-    bag_id: str,
-    chunk_id: str,
-    sweep_id: int,
-    xyz: np.ndarray,
-    mf_mos_mask_uri: str | None = None,
-) -> dict:
-    row = _proc_row(bag_id, chunk_id, sweep_id, xyz)
-    row["mf_mos_mask_path"] = mf_mos_mask_uri
-    return row
-
-
-def test_union_fusion_flips_per_sweep_flagged_points(tmp_env):
-    """union mode: only the sweeps whose MF-MOS mask flags the point flip to
-    dynamic; AW-static sweeps without a flag stay static.
-
-    Five sweeps hit the same voxel (AW → confident static). 3 of 5 MF-MOS
-    masks flag it. The (denoised) per-sweep mask drives fusion directly, so
-    exactly those 3 sweeps' points flip — no chunk-wide vote needed.
-    """
-    bag_id, chunk_id = "bag_union", "chunk0"
-    xyz = np.array([[5.0, 0.0, 0.0]])
-    sensor_origin = np.array([-1.0, 0.0, 0.0])
-    mf_flags = [True, True, True, False, False]
-    n_flagged = sum(mf_flags)
-
-    rows = []
-    for i in range(5):
-        _write_world_sweep(bag_id, chunk_id, i, xyz, origin=sensor_origin)
-        mf_uri = _write_mf_mos_mask(bag_id, chunk_id, i, np.array([mf_flags[i]]))
-        rows.append(_proc_row_mf_mos(bag_id, chunk_id, i, xyz, mf_uri))
-    write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
-
-    cfg = ComponentConfig(
-        min_observations=3,
-        mf_mos={"enabled": True, "fusion_mode": "union"},
-    )
-    result = process_chunk(cfg, bag_id, chunk_id)
-
-    assert result.n_dynamic == n_flagged, (
-        f"only the {n_flagged} per-sweep-flagged points must be dynamic; "
-        f"got {result.n_dynamic}"
-    )
-    assert result.n_static == 5 - n_flagged
-
-
-def test_independent_mode_no_mf_mos_effect(tmp_env):
-    """fusion_mode=independent: MF-MOS masks don't change AW classification."""
-    bag_id, chunk_id = "bag_indep", "chunk0"
-    xyz = np.array([[5.0, 0.0, 0.0]])
-    sensor_origin = np.array([-1.0, 0.0, 0.0])
-    mf_flags = [True, True, True, False, False]
-
-    rows = []
-    for i in range(5):
-        _write_world_sweep(bag_id, chunk_id, i, xyz, origin=sensor_origin)
-        mf_uri = _write_mf_mos_mask(bag_id, chunk_id, i, np.array([mf_flags[i]]))
-        rows.append(_proc_row_mf_mos(bag_id, chunk_id, i, xyz, mf_uri))
-    write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
-
-    cfg = ComponentConfig(
-        min_observations=3,
-        mf_mos={"enabled": True, "fusion_mode": "independent"},
-    )
-    result = process_chunk(cfg, bag_id, chunk_id)
-
-    assert result.n_dynamic == 0, "independent fusion must not apply MF-MOS masks"
-
-
-def test_union_fusion_must_not_reintroduce_ground_via_mf_mos(tmp_env):
-    """union fusion ORs the per-sweep MF-MOS mask in, then must re-apply the
-    ground filter so a co-voxel ground point isn't dragged into dynamic."""
-    bag_id, chunk_id = "bag_union_ground", "chunk0"
-    xyz = np.array([[5.0, 0.0, 0.0], [5.0, 0.0, 0.05]])
-    ground_mask = np.array([True, False])
-    mf_flags = np.array([False, True])
-
-    _write_world_sweep(
-        bag_id,
-        chunk_id,
-        0,
-        xyz,
-        origin=np.array([-1.0, 0.0, 0.0]),
-        ground_mask=ground_mask,
-    )
-    mf_uri = _write_mf_mos_mask(bag_id, chunk_id, 0, mf_flags)
-    rows = [_proc_row_mf_mos(bag_id, chunk_id, 0, xyz, mf_uri)]
-    write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
-
-    cfg = ComponentConfig(
-        min_observations=1,
-        mf_mos={"enabled": True, "fusion_mode": "union"},
-    )
-    process_chunk(cfg, bag_id, chunk_id)
-
-    dyn = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
-    is_ground_pt = np.all(np.isclose(dyn["xyz"], xyz[0]), axis=1)
-    assert not is_ground_pt.any(), "ground point must not appear in dynamic_map.npz"
-    mask = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
-    assert not mask[0], "ground point's dynamic-mask bit must be False under union"
-
-
-def test_union_empty_mask_keeps_voxel_classifier_verdict(tmp_env):
-    """Union only ever ADDS movers: a sweep whose MF-MOS verdict is all-False
-    keeps the voxel classifier's carved-dynamic points.
-
-    This is why union is the only fusion mode on offer. The deleted
-    mfmos_only mode replaced the verdict outright, so a model that went quiet
-    — which MF-MOS does on any sweep it skips — emptied dynamic_map.npz with
-    no error anywhere.
-    """
-    bag_id, chunk_id = "bag_mfonly_empty", "chunk0"
-    hit_xyz = np.array([[0.0, 0.0, 0.0]])
-    beyond_xyz = np.array([[8.0, 0.0, 0.0]])
-    n_carves = 20
-
-    rows = []
-    _write_world_sweep(bag_id, chunk_id, 0, hit_xyz, origin=_SENSOR)
-    mf_uri = _write_mf_mos_mask(bag_id, chunk_id, 0, np.array([False]))
-    rows.append(_proc_row_mf_mos(bag_id, chunk_id, 0, hit_xyz, mf_uri))
-    for i in range(1, n_carves + 1):
-        _write_world_sweep(bag_id, chunk_id, i, beyond_xyz, origin=_SENSOR)
-        mf_uri = _write_mf_mos_mask(bag_id, chunk_id, i, np.array([False]))
-        rows.append(_proc_row_mf_mos(bag_id, chunk_id, i, beyond_xyz, mf_uri))
-    write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
-
-    cfg = ComponentConfig(mf_mos={"enabled": True, "fusion_mode": "union"})
-    result = process_chunk(cfg, bag_id, chunk_id)
-
-    assert (
-        result.n_dynamic == 1
-    ), "union with all-False masks must keep the voxel classifier's verdict"
-    mask0 = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
-    assert mask0[0]
-
-
-def test_union_missing_mask_keeps_voxel_classifier_verdict(tmp_env):
-    """Sweeps without a usable MF-MOS mask (mf_mos_mask_path=None) keep the
-    voxel classifier's verdict under union — a skipped sweep costs recall on
-    MF-MOS-only movers, never the carved ones."""
-    bag_id, chunk_id = "bag_mfonly_missing", "chunk0"
-    hit_xyz = np.array([[0.0, 0.0, 0.0]])
-    beyond_xyz = np.array([[8.0, 0.0, 0.0]])
-    n_carves = 20
-
-    _write_world_sweep(bag_id, chunk_id, 0, hit_xyz, origin=_SENSOR)
-    xyz_per_sweep = [hit_xyz]
-    for i in range(1, n_carves + 1):
-        _write_world_sweep(bag_id, chunk_id, i, beyond_xyz, origin=_SENSOR)
-        xyz_per_sweep.append(beyond_xyz)
-    # _proc_row leaves mf_mos_mask_path unset (null in parquet).
-    _write_proc_index(
-        bag_id, chunk_id, list(range(n_carves + 1)), xyz_per_sweep=xyz_per_sweep
-    )
-
-    cfg = ComponentConfig(mf_mos={"enabled": True, "fusion_mode": "union"})
-    result = process_chunk(cfg, bag_id, chunk_id)
-
-    assert (
-        result.n_dynamic == 1
-    ), "union with missing masks must keep the voxel classifier's verdict"
-    dyn = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
-    assert dyn["xyz"].shape[0] == 1
-
-
-def test_mfmos_only_fusion_mode_is_rejected():
-    """The mode is gone, not silently accepted-and-ignored: a config that
-    still asks for it must fail loudly at load."""
-    with pytest.raises(ValidationError):
-        ComponentConfig(mf_mos={"enabled": True, "fusion_mode": "mfmos_only"})
-
-
 def test_far_returns_beyond_carve_guard_become_static(tmp_env):
     """Returns beyond the profile's max range still register endpoint hits.
 
@@ -814,3 +632,73 @@ def test_single_hit_then_carved_is_dynamic(tmp_env):
 
     mask0 = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
     assert mask0[0], "hit-then-carved voxel must be dynamic"
+
+
+# ---------------------------------------------------------------------------
+# Near-range dynamic exclusion + union snapshot (segmentation-method plumbing)
+# ---------------------------------------------------------------------------
+
+
+def test_near_range_gate_excludes_close_points(tmp_env):
+    """A dynamic-voxel point within dynamic_min_range_m of the sensor is
+    forced non-dynamic; a far one survives."""
+    from wato_lidar_preprocessing.classify.masking import apply_classification_to_sweep
+
+    bag_id, chunk_id = "bag_nearrange", "chunk0"
+    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
+    # point 0 at 1 m from sensor (excluded), point 1 at 10 m (kept).
+    xyz = np.array([[1.0, 0.0, 0.0], [10.0, 0.0, 0.0]])
+    keys = np.array([1, 2], dtype=np.int64)
+    empty = np.empty(0, dtype=np.int64)
+
+    def _apply(gate_m: float):
+        return apply_classification_to_sweep(
+            {},  # row: has_intensity defaults False; world_path unused (xyz cached)
+            0,
+            keys,
+            empty,  # static_arr
+            keys,  # dynamic_arr -> both voxels carved-dynamic
+            xyz,  # xyz_cache_i
+            None,  # intensity_cache_i
+            None,  # ground_mask_cache_i
+            np.zeros(3, dtype=np.float64),  # sweep_origin
+            bag_id,
+            chunk_id,
+            False,  # any_intensity
+            dynamic_min_range_m=gate_m,
+        )
+
+    res = _apply(2.5)
+    assert res.n_dynamic == 1, "only the far point should remain dynamic"
+    assert abs(float(res.dyn_xyz[0, 0]) - 10.0) < 1e-6
+    mask = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
+    assert not mask[0] and mask[1], "near point excluded, far point dynamic"
+
+    # With the gate disabled both stay dynamic.
+    assert _apply(0.0).n_dynamic == 2
+
+
+def test_aw_snapshot_written_only_on_union_path(tmp_env):
+    """segmentation='union' makes classify also write aw_dynamic_mask.npy
+    (identical to dynamic_mask.npy at that point) so union's keep_aw_dynamic
+    survives the fused overwrite; the plain aw path writes no snapshot."""
+    from wato_common.artifact_store import aw_dynamic_mask_path
+
+    xyz = np.array([[5.0, 0.0, 0.0], [6.0, 0.0, 0.0]])
+
+    for seg, bag_id in (("union", "bag_snap_union"), ("aw", "bag_snap_aw")):
+        chunk_id = "chunk0"
+        for i in range(5):
+            _write_world_sweep(bag_id, chunk_id, i, xyz, origin=_SENSOR)
+        _write_proc_index(bag_id, chunk_id, list(range(5)), xyz_per_sweep=[xyz] * 5)
+        process_chunk(ComponentConfig(segmentation=seg), bag_id, chunk_id)
+
+        snap = local_path(aw_dynamic_mask_path(bag_id, chunk_id, 0))
+        if seg == "union":
+            assert os.path.exists(snap), "union path must snapshot AW's verdict"
+            np.testing.assert_array_equal(
+                np.load(snap),
+                np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0))),
+            )
+        else:
+            assert not os.path.exists(snap), "aw path must not write a snapshot"

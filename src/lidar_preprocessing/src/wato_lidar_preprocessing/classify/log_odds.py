@@ -2,6 +2,10 @@
 
 All log-odds increments, thresholds, range weighting and carve margin come
 from the datasheet SensorModel (see sensor_model.py) — no hand-tuned knobs.
+
+Pure Amanatides-Woo: no MF-MOS here. The MF-MOS method is a separate,
+self-contained module (mf_mos/), selected with `--seg mos`; `--seg union`
+fuses the two in union/.
 """
 
 from __future__ import annotations
@@ -54,6 +58,7 @@ def build_log_odds_grid(
     list[np.ndarray | None],
     list[np.ndarray | None],
     list[np.ndarray | None],
+    list[np.ndarray | None],
     list[np.ndarray],
     dict[int, list[np.ndarray]],
     tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
@@ -66,7 +71,10 @@ def build_log_odds_grid(
     global_map_prior: two-pass mode — map-matched endpoints get a one-time
         credibility-weighted prior shift; touches log_odds only.
 
-    Returns the caches + log_odds_arrays = (unique_keys, lo, n_obs, n_hits).
+    Returns (xyz_cache, intensity_cache, ground_mask_cache, origin_cache,
+    sweep_keys, frame_keys, log_odds_arrays) where log_odds_arrays =
+    (unique_keys, lo, n_obs, n_hits). origin_cache feeds Pass 2's near-range
+    dynamic gate (cfg.dynamic_min_range_m).
     """
     log_odds_dict, n_obs_dict, n_hits_dict = make_log_odds_dicts()
     cov_dicts = make_cov_dicts()
@@ -235,6 +243,7 @@ def build_log_odds_grid(
         xyz_cache,
         intensity_cache,
         ground_mask_cache,
+        origin_cache,
         sweep_keys,
         frame_keys,
         (unique_keys, lo_vals, n_obs_vals, n_hits_vals),

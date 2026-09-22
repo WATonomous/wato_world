@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 
 import numpy as np
 
-from wato_common.artifact_store import dynamic_mask_path, local_path
-from wato_lidar_preprocessing.config import ComponentConfig
+from wato_common.artifact_store import (
+    aw_dynamic_mask_path,
+    dynamic_mask_path,
+    local_path,
+)
+from wato_lidar_preprocessing.voxel import keys_in_sorted
 
 from .io_helpers import load_world_xyz_intensity
-
-log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -32,15 +33,6 @@ class SweepMaskResult:
     dyn_sweep_id: np.ndarray | None = None
 
 
-def _in_sorted(sorted_arr: np.ndarray, keys: np.ndarray) -> np.ndarray:
-    """Membership of each key in a sorted int64 array (empty → all False)."""
-    if sorted_arr.size == 0:
-        return np.zeros(keys.shape[0], dtype=bool)
-    pos = np.searchsorted(sorted_arr, keys)
-    pos = np.clip(pos, 0, sorted_arr.size - 1)
-    return sorted_arr[pos] == keys
-
-
 def apply_classification_to_sweep(
     row: dict,
     sweep_id: int,
@@ -50,27 +42,33 @@ def apply_classification_to_sweep(
     xyz_cache_i: np.ndarray | None,
     intensity_cache_i: np.ndarray | None,
     ground_mask_cache_i: np.ndarray | None,
-    cfg: ComponentConfig,
+    sweep_origin: np.ndarray | None,
     bag_id: str,
     chunk_id: str,
     any_intensity: bool,
-    sweep_mf_mos_dynamic_arr: np.ndarray | None = None,
+    *,
+    dynamic_min_range_m: float = 0.0,
+    write_aw_snapshot: bool = False,
 ) -> SweepMaskResult:
     """Compute dynamic mask for one sweep, save it, return per-sweep stats.
 
-    `keys` is full-length (matches the world NPZ) so the saved mask stays
-    length-aligned with the downstream xyz array.
+    `keys` is always full-length (matches xyz from the world NPZ) so the
+    saved mask is length-aligned with the downstream xyz array.
 
-    A point is dynamic IFF its voxel key is in `dynamic_arr` (the explicit
-    carved-dynamic voxel set). Voxels that were never observed default to
-    NOT dynamic — absence of evidence is not motion evidence.
+    Pure Amanatides-Woo: a point is dynamic IFF its voxel key is in
+    `dynamic_arr` (the explicit carved-dynamic voxel set) and it is not
+    flagged ground by Patchwork++. Voxels that were never observed default to
+    NOT dynamic — absence of evidence is not motion evidence. Then, when
+    dynamic_min_range_m > 0, points within that horizontal range of the
+    sensor (`sweep_origin`) are forced non-dynamic — near the ego the return
+    is ego self-returns / near clutter and carving is maximal, so AW can't
+    reliably call motion there. No MF-MOS involvement — that lives entirely
+    in the mf_mos/ module (`--seg mos`).
 
-    `sweep_mf_mos_dynamic_arr`: per-sweep MF-MOS-flagged voxel keys (sorted),
-    fused via searchsorted under `fusion_mode: union`. None means "no usable
-    MF-MOS mask for this sweep"; an empty array means "MF-MOS ran and found no
-    movers". Either way the AW verdict stands on its own — union only ever
-    adds movers, so a silent model degrades to the voxel classifier rather
-    than emptying dynamic_map.npz.
+    write_aw_snapshot additionally saves the mask to aw_dynamic_mask.npy.
+    Set on the union path only: union overwrites dynamic_mask.npy with the
+    fused verdict, so keep_aw_dynamic needs AW's own verdict preserved
+    separately to stay re-fusable.
     """
     n = keys.shape[0]
     has_intensity = bool(row.get("has_intensity", False))
@@ -79,10 +77,12 @@ def apply_classification_to_sweep(
     if n == 0:
         mask = np.zeros(0, dtype=bool)
         np.save(local_path(dyn_uri), mask)
+        if write_aw_snapshot:
+            np.save(local_path(aw_dynamic_mask_path(bag_id, chunk_id, sweep_id)), mask)
         return SweepMaskResult(n_static=0, n_dynamic=0, mask_uri=dyn_uri)
 
     # AW verdict: explicit membership in the carved-dynamic voxel set.
-    mask = _in_sorted(dynamic_arr, keys)
+    mask = keys_in_sorted(keys, dynamic_arr)
 
     # Patchwork++ ground mask is authoritative: ground points must never
     # appear in dynamic_map.npz. Ground voxels can share keys with carved
@@ -90,55 +90,45 @@ def apply_classification_to_sweep(
     if ground_mask_cache_i is not None:
         mask &= ~ground_mask_cache_i
 
+    # Resolve xyz/intensity once — needed by the near-range gate below and by
+    # the cloud build at the end. Uses the in-memory cache when available.
+    xyz = xyz_cache_i
+    intensity = intensity_cache_i
+
+    # Near-range dynamic exclusion. Only loads xyz if a point is still a
+    # dynamic candidate (mask.any()), so all-static sweeps skip the read.
+    if dynamic_min_range_m > 0.0 and sweep_origin is not None and mask.any():
+        if xyz is None:
+            xyz, intensity = load_world_xyz_intensity(row["world_path"])
+        d_xy = np.hypot(xyz[:, 0] - sweep_origin[0], xyz[:, 1] - sweep_origin[1])
+        mask &= d_xy >= dynamic_min_range_m
+
     n_dyn = int(mask.sum())
 
     # is_static must use the static_arr lookup, NOT `~mask`: `~mask` would
     # include free-only and under-evidenced-with-hits voxels and pollute
     # static_map.npz with low-confidence returns.
-    is_static = _in_sorted(static_arr, keys)
+    is_static = keys_in_sorted(keys, static_arr)
+    n_static = int(is_static.sum())
 
     # Ground points belong in ground.npz only. Without this filter, road
     # surfaces (hit by every drive-over) pass the static-voxel test and
     # pollute static_map.npz.
     if ground_mask_cache_i is not None:
         is_static &= ~ground_mask_cache_i
-    n_static = int(is_static.sum())
-
-    if cfg.mf_mos.enabled and cfg.mf_mos.fusion_mode == "union":
-        n_dyn_before_mf = n_dyn
-        if sweep_mf_mos_dynamic_arr is not None:
-            is_mf_mos_dyn = _in_sorted(sweep_mf_mos_dynamic_arr, keys)
-        else:
-            is_mf_mos_dyn = np.zeros(n, dtype=bool)
-        mask = mask | is_mf_mos_dyn
-        # Re-apply ground filter: an MF-MOS vote applies to the whole voxel,
-        # so without this re-AND, union would re-introduce co-voxel ground
-        # points that the earlier ground filter removed.
-        if ground_mask_cache_i is not None:
-            mask &= ~ground_mask_cache_i
-        n_dyn = int(mask.sum())
-        log.debug(
-            "sweep %s mf_mos union: %d pts matched mf_mos voxels, n_dyn %d→%d",
-            row.get("sweep_id"),
-            int(is_mf_mos_dyn.sum()),
-            n_dyn_before_mf,
-            n_dyn,
-        )
-        # A point now labelled dynamic can't also live in the static cloud.
-        is_static = is_static & ~mask
         n_static = int(is_static.sum())
 
     np.save(local_path(dyn_uri), mask)
+    if write_aw_snapshot:
+        np.save(local_path(aw_dynamic_mask_path(bag_id, chunk_id, sweep_id)), mask)
 
     result = SweepMaskResult(n_static=n_static, n_dynamic=n_dyn, mask_uri=dyn_uri)
 
     if n_static == 0 and n_dyn == 0:
         return result
 
-    if xyz_cache_i is not None:
-        xyz = xyz_cache_i
-        intensity = intensity_cache_i
-    else:
+    # xyz may already be resolved (cache hit, or loaded by the near-range gate).
+    if xyz is None:
         xyz, intensity = load_world_xyz_intensity(row["world_path"])
 
     static_mask = is_static

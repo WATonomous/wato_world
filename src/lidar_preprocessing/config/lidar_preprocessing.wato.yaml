@@ -66,13 +66,11 @@ lidar_preprocessing:
   # MF-MOS on this rig: the released checkpoint is KITTI-trained (64-beam,
   # single scanner).  The two corner VLP-16s are skipped automatically — 16
   # channels is below what the projection can represent, and the per_lidar
-  # profiles above are what tells MF-MOS so.  Masks are exported for QA while
-  # the voxel classifier stays authoritative for dynamic_map.npz; do not move
-  # to union until mask quality has been audited on this rig
-  # (scripts/debug_mfmos_contribution.py).  Set enabled: false to skip the
-  # GPU cost entirely.
+  # profiles above are what tells MF-MOS so.  MF-MOS only runs under
+  # `--seg mos` / `--seg union`; the default `aw` keeps the voxel classifier
+  # authoritative for dynamic_map.npz.  Do not switch this rig to union until
+  # mask quality has been audited on it (scripts/debug_mfmos_contribution.py).
   mf_mos:
-    enabled: true
     checkpoint_path: /data/models/mf_mos/mf_mos_semantic_kitti.pt
     arch_config:   /data/models/mf_mos/arch_cfg.yaml
     data_config:   /data/models/mf_mos/data_cfg.yaml
@@ -80,8 +78,6 @@ lidar_preprocessing:
     device: cuda
     score_threshold: 0.7
     save_scores: true
-
-    fusion_mode: independent
 
     max_pose_gap_ms: 6000
     occlusion_range_tol_m: 1.0

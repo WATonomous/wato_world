@@ -32,6 +32,80 @@ lidar_preprocessing:
     profile: hdl32e
 
   # ====================================================================
+  # Step B method — static/dynamic segmentation.
+  # ====================================================================
+  # Two independent base methods (no shared code) + one fusion method:
+  #   "aw"    → Amanatides-Woo log-odds voxel ray-casting (classify/). No MF-MOS.
+  #   "mos"   → MF-MOS learned moving-object segmentation (mf_mos/). No ray
+  #             traversal; static/dynamic comes purely from the per-sweep masks.
+  #   "union" → fusion (union/): keep AW's high-precision static map, take the
+  #             dynamic cloud from MF-MOS with that static map as a veto. Runs
+  #             both AW and MF-MOS. Tuned by the `union:` block below.
+  # Override per-run at the CLI: `./watod run lidar_preprocessing --seg union`.
+  segmentation: aw
+
+  # --- Fusion (seg=union) ---
+  union:
+    # Drop MF-MOS-moving points whose voxel AW confirmed static. This is the
+    # core of the method: AW's static map vetoes MF-MOS false positives that
+    # hug static structure (parked cars, facades, poles). false → union is
+    # just raw MF-MOS dynamic (still ground-removed), for A/B'ing the veto.
+    aw_static_veto: true
+    # Recall mode: also union in AW's own dynamic verdict (still ground-removed
+    # and static-vetoed). Off by default — AW dynamics are high-recall but
+    # low-precision (they hug static surfaces), so the default is MF-MOS-only.
+    keep_aw_dynamic: false
+    # Veto exemption for high-confidence MF-MOS movers (handles parked-then-
+    # moving objects: AW's chunk-aggregate evidence calls their voxels static,
+    # which would delete MF-MOS's correct verdict). Points with MF-MOS moving
+    # probability >= this survive the veto. Requires mf_mos.save_scores: true;
+    # null disables the exemption. Suggested starting point: 0.9.
+    veto_score_exempt: null
+    # Drop dynamic candidates below this height (m) over Step C's ground.npz
+    # height grid. The AW static set is structurally blind to the road
+    # (skip_endpoint keeps road voxels at n_hits == 0, never static), so
+    # MF-MOS road false positives — half the union dynamic cloud on
+    # NuScenes 0061, median height -0.36 m — pass every voxel veto; height
+    # over the aggregated ground surface catches them. Costs the bottom
+    # slice of real movers (wheels/feet below the threshold). 0.0 disables.
+    ground_height_veto_m: 0.25
+    # Dilate the AW-static veto to voxels within this Chebyshev distance of a
+    # static voxel — surface returns straddle voxel boundaries, so the exact
+    # test misses the leakage shell one voxel off the structure. Candidates
+    # whose own voxel AW classed dynamic are exempt from the dilated part (AW
+    # corroborates the motion; movers brushing structure must survive).
+    # 0 = exact-voxel veto only.
+    veto_dilation_voxels: 1
+
+    # Post-veto temporal motion filter on the accumulated dynamic cloud. The
+    # voxel vetoes above only reach MF-MOS false positives that land ON the AW
+    # static map; structure it covers sparsely (far walls, foliage, below-grade
+    # returns) slips through. The persistence gate catches it. A/B with
+    # scripts/compare_seg_dynamic. Recall/precision trade on the ring-road bag:
+    #   persist<20 (coherence off): on-static 12.6%, mover-recall 75%  <- default
+    #   persist<5 + coherence:      on-static 3.9%,  mover-recall 34%  (over-cuts)
+    #   no filter:                  on-static 58.3%, recall 100%
+    motion_filter:
+      # Master switch. false -> write the raw post-veto cloud (pre-filter
+      # behaviour), for measuring the filter's contribution.
+      enabled: true
+      # persistence gate (the workhorse): drop a point whose voxel is occupied
+      # across >= this many DISTINCT sweeps. Lower = cleaner but cuts more
+      # slow/large movers (a 4.5 m car dwells ~9 sweeps in a 0.5 m voxel);
+      # higher = more recall, more structure leaks (climbs fast past ~24).
+      # 0 disables. Sweep COUNT — scale with sensor Hz.
+      persistence_max_sweeps: 20
+      persistence_voxel_m: 0.5
+      # coherence gate: OFF by default (0). Drops points whose per-sweep cluster
+      # doesn't link into a >= N-sweep track. Membership only, never velocity.
+      # Cuts ~20% of real movers for <1% precision on sparse LiDAR (distant
+      # movers don't cluster) — enable only on dense clouds.
+      coherence_min_life: 0
+      coherence_cell_m: 0.4         # connected-components cell (m)
+      coherence_link_gate_m: 3.0    # max centroid step between sweeps (m)
+      coherence_max_object_m: 7.0   # per-sweep cluster extent cap -> structure
+
+  # ====================================================================
   # Step A — deskew (rolling-shutter motion compensation).
   # ====================================================================
   # Drop NaN/inf points before deskew.
@@ -60,6 +134,13 @@ lidar_preprocessing:
   # nor dynamic.  The only evidence gate — "was anything ever measured here?"
   # needs no threshold and is not configurable.
   min_observations: 3
+
+  # Points within this horizontal range (m) of the sensor are never labelled
+  # dynamic.  Inside a few metres the return is dominated by the ego's own
+  # body and free-space carving is maximal, so no method can reliably call
+  # motion there.  Applies to every segmentation method (aw, mos, union).
+  # 0.0 disables.
+  dynamic_min_range_m: 2.5
 
   cache_world_xyz_in_memory: true
 
@@ -110,6 +191,8 @@ lidar_preprocessing:
   # ====================================================================
   # Step A.5 — MF-MOS learned moving-object segmentation.
   # ====================================================================
+  # Runs only when segmentation is "mos" or "union" — never under "aw".
+  #
   # Weights: https://github.com/SCNU-RISLAB/MF-MOS/releases — drop at
   # /data/models/mf_mos/ (mounted via docker-compose.yaml).
   #
@@ -119,7 +202,6 @@ lidar_preprocessing:
   # properties of the released checkpoint and live in mf_mos/_core.py.  A
   # scanner with too few channels to project is skipped with a log line.
   mf_mos:
-    enabled: true
     checkpoint_path: /data/models/mf_mos/mf_mos_semantic_kitti.pt
     arch_config:   /data/models/mf_mos/arch_cfg.yaml
     data_config:   /data/models/mf_mos/data_cfg.yaml
@@ -128,16 +210,15 @@ lidar_preprocessing:
     score_threshold: 0.7
     save_scores: true
 
-    # How MF-MOS masks combine with the voxel classifier.
-    #   "independent" → masks exported alongside; the voxel classifier alone
-    #                   decides dynamic_map.npz.  Downstream may read both.
-    #   "union"       → dynamic if either signal says so.  A missing or empty
-    #                   MF-MOS mask leaves the classifier's verdict intact.
-    # Keep this at independent until MF-MOS mask quality has been audited on
-    # the rig in question (scripts/debug_mfmos_contribution.py).
-    fusion_mode: independent
-
+    # Maximum POSE-interpolation gap (ms) when warping a historical sweep
+    # into the current frame for a residual.  Gates pose quality only.
     max_pose_gap_ms: 6000
+    # Maximum sweep-to-sweep time BASELINE (ms) accepted for a residual
+    # channel.  Distinct from max_pose_gap_ms: residual steps are rate-scaled
+    # to span KITTI's 10 Hz frames, so the longest baseline is ~800 ms on any
+    # rig for the released 8-scan checkpoint.  Below that, the long channels
+    # get zeroed and multi-frame MOS silently degrades.
+    max_residual_gap_ms: 1000
     occlusion_range_tol_m: 1.0
     prime_window_from_prior_chunk: true
 

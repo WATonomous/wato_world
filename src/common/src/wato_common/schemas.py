@@ -270,8 +270,8 @@ class ProcessedSweepMeta(BaseModel):
     # (canonical_lidar=None in config) just get frame_id = sweep ordinal.
     # Nullable: orphan sweeps outside any window are None.
     frame_id: Optional[int] = None
-    # Step A.5 — MF-MOS mask path.  Populated by mf_mos.process_chunk when
-    # cfg.mf_mos.enabled is True; None otherwise.  Points to a (n_raw,) bool
+    # Step A.5 — MF-MOS mask path.  Populated by mf_mos.process_chunk on the
+    # `--seg mos` / `--seg union` paths; None otherwise (and on `--seg aw`).  Points to a (n_raw,) bool
     # NPY file aligned to the raw sweep (same length as the raw lidar NPZ).
     mf_mos_mask_path: Optional[str] = None
 
@@ -328,7 +328,25 @@ class ChunkSummaryRow(BaseModel):
     cache_auto_disabled: bool
     estimated_cache_bytes: int
     ground_status: str  # "ok" | "skipped_no_ground_mask" | "empty"
-    # MF-MOS step stats — None when mf_mos.enabled is False.
+    # Which Step-B method produced this chunk's artifacts ("aw"|"mos"|"union").
+    # None on summaries written before the column existed. The orchestrator's
+    # skip check compares it against the current run's cfg.segmentation so
+    # switching --seg never silently serves another method's artifacts.
+    segmentation_method: Optional[str] = None
+    # Sweeps Step B had no usable MF-MOS mask for (mos/union only; None for
+    # aw). Their movers are left static (mos) or dropped (union) — chunks
+    # where this is high (e.g. residual warm-up at chunk starts) lose recall.
+    seg_n_sweeps_no_mask: Optional[int] = None
+    # Dynamic candidates removed by the AW-static veto (union only).
+    union_n_points_vetoed: Optional[int] = None
+    # Dynamic candidates removed by the ground-height veto (union only).
+    union_n_points_ground_vetoed: Optional[int] = None
+    # Dynamic points removed by the post-veto motion filter (union only; None
+    # when the filter is disabled). persistence = voxel occupied across too
+    # many sweeps; coherence = not part of a multi-sweep cluster track.
+    motion_filter_n_persistence_dropped: Optional[int] = None
+    motion_filter_n_coherence_dropped: Optional[int] = None
+    # MF-MOS step stats — None when MF-MOS didn't run (`--seg aw`).
     mf_mos_n_processed: Optional[int] = None
     mf_mos_n_skipped: Optional[int] = None  # failures (pose gap, empty, infer error)
     mf_mos_n_unsupported: Optional[int] = None  # scanner below MIN_BEAMS; by design
@@ -350,6 +368,12 @@ CHUNK_SUMMARY_SCHEMA = pa.schema(
         pa.field("cache_auto_disabled", pa.bool_()),
         pa.field("estimated_cache_bytes", pa.int64()),
         pa.field("ground_status", pa.string()),
+        pa.field("segmentation_method", pa.string()),
+        pa.field("seg_n_sweeps_no_mask", pa.int64()),
+        pa.field("union_n_points_vetoed", pa.int64()),
+        pa.field("union_n_points_ground_vetoed", pa.int64()),
+        pa.field("motion_filter_n_persistence_dropped", pa.int64()),
+        pa.field("motion_filter_n_coherence_dropped", pa.int64()),
         pa.field("mf_mos_n_processed", pa.int64()),
         pa.field("mf_mos_n_skipped", pa.int64()),
         pa.field("mf_mos_n_unsupported", pa.int64()),

@@ -9,7 +9,11 @@ Two-pass algorithm:
   Pass 2: For every sweep, apply the static/dynamic label as a boolean mask
           and write {sweep_id:06d}_dynamic_mask.npy. A point is dynamic IFF
           its voxel is in the explicit carved-dynamic set (never-observed
-          voxels default to not-dynamic).
+          voxels default to not-dynamic) and it lies outside
+          cfg.dynamic_min_range_m of its sensor.
+
+Pure Amanatides-Woo — this is the `--seg aw` method and the static basis of
+`--seg union`. No MF-MOS involvement; that lives in mf_mos/ and union/.
 
 The static cloud is written to static_map.npz (which also carries the
 static + dynamic voxel-key sets consumed by Step C's ground intersection)
@@ -44,7 +48,6 @@ from .global_map_prior import GlobalMapPrior
 from .io_helpers import (
     cache_byte_budget,
     estimate_cache_bytes,
-    load_mf_mos_world_mask,
     origin_from_index,
 )
 from .log_odds import build_log_odds_grid, classify_from_log_odds
@@ -159,6 +162,7 @@ def process_chunk(
         xyz_cache,
         intensity_cache,
         ground_mask_cache,
+        origin_cache,
         sweep_keys,
         frame_keys,
         (unique_keys, lo_vals, n_obs_vals, n_hits_vals),
@@ -189,10 +193,7 @@ def process_chunk(
     dyn_sweep_id_chunks: list[np.ndarray] = []
     total_static = 0
     total_dynamic = 0
-    n_missing_mf_masks = 0
     updated_meta: list[dict] = []
-
-    fusion_active = cfg.mf_mos.enabled and cfg.mf_mos.fusion_mode == "union"
 
     for i, (row, keys) in enumerate(
         tqdm(
@@ -207,19 +208,6 @@ def process_chunk(
             updated_meta.append(_invalid_meta_row(row, sweep_id))
             continue
 
-        # Fusion uses the per-sweep mask directly (already 3D-denoised at
-        # generation time); no chunk-wide vote aggregation. None = no usable
-        # mask for this sweep; empty array = MF-MOS ran and found no movers.
-        sweep_mf_mos_dynamic_arr = None
-        if fusion_active and keys.shape[0] > 0:
-            mf_mask = load_mf_mos_world_mask(
-                bag_id, chunk_id, row, keys.shape[0], cfg.filter_nonfinite_points
-            )
-            if mf_mask is not None:
-                sweep_mf_mos_dynamic_arr = np.sort(np.unique(keys[mf_mask]))
-            else:
-                n_missing_mf_masks += 1
-
         result = apply_classification_to_sweep(
             row,
             sweep_id,
@@ -229,11 +217,14 @@ def process_chunk(
             xyz_cache[i],
             intensity_cache[i],
             ground_mask_cache[i],
-            cfg,
+            origin_cache[i],
             bag_id,
             chunk_id,
             any_intensity,
-            sweep_mf_mos_dynamic_arr=sweep_mf_mos_dynamic_arr,
+            dynamic_min_range_m=cfg.dynamic_min_range_m,
+            # union overwrites dynamic_mask.npy with the fused verdict, so
+            # preserve AW's own verdict for keep_aw_dynamic / re-fusing.
+            write_aw_snapshot=cfg.segmentation == "union",
         )
         total_static += result.n_static
         total_dynamic += result.n_dynamic
@@ -279,18 +270,6 @@ def process_chunk(
         updated_meta, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id)
     )
 
-    if fusion_active and n_missing_mf_masks:
-        # Not fatal under union — those sweeps keep their voxel-classifier
-        # verdict — but a high count means MF-MOS is contributing far less
-        # than the config implies, which is worth seeing in the log.
-        log.warning(
-            "chunk %s: %d/%d sweeps had no usable MF-MOS mask; they "
-            "contributed only their voxel-classifier dynamic points",
-            chunk_id,
-            n_missing_mf_masks,
-            len(meta_rows),
-        )
-
     out_uri = static_map_path(bag_id, chunk_id)
     save_kwargs: dict[str, np.ndarray] = {}
     if static_xyz_chunks:
@@ -302,7 +281,10 @@ def process_chunk(
     save_kwargs["voxel_size"] = np.float32(cfg.voxel_size_m)
     save_kwargs["origin"] = origin
     save_kwargs["static_voxel_keys"] = static_arr
-    # Step C drops ground points landing in carved-dynamic voxels.
+    # Voxels AW itself classed as movers (the carved-dynamic set), sorted.
+    # Step C drops ground points landing in them, and union's dilated static
+    # veto exempts candidates in them — AW corroborates the motion there, so
+    # a static neighbour must not delete them.
     save_kwargs["dynamic_voxel_keys"] = dynamic_arr
     np.savez_compressed(local_path(out_uri), **save_kwargs)
 

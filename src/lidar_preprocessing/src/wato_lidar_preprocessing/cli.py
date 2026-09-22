@@ -58,6 +58,19 @@ def main(log_level: str) -> None:
     default="/ws/src/lidar_preprocessing/config/lidar_preprocessing.yaml",
 )
 @click.option(
+    "--seg",
+    "seg",
+    type=click.Choice(["aw", "mos", "union"]),
+    default=None,
+    help=(
+        "Segmentation method for the static/dynamic split (Step B). "
+        "'aw' = pure Amanatides-Woo log-odds ray-casting (no MF-MOS). "
+        "'mos' = pure MF-MOS learned segmentation (no ray traversal). "
+        "'union' = fusion: AW static map + MF-MOS dynamics vetoed by it. "
+        "Overrides the config's `segmentation` field; default uses the config."
+    ),
+)
+@click.option(
     "--force",
     "-f",
     "force",
@@ -100,14 +113,18 @@ def run_cmd(
     bag_id: str,
     chunk_id: str | None,
     config_path: str,
+    seg: str | None,
     force: bool,
     workers: int,
     auto_reduce: bool,
     two_pass: bool,
 ) -> None:
-    """Run deskew → classify → ground for all chunks (or one chunk) of a bag."""
+    """Run deskew → (aw|mos|union) → ground for all chunks (or one chunk) of a bag."""
     bag_id = _resolve_bag_id(bag_id)
     cfg = load_config(config_path)
+    if seg is not None:
+        cfg.segmentation = seg
+    log.info("segmentation method: %s", cfg.segmentation)
     run_pipeline(
         cfg,
         bag_id=bag_id,
@@ -162,50 +179,167 @@ def reduce_cmd(bag_id: str, config_path: str) -> None:
     "sweep_id",
     default=None,
     type=int,
-    help="optional specific sweep_id (stages A/B only).",
+    help="Write one classified sweep instead of the accumulated chunk.",
 )
 @click.option(
-    "--stage",
-    default="all",
-    type=click.Choice(["A", "B", "C", "D", "all"]),
-    help="Pipeline stage to visualize (default: all).",
+    "--layer",
+    default="classification",
+    type=click.Choice(["classification", "dynamic", "static", "ground", "global"]),
+    help="Artifact to visualize. Native backends require a non-classification layer.",
+)
+@click.option(
+    "--backend",
+    default="html",
+    type=click.Choice(["html", "web", "auto", "open3d", "plotly", "matplotlib"]),
+    help=(
+        "html writes a standalone browser viewer (default); web starts a local "
+        "server; auto/open3d/plotly/matplotlib use the legacy layer viewer."
+    ),
+)
+@click.option(
+    "--export",
+    "export_format",
+    default=None,
+    type=click.Choice(["ply"]),
+    help="Export visualization data for external tools instead of opening a viewer.",
+)
+@click.option(
+    "--out",
+    "out_path",
+    default=None,
+    help=(
+        "Output file or directory for --backend html or --export. "
+        "Defaults under <chunk>/viz/."
+    ),
+)
+@click.option("--host", default="127.0.0.1", help="Host for --backend web.")
+@click.option("--port", default=8765, type=int, help="Port for --backend web.")
+@click.option(
+    "--open/--no-open",
+    "open_after_write",
+    default=False,
+    help="Open generated HTML in the default browser.",
+)
+@click.option(
+    "--color",
+    default="height",
+    type=click.Choice(["height", "sweep_id", "intensity"]),
+    help="Initial color mode for native layer viewers.",
+)
+@click.option("--point-size", default=2.0, type=float, help="Native marker size.")
+@click.option(
+    "--max-points",
+    default=2_000_000,
+    type=int,
+    help="Native viewer point cap (0 = no cap).",
 )
 def viz_cmd(
-    bag_id: str, chunk_id: str | None, sweep_id: int | None, stage: str
+    bag_id: str,
+    chunk_id: str | None,
+    sweep_id: int | None,
+    layer: str,
+    backend: str,
+    export_format: str | None,
+    out_path: str | None,
+    host: str,
+    port: int,
+    open_after_write: bool,
+    color: str,
+    point_size: float,
+    max_points: int,
 ) -> None:
-    """Open interactive Open3D / matplotlib windows for pipeline artifacts.
-
-    Each window blocks until you close it. Requires DISPLAY (or WSLg) to be
-    forwarded into the container — see modules/docker-compose.dev.yaml.
-    """
+    """Visualize static/dynamic classification and pipeline artifacts."""
     from wato_common.artifact_store import chunks_index_path
     from wato_common.io.parquet_io import read_rows
-    from wato_lidar_preprocessing.viz import viz_chunk, viz_stage_D
 
     bag_id = _resolve_bag_id(bag_id)
 
-    if stage == "D":
-        viz_stage_D(bag_id)
+    def selected_chunks() -> list[str]:
+        if chunk_id is not None:
+            return [chunk_id]
+        return [row["chunk_id"] for row in read_rows(chunks_index_path(bag_id))]
+
+    if export_format is not None:
+        if layer != "classification":
+            raise click.ClickException("--export supports --layer classification only")
+        from wato_lidar_preprocessing.viz_export import export_ply
+
+        chunk_ids = selected_chunks()
+        for cid in chunk_ids:
+            target = out_path
+            if out_path is not None and len(chunk_ids) > 1:
+                target = str(Path(out_path) / cid)
+            written = export_ply(bag_id, cid, sweep_id=sweep_id, out_path=target)
+            click.echo(f"exported {written}")
         return
 
-    if chunk_id is not None:
-        chunk_ids = [chunk_id]
-    else:
-        rows = read_rows(chunks_index_path(bag_id))
-        chunk_ids = [r["chunk_id"] for r in rows]
-
-    for cid in chunk_ids:
-        viz_chunk(bag_id, cid, sweep_id=sweep_id, stage=stage)
-
-    if stage == "all":
-        try:
-            viz_stage_D(bag_id)
-        except FileNotFoundError:
-            click.echo(
-                "skipping stage D: global_static_map.npz not found (run 'reduce' first)"
+    if backend == "web":
+        if layer != "classification":
+            raise click.ClickException(
+                "--backend web supports --layer classification only"
             )
-        except ImportError as exc:
-            click.echo(f"skipping stage D: {exc}")
+        if chunk_id is None:
+            raise click.ClickException("--backend web requires --chunk")
+        if sweep_id is not None:
+            raise click.ClickException("--backend web is chunk-level; omit --sweep")
+        if open_after_write:
+            raise click.ClickException("--open is only supported by --backend html")
+        from wato_lidar_preprocessing.web_viz import serve_web_viz
+
+        serve_web_viz(bag_id, chunk_id, host=host, port=port)
+        return
+
+    if backend == "html":
+        if layer != "classification":
+            raise click.ClickException(
+                "--backend html supports --layer classification only"
+            )
+        from wato_lidar_preprocessing.html_viz import open_html_file, write_html_viewer
+
+        chunk_ids = selected_chunks()
+        for cid in chunk_ids:
+            target = out_path
+            if out_path is not None and len(chunk_ids) > 1:
+                target = str(Path(out_path) / cid)
+            written = write_html_viewer(bag_id, cid, sweep_id=sweep_id, out_path=target)
+            click.echo(f"wrote {written}")
+            if open_after_write:
+                if open_html_file(written):
+                    click.echo(f"opened {written.resolve()}")
+                else:
+                    click.echo(
+                        f"could not open automatically; open {written.resolve()}"
+                    )
+        return
+
+    if open_after_write:
+        raise click.ClickException("--open is only supported by --backend html")
+    if sweep_id is not None:
+        raise click.ClickException(
+            "--sweep is only supported by --backend html or --export"
+        )
+    if layer == "classification":
+        raise click.ClickException(
+            "native backends require --layer dynamic, static, ground, or global"
+        )
+
+    from wato_lidar_preprocessing.viz import viz_chunk, viz_global_static_map
+
+    opts = dict(
+        color=color, backend=backend, point_size=point_size, max_points=max_points
+    )
+    if layer == "global":
+        try:
+            viz_global_static_map(bag_id, **opts)
+        except FileNotFoundError:
+            click.echo("global_static_map.npz not found (run 'reduce' first)")
+        return
+
+    for cid in selected_chunks():
+        if layer == "ground":
+            viz_chunk(bag_id, cid, layer="ground")
+        else:
+            viz_chunk(bag_id, cid, layer=layer, **opts)
 
 
 if __name__ == "__main__":
