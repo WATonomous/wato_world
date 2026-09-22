@@ -38,40 +38,22 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Model registry.  Edit here when adding / changing the perception_2d stack.
+# Model registry — pinned revisions live in the component package so that this
+# host-side fetcher and the in-container runtime loaders read the SAME source.
+# Add or re-pin models there, not here.
 # ---------------------------------------------------------------------------
-
-# HF repos snapshot-downloaded into the HF_HOME cache (loaded at runtime via
-# transformers / huggingface_hub from_pretrained, which read that cache layout).
-HF_MODELS: dict[str, str] = {
-    # GroundingDINO detector, loaded via transformers AutoModel/AutoProcessor.
-    "grounding_dino": "IDEA-Research/grounding-dino-base",  # detector.py
-    "depth_anything_v2": "depth-anything/Depth-Anything-V2-Large",  # depth.py
-}
-
-# Single-file checkpoints downloaded directly into MODELS_ROOT (NOT the HF cache):
-# their runtime loader takes a plain filesystem path. {tag: (repo_id, filename)}.
-# The file lands at ${MODELS_ROOT}/<filename> (= /data/models/<filename> in the
-# container), already-present files are left untouched.
-RAW_CHECKPOINTS: dict[str, tuple[str, str]] = {
-    # SAM2.1 — loaded by sam2_tracker via build_sam2_video_predictor(ckpt_path);
-    # the hydra config ships inside the `sam2` package, so only the .pt is needed.
-    "sam2": ("facebook/sam2.1-hiera-large", "sam2.1_hiera_large.pt"),
-}
-
-# DINOv2 weights ship via torch.hub (embeddings.py).  We pre-populate TORCH_HOME
-# by issuing a `torch.hub.load(...)` once.
-TORCH_HUB_MODELS: list[tuple[str, str]] = [
-    ("facebookresearch/dinov2", "dinov2_vitl14"),
-]
-
-ALL_TAGS = list(HF_MODELS.keys()) + list(RAW_CHECKPOINTS.keys()) + ["dinov2"]
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from wato_perception_2d.model_registry import (  # noqa: E402
+    ALL_TAGS,
+    HF_MODELS,
+    RAW_CHECKPOINTS,
+    TORCH_HUB_MODELS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +82,9 @@ def _du_h(path: Path) -> str:
         return "?"
 
 
-def _fetch_hf(repo_id: str, hf_home: Path, token: str | None) -> tuple[bool, str]:
+def _fetch_hf(
+    repo_id: str, revision: str, hf_home: Path, token: str | None
+) -> tuple[bool, str]:
     """Snapshot-download one HuggingFace repo into HF_HOME's hub cache.
 
     Passes cache_dir explicitly (= HF_HOME/hub) instead of relying on the
@@ -115,14 +99,19 @@ def _fetch_hf(repo_id: str, hf_home: Path, token: str | None) -> tuple[bool, str
         return False, "huggingface_hub not installed (pip install huggingface_hub)"
 
     try:
-        snapshot_download(repo_id=repo_id, token=token, cache_dir=str(hf_home / "hub"))
+        snapshot_download(
+            repo_id=repo_id,
+            revision=revision,
+            token=token,
+            cache_dir=str(hf_home / "hub"),
+        )
         return True, "ok"
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
 
 
 def _fetch_hf_file(
-    repo_id: str, filename: str, dest_dir: Path, token: str | None
+    repo_id: str, filename: str, revision: str, dest_dir: Path, token: str | None
 ) -> tuple[bool, str]:
     """Download a single file from an HF repo directly into ``dest_dir``.
 
@@ -141,6 +130,7 @@ def _fetch_hf_file(
         hf_hub_download(
             repo_id=repo_id,
             filename=filename,
+            revision=revision,
             token=token,
             local_dir=str(dest_dir),
         )
@@ -149,8 +139,14 @@ def _fetch_hf_file(
         return False, str(exc)
 
 
-def _fetch_torch_hub(repo: str, model: str, torch_home: Path) -> tuple[bool, str]:
-    """Trigger torch.hub.load to download a model into TORCH_HOME."""
+def _fetch_torch_hub(repo_ref: str, model: str, torch_home: Path) -> tuple[bool, str]:
+    """Trigger torch.hub.load to download a model into TORCH_HOME.
+
+    ``repo_ref`` is "owner/repo:<commit>", never a bare branch — the ref also
+    names the cache directory (facebookresearch_dinov2_<ref>), so the runtime
+    loader must ask for the identical ref to hit this cache instead of the
+    network.
+    """
     try:
         import torch
     except ImportError:
@@ -158,7 +154,7 @@ def _fetch_torch_hub(repo: str, model: str, torch_home: Path) -> tuple[bool, str
 
     os.environ["TORCH_HOME"] = str(torch_home)
     try:
-        torch.hub.load(repo, model, source="github", verbose=False)
+        torch.hub.load(repo_ref, model, source="github", verbose=False)
         return True, "ok"
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
@@ -178,8 +174,7 @@ def main() -> int:
     parser.add_argument(
         "--models-root",
         default=None,
-        help="Target directory (overrides MODELS_ROOT; "
-        "default: <repo>/data/models).",
+        help="Target directory (overrides MODELS_ROOT; default: <repo>/data/models).",
     )
     parser.add_argument(
         "--skip",
@@ -216,54 +211,69 @@ def main() -> int:
 
     if args.dry_run:
         print("Would fetch:")
-        for tag, repo_id in HF_MODELS.items():
+        for tag, m in HF_MODELS.items():
             mark = "skip" if tag in skip else "fetch"
-            print(f"  [{mark}] {tag:<20} {repo_id}  → HF cache")
-        for tag, (repo_id, filename) in RAW_CHECKPOINTS.items():
+            print(f"  [{mark}] {tag:<20} {m.repo_id}@{m.revision[:12]}  → HF cache")
+        for tag, c in RAW_CHECKPOINTS.items():
             mark = "skip" if tag in skip else "fetch"
-            print(f"  [{mark}] {tag:<20} {repo_id}::{filename}  → {models_root}")
-        for repo, model in TORCH_HUB_MODELS:
-            mark = "skip" if "dinov2" in skip else "fetch"
-            print(f"  [{mark}] {'dinov2':<20} torch.hub :: {repo} :: {model}")
+            print(
+                f"  [{mark}] {tag:<20} {c.repo_id}@{c.revision[:12]}::{c.filename}"
+                f"  → {models_root}"
+            )
+        for tag, t in TORCH_HUB_MODELS.items():
+            mark = "skip" if tag in skip else "fetch"
+            print(
+                f"  [{mark}] {tag:<20} torch.hub :: {t.repo}@{t.ref[:12]} :: "
+                f"{t.entrypoint}"
+            )
         return 0
 
     failures: list[tuple[str, str]] = []
 
-    for tag, repo_id in HF_MODELS.items():
+    for tag, m in HF_MODELS.items():
         if tag in skip:
-            print(f"⤬ skip   {tag:<20} ({repo_id})")
+            print(f"⤬ skip   {tag:<20} ({m.repo_id})")
             continue
-        print(f"⟶ fetch  {tag:<20} ({repo_id}) …", flush=True)
-        ok, msg = _fetch_hf(repo_id, hf_home, args.hf_token)
+        print(f"⟶ fetch  {tag:<20} ({m.repo_id}@{m.revision[:12]}) …", flush=True)
+        ok, msg = _fetch_hf(m.repo_id, m.revision, hf_home, args.hf_token)
         if ok:
-            print(f"  ✓ ok")
+            print("  ✓ ok")
         else:
             print(f"  ✗ {msg}", file=sys.stderr)
             failures.append((tag, msg))
 
-    for tag, (repo_id, filename) in RAW_CHECKPOINTS.items():
+    for tag, c in RAW_CHECKPOINTS.items():
         if tag in skip:
-            print(f"⤬ skip   {tag:<20} ({repo_id}::{filename})")
+            print(f"⤬ skip   {tag:<20} ({c.repo_id}::{c.filename})")
             continue
-        print(f"⟶ fetch  {tag:<20} ({repo_id}::{filename}) …", flush=True)
-        ok, msg = _fetch_hf_file(repo_id, filename, models_root, args.hf_token)
+        print(
+            f"⟶ fetch  {tag:<20} ({c.repo_id}@{c.revision[:12]}::{c.filename}) …",
+            flush=True,
+        )
+        ok, msg = _fetch_hf_file(
+            c.repo_id, c.filename, c.revision, models_root, args.hf_token
+        )
         if ok:
             print(f"  ✓ {msg}")
         else:
             print(f"  ✗ {msg}", file=sys.stderr)
             failures.append((tag, msg))
 
-    if "dinov2" not in skip:
-        for repo, model in TORCH_HUB_MODELS:
-            print(f"⟶ fetch  dinov2/{model:<13} (torch.hub :: {repo}) …", flush=True)
-            ok, msg = _fetch_torch_hub(repo, model, torch_home)
-            if ok:
-                print(f"  ✓ ok")
-            else:
-                print(f"  ✗ {msg}", file=sys.stderr)
-                failures.append((f"dinov2/{model}", msg))
-    else:
-        print(f"⤬ skip   dinov2")
+    for tag, t in TORCH_HUB_MODELS.items():
+        if tag in skip:
+            print(f"⤬ skip   {tag:<20} ({t.repo})")
+            continue
+        repo_ref = f"{t.repo}:{t.ref}"
+        print(
+            f"⟶ fetch  {tag:<20} (torch.hub :: {repo_ref[:40]}… :: {t.entrypoint}) …",
+            flush=True,
+        )
+        ok, msg = _fetch_torch_hub(repo_ref, t.entrypoint, torch_home)
+        if ok:
+            print("  ✓ ok")
+        else:
+            print(f"  ✗ {msg}", file=sys.stderr)
+            failures.append((f"{tag}/{t.entrypoint}", msg))
 
     print()
     print(f"Disk usage  HF_HOME    = {_du_h(hf_home)}")
@@ -278,8 +288,8 @@ def main() -> int:
 
     print()
     print("All weights fetched.  Set in the container environment:")
-    print(f"  HF_HOME=/data/models/hf")
-    print(f"  TORCH_HOME=/data/models/torch_hub")
+    print("  HF_HOME=/data/models/hf")
+    print("  TORCH_HOME=/data/models/torch_hub")
     return 0
 
 

@@ -49,6 +49,13 @@ services:
         MODULE_DEPS: "${INGEST_IMAGE}:deps_${TAG}"
         COMPONENT_PACKAGE_DIR: ingest
         COMPONENT_PACKAGE: wato_ingest
+        # Build provenance — baked into the image by
+        # docker/template.Dockerfile, read back at runtime by
+        # wato_common.provenance so every artifact records the source
+        # revision that produced it. Values come from modules/.env.
+        WATO_GIT_COMMIT: "${WATO_GIT_COMMIT:-}"
+        WATO_GIT_DIRTY: "${WATO_GIT_DIRTY:-false}"
+        WATO_BUILD_TIME: "${WATO_BUILD_TIME:-}"
       cache_from:
         - "${INGEST_IMAGE}:${TAG}"
     image: "${INGEST_IMAGE}:${TAG}"
@@ -96,6 +103,13 @@ services:
         MODULE_DEPS: "${PERCEPTION_2D_IMAGE}:deps_${TAG}"
         COMPONENT_PACKAGE_DIR: perception_2d
         COMPONENT_PACKAGE: wato_perception_2d
+        # Build provenance — baked into the image by
+        # docker/template.Dockerfile, read back at runtime by
+        # wato_common.provenance so every artifact records the source
+        # revision that produced it. Values come from modules/.env.
+        WATO_GIT_COMMIT: "${WATO_GIT_COMMIT:-}"
+        WATO_GIT_DIRTY: "${WATO_GIT_DIRTY:-false}"
+        WATO_BUILD_TIME: "${WATO_BUILD_TIME:-}"
       cache_from:
         - "${PERCEPTION_2D_IMAGE}:${TAG}"
     image: "${PERCEPTION_2D_IMAGE}:${TAG}"
@@ -160,6 +174,13 @@ services:
         MODULE_DEPS: "${SEMANTIC_LIFTING_IMAGE}:deps_${TAG}"
         COMPONENT_PACKAGE_DIR: semantic_lifting
         COMPONENT_PACKAGE: wato_semantic_lifting
+        # Build provenance — baked into the image by
+        # docker/template.Dockerfile, read back at runtime by
+        # wato_common.provenance so every artifact records the source
+        # revision that produced it. Values come from modules/.env.
+        WATO_GIT_COMMIT: "${WATO_GIT_COMMIT:-}"
+        WATO_GIT_DIRTY: "${WATO_GIT_DIRTY:-false}"
+        WATO_BUILD_TIME: "${WATO_BUILD_TIME:-}"
       cache_from:
         - "${SEMANTIC_LIFTING_IMAGE}:${TAG}"
     image: "${SEMANTIC_LIFTING_IMAGE}:${TAG}"
@@ -205,6 +226,13 @@ services:
         MODULE_DEPS: "${LIDAR_PREPROCESSING_IMAGE}:deps_${TAG}"
         COMPONENT_PACKAGE_DIR: lidar_preprocessing
         COMPONENT_PACKAGE: wato_lidar_preprocessing
+        # Build provenance — baked into the image by
+        # docker/template.Dockerfile, read back at runtime by
+        # wato_common.provenance so every artifact records the source
+        # revision that produced it. Values come from modules/.env.
+        WATO_GIT_COMMIT: "${WATO_GIT_COMMIT:-}"
+        WATO_GIT_DIRTY: "${WATO_GIT_DIRTY:-false}"
+        WATO_BUILD_TIME: "${WATO_BUILD_TIME:-}"
       cache_from:
         - "${LIDAR_PREPROCESSING_IMAGE}:${TAG}"
     image: "${LIDAR_PREPROCESSING_IMAGE}:${TAG}"
@@ -252,6 +280,13 @@ services:
         MODULE_DEPS: "${PROPOSAL_GENERATION_IMAGE}:deps_${TAG}"
         COMPONENT_PACKAGE_DIR: proposal_generation
         COMPONENT_PACKAGE: wato_proposal_generation
+        # Build provenance — baked into the image by
+        # docker/template.Dockerfile, read back at runtime by
+        # wato_common.provenance so every artifact records the source
+        # revision that produced it. Values come from modules/.env.
+        WATO_GIT_COMMIT: "${WATO_GIT_COMMIT:-}"
+        WATO_GIT_DIRTY: "${WATO_GIT_DIRTY:-false}"
+        WATO_BUILD_TIME: "${WATO_BUILD_TIME:-}"
       cache_from:
         - "${PROPOSAL_GENERATION_IMAGE}:${TAG}"
     image: "${PROPOSAL_GENERATION_IMAGE}:${TAG}"
@@ -299,6 +334,13 @@ services:
         MODULE_DEPS: "${TRACKING_IMAGE}:deps_${TAG}"
         COMPONENT_PACKAGE_DIR: tracking
         COMPONENT_PACKAGE: wato_tracking
+        # Build provenance — baked into the image by
+        # docker/template.Dockerfile, read back at runtime by
+        # wato_common.provenance so every artifact records the source
+        # revision that produced it. Values come from modules/.env.
+        WATO_GIT_COMMIT: "${WATO_GIT_COMMIT:-}"
+        WATO_GIT_DIRTY: "${WATO_GIT_DIRTY:-false}"
+        WATO_BUILD_TIME: "${WATO_BUILD_TIME:-}"
       cache_from:
         - "${TRACKING_IMAGE}:${TAG}"
     image: "${TRACKING_IMAGE}:${TAG}"
@@ -344,6 +386,13 @@ services:
         MODULE_DEPS: "${LABEL_REFINEMENT_IMAGE}:deps_${TAG}"
         COMPONENT_PACKAGE_DIR: label_refinement
         COMPONENT_PACKAGE: wato_label_refinement
+        # Build provenance — baked into the image by
+        # docker/template.Dockerfile, read back at runtime by
+        # wato_common.provenance so every artifact records the source
+        # revision that produced it. Values come from modules/.env.
+        WATO_GIT_COMMIT: "${WATO_GIT_COMMIT:-}"
+        WATO_GIT_DIRTY: "${WATO_GIT_DIRTY:-false}"
+        WATO_BUILD_TIME: "${WATO_BUILD_TIME:-}"
       cache_from:
         - "${LABEL_REFINEMENT_IMAGE}:${TAG}"
     image: "${LABEL_REFINEMENT_IMAGE}:${TAG}"
@@ -391,6 +440,13 @@ services:
         MODULE_DEPS: "${OPEN_VOCAB_DISCOVERY_IMAGE}:deps_${TAG}"
         COMPONENT_PACKAGE_DIR: open_vocab_discovery
         COMPONENT_PACKAGE: wato_open_vocab_discovery
+        # Build provenance — baked into the image by
+        # docker/template.Dockerfile, read back at runtime by
+        # wato_common.provenance so every artifact records the source
+        # revision that produced it. Values come from modules/.env.
+        WATO_GIT_COMMIT: "${WATO_GIT_COMMIT:-}"
+        WATO_GIT_DIRTY: "${WATO_GIT_DIRTY:-false}"
+        WATO_BUILD_TIME: "${WATO_BUILD_TIME:-}"
       cache_from:
         - "${OPEN_VOCAB_DISCOVERY_IMAGE}:${TAG}"
     image: "${OPEN_VOCAB_DISCOVERY_IMAGE}:${TAG}"
@@ -438,6 +494,13 @@ services:
         MODULE_DEPS: "${STUDENT_TRAINING_IMAGE}:deps_${TAG}"
         COMPONENT_PACKAGE_DIR: student_training
         COMPONENT_PACKAGE: wato_student_training
+        # Build provenance — baked into the image by
+        # docker/template.Dockerfile, read back at runtime by
+        # wato_common.provenance so every artifact records the source
+        # revision that produced it. Values come from modules/.env.
+        WATO_GIT_COMMIT: "${WATO_GIT_COMMIT:-}"
+        WATO_GIT_DIRTY: "${WATO_GIT_DIRTY:-false}"
+        WATO_BUILD_TIME: "${WATO_BUILD_TIME:-}"
       cache_from:
         - "${STUDENT_TRAINING_IMAGE}:${TAG}"
     image: "${STUDENT_TRAINING_IMAGE}:${TAG}"

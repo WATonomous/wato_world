@@ -96,6 +96,11 @@ def _update_sweep_numba(
     carve d=t_entry). Carving stops margin_m short of the endpoint. Incidence
     gate: a voxel with a surface normal (nx/ny/nz) is not carved when grazed
     (|ray·n| < grazing_cos); voxels without a normal carve normally.
+
+    Rays longer than max_length_m skip the carve (a pure compute guard) but
+    STILL register their endpoint hit — otherwise far returns would leave
+    their voxels unobserved, and unobserved voxels carry no occupancy
+    evidence at all.
     """
     INF = 1e18
     for i in range(endpoints.shape[0]):
@@ -108,131 +113,137 @@ def _update_sweep_numba(
         dz = ez - oz
         length = math.sqrt(dx * dx + dy * dy + dz * dz)
 
-        if length < 1e-9 or length > max_length_m:
+        if length < 1e-9:
             continue
 
         r_star_endpoint = d_star / length
         if r_star_endpoint > 1.0:
             r_star_endpoint = 1.0
 
-        inv_len = 1.0 / length
-        dxn = dx * inv_len
-        dyn = dy * inv_len
-        dzn = dz * inv_len
-
-        cx = int(math.floor((ox - cox) / voxel_size))
-        cy = int(math.floor((oy - coy) / voxel_size))
-        cz = int(math.floor((oz - coz) / voxel_size))
         exi = int(math.floor((ex - cox) / voxel_size))
         eyi = int(math.floor((ey - coy) / voxel_size))
         ezi = int(math.floor((ez - coz) / voxel_size))
 
-        # frac_*: origin's offset within its current voxel, in [0, voxel_size).
-        frac_x = (ox - cox) - cx * voxel_size
-        frac_y = (oy - coy) - cy * voxel_size
-        frac_z = (oz - coz) - cz * voxel_size
+        # Free-space carving only inside the compute guard; the endpoint hit
+        # below runs regardless of ray length.
+        if length <= max_length_m:
+            inv_len = 1.0 / length
+            dxn = dx * inv_len
+            dyn = dy * inv_len
+            dzn = dz * inv_len
 
-        if dxn > 1e-12:
-            sx = 1
-            t_delta_x = voxel_size / dxn
-            t_max_x = (voxel_size - frac_x) / dxn
-        elif dxn < -1e-12:
-            sx = -1
-            t_delta_x = voxel_size / (-dxn)
-            t_max_x = frac_x / (-dxn)
-        else:
-            sx = 0
-            t_delta_x = INF
-            t_max_x = INF
+            cx = int(math.floor((ox - cox) / voxel_size))
+            cy = int(math.floor((oy - coy) / voxel_size))
+            cz = int(math.floor((oz - coz) / voxel_size))
 
-        if dyn > 1e-12:
-            sy = 1
-            t_delta_y = voxel_size / dyn
-            t_max_y = (voxel_size - frac_y) / dyn
-        elif dyn < -1e-12:
-            sy = -1
-            t_delta_y = voxel_size / (-dyn)
-            t_max_y = frac_y / (-dyn)
-        else:
-            sy = 0
-            t_delta_y = INF
-            t_max_y = INF
+            # frac_*: origin's offset within its voxel, in [0, voxel_size).
+            frac_x = (ox - cox) - cx * voxel_size
+            frac_y = (oy - coy) - cy * voxel_size
+            frac_z = (oz - coz) - cz * voxel_size
 
-        if dzn > 1e-12:
-            sz = 1
-            t_delta_z = voxel_size / dzn
-            t_max_z = (voxel_size - frac_z) / dzn
-        elif dzn < -1e-12:
-            sz = -1
-            t_delta_z = voxel_size / (-dzn)
-            t_max_z = frac_z / (-dzn)
-        else:
-            sz = 0
-            t_delta_z = INF
-            t_max_z = INF
-
-        # Stop carving margin_m metres before the endpoint so the measured
-        # surface is never claimed as free space.
-        stop_t = length - margin_m
-
-        # t_entry must be captured BEFORE incrementing t_max_<axis> so it's
-        # the parametric distance the ray enters the new voxel (what r*_t
-        # needs). Sensor-origin voxel is never emitted.
-        while True:
-            if t_max_x <= t_max_y and t_max_x <= t_max_z:
-                if t_max_x >= stop_t:
-                    break
-                t_entry = t_max_x
-                cx += sx
-                t_max_x += t_delta_x
-            elif t_max_y <= t_max_z:
-                if t_max_y >= stop_t:
-                    break
-                t_entry = t_max_y
-                cy += sy
-                t_max_y += t_delta_y
+            if dxn > 1e-12:
+                sx = 1
+                t_delta_x = voxel_size / dxn
+                t_max_x = (voxel_size - frac_x) / dxn
+            elif dxn < -1e-12:
+                sx = -1
+                t_delta_x = voxel_size / (-dxn)
+                t_max_x = frac_x / (-dxn)
             else:
-                if t_max_z >= stop_t:
-                    break
-                t_entry = t_max_z
-                cz += sz
-                t_max_z += t_delta_z
+                sx = 0
+                t_delta_x = INF
+                t_max_x = INF
 
-            if (
-                cx < 0
-                or cx >= AXIS_RANGE
-                or cy < 0
-                or cy >= AXIS_RANGE
-                or cz < 0
-                or cz >= AXIS_RANGE
-            ):
-                continue
+            if dyn > 1e-12:
+                sy = 1
+                t_delta_y = voxel_size / dyn
+                t_max_y = (voxel_size - frac_y) / dyn
+            elif dyn < -1e-12:
+                sy = -1
+                t_delta_y = voxel_size / (-dyn)
+                t_max_y = frac_y / (-dyn)
+            else:
+                sy = 0
+                t_delta_y = INF
+                t_max_y = INF
 
-            r_star_t = d_star / t_entry
-            if r_star_t > 1.0:
-                r_star_t = 1.0
+            if dzn > 1e-12:
+                sz = 1
+                t_delta_z = voxel_size / dzn
+                t_max_z = (voxel_size - frac_z) / dzn
+            elif dzn < -1e-12:
+                sz = -1
+                t_delta_z = voxel_size / (-dzn)
+                t_max_z = frac_z / (-dzn)
+            else:
+                sz = 0
+                t_delta_z = INF
+                t_max_z = INF
 
-            key = (cx << SHIFT_X) | (cy << SHIFT_Y) | cz
+            # Stop carving margin_m metres before the endpoint so the measured
+            # surface is never claimed as free space.
+            stop_t = length - margin_m
 
-            # Incidence gate (2.0 sentinel = no normal → carve normally).
-            vnx = nx.get(key, numba.float32(2.0))
-            if vnx < numba.float32(1.5):
-                dot = (
-                    dxn * vnx
-                    + dyn * ny.get(key, numba.float32(0.0))
-                    + dzn * nz.get(key, numba.float32(0.0))
-                )
-                if dot < 0.0:
-                    dot = -dot
-                if dot < grazing_cos:
+            # t_entry must be captured BEFORE incrementing t_max_<axis> so it's
+            # the parametric distance the ray enters the new voxel (what r*_t
+            # needs). Sensor-origin voxel is never emitted.
+            while True:
+                if t_max_x <= t_max_y and t_max_x <= t_max_z:
+                    if t_max_x >= stop_t:
+                        break
+                    t_entry = t_max_x
+                    cx += sx
+                    t_max_x += t_delta_x
+                elif t_max_y <= t_max_z:
+                    if t_max_y >= stop_t:
+                        break
+                    t_entry = t_max_y
+                    cy += sy
+                    t_max_y += t_delta_y
+                else:
+                    if t_max_z >= stop_t:
+                        break
+                    t_entry = t_max_z
+                    cz += sz
+                    t_max_z += t_delta_z
+
+                if (
+                    cx < 0
+                    or cx >= AXIS_RANGE
+                    or cy < 0
+                    or cy >= AXIS_RANGE
+                    or cz < 0
+                    or cz >= AXIS_RANGE
+                ):
                     continue
 
-            old_lo = log_odds.get(key, numba.float32(0.0))
-            new_lo = old_lo - numba.float32(l_free * r_star_t)
-            if new_lo < numba.float32(-log_odds_clamp):
-                new_lo = numba.float32(-log_odds_clamp)
-            log_odds[key] = new_lo
-            n_obs[key] = numba.int32(n_obs.get(key, numba.int32(0)) + numba.int32(1))
+                r_star_t = d_star / t_entry
+                if r_star_t > 1.0:
+                    r_star_t = 1.0
+
+                key = (cx << SHIFT_X) | (cy << SHIFT_Y) | cz
+
+                # Incidence gate (2.0 sentinel = no normal → carve normally).
+                vnx = nx.get(key, numba.float32(2.0))
+                if vnx < numba.float32(1.5):
+                    dot = (
+                        dxn * vnx
+                        + dyn * ny.get(key, numba.float32(0.0))
+                        + dzn * nz.get(key, numba.float32(0.0))
+                    )
+                    if dot < 0.0:
+                        dot = -dot
+                    if dot < grazing_cos:
+                        continue
+
+                old_lo = log_odds.get(key, numba.float32(0.0))
+                new_lo = old_lo - numba.float32(l_free * r_star_t)
+                if new_lo < numba.float32(-log_odds_clamp):
+                    new_lo = numba.float32(-log_odds_clamp)
+                log_odds[key] = new_lo
+                n_obs[key] = numba.int32(
+                    n_obs.get(key, numba.int32(0)) + numba.int32(1)
+                )
 
         # Endpoint voxel: occupied observation (skipped when is_ground).
         if not is_ground[i] and (

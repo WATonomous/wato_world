@@ -22,6 +22,8 @@ from typing import Optional
 
 import numpy as np
 
+from wato_perception_2d.model_registry import hf_revision
+
 log = logging.getLogger(__name__)
 
 
@@ -156,9 +158,14 @@ class GroundingDinoDetector:
                 AutoProcessor,
             )
 
-            self._processor = AutoProcessor.from_pretrained(self._model_id)
+            revision = hf_revision(self._model_id)
+            self._processor = AutoProcessor.from_pretrained(
+                self._model_id, revision=revision
+            )
             self._model = (
-                AutoModelForZeroShotObjectDetection.from_pretrained(self._model_id)
+                AutoModelForZeroShotObjectDetection.from_pretrained(
+                    self._model_id, revision=revision
+                )
                 .to(self._device)
                 .eval()
             )
@@ -218,7 +225,12 @@ class GroundingDinoDetector:
             canonical = match_label_to_class(str(label), concepts)
             if canonical is None:
                 continue  # off-taxonomy phrase — drop to keep output clean
-            x1, y1, x2, y2 = (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+            x1, y1, x2, y2 = (
+                float(box[0]),
+                float(box[1]),
+                float(box[2]),
+                float(box[3]),
+            )
             dets.append(
                 Detection(
                     box_xyxy=(x1, y1, x2, y2),

@@ -115,6 +115,7 @@ def run_cmd(
         force=force,
         workers=workers,
         two_pass=two_pass,
+        config_path=config_path,
     )
     # Two-pass already built one global_static_map.npz to seed pass 2; we
     # re-reduce here so the final on-disk map reflects pass-2 outputs.

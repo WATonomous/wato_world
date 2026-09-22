@@ -25,6 +25,7 @@ def main() -> None:
 def run_cmd(bag_id: str, chunk_id: str | None, config_path: str) -> None:
     cfg = load_config(config_path)
     from wato_semantic_lifting.pipeline import run as run_pipeline
+
     run_pipeline(cfg, bag_id=bag_id, chunk_id=chunk_id)
 
 

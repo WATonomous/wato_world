@@ -17,6 +17,8 @@ from typing import Optional
 
 import numpy as np
 
+from wato_perception_2d.model_registry import torch_hub_repo
+
 log = logging.getLogger(__name__)
 
 # Cache loaded DINOv2 models so torch.hub.load (model reconstruction + weight
@@ -32,7 +34,14 @@ def _get_model(model_name: str, device: str):
     if model is None:
         import torch
 
-        model = torch.hub.load("facebookresearch/dinov2", model_name)
+        # Pinned ref, not the default branch. Two reasons: upstream `main`
+        # moves (so an unpinned load is a silently changing ReID model), and
+        # the ref names the TORCH_HOME cache directory
+        # (facebookresearch_dinov2_<ref>) that fetch_models.py populated — a
+        # bare "facebookresearch/dinov2" looks for ..._main, misses the
+        # pre-fetched cache, and tries to reach the network from a container
+        # whose /data/models is mounted read-only.
+        model = torch.hub.load(torch_hub_repo(), model_name)
         model.eval().to(device)
         _MODEL_CACHE[key] = model
     return model

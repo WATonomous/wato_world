@@ -1,0 +1,95 @@
+lidar_preprocessing:
+  # ====================================================================
+  # WATO 3-Velodyne rig profile (VLP-32C centre + 2× VLP-16 corners).
+  # ====================================================================
+  # Companion to lidar_preprocessing.yaml (the nuScenes profile).  Same
+  # schema; only rig-dependent values differ.  Use together with ingest's
+  # ingest.wato.yaml, which ingests the three per-corner topics as separate
+  # lidars (lidar_cc / lidar_ne / lidar_nw) — classify's ray traversal needs
+  # each sweep's true sensor origin, which the merged cloud destroys.
+  #
+  # Switch per run via --config:
+  #   ./watod run lidar_preprocessing --bag <wato_bag> \
+  #       --config /ws/src/lidar_preprocessing/config/lidar_preprocessing.wato.yaml
+
+  # Each scanner gets its own datasheet profile: the corners are VLP-16s with
+  # a different channel count, field of view and usable range than the centre
+  # VLP-32C, and deskew, classify and MF-MOS all read the right one per sweep.
+  # Everything physical follows from this block — there is nothing else to set
+  # when the rig changes.
+  sensor_model:
+    profile: vlp32c
+    per_lidar:
+      lidar_cc: vlp32c
+      lidar_ne: vlp16
+      lidar_nw: vlp16
+
+  filter_nonfinite_points: true
+
+  # Rotation period comes from each scanner's profile (VLP @ 20 Hz → 50 ms).
+  synthesize_per_point_times: true
+
+  require_patchwork: true
+  allow_uncompensated_motion: false
+
+  voxel_size_m: 0.25
+  min_observations: 3
+
+  cache_world_xyz_in_memory: true
+
+  global_map_voxel_size_m: 0.30
+
+  # Velodyne per-point "t" field is in seconds.
+  point_time_unit: "seconds"
+
+  patchwork:
+    sensor_height: 1.8
+    num_iter: 3
+    num_lpr: 20
+    num_min_pts: 10
+    th_seeds: 0.3
+    th_dist: 0.15
+    th_seeds_v: 0.25
+    th_dist_v: 0.85
+    max_range: 90.0
+    min_range: 1.0
+    uprightness_thr: 0.101
+    enable_RNR: false
+    verbose: false
+    ground_cell_size_m: 0.25
+
+  # Group the three per-corner sweeps into one frame per centre-LiDAR tick.
+  frame_sync:
+    canonical_lidar: lidar_cc
+    tolerance_ms: 25.0
+
+  # MF-MOS on this rig: the released checkpoint is KITTI-trained (64-beam,
+  # single scanner).  The two corner VLP-16s are skipped automatically — 16
+  # channels is below what the projection can represent, and the per_lidar
+  # profiles above are what tells MF-MOS so.  Masks are exported for QA while
+  # the voxel classifier stays authoritative for dynamic_map.npz; do not move
+  # to union until mask quality has been audited on this rig
+  # (scripts/debug_mfmos_contribution.py).  Set enabled: false to skip the
+  # GPU cost entirely.
+  mf_mos:
+    enabled: true
+    checkpoint_path: /data/models/mf_mos/mf_mos_semantic_kitti.pt
+    arch_config:   /data/models/mf_mos/arch_cfg.yaml
+    data_config:   /data/models/mf_mos/data_cfg.yaml
+
+    device: cuda
+    score_threshold: 0.7
+    save_scores: true
+
+    fusion_mode: independent
+
+    max_pose_gap_ms: 6000
+    occlusion_range_tol_m: 1.0
+    prime_window_from_prior_chunk: true
+
+    moving_cluster_voxel_m: 0.5
+    moving_min_cluster_pts: 8
+
+  save_voxel_occupancy: true
+  save_voxel_diagnostics: true
+  save_per_frame_voxel_occupancy: false

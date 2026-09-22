@@ -40,7 +40,10 @@ from wato_semantic_lifting.io import (
 )
 from wato_semantic_lifting.projection import assign_masks_to_points, project_and_clip
 from wato_semantic_lifting.stats import build_stats_row
-from wato_semantic_lifting.temporal_match import compute_cam_T_world, match_sweep_to_frames
+from wato_semantic_lifting.temporal_match import (
+    compute_cam_T_world,
+    match_sweep_to_frames,
+)
 from wato_semantic_lifting.visibility import visibility_test
 from wato_semantic_lifting.voting import LabeledPoint, PointVote, accumulate_votes
 
@@ -76,7 +79,9 @@ def _process_chunk(
         if pts_world is None or pts_world.shape[0] == 0:
             stats_rows.append(
                 build_stats_row(
-                    bag_id, chunk_id, sweep.sweep_id,
+                    bag_id,
+                    chunk_id,
+                    sweep.sweep_id,
                     n_points_total=0,
                     labeled_points=[],
                     n_points_in_any_mask=0,
@@ -173,7 +178,9 @@ def _process_chunk(
         _write_sweep_labels(bag_id, chunk_id, sweep.sweep_id, labeled)
         stats_rows.append(
             build_stats_row(
-                bag_id, chunk_id, sweep.sweep_id,
+                bag_id,
+                chunk_id,
+                sweep.sweep_id,
                 n_points_total=n_total,
                 labeled_points=labeled,
                 n_points_in_any_mask=n_in_any_mask,
@@ -185,7 +192,9 @@ def _process_chunk(
     write_lifted_stats(bag_id, chunk_id, stats_rows)
     log.info(
         "semantic_lifting: chunk %s done — %d sweeps, %d total stats rows",
-        chunk_id, len(sweeps), len(stats_rows),
+        chunk_id,
+        len(sweeps),
+        len(stats_rows),
     )
 
 
@@ -197,9 +206,12 @@ def _write_sweep_labels(
 ) -> None:
     if not labeled:
         write_lifted_labels(
-            bag_id, chunk_id, sweep_id,
+            bag_id,
+            chunk_id,
+            sweep_id,
             np.array([], dtype=np.int32),
-            [], [],
+            [],
+            [],
             np.array([], dtype=np.float32),
             np.array([], dtype=np.int32),
             np.array([], dtype=np.int32),
@@ -207,13 +219,19 @@ def _write_sweep_labels(
         return
 
     write_lifted_labels(
-        bag_id, chunk_id, sweep_id,
+        bag_id,
+        chunk_id,
+        sweep_id,
         point_indices=np.array([p.point_idx for p in labeled], dtype=np.int32),
         instance_ids=[p.instance_id for p in labeled],
         classes=[p.cls for p in labeled],
         confidences=np.array([p.confidence for p in labeled], dtype=np.float32),
-        n_supporting=np.array([p.n_supporting_cameras for p in labeled], dtype=np.int32),
-        n_disagreeing=np.array([p.n_disagreeing_cameras for p in labeled], dtype=np.int32),
+        n_supporting=np.array(
+            [p.n_supporting_cameras for p in labeled], dtype=np.int32
+        ),
+        n_disagreeing=np.array(
+            [p.n_disagreeing_cameras for p in labeled], dtype=np.int32
+        ),
     )
 
 
@@ -257,5 +275,7 @@ def run(
 
     log.info(
         "semantic_lifting complete for bag %s: %d processed, %d skipped",
-        bag_id, n_ok, n_skip,
+        bag_id,
+        n_ok,
+        n_skip,
     )

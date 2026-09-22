@@ -233,9 +233,7 @@ def _synthesize_t_offset_ns_from_azimuth(
     elif rotation_dir == "cw":
         delta = (phi_start - phi) % (2.0 * np.pi)
     else:
-        raise ValueError(
-            f"rotation_dir must be 'ccw' or 'cw'; got {rotation_dir!r}"
-        )
+        raise ValueError(f"rotation_dir must be 'ccw' or 'cw'; got {rotation_dir!r}")
     frac = delta / (2.0 * np.pi)
     return (frac * sweep_duration_ns).astype(np.float64)
 
@@ -387,9 +385,10 @@ def process_chunk(
 
     pw = _make_patchwork(cfg.patchwork, required=cfg.require_patchwork)
 
-    # Scan rotation direction is a fixed hardware property — read it from the
-    # datasheet sensor profile rather than probing azimuth signs per sweep.
-    rotation_dir = cfg.build_sensor_model().rotation_dir
+    # Rotation direction and period are fixed hardware properties — read them
+    # from each lidar's datasheet profile rather than probing azimuth signs
+    # per sweep. On a mixed rig the corner scanners may differ from the centre.
+    sensor_by_lidar = {lid: cfg.build_sensor_model(lid) for lid in lidar_ids}
 
     results: list[DeskewResult] = []
     meta_rows: list[dict] = []
@@ -404,6 +403,7 @@ def process_chunk(
         lid = row["lidar_id"]
         if lid not in ego_T_lidar_by_id:
             continue
+        sensor = sensor_by_lidar[lid]
 
         sweep_id = int(row["sweep_id"])
         header_ts = int(row["header_timestamp_ns"])
@@ -449,8 +449,8 @@ def process_chunk(
                 filter_nonfinite=cfg.filter_nonfinite_points,
                 pw=pw,
                 synthesize_per_point_times=cfg.synthesize_per_point_times,
-                sweep_duration_ns=cfg.lidar_sweep_duration_ms * 1_000_000.0,
-                rotation_dir=rotation_dir,
+                sweep_duration_ns=sensor.sweep_duration_ns,
+                rotation_dir=sensor.rotation_dir,
                 allow_uncompensated_motion=cfg.allow_uncompensated_motion,
             )
         except Exception as exc:  # noqa: BLE001 — record failure, keep going

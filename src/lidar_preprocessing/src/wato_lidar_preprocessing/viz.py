@@ -211,7 +211,7 @@ def _p_occ_colors(p_occ: np.ndarray) -> np.ndarray:
 
     Diverging colormap centred on 0.5: 0.0=dark red, ~0.12=yellow
     (p_dynamic_threshold = 1-p_hit), ~0.88=blue (p_static_threshold = p_hit)
-    for the default velodyne_vlp profile. NaN points get faint gray.
+    for the default vlp32c profile. NaN points get faint gray.
     """
     import matplotlib.cm as cm
 

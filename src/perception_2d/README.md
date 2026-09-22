@@ -40,9 +40,38 @@ MODELS_ROOT=/srv/wato_models python3 src/perception_2d/scripts/fetch_models.py
 python3 src/perception_2d/scripts/fetch_models.py --skip depth_anything_v2
 ```
 
-Pulls GroundingDINO + Depth Anything V2 into the HF cache, the SAM2.1 checkpoint
-as a loose `.pt`, and DINOv2 into the torch.hub cache. The container points
-`HF_HOME` / `TORCH_HOME` at those caches and runs `HF_HUB_OFFLINE=1`.
+Pulls GroundingDINO, Depth Anything V2 and Florence-2 into the HF cache, the
+SAM2.1 checkpoint as a loose `.pt`, and DINOv2 into the torch.hub cache. The
+container points `HF_HOME` / `TORCH_HOME` at those caches and runs
+`HF_HUB_OFFLINE=1`.
+
+**Every model is pinned to an exact revision.** The registry lives at
+[`model_registry.py`](src/wato_perception_2d/model_registry.py) and is the
+single source of truth for both this fetcher and the in-container runtime
+loaders, so a pinned fetch and an unpinned load cannot disagree. These four
+models jointly decide every 2D label the pipeline emits; an unpinned HF `main`
+or torch.hub default branch would silently change the labeler between runs.
+
+Two consequences worth knowing:
+
+- `torch.hub` caches by ref, so `embeddings.py` loads
+  `facebookresearch/dinov2:<sha>`, not the bare repo. A bare reference looks
+  for a differently-named cache directory, misses the pre-fetched weights, and
+  tries to reach the network from a container whose `/data/models` is
+  read-only.
+- HF loaders (GroundingDINO, Florence-2, Depth Anything V2) pass
+  `revision=hf_revision(repo_id)`. `fetch_models.py` downloads by SHA, and
+  huggingface_hub writes no `refs/main` for a SHA fetch, so a loader asking for
+  the default `main` can't resolve offline on a clean host. A model ID in the
+  config that isn't in the registry now fails at load time on purpose; register
+  it with a SHA first.
+- Florence-2 is referenced by `discovery.model` in the config but was missing
+  from the registry until 2026-09-21, so it was never pre-fetched — enabling
+  discovery on a clean host failed at load time. It is registered now.
+
+To upgrade a model: change its revision in `model_registry.py`, re-run
+`fetch_models.py`, re-run the affected stages. The new revision is recorded in
+every manifest written afterwards, so old and new labels stay distinguishable.
 
 **2. Run on a bag** — `ingest` and `lidar_preprocessing` must have run first
 (perception_2d reads `frame_index`, calibration, and static LiDAR points):

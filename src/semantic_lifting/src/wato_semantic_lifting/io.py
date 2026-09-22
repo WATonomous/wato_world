@@ -26,7 +26,7 @@ from wato_common.artifact_store import (
     tracklets_2d_path,
 )
 from wato_common.io.parquet_io import read_rows, write_table
-from wato_common.schemas import LIFTED_STATS_SCHEMA, LiftedStatsRow
+from wato_common.schemas import LIFTED_STATS_SCHEMA
 from wato_semantic_lifting.temporal_match import CameraFrameRef
 
 
@@ -40,8 +40,8 @@ class LidarSweepInfo:
 
 @dataclass
 class CalibrationInfo:
-    K: np.ndarray        # (3, 3) float64 intrinsic
-    ego_T_cam: np.ndarray   # (4, 4) float64 SE3
+    K: np.ndarray  # (3, 3) float64 intrinsic
+    ego_T_cam: np.ndarray  # (4, 4) float64 SE3
     ego_T_lidar: np.ndarray  # (4, 4) float64 SE3
 
 
@@ -104,7 +104,9 @@ def load_calibration(bag_id: str) -> dict[str, CalibrationInfo]:
     for cam_id, entry in calib.get("cameras", {}).items():
         K = np.asarray(entry["K"], dtype=np.float64)
         ego_T_cam = np.asarray(entry["ego_T_cam"], dtype=np.float64)
-        result[cam_id] = CalibrationInfo(K=K, ego_T_cam=ego_T_cam, ego_T_lidar=ego_T_lidar)
+        result[cam_id] = CalibrationInfo(
+            K=K, ego_T_cam=ego_T_cam, ego_T_lidar=ego_T_lidar
+        )
     return result
 
 
@@ -149,7 +151,8 @@ def load_masks_for_frame(
     """
     rows = read_rows(tracklets_2d_path(bag_id, chunk_id))
     cam_rows = [
-        r for r in rows
+        r
+        for r in rows
         if r.get("cam_id") == cam_id
         and camera_seq in _decode_frames_present(r.get("frames_present", []))
     ]
@@ -212,7 +215,5 @@ def write_lifted_labels(
     )
 
 
-def write_lifted_stats(
-    bag_id: str, chunk_id: str, rows: list[dict]
-) -> None:
+def write_lifted_stats(bag_id: str, chunk_id: str, rows: list[dict]) -> None:
     write_table(rows, LIFTED_STATS_SCHEMA, lifted_stats_path(bag_id, chunk_id))

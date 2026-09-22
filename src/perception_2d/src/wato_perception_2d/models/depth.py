@@ -15,6 +15,8 @@ from typing import Optional
 
 import numpy as np
 
+from wato_perception_2d.model_registry import hf_revision
+
 log = logging.getLogger(__name__)
 
 
@@ -82,7 +84,9 @@ class DepthAnythingV2:
             encoder = self._encoder()
             head_cfg, repo_id = self._ENCODER_CONFIGS[encoder]
             ckpt = hf_hub_download(
-                repo_id=repo_id, filename=f"depth_anything_v2_{encoder}.pth"
+                repo_id=repo_id,
+                filename=f"depth_anything_v2_{encoder}.pth",
+                revision=hf_revision(repo_id),
             )
             model = _DA(encoder=encoder, **head_cfg)
             model.load_state_dict(torch.load(ckpt, map_location="cpu"))

@@ -1,0 +1,158 @@
+# Locked Python dependency set for the lidar_preprocessing component.
+#
+# GENERATED, NOT HAND-EDITED. Frozen on 2026-09-21 from the deps image that was
+# known-good at that time:
+#     docker run --rm --entrypoint uv \
+#         ghcr.io/watonomous/wato_world/lidar_preprocessing:deps_<tag> pip freeze --system
+#
+# See docker/requirements/ingest.txt for why these lockfiles exist and how to
+# regenerate one.
+#
+# KNOWN DRIFT CAPTURED IN THIS LOCK — clean up separately, do not hand-edit here
+# ------------------------------------------------------------------------------
+# The Dockerfile asked for `torch>=2.7,<3`, which floated to 2.11.0. Two
+# consequences, both locked in below because this set is what currently works:
+#
+#   1. `cuda-toolkit==12.8.1` is pulled in. torch 2.10+ added a runtime dep on
+#      that multi-GB PyPI meta-wheel. docker/perception_2d.Dockerfile pins
+#      torch==2.7.1 *specifically to avoid it* — the base image already ships
+#      the CUDA 12.8.1 runtime + cuDNN, so the meta-wheel is redundant bulk.
+#
+#   2. This component and perception_2d are on different torch builds
+#      (2.11.0 / cuDNN 9.19.0 / NCCL 2.28.9 here, vs 2.7.1 / cuDNN 9.7.1 /
+#      NCCL 2.26.2 there). Nothing shares tensors across the two images today,
+#      so this is not a correctness bug, but it doubles the CUDA wheel
+#      footprint on disk and means a kernel-level bug reproduces in one
+#      component and not the other.
+#
+# Aligning both components on one torch means rebuilding and re-validating
+# lidar_preprocessing (numba kernels, pypatchworkpp, open3d) — a separate,
+# testable change. Until then this lock at least makes the drift explicit and
+# frozen instead of silent and moving.
+#
+# INDEX RESOLUTION
+# ----------------
+# Installed with `--index-strategy unsafe-first-match`. uv's default strategy
+# considers only the FIRST index that carries a given package name, which
+# breaks here: download.pytorch.org/whl/cu128 mirrors common packages like
+# certifi at its own versions, so the default strategy refuses to fall back to
+# PyPI for them and the install fails to resolve. unsafe-first-match walks the
+# indexes in order and takes the first that has the *requested version* — PyPI
+# for ordinary packages, the cu128 index only for the wheels PyPI lacks
+# (torch==...+cu128 and friends).
+#
+# The "unsafe" in the name refers to dependency confusion, where an attacker
+# publishes a same-named package on another index. That risk is much reduced
+# here: every version is exactly pinned and installed with --no-deps, so a
+# hostile index cannot introduce a package or a version this file does not
+# already name. Both indexes are also first-party (PyPI, pytorch.org).
+
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+addict==2.4.0
+annotated-types==0.8.0
+asttokens==3.0.2
+attrs==26.1.0
+blinker==1.9.0
+certifi==2026.7.22
+charset-normalizer==3.5.1
+click==8.5.0
+cloudpickle==3.1.2
+comm==0.2.3
+configargparse==1.7.7
+contourpy==1.4.0
+cuda-bindings==12.9.7
+cuda-pathfinder==1.6.0
+cuda-toolkit==12.8.1
+cycler==0.12.1
+dash==4.4.1
+executing==2.2.1
+fastjsonschema==2.22.2
+filelock==3.32.3
+flask==3.1.3
+fonttools==4.65.0
+fsspec==2026.7.0
+idna==3.19
+importlib-metadata==9.0.1
+ipython==9.17.1
+ipython-pygments-lexers==1.1.1
+ipywidgets==8.1.9
+itsdangerous==2.2.0
+janus==2.0.0
+jedi==0.20.0
+jinja2==3.1.6
+joblib==1.6.0
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+jupyter-core==5.9.1
+jupyterlab-widgets==3.0.17
+kiwisolver==1.5.1
+llvmlite==0.49.0
+markupsafe==3.0.3
+matplotlib==3.11.2
+matplotlib-inline==0.2.2
+mpmath==1.3.0
+narwhals==2.26.0
+nbformat==5.11.1
+nest-asyncio==1.6.0
+networkx==3.6.1
+numba==0.67.0
+numpy==2.5.3
+nvidia-cublas-cu12==12.8.4.1
+nvidia-cuda-cupti-cu12==12.8.90
+nvidia-cuda-nvrtc-cu12==12.8.93
+nvidia-cuda-runtime-cu12==12.8.90
+nvidia-cudnn-cu12==9.19.0.56
+nvidia-cufft-cu12==11.3.3.83
+nvidia-cufile-cu12==1.13.1.3
+nvidia-curand-cu12==10.3.9.90
+nvidia-cusolver-cu12==11.7.3.90
+nvidia-cusparse-cu12==12.5.8.93
+nvidia-cusparselt-cu12==0.7.1
+nvidia-nccl-cu12==2.28.9
+nvidia-nvjitlink-cu12==12.8.93
+nvidia-nvshmem-cu12==3.4.5
+nvidia-nvtx-cu12==12.8.90
+open3d==0.19.0
+packaging==26.3
+pandas==3.0.5
+parso==0.8.7
+pexpect==4.9.0
+pillow==12.3.0
+platformdirs==4.11.8
+plotly==7.0.0
+prompt-toolkit==3.0.53
+psutil==7.2.2
+ptyprocess==0.7.0
+pure-eval==0.2.4
+pyarrow==25.0.1
+pydantic==2.13.5
+pydantic-core==2.46.5
+pygments==2.21.0
+pyparsing==3.3.2
+pypatchworkpp==1.0.4
+pyquaternion==0.9.9
+python-dateutil==2.9.0.post0
+pyyaml==6.0.3
+referencing==0.37.0
+requests==2.34.2
+retrying==1.4.2
+rpds-py==2026.6.3
+scikit-learn==1.9.1
+scipy==1.18.1
+setuptools==78.1.0
+six==1.17.0
+stack-data==0.6.3
+sympy==1.14.0
+threadpoolctl==3.6.0
+torch==2.11.0+cu128
+tqdm==4.70.1
+traitlets==5.16.1
+triton==3.6.0
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+urllib3==2.7.0
+wcwidth==0.8.3
+werkzeug==3.1.8
+widgetsnbextension==4.0.16
+zipp==4.1.0

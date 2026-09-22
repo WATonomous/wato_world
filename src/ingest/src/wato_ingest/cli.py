@@ -277,14 +277,18 @@ def run_cmd(
         only_chunk=only_chunk,
     )
     click.echo("")
-    click.echo(f"bag: {results[0].bag_id}  ({len(results)} chunk{'s' if len(results) != 1 else ''})")
+    click.echo(
+        f"bag: {results[0].bag_id}  ({len(results)} chunk{'s' if len(results) != 1 else ''})"
+    )
     click.echo("")
     click.echo(f"  {'chunk':<8}  {'frames':>8}  {'dropped':>7}  tags")
     click.echo(f"  {'-----':<8}  {'------':>8}  {'-------':>7}  ----")
     for r in results:
         total = r.valid_camera_count + r.dropped_camera_count
         tags = ", ".join(r.quality_tags) if r.quality_tags else "ok"
-        click.echo(f"  {r.chunk_id:<8}  {r.valid_camera_count:>6}/{total:<6}  {r.dropped_camera_count:>7}  {tags}")
+        click.echo(
+            f"  {r.chunk_id:<8}  {r.valid_camera_count:>6}/{total:<6}  {r.dropped_camera_count:>7}  {tags}"
+        )
     click.echo("")
 
 

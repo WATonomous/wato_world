@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from wato_semantic_lifting.temporal_match import (
     CameraFrameRef,
@@ -28,9 +27,9 @@ def _frame(cam_id: str, seq: int, ts_ns: int) -> CameraFrameRef:
 
 def test_match_within_tolerance_returns_nearest():
     frames = [
-        _frame("cam_front", 0, 1_000_000_000),   # 1.000 s
-        _frame("cam_front", 1, 1_030_000_000),   # 1.030 s — nearest
-        _frame("cam_front", 2, 1_060_000_000),   # 1.060 s
+        _frame("cam_front", 0, 1_000_000_000),  # 1.000 s
+        _frame("cam_front", 1, 1_030_000_000),  # 1.030 s — nearest
+        _frame("cam_front", 2, 1_060_000_000),  # 1.060 s
     ]
     result = match_sweep_to_frames(1_025_000_000, frames, max_offset_s=0.05)
     assert "cam_front" in result

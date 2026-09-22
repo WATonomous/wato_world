@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 CLASS_STATIC = 0
 CLASS_AMBIGUOUS = 1  # evidenced + has_hits + p_dynamic ≤ p_occ < p_static
 CLASS_UNDER_EVIDENCED = 2  # has_hits but n_obs < min_observations
-CLASS_FREE_ONLY = 3  # n_hits < min_occupied_hits
+CLASS_FREE_ONLY = 3  # traversed but never hit (n_hits == 0)
 CLASS_DYNAMIC = 4  # evidenced + has_hits + p_occ < p_dynamic_threshold
 
 
@@ -78,7 +78,7 @@ def build_log_odds_grid(
     d_star = sensor_model.credibility_crossover_m(voxel_size)
     margin_m = sensor_model.carve_margin_m(pose_sigma_m)
     grazing_cos = sensor_model.grazing_cos_threshold(voxel_size)
-    max_len = cfg.effective_max_ray_length_m()
+    max_len = sensor_model.max_range_m
     log.info(
         "chunk %s log-odds model (%s): l_occ=%.3f l_free=%.3f clamp=%.3f "
         "d*=%.1fm carve_margin=%.3fm grazing_cos=%.2f (σ_range=%.3f "
@@ -175,13 +175,12 @@ def build_log_odds_grid(
         else:
             xyz, _, _, _ = load_world_full(row["world_path"])
 
-        if cfg.ground_endpoint_strategy == "skip_endpoint":
-            # Kernel skips +l_occ at ground endpoints but still carves the ray.
-            endpoints_arr = xyz
-            is_ground_arr = ground_mask
-        else:  # "skip_ray" — drop ground rays entirely.
-            endpoints_arr = xyz[~ground_mask] if ground_mask is not None else xyz
-            is_ground_arr = None
+        # Ground rays are traversed for their free-space evidence but add no
+        # +l_occ at the endpoint: the road is not a mover, and crediting it
+        # with occupancy makes every drive-over reinforce a surface that
+        # Patchwork++ has already claimed. The kernel applies this per point.
+        endpoints_arr = xyz
+        is_ground_arr = ground_mask
 
         if endpoints_arr.shape[0] > 0:
             update_sweep_log_odds(
@@ -250,12 +249,20 @@ def classify_from_log_odds(
     cfg: ComponentConfig,
     sensor_model: SensorModel,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, int]]:
-    """Return (static_arr, not_dynamic_arr, classification, diag).
+    """Return (static_arr, dynamic_arr, classification, diag).
 
     static if p_occ ≥ p_static (= p_hit), dynamic if p_occ < p_dynamic
-    (= 1-p_hit); the band between is AMBIGUOUS → not-dynamic (conservative).
-    not_dynamic_arr is the union of (static + free_only + under-with-hits +
-    ambiguous); points in any of those get mask=False.
+    (= 1-p_hit) AND the voxel is evidenced with hits; the band between is
+    AMBIGUOUS → not dynamic (conservative).
+
+    A point is dynamic IFF its voxel is in dynamic_arr. Everything else —
+    static, ambiguous, under-evidenced, free-only, and voxels never observed
+    at all — is not dynamic: absence of evidence is not motion evidence.
+    (The old formulation defaulted never-observed voxels to dynamic, which
+    dumped every return outside the observed grid into dynamic_map.npz.)
+
+    Both returned key arrays are sorted (unique_keys is sorted; boolean
+    masking preserves order), so callers may use np.searchsorted directly.
     """
     if unique_keys.size == 0:
         empty = np.empty(0, dtype=np.int64)
@@ -268,6 +275,7 @@ def classify_from_log_odds(
                 "n_under_evidenced_with_hits": 0,
                 "n_ambiguous": 0,
                 "n_free_only": 0,
+                "n_dynamic_voxels": 0,
             },
         )
 
@@ -276,16 +284,15 @@ def classify_from_log_odds(
 
     p_occ = sigmoid(lo_vals)
     evidenced = n_obs_vals >= cfg.min_observations
-    has_hits = n_hits_vals >= cfg.min_occupied_hits
+    # "Was anything ever measured here?" — a yes/no question, not a threshold.
+    has_hits = n_hits_vals > 0
 
     static_mask = evidenced & has_hits & (p_occ >= p_static_threshold)
     static_arr = unique_keys[static_mask]
 
-    free_only_mask = n_hits_vals < cfg.min_occupied_hits
-    free_only_arr = unique_keys[free_only_mask]
+    free_only_mask = ~has_hits
 
     under_evidenced_with_hits_mask = (~evidenced) & has_hits
-    under_arr = unique_keys[under_evidenced_with_hits_mask]
 
     ambiguous_mask = (
         evidenced
@@ -293,21 +300,12 @@ def classify_from_log_odds(
         & (p_occ < p_static_threshold)
         & (p_occ >= p_dynamic_threshold)
     )
-    ambiguous_arr = unique_keys[ambiguous_mask]
 
-    parts = [
-        a for a in (static_arr, free_only_arr, under_arr, ambiguous_arr) if a.size > 0
-    ]
-    if not parts:
-        not_dynamic_arr = np.empty(0, dtype=np.int64)
-    elif len(parts) == 1:
-        not_dynamic_arr = parts[0]
-    else:
-        not_dynamic_arr = np.unique(np.concatenate(parts))
+    dynamic_mask = evidenced & has_hits & (p_occ < p_dynamic_threshold)
+    dynamic_arr = unique_keys[dynamic_mask]
 
     # CLASS_FREE_ONLY is the default; predicates below are mutually
     # exclusive partitions of (evidenced, has_hits, p_occ) space.
-    dynamic_mask = evidenced & has_hits & (p_occ < p_dynamic_threshold)
     classification = np.full(unique_keys.shape[0], CLASS_FREE_ONLY, dtype=np.int8)
     classification[under_evidenced_with_hits_mask] = CLASS_UNDER_EVIDENCED
     classification[dynamic_mask] = CLASS_DYNAMIC
@@ -319,5 +317,6 @@ def classify_from_log_odds(
         "n_under_evidenced_with_hits": int(under_evidenced_with_hits_mask.sum()),
         "n_ambiguous": int(ambiguous_mask.sum()),
         "n_free_only": int(free_only_mask.sum()),
+        "n_dynamic_voxels": int(dynamic_mask.sum()),
     }
-    return static_arr, not_dynamic_arr, classification, diag
+    return static_arr, dynamic_arr, classification, diag

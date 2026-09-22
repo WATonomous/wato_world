@@ -330,7 +330,8 @@ class ChunkSummaryRow(BaseModel):
     ground_status: str  # "ok" | "skipped_no_ground_mask" | "empty"
     # MF-MOS step stats — None when mf_mos.enabled is False.
     mf_mos_n_processed: Optional[int] = None
-    mf_mos_n_skipped: Optional[int] = None
+    mf_mos_n_skipped: Optional[int] = None  # failures (pose gap, empty, infer error)
+    mf_mos_n_unsupported: Optional[int] = None  # scanner below MIN_BEAMS; by design
     mf_mos_n_points_moving: Optional[int] = None
 
 
@@ -351,6 +352,7 @@ CHUNK_SUMMARY_SCHEMA = pa.schema(
         pa.field("ground_status", pa.string()),
         pa.field("mf_mos_n_processed", pa.int64()),
         pa.field("mf_mos_n_skipped", pa.int64()),
+        pa.field("mf_mos_n_unsupported", pa.int64()),
         pa.field("mf_mos_n_points_moving", pa.int64()),
     ]
 )
@@ -400,11 +402,13 @@ class MaskletRow(BaseModel):
     dino_feature_path: Optional[str] = None  # DINOv2 embedding NPZ
     global_object_id: Optional[str] = None  # cross-camera identity
     # detector + SAM2 fields
-    raw_phrase: str = ""          # raw detector label before canonicalisation
-    det_score: float = 0.0        # detector (× SAM2 mask) confidence
+    raw_phrase: str = ""  # raw detector label before canonicalisation
+    det_score: float = 0.0  # detector (× SAM2 mask) confidence
     discovery_score: float = 0.0  # detector / Florence-2 confidence
-    centroid_depth_m: float = 0.0 # metric depth at mask centroid (used for cross-cam merge)
-    tracker_backend: str = "sam2" # tracker that produced this masklet
+    centroid_depth_m: float = (
+        0.0  # metric depth at mask centroid (used for cross-cam merge)
+    )
+    tracker_backend: str = "sam2"  # tracker that produced this masklet
 
 
 MASKLET_SCHEMA = pa.schema(
@@ -445,10 +449,10 @@ class DepthFrameRow(BaseModel):
     chunk_id: str
     cam_id: str
     frame_seq: int
-    affine_a: float   # scale: d_lidar = a * d_da + b
-    affine_b: float   # offset
-    n_anchors: int    # (d_lidar, d_da) pairs before RANSAC
-    n_inliers: int    # RANSAC inliers
+    affine_a: float  # scale: d_lidar = a * d_da + b
+    affine_b: float  # offset
+    n_anchors: int  # (d_lidar, d_da) pairs before RANSAC
+    n_inliers: int  # RANSAC inliers
     rmse_inliers_m: float
     fit_status: int
 

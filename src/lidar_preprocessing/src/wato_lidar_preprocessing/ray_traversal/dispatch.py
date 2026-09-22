@@ -39,8 +39,7 @@ except Exception as _e:  # noqa: BLE001 — half-installed numba can raise Attri
 
 
 _MISSING_NUMBA_MSG = (
-    "log-odds classification requires numba; install it "
-    "(pip install 'numba>=0.59')"
+    "log-odds classification requires numba; install it " "(pip install 'numba>=0.59')"
 )
 
 
@@ -254,7 +253,7 @@ def apply_global_map_boost(
     log_odds, clamped at ±clamp.
 
     Only touches log_odds — n_hits stays backed by real sweep returns so
-    the has_hits / min_occupied_hits gate isn't bypassed by the prior.
+    the has_hits gate isn't bypassed by the prior.
     """
     _require_numba()
     if hit_keys.size == 0:

@@ -59,113 +59,119 @@ def _update_sweep_python(
         dy = ey - oy
         dz = ez - oz
         length = math.sqrt(dx * dx + dy * dy + dz * dz)
-        if length < 1e-9 or length > max_length_m:
+        if length < 1e-9:
             continue
 
         r_star_endpoint = d_star / length
         if r_star_endpoint > 1.0:
             r_star_endpoint = 1.0
 
-        inv_len = 1.0 / length
-        dxn = dx * inv_len
-        dyn = dy * inv_len
-        dzn = dz * inv_len
-
-        cx = int(math.floor((ox - cox) / voxel_size))
-        cy = int(math.floor((oy - coy) / voxel_size))
-        cz = int(math.floor((oz - coz) / voxel_size))
         exi = int(math.floor((ex - cox) / voxel_size))
         eyi = int(math.floor((ey - coy) / voxel_size))
         ezi = int(math.floor((ez - coz) / voxel_size))
 
-        frac_x = (ox - cox) - cx * voxel_size
-        frac_y = (oy - coy) - cy * voxel_size
-        frac_z = (oz - coz) - cz * voxel_size
+        # Free-space carving only inside the compute guard; the endpoint hit
+        # below runs regardless of ray length (matches the Numba kernel).
+        if length <= max_length_m:
+            inv_len = 1.0 / length
+            dxn = dx * inv_len
+            dyn = dy * inv_len
+            dzn = dz * inv_len
 
-        if dxn > 1e-12:
-            sx = 1
-            t_delta_x = voxel_size / dxn
-            t_max_x = (voxel_size - frac_x) / dxn
-        elif dxn < -1e-12:
-            sx = -1
-            t_delta_x = voxel_size / (-dxn)
-            t_max_x = frac_x / (-dxn)
-        else:
-            sx = 0
-            t_delta_x = INF
-            t_max_x = INF
+            cx = int(math.floor((ox - cox) / voxel_size))
+            cy = int(math.floor((oy - coy) / voxel_size))
+            cz = int(math.floor((oz - coz) / voxel_size))
 
-        if dyn > 1e-12:
-            sy = 1
-            t_delta_y = voxel_size / dyn
-            t_max_y = (voxel_size - frac_y) / dyn
-        elif dyn < -1e-12:
-            sy = -1
-            t_delta_y = voxel_size / (-dyn)
-            t_max_y = frac_y / (-dyn)
-        else:
-            sy = 0
-            t_delta_y = INF
-            t_max_y = INF
+            frac_x = (ox - cox) - cx * voxel_size
+            frac_y = (oy - coy) - cy * voxel_size
+            frac_z = (oz - coz) - cz * voxel_size
 
-        if dzn > 1e-12:
-            sz = 1
-            t_delta_z = voxel_size / dzn
-            t_max_z = (voxel_size - frac_z) / dzn
-        elif dzn < -1e-12:
-            sz = -1
-            t_delta_z = voxel_size / (-dzn)
-            t_max_z = frac_z / (-dzn)
-        else:
-            sz = 0
-            t_delta_z = INF
-            t_max_z = INF
-
-        stop_t = length - margin_m
-
-        while True:
-            if t_max_x <= t_max_y and t_max_x <= t_max_z:
-                if t_max_x >= stop_t:
-                    break
-                t_entry = t_max_x
-                cx += sx
-                t_max_x += t_delta_x
-            elif t_max_y <= t_max_z:
-                if t_max_y >= stop_t:
-                    break
-                t_entry = t_max_y
-                cy += sy
-                t_max_y += t_delta_y
+            if dxn > 1e-12:
+                sx = 1
+                t_delta_x = voxel_size / dxn
+                t_max_x = (voxel_size - frac_x) / dxn
+            elif dxn < -1e-12:
+                sx = -1
+                t_delta_x = voxel_size / (-dxn)
+                t_max_x = frac_x / (-dxn)
             else:
-                if t_max_z >= stop_t:
-                    break
-                t_entry = t_max_z
-                cz += sz
-                t_max_z += t_delta_z
+                sx = 0
+                t_delta_x = INF
+                t_max_x = INF
 
-            if not (
-                0 <= cx < AXIS_RANGE and 0 <= cy < AXIS_RANGE and 0 <= cz < AXIS_RANGE
-            ):
-                continue
+            if dyn > 1e-12:
+                sy = 1
+                t_delta_y = voxel_size / dyn
+                t_max_y = (voxel_size - frac_y) / dyn
+            elif dyn < -1e-12:
+                sy = -1
+                t_delta_y = voxel_size / (-dyn)
+                t_max_y = frac_y / (-dyn)
+            else:
+                sy = 0
+                t_delta_y = INF
+                t_max_y = INF
 
-            r_star_t = d_star / t_entry
-            if r_star_t > 1.0:
-                r_star_t = 1.0
+            if dzn > 1e-12:
+                sz = 1
+                t_delta_z = voxel_size / dzn
+                t_max_z = (voxel_size - frac_z) / dzn
+            elif dzn < -1e-12:
+                sz = -1
+                t_delta_z = voxel_size / (-dzn)
+                t_max_z = frac_z / (-dzn)
+            else:
+                sz = 0
+                t_delta_z = INF
+                t_max_z = INF
 
-            key = (cx << SHIFT_X) | (cy << SHIFT_Y) | cz
+            stop_t = length - margin_m
 
-            # Incidence gate: skip carving an occupied voxel the ray grazes.
-            if nx is not None and key in nx:
-                dot = abs(dxn * nx[key] + dyn * ny[key] + dzn * nz[key])
-                if dot < grazing_cos:
+            while True:
+                if t_max_x <= t_max_y and t_max_x <= t_max_z:
+                    if t_max_x >= stop_t:
+                        break
+                    t_entry = t_max_x
+                    cx += sx
+                    t_max_x += t_delta_x
+                elif t_max_y <= t_max_z:
+                    if t_max_y >= stop_t:
+                        break
+                    t_entry = t_max_y
+                    cy += sy
+                    t_max_y += t_delta_y
+                else:
+                    if t_max_z >= stop_t:
+                        break
+                    t_entry = t_max_z
+                    cz += sz
+                    t_max_z += t_delta_z
+
+                if not (
+                    0 <= cx < AXIS_RANGE
+                    and 0 <= cy < AXIS_RANGE
+                    and 0 <= cz < AXIS_RANGE
+                ):
                     continue
 
-            old_lo = log_odds.get(key, 0.0)
-            new_lo = np.float32(old_lo) - np.float32(l_free * r_star_t)
-            if new_lo < np.float32(-log_odds_clamp):
-                new_lo = np.float32(-log_odds_clamp)
-            log_odds[key] = new_lo
-            n_obs[key] = n_obs.get(key, np.int32(0)) + np.int32(1)
+                r_star_t = d_star / t_entry
+                if r_star_t > 1.0:
+                    r_star_t = 1.0
+
+                key = (cx << SHIFT_X) | (cy << SHIFT_Y) | cz
+
+                # Incidence gate: skip carving an occupied voxel the ray grazes.
+                if nx is not None and key in nx:
+                    dot = abs(dxn * nx[key] + dyn * ny[key] + dzn * nz[key])
+                    if dot < grazing_cos:
+                        continue
+
+                old_lo = log_odds.get(key, 0.0)
+                new_lo = np.float32(old_lo) - np.float32(l_free * r_star_t)
+                if new_lo < np.float32(-log_odds_clamp):
+                    new_lo = np.float32(-log_odds_clamp)
+                log_odds[key] = new_lo
+                n_obs[key] = n_obs.get(key, np.int32(0)) + np.int32(1)
 
         if (
             not is_g

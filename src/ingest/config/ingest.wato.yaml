@@ -51,10 +51,20 @@ topics:
     PANO_SW: { image: /camera_pano_sw/image_rect_compressed, info: /camera_pano_sw/camera_info }
     PANO_NW: { image: /camera_pano_nw/image_rect_compressed, info: /camera_pano_nw/camera_info }
   lidars:
-    # The merged full-ring cloud (fusion of the per-corner Velodynes).  It is
-    # the single primary cloud, analogous to nuScenes LIDAR_TOP.  Swap for a
-    # per-corner topic (e.g. /lidar_cc/velodyne_points) if you want raw sweeps.
-    LIDAR_TOP: /lidar/all/points_merged
+    # Per-sensor sweeps, NOT the merged /lidar/all/points_merged cloud.
+    # lidar_preprocessing's classify step ray-casts every sweep from a single
+    # sensor origin; the merged cloud mixes returns from three physically
+    # offset scanners, so rays traced from any one origin carve through
+    # genuinely occupied voxels (worst near the vehicle) and leak static
+    # structure into dynamic_map.npz.  Ingesting the raw per-corner topics
+    # gives every sweep its true origin; grouping sweeps into frames is
+    # handled downstream by lidar_preprocessing's frame_sync
+    # (canonical_lidar: lidar_cc — see lidar_preprocessing.wato.yaml).
+    # NOTE: frame_index.parquet gains one row per (sweep, cam) for EVERY
+    # lidar, so per-corner ingest triples its row count vs. the merged topic.
+    lidar_cc: /lidar_cc/velodyne_points   # centre VLP-32C (canonical)
+    lidar_ne: /lidar_ne/velodyne_points   # corner VLP-16
+    lidar_nw: /lidar_nw/velodyne_points   # corner VLP-16
   # Pose: eidos SLAM odometry — stamped at the LiDAR keyframe sensor time, in
   # the SLAM-optimized map frame, child=base_footprint.  This is the canonical
   # WATO pose source.  Do NOT use /tf (wall-clock-stamped; desyncs from LiDAR).

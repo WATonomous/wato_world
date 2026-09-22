@@ -19,6 +19,8 @@ from typing import Optional
 
 import numpy as np
 
+from wato_perception_2d.model_registry import hf_revision
+
 log = logging.getLogger(__name__)
 
 
@@ -66,11 +68,15 @@ class Florence2Discovery:
         try:
             from transformers import AutoModelForCausalLM, AutoProcessor
 
+            # revision also pins the remote code (transformers' code_revision
+            # defaults to it) — trust_remote_code on a moving branch would run
+            # whatever modeling code upstream pushed last.
+            revision = hf_revision(self._model_id)
             self._processor = AutoProcessor.from_pretrained(
-                self._model_id, trust_remote_code=True
+                self._model_id, revision=revision, trust_remote_code=True
             )
             self._model = AutoModelForCausalLM.from_pretrained(
-                self._model_id, trust_remote_code=True
+                self._model_id, revision=revision, trust_remote_code=True
             ).to(self._device)
             self._model.eval()
             log.info("Florence-2 loaded (%s) on %s", self._model_id, self._device)

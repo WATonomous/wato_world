@@ -63,9 +63,7 @@ class _FakePredictor:
         )
         for f in range(start_frame_idx, stop + 1):
             present = [
-                (oid, box)
-                for oid, (af, box) in sorted(self._objs.items())
-                if af <= f
+                (oid, box) for oid, (af, box) in sorted(self._objs.items()) if af <= f
             ]
             obj_ids = [oid for oid, _ in present]
             if present:
@@ -189,7 +187,16 @@ def test_mask_saved_at_frame_resolution(tmp_path):
 
 
 def test_empty_inputs_return_empty(tmp_path):
-    assert _track(_FakePredictor(8, 8), _ConstDetector([]), [], [], masks_2d_base_dir=str(tmp_path)) == []
+    assert (
+        _track(
+            _FakePredictor(8, 8),
+            _ConstDetector([]),
+            [],
+            [],
+            masks_2d_base_dir=str(tmp_path),
+        )
+        == []
+    )
 
 
 # ---------------------------------------------------------------------------

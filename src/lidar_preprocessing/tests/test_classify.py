@@ -1,6 +1,6 @@
 """Tests for classify (Step B — voxel static/dynamic decomposition).
 
-Constants are derived from the SensorModel (default velodyne_vlp): l_occ≈1.99,
+Constants are derived from the SensorModel (default vlp32c): l_occ≈1.99,
 l_free≈0.41, p_static=0.88, p_dynamic=0.12. Tests engineer geometry that lands
 robustly in the intended class rather than pinning exact log-odds. Every sweep
 carries an `origin` (required by the log-odds ray-casting path).
@@ -12,6 +12,7 @@ import os
 
 import numpy as np
 import pytest
+from pydantic import ValidationError
 
 from wato_common.artifact_store import (
     dynamic_map_path,
@@ -295,9 +296,7 @@ def test_log_odds_static_accumulated_from_fixed_point(tmp_env):
         bag_id, chunk_id, list(range(n_sweeps)), xyz_per_sweep=[point_xyz] * n_sweeps
     )
 
-    result = process_chunk(
-        ComponentConfig(min_observations=3), bag_id, chunk_id
-    )
+    result = process_chunk(ComponentConfig(min_observations=3), bag_id, chunk_id)
 
     assert result.n_static == n_sweeps, "all points should be static"
     assert result.n_dynamic == 0
@@ -323,9 +322,7 @@ def test_log_odds_free_only_voxel_not_dynamic(tmp_env):
     _write_proc_index(bag_id, chunk_id, [0, 1], xyz_per_sweep=[xyz0, xyz1])
 
     cfg = ComponentConfig(
-        ground_endpoint_strategy="skip_endpoint",
         min_observations=3,
-        min_occupied_hits=1,
     )
     process_chunk(cfg, bag_id, chunk_id)
 
@@ -353,8 +350,12 @@ def test_static_map_xyz_excludes_free_only_and_under_evidenced(tmp_env):
 
     ground_sweep_id = n_static_sweeps
     _write_world_sweep(
-        bag_id, chunk_id, ground_sweep_id, ground_pt,
-        origin=sensor_origin, ground_mask=np.array([True]),
+        bag_id,
+        chunk_id,
+        ground_sweep_id,
+        ground_pt,
+        origin=sensor_origin,
+        ground_mask=np.array([True]),
     )
     xyz_per_sweep.append(ground_pt)
 
@@ -366,15 +367,13 @@ def test_static_map_xyz_excludes_free_only_and_under_evidenced(tmp_env):
     _write_proc_index(bag_id, chunk_id, sweep_ids, xyz_per_sweep=xyz_per_sweep)
 
     cfg = ComponentConfig(
-        ground_endpoint_strategy="skip_endpoint",
         min_observations=3,
-        min_occupied_hits=1,
     )
     result = process_chunk(cfg, bag_id, chunk_id)
 
-    assert result.n_static == n_static_sweeps, (
-        f"expected {n_static_sweeps} confident-static points, got {result.n_static}"
-    )
+    assert (
+        result.n_static == n_static_sweeps
+    ), f"expected {n_static_sweeps} confident-static points, got {result.n_static}"
 
     static_xyz = np.load(local_path(static_map_path(bag_id, chunk_id)))["xyz"]
     assert static_xyz.shape[0] == n_static_sweeps
@@ -383,12 +382,12 @@ def test_static_map_xyz_excludes_free_only_and_under_evidenced(tmp_env):
     )
 
     flat = static_xyz.reshape(-1, 3)
-    assert not (flat == ground_pt[0]).all(axis=1).any(), (
-        "ground point in free-only voxel must NOT appear in static_map.npz['xyz']"
-    )
-    assert not (flat == under_pt[0]).all(axis=1).any(), (
-        "under-evidenced point must NOT appear in static_map.npz['xyz']"
-    )
+    assert (
+        not (flat == ground_pt[0]).all(axis=1).any()
+    ), "ground point in free-only voxel must NOT appear in static_map.npz['xyz']"
+    assert (
+        not (flat == under_pt[0]).all(axis=1).any()
+    ), "under-evidenced point must NOT appear in static_map.npz['xyz']"
 
 
 def test_under_evidenced_with_hits_not_dynamic(tmp_env):
@@ -404,9 +403,7 @@ def test_under_evidenced_with_hits_not_dynamic(tmp_env):
     _write_world_sweep(bag_id, chunk_id, 0, xyz, origin=np.array([-1.0, 0.0, 0.0]))
     _write_proc_index(bag_id, chunk_id, [0], xyz_per_sweep=[xyz])
 
-    result = process_chunk(
-        ComponentConfig(min_observations=3, min_occupied_hits=1), bag_id, chunk_id
-    )
+    result = process_chunk(ComponentConfig(min_observations=3), bag_id, chunk_id)
 
     assert result.n_static == 0, "under-evidenced voxel must not be static"
     assert result.n_dynamic == 0, "under-evidenced voxel WITH hits must not be dynamic"
@@ -423,15 +420,17 @@ def test_skip_endpoint_isolated_ground_voxel_not_dynamic(tmp_env):
     xyz = np.array([[0.05, 0.0, 0.01]])
 
     _write_world_sweep(
-        bag_id, chunk_id, 0, xyz,
-        origin=np.array([-1.0, 0.0, 0.0]), ground_mask=np.array([True]),
+        bag_id,
+        chunk_id,
+        0,
+        xyz,
+        origin=np.array([-1.0, 0.0, 0.0]),
+        ground_mask=np.array([True]),
     )
     _write_proc_index(bag_id, chunk_id, [0], xyz_per_sweep=[xyz])
 
     cfg = ComponentConfig(
-        ground_endpoint_strategy="skip_endpoint",
         min_observations=1,
-        min_occupied_hits=1,
     )
     process_chunk(cfg, bag_id, chunk_id)
 
@@ -439,33 +438,6 @@ def test_skip_endpoint_isolated_ground_voxel_not_dynamic(tmp_env):
     assert not mask[0], "isolated ground voxel must not leak into dynamic"
     dyn = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
     assert dyn["xyz"].shape[0] == 0, "dynamic_map.npz must be empty"
-
-
-def test_skip_ray_ground_not_dynamic(tmp_env):
-    """In skip_ray mode, ground voxels must not be labeled dynamic and the mask
-    length still matches the world NPZ point count."""
-    bag_id, chunk_id = "bag_lo_skipray", "chunk0"
-    xyz = np.array([[0.05, 0.0, 0.01], [5.0, 0.0, 0.0]])
-    ground_mask = np.array([True, False])
-
-    _write_world_sweep(
-        bag_id, chunk_id, 0, xyz,
-        origin=np.array([-1.0, 0.0, 0.0]), ground_mask=ground_mask,
-    )
-    _write_proc_index(bag_id, chunk_id, [0], xyz_per_sweep=[xyz])
-
-    cfg = ComponentConfig(
-        ground_endpoint_strategy="skip_ray",
-        min_observations=1,
-        min_occupied_hits=1,
-    )
-    process_chunk(cfg, bag_id, chunk_id)
-
-    mask = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
-    assert mask.shape == (2,), (
-        f"mask length must match total world NPZ points (2), got {mask.shape[0]}"
-    )
-    assert not mask[0], "ground point in skip_ray mode must not be dynamic"
 
 
 # ---------------------------------------------------------------------------
@@ -518,7 +490,6 @@ def test_union_fusion_flips_per_sweep_flagged_points(tmp_env):
 
     cfg = ComponentConfig(
         min_observations=3,
-        min_occupied_hits=1,
         mf_mos={"enabled": True, "fusion_mode": "union"},
     )
     result = process_chunk(cfg, bag_id, chunk_id)
@@ -546,7 +517,6 @@ def test_independent_mode_no_mf_mos_effect(tmp_env):
 
     cfg = ComponentConfig(
         min_observations=3,
-        min_occupied_hits=1,
         mf_mos={"enabled": True, "fusion_mode": "independent"},
     )
     result = process_chunk(cfg, bag_id, chunk_id)
@@ -563,17 +533,19 @@ def test_union_fusion_must_not_reintroduce_ground_via_mf_mos(tmp_env):
     mf_flags = np.array([False, True])
 
     _write_world_sweep(
-        bag_id, chunk_id, 0, xyz,
-        origin=np.array([-1.0, 0.0, 0.0]), ground_mask=ground_mask,
+        bag_id,
+        chunk_id,
+        0,
+        xyz,
+        origin=np.array([-1.0, 0.0, 0.0]),
+        ground_mask=ground_mask,
     )
     mf_uri = _write_mf_mos_mask(bag_id, chunk_id, 0, mf_flags)
     rows = [_proc_row_mf_mos(bag_id, chunk_id, 0, xyz, mf_uri)]
     write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
 
     cfg = ComponentConfig(
-        ground_endpoint_strategy="skip_endpoint",
         min_observations=1,
-        min_occupied_hits=1,
         mf_mos={"enabled": True, "fusion_mode": "union"},
     )
     process_chunk(cfg, bag_id, chunk_id)
@@ -585,35 +557,151 @@ def test_union_fusion_must_not_reintroduce_ground_via_mf_mos(tmp_env):
     assert not mask[0], "ground point's dynamic-mask bit must be False under union"
 
 
-def test_mfmos_only_fusion_must_not_label_ground_dynamic(tmp_env):
-    """mfmos_only mode overwrites the mask with the MF-MOS mask; the ground
-    filter must be re-applied so a co-voxel ground point isn't flagged."""
-    bag_id, chunk_id = "bag_mfonly_ground", "chunk0"
-    xyz = np.array([[5.0, 0.0, 0.0], [5.0, 0.0, 0.05]])
-    ground_mask = np.array([True, False])
-    mf_flags = np.array([False, True])
+def test_union_empty_mask_keeps_voxel_classifier_verdict(tmp_env):
+    """Union only ever ADDS movers: a sweep whose MF-MOS verdict is all-False
+    keeps the voxel classifier's carved-dynamic points.
 
-    _write_world_sweep(
-        bag_id, chunk_id, 0, xyz,
-        origin=np.array([-1.0, 0.0, 0.0]), ground_mask=ground_mask,
-    )
-    mf_uri = _write_mf_mos_mask(bag_id, chunk_id, 0, mf_flags)
-    rows = [_proc_row_mf_mos(bag_id, chunk_id, 0, xyz, mf_uri)]
+    This is why union is the only fusion mode on offer. The deleted
+    mfmos_only mode replaced the verdict outright, so a model that went quiet
+    — which MF-MOS does on any sweep it skips — emptied dynamic_map.npz with
+    no error anywhere.
+    """
+    bag_id, chunk_id = "bag_mfonly_empty", "chunk0"
+    hit_xyz = np.array([[0.0, 0.0, 0.0]])
+    beyond_xyz = np.array([[8.0, 0.0, 0.0]])
+    n_carves = 20
+
+    rows = []
+    _write_world_sweep(bag_id, chunk_id, 0, hit_xyz, origin=_SENSOR)
+    mf_uri = _write_mf_mos_mask(bag_id, chunk_id, 0, np.array([False]))
+    rows.append(_proc_row_mf_mos(bag_id, chunk_id, 0, hit_xyz, mf_uri))
+    for i in range(1, n_carves + 1):
+        _write_world_sweep(bag_id, chunk_id, i, beyond_xyz, origin=_SENSOR)
+        mf_uri = _write_mf_mos_mask(bag_id, chunk_id, i, np.array([False]))
+        rows.append(_proc_row_mf_mos(bag_id, chunk_id, i, beyond_xyz, mf_uri))
     write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
 
-    cfg = ComponentConfig(
-        ground_endpoint_strategy="skip_endpoint",
-        min_observations=1,
-        min_occupied_hits=1,
-        mf_mos={"enabled": True, "fusion_mode": "mfmos_only"},
-    )
-    process_chunk(cfg, bag_id, chunk_id)
+    cfg = ComponentConfig(mf_mos={"enabled": True, "fusion_mode": "union"})
+    result = process_chunk(cfg, bag_id, chunk_id)
 
-    dyn = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
-    is_ground_pt = np.all(np.isclose(dyn["xyz"], xyz[0]), axis=1)
-    assert not is_ground_pt.any(), (
-        "ground point must not appear in dynamic_map.npz under mfmos_only"
+    assert (
+        result.n_dynamic == 1
+    ), "union with all-False masks must keep the voxel classifier's verdict"
+    mask0 = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
+    assert mask0[0]
+
+
+def test_union_missing_mask_keeps_voxel_classifier_verdict(tmp_env):
+    """Sweeps without a usable MF-MOS mask (mf_mos_mask_path=None) keep the
+    voxel classifier's verdict under union — a skipped sweep costs recall on
+    MF-MOS-only movers, never the carved ones."""
+    bag_id, chunk_id = "bag_mfonly_missing", "chunk0"
+    hit_xyz = np.array([[0.0, 0.0, 0.0]])
+    beyond_xyz = np.array([[8.0, 0.0, 0.0]])
+    n_carves = 20
+
+    _write_world_sweep(bag_id, chunk_id, 0, hit_xyz, origin=_SENSOR)
+    xyz_per_sweep = [hit_xyz]
+    for i in range(1, n_carves + 1):
+        _write_world_sweep(bag_id, chunk_id, i, beyond_xyz, origin=_SENSOR)
+        xyz_per_sweep.append(beyond_xyz)
+    # _proc_row leaves mf_mos_mask_path unset (null in parquet).
+    _write_proc_index(
+        bag_id, chunk_id, list(range(n_carves + 1)), xyz_per_sweep=xyz_per_sweep
     )
+
+    cfg = ComponentConfig(mf_mos={"enabled": True, "fusion_mode": "union"})
+    result = process_chunk(cfg, bag_id, chunk_id)
+
+    assert (
+        result.n_dynamic == 1
+    ), "union with missing masks must keep the voxel classifier's verdict"
+    dyn = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
+    assert dyn["xyz"].shape[0] == 1
+
+
+def test_mfmos_only_fusion_mode_is_rejected():
+    """The mode is gone, not silently accepted-and-ignored: a config that
+    still asks for it must fail loudly at load."""
+    with pytest.raises(ValidationError):
+        ComponentConfig(mf_mos={"enabled": True, "fusion_mode": "mfmos_only"})
+
+
+def test_far_returns_beyond_carve_guard_become_static(tmp_env):
+    """Returns beyond the profile's max range still register endpoint hits.
+
+    Regression: the kernel used to skip over-length rays ENTIRELY (no carve,
+    no endpoint hit), leaving far voxels unobserved — and unobserved voxels
+    defaulted to dynamic, dumping all far static structure into
+    dynamic_map.npz. Now the carve is skipped (compute guard) but the hit is
+    registered, so a repeatedly-seen far wall accumulates occupancy evidence
+    and classifies static.
+    """
+    bag_id, chunk_id = "bag_far_static", "chunk0"
+    n_sweeps = 10
+    # hdl32e's usable range is 80 m; this lands 90 m from the sensor at (-5,0,0).
+    far_pt = np.array([[85.0, 0.0, 0.0]])
+    for i in range(n_sweeps):
+        _write_world_sweep(bag_id, chunk_id, i, far_pt, origin=_SENSOR)
+    _write_proc_index(
+        bag_id, chunk_id, list(range(n_sweeps)), xyz_per_sweep=[far_pt] * n_sweeps
+    )
+
+    cfg = ComponentConfig(sensor_model={"profile": "hdl32e"}, min_observations=3)
+    result = process_chunk(cfg, bag_id, chunk_id)
+
+    assert result.n_dynamic == 0, "far returns must not default to dynamic"
+    assert (
+        result.n_static == n_sweeps
+    ), "far returns hit every sweep must accumulate l_occ and go static"
+    dyn = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
+    assert dyn["xyz"].shape[0] == 0
+
+
+def test_never_observed_voxel_not_dynamic(tmp_env):
+    """A point whose ray is degenerate (endpoint == sensor origin) leaves its
+    voxel unobserved. Unobserved voxels must default to NOT dynamic —
+    absence of evidence is not motion evidence."""
+    bag_id, chunk_id = "bag_unobserved", "chunk0"
+    origin_v = np.array([-5.0, 0.0, 0.0])
+    pt_at_origin = origin_v.reshape(1, 3).copy()
+
+    _write_world_sweep(bag_id, chunk_id, 0, pt_at_origin, origin=origin_v)
+    _write_proc_index(bag_id, chunk_id, [0], xyz_per_sweep=[pt_at_origin])
+
+    result = process_chunk(ComponentConfig(), bag_id, chunk_id)
+
+    assert result.n_dynamic == 0, "never-observed voxel must not be dynamic"
+    mask = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
+    assert not mask[0]
+    dyn = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
+    assert dyn["xyz"].shape[0] == 0
+
+
+def test_static_map_carries_dynamic_voxel_keys(tmp_env):
+    """static_map.npz must export the carved-dynamic voxel set for Step C."""
+    bag_id, chunk_id = "bag_dynkeys", "chunk0"
+    hit_xyz = np.array([[0.0, 0.0, 0.0]])
+    beyond_xyz = np.array([[8.0, 0.0, 0.0]])
+    n_carves = 20
+
+    _write_world_sweep(bag_id, chunk_id, 0, hit_xyz, origin=_SENSOR)
+    xyz_per_sweep = [hit_xyz]
+    for i in range(1, n_carves + 1):
+        _write_world_sweep(bag_id, chunk_id, i, beyond_xyz, origin=_SENSOR)
+        xyz_per_sweep.append(beyond_xyz)
+    _write_proc_index(
+        bag_id, chunk_id, list(range(n_carves + 1)), xyz_per_sweep=xyz_per_sweep
+    )
+
+    process_chunk(ComponentConfig(), bag_id, chunk_id)
+
+    static = np.load(local_path(static_map_path(bag_id, chunk_id)))
+    assert "dynamic_voxel_keys" in static
+    assert (
+        static["dynamic_voxel_keys"].size >= 1
+    ), "the carved voxel must appear in dynamic_voxel_keys"
+    assert np.all(np.diff(static["dynamic_voxel_keys"]) >= 0), "keys must be sorted"
 
 
 def test_classify_raises_when_world_npz_missing_origin(tmp_env):
@@ -657,9 +745,7 @@ def test_well_observed_static_survives_far_noisy_carves(tmp_env):
     )
 
     cfg = ComponentConfig(
-        ground_endpoint_strategy="skip_endpoint",
         min_observations=3,
-        min_occupied_hits=1,
     )
     result = process_chunk(cfg, bag_id, chunk_id)
 
@@ -681,16 +767,18 @@ def test_cache_disabled_must_still_apply_ground_filter(tmp_env):
     bag_id, chunk_id = "bag_nocache_ground", "chunk0"
     ground_pt = np.array([[0.05, 0.05, 0.0]])
     _write_world_sweep(
-        bag_id, chunk_id, 0, ground_pt,
-        origin=np.array([-1.0, 0.0, 0.0]), ground_mask=np.array([True]),
+        bag_id,
+        chunk_id,
+        0,
+        ground_pt,
+        origin=np.array([-1.0, 0.0, 0.0]),
+        ground_mask=np.array([True]),
     )
     _write_proc_index(bag_id, chunk_id, [0], xyz_per_sweep=[ground_pt])
 
     cfg = ComponentConfig(
-        ground_endpoint_strategy="skip_endpoint",
         cache_world_xyz_in_memory=False,
         min_observations=1,
-        min_occupied_hits=1,
     )
     process_chunk(cfg, bag_id, chunk_id)
 
@@ -698,13 +786,15 @@ def test_cache_disabled_must_still_apply_ground_filter(tmp_env):
     assert dyn["xyz"].shape[0] == 0, "cache-disabled path must not leak ground points"
 
 
-def test_min_occupied_hits_filters_below_threshold(tmp_env):
-    """min_occupied_hits>1 routes 0 < n_hits < threshold voxels to free-only.
+def test_single_hit_then_carved_is_dynamic(tmp_env):
+    """A voxel hit once and then carved through repeatedly is a mover.
 
-    A voxel with a single hit and many carves, with min_occupied_hits=3, must
-    be free-only (not dynamic) — free_only_mask uses n_hits < min_occupied_hits.
+    This is the case the old min_occupied_hits knob could suppress by
+    demanding N hits before a voxel was allowed to be anything. Nothing
+    should need configuring here: one measured return plus sustained
+    free-space evidence IS the signature of something that moved away.
     """
-    bag_id, chunk_id = "bag_min_hits_hole", "chunk0"
+    bag_id, chunk_id = "bag_single_hit_carved", "chunk0"
     hit_pt = np.array([[5.0, 0.0, 0.0]])
     beyond_pt = np.array([[10.0, 0.0, 0.0]])
     sensor_origin = np.array([-1.0, 0.0, 0.0])
@@ -713,29 +803,14 @@ def test_min_occupied_hits_filters_below_threshold(tmp_env):
     _write_world_sweep(bag_id, chunk_id, 0, hit_pt, origin=sensor_origin)
     n_carves = 12
     for j in range(n_carves):
-        sid = j + 1
-        _write_world_sweep(bag_id, chunk_id, sid, beyond_pt, origin=sensor_origin)
+        _write_world_sweep(bag_id, chunk_id, j + 1, beyond_pt, origin=sensor_origin)
         rows_xyz.append(beyond_pt)
     _write_proc_index(
         bag_id, chunk_id, list(range(1 + n_carves)), xyz_per_sweep=rows_xyz
     )
 
-    cfg = ComponentConfig(
-        ground_endpoint_strategy="skip_endpoint",
-        voxel_size_m=0.25,
-        min_observations=3,
-        min_occupied_hits=3,
-    )
+    cfg = ComponentConfig(voxel_size_m=0.25, min_observations=3)
     process_chunk(cfg, bag_id, chunk_id)
 
-    dyn = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
-    is_hit_pt = (
-        np.all(np.isclose(dyn["xyz"], hit_pt[0]), axis=1)
-        if dyn["xyz"].shape[0]
-        else np.zeros(0, dtype=bool)
-    )
-    assert not is_hit_pt.any(), (
-        "voxel with n_hits=1 < min_occupied_hits=3 must be free-only, not dynamic"
-    )
     mask0 = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
-    assert not mask0[0]
+    assert mask0[0], "hit-then-carved voxel must be dynamic"

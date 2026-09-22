@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from wato_semantic_lifting.voting import LabeledPoint, PointVote, accumulate_votes
+from wato_semantic_lifting.voting import PointVote, accumulate_votes
 
 
 def _vote(pt_idx: int, instance: str, cls: str, score: float, cam: str) -> PointVote:

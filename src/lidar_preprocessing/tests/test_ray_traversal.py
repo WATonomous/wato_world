@@ -376,9 +376,9 @@ def test_range_weight_numba_python_parity():
     assert np.array_equal(n_keys, p_keys)
     assert np.array_equal(n_no, p_no)
     assert np.array_equal(n_nh, p_nh)
-    assert np.array_equal(n_lo, p_lo), (
-        "weighted log_odds diverged between Numba and Python kernels"
-    )
+    assert np.array_equal(
+        n_lo, p_lo
+    ), "weighted log_odds diverged between Numba and Python kernels"
 
 
 def test_range_weight_per_voxel_free_space_python_kernel():
@@ -679,3 +679,118 @@ def test_missing_numba_hard_fail_real_import(tmp_path):
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
     assert "OK" in result.stdout
+
+
+@requires_numba
+def test_over_length_ray_registers_endpoint_hit_only():
+    """A ray longer than max_length_m must skip the carve but STILL register
+    its endpoint hit (range-weighted). Regression: over-length rays used to
+    be skipped entirely, leaving far voxels unobserved."""
+    log_odds, n_obs, n_hits = make_log_odds_dicts()
+    sweep_origin = np.zeros(3)
+    endpoints = np.array([[60.0, 0.0, 0.0]])  # length 60 > max 50
+    chunk_origin = np.array([-1.0, -1.0, -1.0])
+    voxel_size = 0.15
+    d_star = 40.0
+
+    update_sweep_log_odds(
+        sweep_origin,
+        endpoints,
+        None,
+        chunk_origin,
+        voxel_size=voxel_size,
+        margin_m=0.15,
+        max_length_m=50.0,
+        log_odds=log_odds,
+        n_obs=n_obs,
+        n_hits=n_hits,
+        l_occ=0.85,
+        l_free=0.40,
+        log_odds_clamp=5.0,
+        d_star=d_star,
+    )
+
+    keys, lo_vals, n_obs_vals, n_hits_vals = extract_log_odds_arrays(
+        log_odds, n_obs, n_hits
+    )
+    assert (
+        keys.size == 1
+    ), f"only the endpoint voxel may be touched (no carve); got {keys.size}"
+    assert int(n_hits_vals[0]) == 1
+    assert int(n_obs_vals[0]) == 1
+    expected = np.float32(0.85 * (d_star / 60.0))
+    np.testing.assert_array_equal(lo_vals, np.array([expected], dtype=np.float32))
+
+
+@requires_numba
+def test_over_length_ray_python_parity():
+    """Numba and Python kernels agree on over-length ray handling."""
+    from wato_lidar_preprocessing.ray_traversal._python_kernel import (
+        _update_sweep_python,
+    )
+
+    rng = np.random.default_rng(seed=7)
+    n_rays = 30
+    # Mix of in-range and over-length rays in all octants.
+    endpoints = np.concatenate(
+        [
+            rng.uniform(-3.0, 3.0, size=(n_rays, 3)),
+            rng.uniform(-90.0, 90.0, size=(n_rays, 3)),
+        ]
+    )
+    is_ground = rng.choice([True, False], size=2 * n_rays)
+    sweep_origin = np.array([0.001, -0.002, 0.003])
+    chunk_origin = np.array([-100.0, -100.0, -100.0])
+    voxel_size = 0.15
+    margin_m = 0.15
+    max_length_m = 5.0  # forces many rays over-length
+    l_occ, l_free, log_odds_clamp = 0.85, 0.40, 5.0
+    d_star = 3.0
+
+    nlo, nno, nnh = make_log_odds_dicts()
+    update_sweep_log_odds(
+        sweep_origin,
+        endpoints.astype(np.float64),
+        is_ground,
+        chunk_origin,
+        voxel_size,
+        margin_m,
+        max_length_m,
+        nlo,
+        nno,
+        nnh,
+        l_occ,
+        l_free,
+        log_odds_clamp,
+        d_star,
+    )
+    n_keys, n_lo, n_no, n_nh = extract_log_odds_arrays(nlo, nno, nnh)
+
+    plo: dict[int, np.float32] = {}
+    pno: dict[int, np.int32] = {}
+    pnh: dict[int, np.int32] = {}
+    _update_sweep_python(
+        sweep_origin,
+        endpoints.astype(np.float64),
+        is_ground,
+        chunk_origin,
+        voxel_size,
+        margin_m,
+        max_length_m,
+        plo,
+        pno,
+        pnh,
+        l_occ,
+        l_free,
+        log_odds_clamp,
+        d_star,
+    )
+    p_keys = np.array(sorted(plo.keys()), dtype=np.int64)
+    p_lo = np.array([plo[k] for k in p_keys], dtype=np.float32)
+    p_no = np.array([int(pno[k]) for k in p_keys], dtype=np.int32)
+    p_nh = np.array([int(pnh.get(k, 0)) for k in p_keys], dtype=np.int32)
+
+    assert np.array_equal(n_keys, p_keys), "voxel-key sets differ between kernels"
+    assert np.array_equal(n_no, p_no), "n_obs arrays differ"
+    assert np.array_equal(n_nh, p_nh), "n_hits arrays differ"
+    assert np.array_equal(n_lo, p_lo), "log_odds arrays differ"

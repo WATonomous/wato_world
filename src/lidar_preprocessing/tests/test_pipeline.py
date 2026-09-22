@@ -248,6 +248,14 @@ def test_chunk_summary_written(tmp_env):
     assert row["cache_auto_disabled"] is False
     # No Patchwork++ in tests → ground status flags it.
     assert row["ground_status"] in ("ok", "skipped_no_ground_mask", "empty")
+    # MF-MOS is off by default → its fields are null, not zero.
+    for k in (
+        "mf_mos_n_processed",
+        "mf_mos_n_skipped",
+        "mf_mos_n_unsupported",
+        "mf_mos_n_points_moving",
+    ):
+        assert row[k] is None, k
 
 
 def test_cache_auto_disable_logged_in_summary(tmp_env, monkeypatch):

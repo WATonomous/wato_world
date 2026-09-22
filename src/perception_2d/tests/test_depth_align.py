@@ -111,8 +111,11 @@ def test_sky_filter_removes_upper_fraction():
 def test_no_lidar_points_returns_empty():
     K = _make_K()
     d_lidar, d_da = build_anchor_pairs(
-        np.zeros((0, 3)), np.ones((480, 640), dtype=np.float32),
-        K, np.eye(4), (640, 480)
+        np.zeros((0, 3)),
+        np.ones((480, 640), dtype=np.float32),
+        K,
+        np.eye(4),
+        (640, 480),
     )
     assert d_lidar.shape[0] == 0
 
@@ -120,8 +123,7 @@ def test_no_lidar_points_returns_empty():
 def test_none_lidar_points_returns_empty():
     K = _make_K()
     d_lidar, d_da = build_anchor_pairs(
-        None, np.ones((480, 640), dtype=np.float32),
-        K, np.eye(4), (640, 480)
+        None, np.ones((480, 640), dtype=np.float32), K, np.eye(4), (640, 480)
     )
     assert d_lidar.shape[0] == 0
 

@@ -6,9 +6,7 @@ This module resolves disagreements and produces per-point labels.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
-import numpy as np
+from dataclasses import dataclass
 
 
 @dataclass
@@ -16,11 +14,11 @@ class PointVote:
     """A single camera's label vote for one LiDAR point."""
 
     point_idx: int
-    instance_id: str   # global_object_id from masklet
+    instance_id: str  # global_object_id from masklet
     cls: str
-    score: float       # det_score * depth_confidence
+    score: float  # det_score * depth_confidence
     cam_id: str
-    mask_area: int     # pixel count of the source mask
+    mask_area: int  # pixel count of the source mask
 
 
 @dataclass

@@ -60,7 +60,13 @@ def main() -> None:
 )
 def run_cmd(bag_id: str, chunk_id: str | None, config_path: str, force: bool) -> None:
     cfg = load_config(config_path)
-    run_pipeline(cfg, bag_id=_resolve_bag_id(bag_id), chunk_id=chunk_id, force=force)
+    run_pipeline(
+        cfg,
+        bag_id=_resolve_bag_id(bag_id),
+        chunk_id=chunk_id,
+        force=force,
+        config_path=config_path,
+    )
 
 
 @main.command("viz")

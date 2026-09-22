@@ -150,7 +150,7 @@ def test_sensor_model_range_weight_attenuates_past_crossover():
     crossover. This is the physics that replaced GlobalMapPrior's old r_max."""
     from wato_lidar_preprocessing.sensor_model import get_sensor_model
 
-    sm = get_sensor_model("velodyne_vlp")
+    sm = get_sensor_model("vlp32c")
     voxel = 0.30  # d_star = 0.30 / 0.003 = 100 m
     assert sm.credibility_crossover_m(voxel) == pytest.approx(100.0)
     d = np.array([50.0, 100.0, 200.0, 400.0])
@@ -251,10 +251,7 @@ def test_build_log_odds_grid_with_prior_increases_lo(tmp_env):
     rows = [_proc_row(bag_id, chunk_id, sid, static_pt) for sid in range(n_sweeps)]
     write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
 
-    cfg = ComponentConfig(
-        voxel_size_m=0.15,
-        ground_endpoint_strategy="skip_ray",
-    )
+    cfg = ComponentConfig(voxel_size_m=0.15)
     sm = cfg.build_sensor_model()
 
     meta_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
@@ -334,15 +331,13 @@ def test_iwu_boost_excludes_ground_points(tmp_env):
     """Ground points are filtered from the IWU boost query.
 
     Regression: the boost previously used the full sweep xyz, so a ground
-    voxel matching the global static map got a phantom log_odds entry with
-    no n_obs / n_hits backing.  Harmless for correctness (free_only →
-    not_dynamic_arr) but it inflated unique_keys.
+    voxel matching the global static map got a phantom log_odds entry that no
+    measurement backed.
 
     Geometry: non-ground endpoint sits on the +x axis at (10, 0, 0); ground
-    endpoint is at (0, 5, 0).  In skip_ray mode the ground ray is never
-    traversed, and the non-ground ray (sensor at origin) goes along +x and
-    doesn't touch the ground voxel at vy≈33.  So ground voxel only enters
-    the dict if the boost is querying it — which is exactly the bug.
+    endpoint is at (0, 5, 0).  The ground ray is traversed for its free-space
+    evidence but is credited no endpoint hit, so whatever the ground voxel
+    ends up with must come from carving — never from the prior.
     """
     bag_id, chunk_id = "bag_iwu_ground", "chunk0"
     chunk_origin = np.array([0.0, 0.0, 0.0], dtype=np.float64)
@@ -356,10 +351,7 @@ def test_iwu_boost_excludes_ground_points(tmp_env):
     rows = [_proc_row(bag_id, chunk_id, sid, xyz) for sid in range(2)]
     write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
 
-    cfg = ComponentConfig(
-        voxel_size_m=0.15,
-        ground_endpoint_strategy="skip_ray",
-    )
+    cfg = ComponentConfig(voxel_size_m=0.15)
     sm = cfg.build_sensor_model()
     meta_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
     origin = origin_from_index(meta_rows)
@@ -388,12 +380,16 @@ def test_iwu_boost_excludes_ground_points(tmp_env):
     assert int(n_hits[ng_idx]) == 2, "non-ground voxel got both sweep hits"
     assert float(lo_vals[ng_idx]) > 0, "non-ground voxel should have positive log_odds"
 
-    # Ground voxel must NOT be in unique_keys: skip_ray skips its ray, the
-    # non-ground ray doesn't traverse it, and the boost no longer queries
-    # it.  Pre-fix, the boost created a phantom entry.
+    # The ground voxel must carry no evidence the prior invented: no endpoint
+    # hits (ground endpoints are never credited) and no positive log_odds
+    # (the only thing that could push it positive here is the boost).
+    # Pre-fix, the boost created exactly such a phantom entry.
     gnd_idx = np.searchsorted(keys, ground_key)
-    found_ground = gnd_idx < len(keys) and keys[gnd_idx] == ground_key
-    assert not found_ground, (
-        f"ground voxel (key={ground_key}) leaked into unique_keys via IWU "
-        f"boost — Bug 4 regression"
-    )
+    if gnd_idx < len(keys) and keys[gnd_idx] == ground_key:
+        assert (
+            int(n_hits[gnd_idx]) == 0
+        ), "ground endpoint must never be credited an occupancy hit"
+        assert float(lo_vals[gnd_idx]) <= 0.0, (
+            f"ground voxel (key={ground_key}) was boosted by the IWU prior "
+            f"with no measurement behind it — Bug 4 regression"
+        )

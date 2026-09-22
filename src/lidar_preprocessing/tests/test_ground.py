@@ -119,10 +119,10 @@ def _write_static_map_covering_all(
     all_xyz: np.ndarray,
     voxel_size: float = 0.15,
 ):
-    """Write a static_map.npz whose voxel keys cover every point in `all_xyz`.
+    """Write a static_map.npz with an EMPTY dynamic-voxel set.
 
-    Ground tests that don't care about the static intersection use this to
-    pass every candidate ground point through the filter.
+    Ground tests that don't care about the dynamic intersection use this to
+    pass every candidate ground point through the filter (nothing to drop).
     """
     from wato_lidar_preprocessing.voxel import voxel_indices
 
@@ -139,6 +139,7 @@ def _write_static_map_covering_all(
         origin=origin,
         voxel_size=np.float32(voxel_size),
         static_voxel_keys=keys,
+        dynamic_voxel_keys=np.empty(0, dtype=np.int64),
     )
 
 
@@ -229,19 +230,18 @@ def test_empty_proc_index_writes_sentinel(tmp_env):
     assert result.n_ground == 0
 
 
-def _write_static_voxel_set(
-    bag_id: str, chunk_id: str, static_xyz: np.ndarray, voxel_size: float
+def _write_dynamic_voxel_set(
+    bag_id: str,
+    chunk_id: str,
+    dynamic_xyz: np.ndarray,
+    voxel_size: float,
+    origin: np.ndarray,
 ):
-    """Write a static_map.npz with static_voxel_keys derived from static_xyz."""
+    """Write a static_map.npz with dynamic_voxel_keys derived from dynamic_xyz."""
     from wato_lidar_preprocessing.voxel import voxel_indices as _voxel_indices
 
-    origin = (
-        np.zeros(3, dtype=np.float64)
-        if static_xyz.size == 0
-        else static_xyz.min(axis=0)
-    )
-    if static_xyz.shape[0] > 0:
-        keys = _voxel_indices(static_xyz, origin, voxel_size, chunk_id=chunk_id)
+    if dynamic_xyz.shape[0] > 0:
+        keys = _voxel_indices(dynamic_xyz, origin, voxel_size, chunk_id=chunk_id)
         keys = np.unique(keys)
     else:
         keys = np.empty(0, dtype=np.int64)
@@ -249,46 +249,88 @@ def _write_static_voxel_set(
     os.makedirs(os.path.dirname(path), exist_ok=True)
     np.savez_compressed(
         path,
-        xyz=static_xyz,
+        xyz=np.empty((0, 3), dtype=np.float64),
         origin=origin,
         voxel_size=np.float32(voxel_size),
-        static_voxel_keys=keys,
+        static_voxel_keys=np.empty(0, dtype=np.int64),
+        dynamic_voxel_keys=keys,
     )
 
 
 def test_intersection_drops_dynamic_ground_points(tmp_env):
     """Ground points whose voxel ended up dynamic must be dropped from ground.npz.
 
-    Setup: one sweep with two ground-flagged points.  Only one of them
-    falls in a voxel that classify marked static.  The other is filtered
-    out, n_dropped_dynamic reports it, and ground.npz contains only the
-    survivor.
+    Setup: one sweep with two ground-flagged points.  One falls in a voxel
+    classify marked DYNAMIC and is filtered out (n_dropped_dynamic reports
+    it); the other is in no particular voxel class (ground voxels are
+    typically free-only under skip_endpoint) and passes through.
     """
     bag_id, chunk_id = "bag_g_inter", "chunk0"
-    # Two ground points; only the first is in the static voxel set.
-    static_pt = np.array([[10.0, 10.0, 0.0]])
+    # Two ground points; only the second is in the dynamic voxel set.
+    survivor_pt = np.array([[10.0, 10.0, 0.0]])
     dynamic_pt = np.array([[100.0, 100.0, 0.0]])
-    sweep_xyz = np.concatenate([static_pt, dynamic_pt], axis=0)
+    sweep_xyz = np.concatenate([survivor_pt, dynamic_pt], axis=0)
     ground_mask = np.array([True, True])  # both flagged ground by Patchwork++
     _write_world_sweep_with_mask(bag_id, chunk_id, 0, sweep_xyz, ground_mask)
     _write_proc_index(bag_id, chunk_id, [0])
 
-    # static_map.npz contains only static_pt.  Voxel size 1 m so the two
-    # points land in clearly distinct voxels.
-    _write_static_voxel_set(bag_id, chunk_id, static_pt, voxel_size=1.0)
+    # dynamic_voxel_keys contains only dynamic_pt's voxel.  Voxel size 1 m so
+    # the two points land in clearly distinct voxels.
+    _write_dynamic_voxel_set(
+        bag_id,
+        chunk_id,
+        dynamic_pt,
+        voxel_size=1.0,
+        origin=sweep_xyz.min(axis=0),
+    )
 
     cfg = ComponentConfig(voxel_size_m=1.0)
     result = process_chunk(cfg, bag_id, chunk_id)
     assert result.status == "ok"
-    assert result.n_ground == 1, "only the static-voxel point should survive"
+    assert result.n_ground == 1, "only the non-dynamic-voxel point should survive"
     assert result.n_dropped_dynamic == 1
 
     data = np.load(local_path(ground_path(bag_id, chunk_id)))
-    np.testing.assert_allclose(data["ground_xyz"], static_pt)
+    np.testing.assert_allclose(data["ground_xyz"], survivor_pt)
+
+
+def test_ground_voxels_not_in_any_class_pass_through(tmp_env):
+    """Regression: ground points must NOT be required to sit in STATIC voxels.
+
+    Under skip_endpoint, ground voxels never receive endpoint hits and can
+    never be classified static — the old keep-if-static intersection dropped
+    ~all ground points (98% on real bags).  With an empty dynamic set, every
+    ground point must survive even though none are in static voxels.
+    """
+    bag_id, chunk_id = "bag_g_passthrough", "chunk0"
+    rng = np.random.default_rng(11)
+    xy = rng.uniform(-10, 10, size=(200, 2))
+    xyz = np.column_stack([xy, np.zeros(200)])
+    _write_world_sweep_with_mask(bag_id, chunk_id, 0, xyz, np.ones(200, dtype=bool))
+    _write_proc_index(bag_id, chunk_id, [0])
+
+    # static_voxel_keys deliberately empty; dynamic_voxel_keys empty too.
+    path = local_path(static_map_path(bag_id, chunk_id))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    np.savez_compressed(
+        path,
+        xyz=np.empty((0, 3), dtype=np.float64),
+        origin=xyz.min(axis=0),
+        voxel_size=np.float32(0.15),
+        static_voxel_keys=np.empty(0, dtype=np.int64),
+        dynamic_voxel_keys=np.empty(0, dtype=np.int64),
+    )
+
+    result = process_chunk(ComponentConfig(), bag_id, chunk_id)
+    assert result.status == "ok"
+    assert (
+        result.n_ground == 200
+    ), f"all ground points must survive an empty dynamic set; kept {result.n_ground}"
+    assert result.n_dropped_dynamic == 0
 
 
 def test_intersection_raises_on_legacy_static_map(tmp_env):
-    """Legacy static_map.npz without static_voxel_keys → loud KeyError
+    """Legacy static_map.npz without dynamic_voxel_keys → loud KeyError
     pointing at the re-run command, not silent passthrough."""
     bag_id, chunk_id = "bag_g_legacy", "chunk0"
     rng = np.random.default_rng(3)

@@ -44,14 +44,18 @@ class _FakeDepth:
         self.batch_sizes.append(len(images))
         # Echo the marker baked into _load_image so the caller can verify the
         # depth map is matched to the right frame.
-        depths = [np.full((4, 5), float(im[0, 0, 0]), dtype=np.float32) for im in images]
+        depths = [
+            np.full((4, 5), float(im[0, 0, 0]), dtype=np.float32) for im in images
+        ]
         return depths, [None] * len(images)
 
     def unload(self):
         pass
 
 
-def _run(monkeypatch, *, n_frames: int, batch_size: int, skip_seq: set[int] | None = None):
+def _run(
+    monkeypatch, *, n_frames: int, batch_size: int, skip_seq: set[int] | None = None
+):
     skip_seq = skip_seq or set()
     _FakeDepth.instances.clear()
     aligned: list[tuple[int, float]] = []

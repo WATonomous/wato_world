@@ -1,23 +1,35 @@
 lidar_preprocessing:
   # ====================================================================
+  # nuScenes profile (the default).
+  # ====================================================================
+  # Companion: lidar_preprocessing.wato.yaml — same schema tuned for the
+  # WATO 3-Velodyne rig.  Switch per run via --config, mirroring ingest's
+  # ingest.yaml / ingest.wato.yaml:
+  #   ./watod run lidar_preprocessing --bag <wato_bag> \
+  #       --config /ws/src/lidar_preprocessing/config/lidar_preprocessing.wato.yaml
+  #
+  # This file states WHICH SENSORS the bag was recorded with and the handful
+  # of choices that are genuinely ours to make.  It states no physics: beam
+  # count, field of view, spin rate, range accuracy, beam divergence, usable
+  # range, intensity scale and every log-odds constant derived from them come
+  # from the scanner profile in sensor_model.py.  If a number here looks like
+  # it belongs on a datasheet, it is in the wrong file.
+
+  # ====================================================================
   # Sensor model — the SINGLE source of every classifier constant.
   # ====================================================================
-  # The static/dynamic classifier does NOT take hand-tuned log-odds knobs.
-  # It derives l_occ, l_free, the saturation clamp, the static/dynamic
-  # decision thresholds, the range-credibility falloff, the carve margin and
-  # the grazing-incidence gate (per-voxel surface normals stop a ray from
-  # carving a wall it merely skims) from a datasheet sensor profile (see
-  # sensor_model.py). The YAML only PICKS the sensor; the numbers are
-  # computed from its published specs.
+  # profile:   the scanner this bag was recorded with.
+  # per_lidar: {lidar_id: profile} overrides for a mixed rig.
   #
-  #   "velodyne_vlp" — WATO 3-Velodyne rig (VLP-32C centre + 2× VLP-16):
-  #                    ±3 cm range accuracy, ~3 mrad beam divergence.
-  #   "nuscenes"     — HDL-32E-class LIDAR_TOP: ±2 cm, ~2.8 mrad.
+  # Available: hdl32e (nuScenes LIDAR_TOP), vlp32c, vlp16.
   #
-  # Switching profile also implies switching the hardware fields below
-  # (sweep duration, MF-MOS FoV / range-image height, frame_sync).
+  # The profile fixes l_occ, l_free, the log-odds clamp, the static/dynamic
+  # decision thresholds, the range-credibility crossover, the carve margin,
+  # the grazing-incidence gate, the scan rate and direction, and the MF-MOS
+  # projection geometry.  None of those are knobs here — changing the labeller
+  # means changing sensor_model.py, where the reasoning is written down.
   sensor_model:
-    profile: nuscenes
+    profile: hdl32e
 
   # ====================================================================
   # Step A — deskew (rolling-shutter motion compensation).
@@ -26,15 +38,10 @@ lidar_preprocessing:
   filter_nonfinite_points: true
 
   # When raw NPZ lacks per-point timestamps, synthesize them from azimuth
-  # assuming uniform rotation (required for NuScenes; without it, intra-sweep
-  # ego motion smears statics across voxels). Scan direction is taken from the
-  # sensor_model profile (Velodyne spins clockwise) — deskew no longer probes
-  # azimuth signs per sweep.
+  # assuming uniform rotation (required for nuScenes; without it, intra-sweep
+  # ego motion smears statics across voxels and leaks them into dynamic_map).
+  # The rotation period and direction come from the sensor profile.
   synthesize_per_point_times: true
-
-  # LiDAR rotation period (ms). NuScenes (HDL-32E-class) @ 20 Hz → 50 ms.
-  # WATO Velodyne rig @ 10 Hz → 100 ms.
-  lidar_sweep_duration_ms: 50.0
 
   # Fail loudly rather than silently degrade.
   require_patchwork: true
@@ -43,25 +50,16 @@ lidar_preprocessing:
   # ====================================================================
   # Step B — voxel static/dynamic classification.
   # ====================================================================
-  # Edge length of the cubic occupancy voxels. Smaller → finer fidelity but
+  # Edge length of the cubic occupancy voxels.  Smaller → finer fidelity but
   # more sensitive to pose drift / beam spacing; larger → small objects smear.
+  # A genuine trade-off with no datasheet answer, so it lives here.
   voxel_size_m: 0.25
 
-  # Evidence gates (statistical, sensor-independent).
-  # Voxels observed fewer than this many times stay UNKNOWN.
+  # How many ray traversals a voxel needs before its occupancy probability is
+  # believed at all.  Below this the voxel is UNDER_EVIDENCED: neither static
+  # nor dynamic.  The only evidence gate — "was anything ever measured here?"
+  # needs no threshold and is not configurable.
   min_observations: 3
-  # Voxels with fewer endpoint hits go to free_only (never dynamic).
-  min_occupied_hits: 1
-
-  # Optional hard cap on accepted ray length (m). null → use the sensor
-  # profile's max_range_m as a pure compute guard. (Far-field carving noise is
-  # handled smoothly by the beam-footprint credibility weight, not a hard cap.)
-  max_ray_length_m: null
-
-  # How rays whose endpoint lies on ground points are handled.
-  # "skip_endpoint" → traverse for free-space evidence but add no l_occ at the
-  #                   ground endpoint. "skip_ray" → discard ground rays (A/B).
-  ground_endpoint_strategy: skip_endpoint
 
   cache_world_xyz_in_memory: true
 
@@ -69,14 +67,14 @@ lidar_preprocessing:
   # Step D — global static map reduce + two-pass prior.
   # ====================================================================
   # Voxel size used when merging per-chunk static maps into the global map.
+  # Doubles as the two-pass prior's KDTree match radius: reduce snaps points
+  # to voxel centres, so "within one map voxel" is what a match means.  The
+  # prior's strength and range falloff are derived from the sensor model.
   global_map_voxel_size_m: 0.30
-  # KDTree match radius for the two-pass prior; should be >= global_map_voxel_size_m
-  # (reduce snaps points to voxel centres). The prior's reinforcement strength
-  # and range falloff are derived from the sensor model, not separate knobs.
-  global_map_match_radius_m: 0.30
 
-  # Unit of ingest's per-point t_offset_us field. "seconds" | "microseconds" |
-  # "nanoseconds". Velodyne "t" is seconds.
+  # Unit of ingest's per-point t_offset_us field.  "seconds" |
+  # "microseconds" | "nanoseconds".  A property of the bag's driver, not the
+  # scanner — nuScenes conversions emit seconds.
   point_time_unit: "seconds"
 
   # ====================================================================
@@ -103,7 +101,7 @@ lidar_preprocessing:
   # Multi-lidar frame grouping (SAM4D alignment).
   # ====================================================================
   # canonical_lidar: null → each sweep is its own frame (single-LiDAR bags
-  #   like NuScenes mini). "lidar_cc" → side sweeps within ±tolerance_ms
+  #   like nuScenes mini).  "lidar_cc" → side sweeps within ±tolerance_ms
   #   inherit the centre LiDAR's frame_id (WATO 3-Velodyne rig).
   frame_sync:
     canonical_lidar: null
@@ -114,34 +112,30 @@ lidar_preprocessing:
   # ====================================================================
   # Weights: https://github.com/SCNU-RISLAB/MF-MOS/releases — drop at
   # /data/models/mf_mos/ (mounted via docker-compose.yaml).
+  #
+  # The spherical projection is NOT configured here.  Range-image rows, FoV
+  # bounds and intensity scale come from each lidar's sensor profile; image
+  # width, the training range window and the residual-channel spacing are
+  # properties of the released checkpoint and live in mf_mos/_core.py.  A
+  # scanner with too few channels to project is skipped with a log line.
   mf_mos:
     enabled: true
     checkpoint_path: /data/models/mf_mos/mf_mos_semantic_kitti.pt
     arch_config:   /data/models/mf_mos/arch_cfg.yaml
     data_config:   /data/models/mf_mos/data_cfg.yaml
 
-    # Residual-channel sweep-index offsets (len == checkpoint n_input_scans).
-    # NuScenes (20 Hz) uses 2× the KITTI (10 Hz) offsets so per-channel motion
-    # magnitude matches training. Velodyne rig @ 10 Hz → [1,2,3,4,5,6,7,8].
-    residual_steps: [2, 4, 6, 8, 10, 12, 14, 16]
-
-    # Range-image dims. h must match the LiDAR beam count (NuScenes 32,
-    # VLP-32C 32, VLP-16 16, KITTI 64).
-    range_image_h: 32
-    range_image_w: 1024
-
-    # Vertical FoV bounds (deg). NuScenes: 10 / -30. VLP-32C: 15 / -25.
-    fov_up_deg:    10.0
-    fov_down_deg: -30.0
-
     device: cuda
     score_threshold: 0.7
     save_scores: true
 
     # How MF-MOS masks combine with the voxel classifier.
-    # "independent" → exported, not fused. "union" → DYNAMIC if either signal.
-    # "mfmos_only"  → MF-MOS is the authoritative dynamic signal.
-    fusion_mode: mfmos_only
+    #   "independent" → masks exported alongside; the voxel classifier alone
+    #                   decides dynamic_map.npz.  Downstream may read both.
+    #   "union"       → dynamic if either signal says so.  A missing or empty
+    #                   MF-MOS mask leaves the classifier's verdict intact.
+    # Keep this at independent until MF-MOS mask quality has been audited on
+    # the rig in question (scripts/debug_mfmos_contribution.py).
+    fusion_mode: independent
 
     max_pose_gap_ms: 6000
     occlusion_range_tol_m: 1.0
@@ -150,14 +144,14 @@ lidar_preprocessing:
     # --- Per-sweep spatial denoise (replaces the old chunk-wide vote tier) ---
     # MF-MOS speckle is removed spatially, in the sweep where it occurs:
     # moving points are clustered on a coarse 3D grid (26-connectivity) and
-    # clusters below the minimum size are dropped. Temporal confirmation of a
+    # clusters below the minimum size are dropped.  Temporal confirmation of a
     # mover is the downstream tracker's job, not this stage's — so fast
     # few-sweep movers survive (the old vote denominator killed them).
     #
-    # Connected-component grid resolution (m). ~2× voxel_size keeps a real
+    # Connected-component grid resolution (m).  ~2× voxel_size keeps a real
     # object connected across beam gaps without bridging separate objects.
     moving_cluster_voxel_m: 0.5
-    # Drop moving clusters smaller than this. Grounded in point density: the
+    # Drop moving clusters smaller than this.  Grounded in point density: the
     # smallest object of interest (pedestrian) at the far edge of reliable
     # MF-MOS range subtends well above this on a 32-beam sensor, while
     # single-sweep mispredictions are 1–few isolated points.
@@ -172,5 +166,5 @@ lidar_preprocessing:
   # including carved voxels) — powers the viz p_occ color mode.
   save_voxel_diagnostics: true
   # One voxel_occupancy_frame_NNNN.npz per frame_id (what perception_2d feeds
-  # to MinkUNet). Disabled until perception_2d is wired up.
+  # to MinkUNet).  Disabled until perception_2d is wired up.
   save_per_frame_voxel_occupancy: false

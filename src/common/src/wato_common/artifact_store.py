@@ -225,7 +225,9 @@ def semantic_lifting_dir(bag_id: str, chunk_id: str) -> str:
 
 def lifted_labels_path(bag_id: str, chunk_id: str, sweep_id: str) -> str:
     """Per-sweep npz: point_idx, class_id, instance_id, confidence, etc."""
-    return _join(semantic_lifting_dir(bag_id, chunk_id), "lifted_labels", f"{sweep_id}.npz")
+    return _join(
+        semantic_lifting_dir(bag_id, chunk_id), "lifted_labels", f"{sweep_id}.npz"
+    )
 
 
 def lifted_stats_path(bag_id: str, chunk_id: str) -> str:

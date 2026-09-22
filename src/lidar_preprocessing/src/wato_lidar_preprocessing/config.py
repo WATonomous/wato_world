@@ -1,7 +1,10 @@
 """Pydantic-loaded config for lidar_preprocessing.
 
-Classifier constants are derived from the datasheet SensorModel selected by
-sensor_model.profile (see sensor_model.py), not configured as raw numbers.
+Every physical constant — log-odds increments, decision thresholds, carve
+geometry, scan rate, FoV, beam count, intensity scale — is derived from the
+datasheet SensorModel selected by ``sensor_model`` (see sensor_model.py).
+YAML picks scanners and states the few genuinely free choices (voxel size,
+evidence count, which stages run). It does not state physics.
 """
 
 from __future__ import annotations
@@ -15,13 +18,24 @@ from wato_lidar_preprocessing.sensor_model import SensorModel, get_sensor_model
 
 
 class SensorModelParams(BaseModel):
-    """Selects the datasheet sensor profile. The physical numbers live in
-    sensor_model.py's profile table, not in user YAML."""
+    """Selects a datasheet scanner profile, optionally one per lidar_id.
+
+    The physical numbers live in sensor_model.py's profile table, never in
+    user YAML. ``profile`` is the rig default; ``per_lidar`` overrides it for
+    a mixed rig (the WATO car runs a VLP-32C centre and two VLP-16 corners),
+    so each scanner's own FoV, beam count, range and rate are used wherever
+    the work is per-sweep.
+
+    The default profile also supplies the chunk-level decision constants
+    (l_occ, l_free, thresholds), which are shared across profiles by
+    construction — see sensor_model.py — so a mixed rig does not classify
+    one lidar's returns by a different rule than another's.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    # "velodyne_vlp" (WATO 3-Velodyne rig) | "nuscenes" (HDL-32E-class).
-    profile: str = "velodyne_vlp"
+    profile: str = "vlp32c"
+    per_lidar: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("profile")
     @classmethod
@@ -29,7 +43,20 @@ class SensorModelParams(BaseModel):
         get_sensor_model(v)  # raises ValueError listing valid profiles
         return v
 
-    def build(self) -> SensorModel:
+    @field_validator("per_lidar")
+    @classmethod
+    def _known_per_lidar(cls, v: dict[str, str]) -> dict[str, str]:
+        for lidar_id, prof in v.items():
+            try:
+                get_sensor_model(prof)
+            except ValueError as exc:
+                raise ValueError(f"per_lidar[{lidar_id!r}]: {exc}") from None
+        return v
+
+    def build(self, lidar_id: Optional[str] = None) -> SensorModel:
+        """The profile for ``lidar_id``, falling back to the rig default."""
+        if lidar_id is not None and lidar_id in self.per_lidar:
+            return get_sensor_model(self.per_lidar[lidar_id])
         return get_sensor_model(self.profile)
 
 
@@ -106,6 +133,14 @@ class MFMosParams(BaseModel):
 
     Step A.5 between deskew and classify when enabled. Requires a CUDA GPU
     for realistic data; device="cpu" is for tiny smoke tests only.
+
+    The spherical-projection geometry (range-image height, vertical FoV,
+    intensity scale, residual spacing) is NOT configured here — it is read
+    from each lidar's sensor profile, and the checkpoint-side constants
+    (image width, training range window, KITTI reference rate) live in
+    mf_mos/_core.py. What remains below is genuinely about running the model:
+    where its weights are, how confident a pixel must be, and how the output
+    is cleaned and fused.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -114,65 +149,36 @@ class MFMosParams(BaseModel):
     checkpoint_path: str = "/data/models/mf_mos/mf_mos_semantic_kitti.pt"
     arch_config: str = "/data/models/mf_mos/arch_cfg.yaml"
     data_config: str = "/data/models/mf_mos/data_cfg.yaml"
-    residual_steps: list[int] = Field(default_factory=lambda: [1, 2, 4, 8])
-    range_image_h: int = 32
-    range_image_w: int = 1024
-    fov_up_deg: float = 10.0
-    fov_down_deg: float = -30.0
     device: str = "cuda"
     score_threshold: float = 0.5
     save_scores: bool = False
-    # fusion_mode controls how classify uses the MF-MOS mask:
-    #   independent — masks written side-by-side, downstream decides.
-    #   union       — static/dynamic accumulators use (voxel | mf_mos).
-    #   mfmos_only  — accumulators use the mf_mos mask only.
-    fusion_mode: str = "independent"
+    # How classify uses the MF-MOS mask:
+    #   independent — masks written side-by-side; the voxel classifier alone
+    #                 decides dynamic_map.npz. Downstream may read both.
+    #   union       — a point is dynamic if the voxel classifier OR this
+    #                 sweep's MF-MOS voxel set says so. A missing or empty
+    #                 mask leaves the classifier's verdict untouched.
+    # There is deliberately no "mfmos_only": handing the entire verdict to a
+    # model that silently emits nothing on a skipped sweep empties
+    # dynamic_map.npz with no failure. Use union and read the skip warning.
+    fusion_mode: Literal["independent", "union"] = "independent"
     max_pose_gap_ms: float = 200.0
-    # Match training preprocessing (data_preparing.yaml).
-    min_range_m: float = 2.0
-    max_range_m: float = 50.0
-    # Divisor that scales raw intensity into [0, 1] like KITTI remission.
-    # NuScenes intensity is uint8 [0, 255] → 255.0. Use 1.0 for sensors
-    # that already produce [0, 1].
-    intensity_scale: float = 255.0
-    # Restrict MF-MOS to specific lidar_ids. fov_up/down + image H/W are
-    # global, so LiDARs with significantly different mount geometry would
-    # project into non-KITTI-like range images and the model mispredicts.
-    # None = run on every LiDAR; e.g. ["lidar_cc"] = centre only.
-    lidar_id_allowlist: Optional[list[str]] = None
     # Occlusion gate for unprojecting the per-pixel moving mask back to points.
     occlusion_range_tol_m: float = 1.0
     # Seed each lidar's residual sliding window from the temporally-preceding
-    # chunk's sweeps so the first max(residual_steps) sweeps of a chunk get
-    # full residual channels instead of cold-start zeros.
+    # chunk's sweeps so the first sweeps of a chunk get full residual channels
+    # instead of cold-start zeros.
     prime_window_from_prior_chunk: bool = True
 
     # --- Per-sweep spatial denoise (replaces the chunk-wide vote tier) ---
     # MF-MOS speckle is removed spatially per sweep: cluster moving points on a
     # 26-connected 3D grid and drop clusters below the size floor. Temporal
     # confirmation of a mover is the downstream tracker's job.
-    # Cluster grid resolution [m] (~2× voxel keeps an object connected).
+    # Cluster grid resolution [m] (~2x voxel keeps an object connected).
     moving_cluster_voxel_m: float = 0.5
     # Min points per moving cluster (a pedestrian at MF-MOS range is well above
-    # this; single-sweep mispredictions are 1–few points).
+    # this; single-sweep mispredictions are 1-few points).
     moving_min_cluster_pts: int = 8
-
-    @field_validator("residual_steps")
-    @classmethod
-    def _residuals_positive(cls, v: list[int]) -> list[int]:
-        if any(k <= 0 for k in v):
-            raise ValueError(f"residual_steps must all be > 0, got {v}")
-        if len(v) != len(set(v)):
-            raise ValueError(f"residual_steps must be unique, got {v}")
-        return sorted(v)
-
-    @field_validator("fusion_mode")
-    @classmethod
-    def _fusion_mode_valid(cls, v: str) -> str:
-        valid = {"independent", "union", "mfmos_only"}
-        if v not in valid:
-            raise ValueError(f"fusion_mode must be one of {valid}, got {v!r}")
-        return v
 
     @field_validator("score_threshold")
     @classmethod
@@ -211,9 +217,8 @@ class ComponentConfig(BaseModel):
     # share the header pose → intra-sweep smear that spreads statics across
     # voxels and leaks them into dynamic_map.
     synthesize_per_point_times: bool = True
-    # Velodyne VLP @ 10 Hz = 100 ms; NuScenes @ 20 Hz = 50 ms.
-    lidar_sweep_duration_ms: float = 100.0
-    # Scan rotation direction comes from the sensor_model profile.
+    # Rotation period and spin direction come from each lidar's sensor
+    # profile (sweep_duration_ms / rotation_dir) — they are datasheet facts.
 
     # Strictness flags — fail loudly on missing inputs rather than degrade.
     require_patchwork: bool = True
@@ -222,29 +227,22 @@ class ComponentConfig(BaseModel):
     # Step B — voxel classification.
     voxel_size_m: float = 0.15
 
-    # Evidence gates (statistical, sensor-independent).
-    # Voxels observed fewer than min_observations times stay UNKNOWN.
+    # The one evidence gate: how many ray traversals a voxel needs before its
+    # occupancy probability is trusted at all. Statistical, not physical — it
+    # trades recall on sparsely-seen structure against noise from single
+    # observations. Voxels below it are UNDER_EVIDENCED: neither static nor
+    # dynamic. A voxel with zero endpoint hits is FREE_ONLY and can never be
+    # dynamic regardless (that rule needs no threshold: "was anything ever
+    # measured here?" is a yes/no question).
     min_observations: int = 3
-    # Voxels with fewer endpoint hits go to free_only (never dynamic).
-    min_occupied_hits: int = 1
-
-    # Optional hard cap on ray length [m]. None → sensor profile's max_range_m
-    # (a compute guard; far-field carving noise is handled by range weighting).
-    max_ray_length_m: Optional[float] = None
-
-    # "skip_endpoint" → traverse ground rays for free-space evidence, no l_occ at endpoint.
-    # "skip_ray"      → skip ground rays entirely (legacy).
-    ground_endpoint_strategy: Literal["skip_endpoint", "skip_ray"] = "skip_endpoint"
 
     cache_world_xyz_in_memory: bool = True
 
-    # Step D — global static map reduce.
+    # Step D — global static map reduce. The two-pass prior's KDTree match
+    # radius is this same value: reduce snaps map points to voxel centres, so
+    # "within one map voxel" is exactly what a match means. Its strength and
+    # range weighting are derived from the sensor model.
     global_map_voxel_size_m: float = 0.30
-
-    # Two-pass global map prior (UniLiPs IWU): KDTree match radius, >=
-    # global_map_voxel_size_m (reduce snaps to voxel centres). The prior's
-    # strength + range weighting are derived from the sensor model.
-    global_map_match_radius_m: float = 0.30
 
     # Unit of ingest's t_offset_us field.
     # Options: "seconds" | "microseconds" | "nanoseconds"
@@ -278,18 +276,11 @@ class ComponentConfig(BaseModel):
             raise ValueError(f"value must be > 0, got {v}")
         return v
 
-    @field_validator("max_ray_length_m")
-    @classmethod
-    def _positive_ray_length(cls, v: Optional[float]) -> Optional[float]:
-        if v is not None and v <= 0:
-            raise ValueError(f"max_ray_length_m must be > 0 or null, got {v}")
-        return v
-
-    @field_validator("min_observations", "min_occupied_hits")
+    @field_validator("min_observations")
     @classmethod
     def _positive_min_obs(cls, v: int) -> int:
         if v < 1:
-            raise ValueError(f"value must be >= 1, got {v}")
+            raise ValueError(f"min_observations must be >= 1, got {v}")
         return v
 
     def point_time_scale_to_ns(self) -> float:
@@ -301,15 +292,9 @@ class ComponentConfig(BaseModel):
             )
         return scales[self.point_time_unit]
 
-    def build_sensor_model(self) -> SensorModel:
-        """The datasheet SensorModel selected by sensor_model.profile."""
-        return self.sensor_model.build()
-
-    def effective_max_ray_length_m(self) -> float:
-        """Compute guard: explicit override, else the sensor's max range."""
-        if self.max_ray_length_m is not None:
-            return float(self.max_ray_length_m)
-        return self.build_sensor_model().max_range_m
+    def build_sensor_model(self, lidar_id: Optional[str] = None) -> SensorModel:
+        """The datasheet SensorModel for ``lidar_id`` (default: the rig's)."""
+        return self.sensor_model.build(lidar_id)
 
 
 def load_config(path: str) -> ComponentConfig:

@@ -51,10 +51,14 @@ from tqdm.auto import tqdm
 
 import numpy as np
 
+from wato_common import manifest as common_manifest
 from wato_common.artifact_store import (
+    depth_2d_dir,
     depth_2d_path,
+    depth_stats_path,
     detections_2d_path,
     ensure_local_dir,
+    frame_index_path,
     local_path,
     masks_2d_dir,
     tracklets_2d_path,
@@ -63,6 +67,7 @@ from wato_common.geometry import invert_se3, unflatten_se3
 from wato_common.io.parquet_io import write_table
 from wato_common.schemas import MASKLET_SCHEMA, MaskletRow, encode_int_list
 from wato_perception_2d.config import ComponentConfig
+from wato_perception_2d.model_registry import revisions as model_revisions
 from wato_perception_2d.fusion.depth_align import (
     apply_affine,
     build_anchor_pairs,
@@ -550,7 +555,9 @@ def _run_tracking_pass(
         for cam_id, cam_frames in frames_by_cam.items():
             calib = calibration.get(cam_id)
             if calib is None:
-                log.warning("chunk %s: no calibration for %s — skipping", chunk_id, cam_id)
+                log.warning(
+                    "chunk %s: no calibration for %s — skipping", chunk_id, cam_id
+                )
                 continue
 
             cached = _load_cam_partial(bag_id, chunk_id, cam_id)
@@ -661,18 +668,58 @@ def _write_empty(bag_id: str, chunk_id: str) -> None:
     write_table([], MASKLET_SCHEMA, tracklets_2d_path(bag_id, chunk_id))
 
 
+def _write_chunk_manifest(
+    bag_id: str, chunk_id: str, config_path: Optional[str]
+) -> None:
+    """Record which models and parameters produced this chunk's 2D labels.
+
+    This is the manifest that matters most in the pipeline: GroundingDINO,
+    SAM2, Depth-Anything-V2 and DINOv2 jointly decide every 2D label, and
+    ``model_revisions()`` names the exact pinned weights of all four. Without
+    it, two runs that disagree cannot be attributed to a model change, a config
+    change, or a code change.
+
+    Best-effort: never fails a chunk that otherwise succeeded.
+    """
+    try:
+        common_manifest.write(
+            component="perception_2d",
+            bag_id=bag_id,
+            chunk_id=chunk_id,
+            inputs={"frame_index": frame_index_path(bag_id, chunk_id)},
+            outputs={
+                "detections_2d": detections_2d_path(bag_id, chunk_id),
+                "tracklets_2d": tracklets_2d_path(bag_id, chunk_id),
+                "masks_2d": masks_2d_dir(bag_id, chunk_id),
+                "depth_2d": depth_2d_dir(bag_id, chunk_id),
+                "depth_stats": depth_stats_path(bag_id, chunk_id),
+            },
+            config_path=config_path,
+            models=model_revisions(),
+            filename=common_manifest.component_manifest_name("perception_2d"),
+        )
+    except Exception:  # noqa: BLE001
+        log.warning("failed to write manifest for chunk %s", chunk_id, exc_info=True)
+
+
 def run(
     cfg: ComponentConfig,
     *,
     bag_id: str,
     chunk_id: Optional[str] = None,
     force: bool = False,
+    config_path: Optional[str] = None,
 ) -> None:
     """Process one bag (or one chunk) end-to-end.
 
     Skips chunks whose output parquets already exist unless force=True.  Model
     loading is fail-loud: a chunk that needs a model the environment can't
     provide raises rather than emitting empty placeholder output.
+
+    Args:
+        config_path: path to the config that produced ``cfg``. Hashed into each
+            chunk's manifest alongside the pinned model revisions, so a label
+            can be traced to the exact parameters and weights behind it.
     """
     if cfg.discovery.backend == "fixed" and not os.path.exists(cfg.prompts_path):
         log.info(
@@ -740,8 +787,16 @@ def run(
             # Fail loud: a chunk failure (e.g. a missing model) propagates out of
             # run() rather than being swallowed into a log line.
             _process_chunk(
-                cfg, bag_id, cid, discovery, detector, fixed_concepts, device, force=force
+                cfg,
+                bag_id,
+                cid,
+                discovery,
+                detector,
+                fixed_concepts,
+                device,
+                force=force,
             )
+            _write_chunk_manifest(bag_id, cid, config_path)
             n_ok += 1
     finally:
         # Don't leave SAM2 parked in VRAM after the bag finishes.

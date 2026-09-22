@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from wato_semantic_lifting.visibility import visibility_test
 
