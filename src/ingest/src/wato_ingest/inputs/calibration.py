@@ -8,7 +8,12 @@ Two paths:
 2. `freeze_from_file` — copy an authored calibration JSON in.  Use this only
    when the bag's CameraInfo or /tf_static is missing or wrong.
 
-Either way the output is `raw/<bag_id>/calibration.json` with this schema:
+Either way `require_complete` then checks that every configured camera and
+LiDAR has what downstream projection needs (intrinsics, ego_T_cam,
+ego_T_lidar) and raises CalibrationError otherwise, so an incomplete
+calibration fails ingest instead of surfacing as nulls in a later component.
+
+The output is `raw/<bag_id>/calibration.json` with this schema:
     {
       "calibration_version": str,
       "ego_frame": str,                       # parent frame for ego_T_*
@@ -51,6 +56,10 @@ from wato_common.geometry import make_se3
 from wato_common.io.rosbag_reader import messages
 
 from wato_ingest.config import IngestConfig
+
+
+class CalibrationError(RuntimeError):
+    """A configured sensor has no usable intrinsics or extrinsics."""
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +194,18 @@ def freeze_from_bag(bag_path: str, bag_id: str, cfg: IngestConfig) -> str:
 
     Writes raw/<bag_id>/calibration.json and returns its URI.
     """
+    unset = [
+        f"topics.cameras.{cam_id}.info"
+        for cam_id, c in cfg.topics.cameras.items()
+        if c.info is None
+    ]
+    if cfg.topics.tf_static is None:
+        unset.append("topics.tf_static")
+    if unset:
+        raise CalibrationError(
+            f"calibration from the bag needs {unset} in the ingest config; "
+            "set them, or pass --calibration <file> for a bag without them"
+        )
     info_topic_to_cam = {c.info: cam_id for cam_id, c in cfg.topics.cameras.items()}
     lidar_topic_to_id = {
         topic: lidar_id for lidar_id, topic in cfg.topics.lidars.items()
@@ -295,6 +316,46 @@ def freeze_from_file(
     with open(local_path(out_uri), "w", encoding="utf-8") as fh:
         json.dump(calib, fh, indent=2)
     return out_uri
+
+
+def require_complete(calib: dict, cfg: IngestConfig) -> None:
+    """Raise CalibrationError unless every configured sensor is calibrated.
+
+    Each camera needs K, width/height and ego_T_cam; each LiDAR needs
+    ego_T_lidar.  Without them nothing downstream can place that sensor's data
+    in the ego or world frame.
+    """
+    problems: list[str] = []
+    cams = calib.get("cameras") or {}
+    for cam_id in cfg.topics.cameras:
+        c = cams.get(cam_id)
+        if c is None:
+            problems.append(f"camera {cam_id}: no entry (no CameraInfo received?)")
+            continue
+        if not c.get("K"):
+            problems.append(f"camera {cam_id}: no intrinsics K")
+        if c.get("ego_T_cam") is None:
+            problems.append(
+                f"camera {cam_id}: no transform {calib.get('ego_frame')} -> "
+                f"{c.get('frame_id')}"
+            )
+    lidars = calib.get("lidars") or {}
+    for lidar_id in cfg.topics.lidars:
+        lid = lidars.get(lidar_id)
+        if lid is None:
+            problems.append(f"lidar {lidar_id}: no entry (no PointCloud2 received?)")
+        elif lid.get("ego_T_lidar") is None:
+            problems.append(
+                f"lidar {lidar_id}: no transform {calib.get('ego_frame')} -> "
+                f"{lid.get('frame_id')}"
+            )
+    if problems:
+        raise CalibrationError(
+            "calibration is incomplete: "
+            + "; ".join(problems)
+            + ". Check ego_frame and the TF topic in the ingest config, or pass "
+            "--calibration <file>."
+        )
 
 
 def load(bag_id: str) -> dict:

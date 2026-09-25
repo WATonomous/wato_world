@@ -145,18 +145,28 @@ lidar_preprocessing:
   cache_world_xyz_in_memory: true
 
   # ====================================================================
-  # Step D — global static map reduce + two-pass prior.
+  # Step D — global static map reduce (+ optional two-pass prior).
   # ====================================================================
   # Voxel size used when merging per-chunk static maps into the global map.
-  # Doubles as the two-pass prior's KDTree match radius: reduce snaps points
-  # to voxel centres, so "within one map voxel" is what a match means.  The
-  # prior's strength and range falloff are derived from the sensor model.
+  # Doubles as the match radius of everything that compares points against
+  # that map — the two-pass prior (`--two-pass`), IWU (Step E; the paper
+  # uses 30 cm) and the proposal step's IWU_EVICTED / UNMAPPED tests: reduce
+  # snaps points to voxel centres, so "within one map voxel" is what a match
+  # means.  Strengths and range falloff come from the sensor model.
   global_map_voxel_size_m: 0.30
 
   # Unit of ingest's per-point t_offset_us field.  "seconds" |
   # "microseconds" | "nanoseconds".  A property of the bag's driver, not the
   # scanner — nuScenes conversions emit seconds.
   point_time_unit: "seconds"
+
+  # Where a sweep's header stamp sits in the rotation when per-point times are
+  # synthesized from azimuth: "sweep_start" (first-fired point at the stamp)
+  # or "sweep_end" (last-fired point at the stamp).  A driver property.  For
+  # nuScenes it is unverified: camera trigger offsets only locate the cut
+  # angle, and the start and end of a rotation share it.  "sweep_start" keeps
+  # the behaviour this profile has always had.
+  header_stamp_at: sweep_start
 
   # ====================================================================
   # Step C — Patchwork++ ground segmentation.
@@ -237,6 +247,43 @@ lidar_preprocessing:
     # MF-MOS range subtends well above this on a 32-beam sensor, while
     # single-sweep mispredictions are 1–few isolated points.
     moving_min_cluster_pts: 8
+
+  # ====================================================================
+  # Step E — UniLiPs Iterative Weighted Update (bag level, any --seg).
+  # ====================================================================
+  # Refines global_static_map.npz: every map point keeps a static
+  # probability, reinforced when a sweep returns on it and decayed when a
+  # sweep sees THROUGH it (occluded points are never decayed).  Points ending
+  # below 0.5 are evicted as floaters — parked-then-moved cars, pedestrians
+  # that stood still for a chunk — and become IWU_EVICTED proposals.
+  # α=0.7 / τ=0.5 are the paper's and live in iwu/_core.py.
+  iwu:
+    enabled: true
+    # Updates per second per lidar.  The EMA is dominated by its last ~10
+    # updates, so consecutive 20 Hz sweeps are nearly redundant; each
+    # lidar's stride is round(datasheet rate / this).
+    update_rate_hz: 4.0
+
+  # ====================================================================
+  # Step F — recall-oriented motion proposals (per chunk, any --seg).
+  # ====================================================================
+  # Separate artifact from dynamic_mask.npy: *_motion_proposals.npz flags
+  # every point any heuristic calls a mover (source_bits) and
+  # motion_clusters.parquet scores each HDBSCAN cluster's motion (Chen et
+  # al. 2022).  False positives are expected — downstream association
+  # removes them — so nothing is dropped on motion evidence.
+  motion_proposals:
+    enabled: true
+    # Points lower than this over the ground grid are never flagged (road
+    # false positives dodge every voxel test).  BOX_FILL brings wheels/feet
+    # back on moving clusters.  0.0 disables.
+    min_height_above_ground_m: 0.25
+    # Chen N_min: smallest cluster kept (HDBSCAN min_cluster_size).
+    min_cluster_pts: 5
+    # Chen T_size: clusters with a longer BEV side are structure, not objects.
+    max_side_m: 20.0
+    # Chen box fill: points inside a moving cluster's box get BOX_FILL.
+    box_fill: true
 
   # ====================================================================
   # Diagnostic / export toggles.

@@ -19,6 +19,7 @@ from wato_common.artifact_store import (
 )
 from wato_common.io.parquet_io import read_rows
 from wato_ingest.config import IngestConfig
+from wato_ingest.decoders.poses import dense_fraction
 
 
 @dataclass
@@ -83,6 +84,17 @@ def compute(bag_id: str, chunk_id: str, cfg: IngestConfig) -> QualityReport:
         if metrics["ego_speed_mean"] < cfg.quality_thresholds["stationary_speed_mps"]:
             tags.append("STATIONARY")
 
+    # ---- Pose density (the chunk-level requirement already passed in
+    # decoders/poses.py; recorded so a bag's margin to it is visible). --------
+    if len(poses) >= 2:
+        pose_ts = np.sort(np.array([p["timestamp_ns"] for p in poses], dtype=np.int64))
+        spacing_ms = np.diff(pose_ts) / 1e6
+        metrics["pose_median_spacing_ms"] = float(np.median(spacing_ms))
+        metrics["pose_max_spacing_ms"] = float(spacing_ms.max())
+        metrics["pose_dense_fraction"] = dense_fraction(
+            pose_ts.tolist(), cfg.pose_requirements.max_bracket_ms
+        )
+
     # ---- Pose availability over the chunk window. ---------------------------
     if frames:
         with_pose = sum(1 for f in frames if f["valid_pose"])
@@ -92,6 +104,23 @@ def compute(bag_id: str, chunk_id: str, cfg: IngestConfig) -> QualityReport:
             < cfg.quality_thresholds["min_pose_availability"]
         ):
             tags.append("POSE_MISSING")
+
+        # Sweeps (not frame_index rows — those repeat per camera) that lost
+        # their pose, by pose_drop_reason family.
+        dropped: dict[str, set[tuple[str, int]]] = {
+            "gap": set(),
+            "jump": set(),
+            "span": set(),
+        }
+        for f in frames:
+            family = _pose_drop_family(f.get("pose_drop_reason"))
+            if family is not None:
+                dropped[family].add((f["lidar_id"], int(f["sweep_id"])))
+        metrics["pose_gap_sweeps"] = float(len(dropped["gap"]))
+        metrics["pose_jump_sweeps"] = float(len(dropped["jump"]))
+        metrics["pose_outside_span_sweeps"] = float(len(dropped["span"]))
+        if dropped["jump"]:
+            tags.append("POSE_JUMPS")
 
     # ---- Lighting (mean V channel) — sample a few images to keep this cheap.
     metrics["lighting_mean_v"] = _sample_v_channel(cameras, max_samples=12)
@@ -107,6 +136,19 @@ def compute(bag_id: str, chunk_id: str, cfg: IngestConfig) -> QualityReport:
     report = QualityReport(bag_id=bag_id, chunk_id=chunk_id, metrics=metrics, tags=tags)
     _write(report)
     return report
+
+
+def _pose_drop_family(reason: str | None) -> str | None:
+    """Map a frame_index pose_drop_reason to gap / jump / span (or None)."""
+    if not reason:
+        return None
+    if reason.startswith("pose_gap_"):
+        return "gap"
+    if reason.startswith("pose_jump_"):
+        return "jump"
+    if reason == "outside_pose_span":
+        return "span"
+    return None
 
 
 def _sample_v_channel(camera_rows: list[dict], *, max_samples: int) -> float:

@@ -6,10 +6,10 @@ physical constant. Two groups of fields live here:
 
 **Datasheet specs** — `beams`, `fov_up_deg`, `fov_down_deg`, `range_sigma_m`,
 `beam_divergence_rad`, `max_range_m`, `sweep_duration_ms`, `intensity_scale`,
-`rotation_dir`. These are published numbers; a wrong value is a bug with a
-citable answer. Everything downstream reads them: deskew's azimuth-to-time
-synthesis, classify's log-odds constants and carve geometry, and MF-MOS's
-spherical projection.
+`rotation_dir`, `firing_cycle_us`. These are published numbers; a wrong value
+is a bug with a citable answer. Everything downstream reads them: deskew's
+azimuth-to-time synthesis, classify's log-odds constants and carve geometry,
+and the MF-MOS / IWU spherical projections.
 
 **Inverse-sensor-model probabilities** — `p_hit`, `p_miss`, `p_clamp`,
 `k_sigma`, `p_map_prior`. These are NOT on any datasheet. They are the
@@ -100,6 +100,9 @@ class SensorModel:
         sweep_duration_ms:   one full rotation [ms]; azimuth→time synthesis.
         intensity_scale:     divisor mapping raw intensity into [0, 1].
         rotation_dir:        spin direction seen from above.
+        firing_cycle_us:     time for one full firing sequence of all
+                             channels [µs]; with the spin rate it fixes the
+                             azimuth step (see azimuth_res_deg).
 
     Inverse-sensor-model fields (picked, not measured — see module docstring):
         p_hit, p_miss, p_clamp, k_sigma, p_map_prior.
@@ -115,6 +118,7 @@ class SensorModel:
     sweep_duration_ms: float
     intensity_scale: float
     rotation_dir: Literal["cw", "ccw"]
+    firing_cycle_us: float
     p_hit: float = _P_HIT
     p_miss: float = _P_MISS
     p_clamp: float = _P_CLAMP
@@ -130,6 +134,20 @@ class SensorModel:
     @property
     def sweep_duration_ns(self) -> float:
         return self.sweep_duration_ms * 1_000_000.0
+
+    @property
+    def azimuth_res_deg(self) -> float:
+        """Horizontal step between firings: 360° × firing_cycle / rotation period.
+
+        Velodyne quotes resolution as a range over spin rates because it is
+        derived, not fixed — e.g. VLP-32C 55.296 µs at 20 Hz → 0.40°.
+        """
+        return 360.0 * self.firing_cycle_us / (self.sweep_duration_ms * 1000.0)
+
+    @property
+    def azimuth_columns(self) -> int:
+        """Range-image width at the scanner's native azimuth step."""
+        return int(round(360.0 / self.azimuth_res_deg))
 
     # --- Log-odds increments / bounds ---
 
@@ -208,6 +226,7 @@ _PROFILES: dict[str, SensorModel] = {
         sweep_duration_ms=50.0,  # WATO runs the rig at ~20 Hz
         intensity_scale=255.0,
         rotation_dir="cw",
+        firing_cycle_us=55.296,  # VLP-32C manual: 32 channels in 55.296 µs
     ),
     # WATO rig corner scanners. Datasheet: 16 channels, ±15°, ±3 cm, ~3 mrad,
     # 100 m range. Too few channels for the MF-MOS projection (see mf_mos).
@@ -222,6 +241,7 @@ _PROFILES: dict[str, SensorModel] = {
         sweep_duration_ms=50.0,
         intensity_scale=255.0,
         rotation_dir="cw",
+        firing_cycle_us=55.296,  # VLP-16 manual: 16 firings + recharge, 55.296 µs
     ),
     # nuScenes LIDAR_TOP. HDL-32E: 32 channels, +10.67°/-30.67°, ±2 cm,
     # ~2.8 mrad, 20 Hz, usable ~80 m.
@@ -236,6 +256,7 @@ _PROFILES: dict[str, SensorModel] = {
         sweep_duration_ms=50.0,
         intensity_scale=255.0,
         rotation_dir="cw",
+        firing_cycle_us=46.08,  # HDL-32E manual: 32 lasers in 46.08 µs
     ),
 }
 

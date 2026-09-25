@@ -39,9 +39,11 @@ class CameraFrameInfo:
     cam_id: str
     image_path: str
     camera_seq: int
-    world_T_ego_flat: Optional[list[float]]  # row-major 4×4, None if invalid
+    # When the image was taken.  The ego pose for projecting into this image is
+    # looked up at this time (wato_common.pose_lookup), not taken from
+    # frame_index's world_T_ego, which is the LiDAR sweep's pose.
+    camera_timestamp_ns: Optional[int]
     valid_camera: bool
-    valid_pose: bool
 
 
 @dataclass
@@ -62,9 +64,7 @@ def load_frame_index(bag_id: str, chunk_id: str) -> list[CameraFrameInfo]:
     for r in rows:
         if not r.get("valid_camera", False):
             continue
-        flat = r.get("world_T_ego_flat")
-        if flat is not None:
-            flat = list(flat)
+        cam_ts = r.get("camera_timestamp_ns")
         result.append(
             CameraFrameInfo(
                 frame_id=str(r.get("frame_id", "")),
@@ -74,9 +74,8 @@ def load_frame_index(bag_id: str, chunk_id: str) -> list[CameraFrameInfo]:
                 cam_id=str(r["cam_id"]),
                 image_path=local_path(str(r["image_path"])),
                 camera_seq=int(r["camera_seq"]),
-                world_T_ego_flat=flat,
+                camera_timestamp_ns=int(cam_ts) if cam_ts is not None else None,
                 valid_camera=bool(r.get("valid_camera", False)),
-                valid_pose=bool(r.get("valid_pose", False)),
             )
         )
     return result

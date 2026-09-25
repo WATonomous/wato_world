@@ -7,7 +7,8 @@ do not all fit (e.g. ~6 GB):
   PASS 1 — depth (only DA-V2 in VRAM), per camera (frames batched through the
   backbone `depth.batch_size` at a time; steps 2-6 then run per frame):
     1. DepthAnythingV2.infer_batch() → relative_depth
-    2. Load static LiDAR points for this sweep
+    2. Load static LiDAR points for this sweep, and the ego pose at the
+       camera frame's own timestamp (wato_common.pose_lookup)
     3. depth_align.build_anchor_pairs() → d_lidar, d_da
     4. depth_align.ransac_affine_fit() → affine params
     5. depth_align.apply_affine() → metric_depth
@@ -61,10 +62,12 @@ from wato_common.artifact_store import (
     frame_index_path,
     local_path,
     masks_2d_dir,
+    poses_path,
     tracklets_2d_path,
 )
-from wato_common.geometry import invert_se3, unflatten_se3
+from wato_common.geometry import invert_se3
 from wato_common.io.parquet_io import write_table
+from wato_common.pose_lookup import PoseLookup
 from wato_common.schemas import MASKLET_SCHEMA, MaskletRow, encode_int_list
 from wato_perception_2d.config import ComponentConfig
 from wato_perception_2d.model_registry import revisions as model_revisions
@@ -190,6 +193,7 @@ def _align_and_write_depth(
     frame: CameraFrameInfo,
     rel_depth: np.ndarray,
     calib: CalibrationInfo,
+    poses: PoseLookup,
     fallback_window: deque,
 ) -> None:
     """LiDAR-align one frame's relative depth to metric and write the artifact.
@@ -197,6 +201,12 @@ def _align_and_write_depth(
     The DA-V2 inference is done by the caller (batched); this is the per-frame
     sequential tail. Writes nothing on total failure (fit_status==2): downstream
     treats a missing depth_2d artifact identically to a written fit_status==2 one.
+
+    The static points are already in world coordinates (each deskewed at its
+    own time by lidar_preprocessing), so projecting them into this image needs
+    the ego pose when the image was taken — looked up at the frame's
+    camera_timestamp_ns, not the LiDAR sweep's pose from frame_index (the car
+    moves between the two; up to ~0.9 m at 30 m on the WATO rig).
     """
     H, W = rel_depth.shape[:2]
     fit_params: dict = {
@@ -208,10 +218,14 @@ def _align_and_write_depth(
     }
 
     static_pts = load_static_lidar_points(bag_id, chunk_id, frame.sweep_id)
+    pose = (
+        poses.at(frame.camera_timestamp_ns)
+        if frame.camera_timestamp_ns is not None
+        else None
+    )
 
-    if static_pts is not None and frame.valid_pose and frame.world_T_ego_flat:
-        world_T_ego = unflatten_se3(frame.world_T_ego_flat)
-        cam_T_world = invert_se3(calib.ego_T_cam) @ invert_se3(world_T_ego)
+    if static_pts is not None and pose is not None and pose.valid:
+        cam_T_world = invert_se3(calib.ego_T_cam) @ invert_se3(pose.world_T_ego)
         d_lidar, d_da = build_anchor_pairs(
             static_pts,
             rel_depth,
@@ -469,6 +483,15 @@ def _run_depth_pass(
     the LiDAR alignment that follows each batch stays strictly sequential, so the
     fallback-window state is identical to per-frame processing.
     """
+    try:
+        poses = PoseLookup.load(bag_id, chunk_id)
+    except FileNotFoundError:
+        log.warning(
+            "chunk %s has no poses.parquet — no frame can be LiDAR-aligned "
+            "(re-run ingest)",
+            chunk_id,
+        )
+        poses = PoseLookup([])
     depth_model = DepthAnythingV2(model_size=cfg.depth.model, device=None)
     batch_size = max(1, cfg.depth.batch_size)
     try:
@@ -508,6 +531,7 @@ def _run_depth_pass(
                                 frame,
                                 rel_depth,
                                 calib,
+                                poses,
                                 fallback_window,
                             )
                     pbar.update(len(batch_frames))
@@ -686,7 +710,10 @@ def _write_chunk_manifest(
             component="perception_2d",
             bag_id=bag_id,
             chunk_id=chunk_id,
-            inputs={"frame_index": frame_index_path(bag_id, chunk_id)},
+            inputs={
+                "frame_index": frame_index_path(bag_id, chunk_id),
+                "poses": poses_path(bag_id, chunk_id),
+            },
             outputs={
                 "detections_2d": detections_2d_path(bag_id, chunk_id),
                 "tracklets_2d": tracklets_2d_path(bag_id, chunk_id),

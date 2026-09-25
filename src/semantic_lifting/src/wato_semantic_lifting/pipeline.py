@@ -136,7 +136,6 @@ def _process_chunk(
             n_failed_vis += int((~vis).sum())
 
             uv_vis = uv_valid[vis]
-            d_cam_vis = d_cam_valid[vis]
             vis_indices = valid_indices[vis]
 
             if uv_vis.shape[0] == 0:

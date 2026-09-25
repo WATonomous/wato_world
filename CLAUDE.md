@@ -47,7 +47,7 @@ each in its own Docker image, communicating only through artifacts on disk
 
 ```
 ingest              → frames + lidar sweeps + poses + frame_index
-lidar_preprocessing → motion comp, static/dynamic split, ground extraction
+lidar_preprocessing → motion comp, static/dynamic split (--seg aw|mos|union), ground, bag IWU, motion proposals
 perception_2d       → GroundingDINO + SAM2 video tracker + Depth Anything V2 + DINOv2 (optional Florence-2 discovery)
 semantic_lifting    → occlusion-aware 2D→3D label lifting (UniLiPs Eq.1)
 proposal_generation → LiDAR detector ensemble + Segment-Lift-Fit + fusion
@@ -66,10 +66,34 @@ profiles — the default (nuScenes) and a `.wato.yaml` variant for the
 3-Velodyne rig (per-corner lidar topics, per-lidar sensor profiles —
 `vlp32c` for `lidar_cc`, `vlp16` for `lidar_ne`/`lidar_nw` — and
 `frame_sync.canonical_lidar: lidar_cc`). Valid profiles are `vlp32c`, `vlp16`,
-`hdl32e`; physics lives in `sensor_model.py`, not YAML. WATO bags must be ingested with the
+`hdl32e`; physics lives in `sensor_model.py`, not YAML. Driver properties live
+in the profile YAML instead: WATO Velodyne per-point `time` fields are all
+zero, so deskew treats them as missing and synthesizes times from azimuth,
+counting back from the stamp (`header_stamp_at: sweep_end`, from the car's
+`timestamp_first_packet: false`). Ingest's `sweep_id` is one counter per chunk
+shared by all LiDARs, which is what lets lidar_preprocessing, perception_2d and
+semantic_lifting key per-sweep files and joins on `sweep_id` alone; chunks
+ingested before that restart it per LiDAR and must be re-ingested (their three
+WATO scanners overwrite each other's world files). WATO bags must be ingested with the
 per-corner topics, NOT `/lidar/all/points_merged`: classify's ray traversal
 assumes one sensor origin per sweep, and merged clouds leak static structure
 into `dynamic_map.npz`.
+
+**lidar_preprocessing has two dynamic artifacts — don't conflate them.**
+`*_dynamic_mask.npy` / `dynamic_map.npz` is the chosen seg method's
+*precision* verdict (perception_2d's depth anchors read `~dynamic_mask` as
+trusted static; semantic_lifting carries the path for its planned
+dynamic-point handling). `*_motion_proposals.npz` /
+`motion_clusters.parquet` (Step F) is the *recall* artifact: every heuristic's
+per-point verdict (`source_bits`: AW dynamic/ambiguous, IWU-evicted, MF-MOS,
+seg dynamic, box fill, unmapped) plus HDBSCAN clusters with soft motion
+features (Chen et al.'s motion_score). False positives there are by design —
+downstream association filters them. Step E (`iwu/`, bag-level UniLiPs IWU →
+`global_iwu.npz`) evicts floaters from the bag static map and feeds Step F.
+The box / Kalman / association code Step F tracks with lives in
+`wato_common/tracking/` so the `tracking` component reuses it rather than
+growing a second motion model. `--two-pass` (a one-time global-map log-odds
+prior) is off by default and is NOT IWU.
 
 ## Repository conventions
 
@@ -112,6 +136,15 @@ or a list. `:dev` = develop target with source bind-mounts.
 
 ## Ingest pipeline (the only complete component)
 
+**Dataset-agnostic: a new recording needs only a new YAML, never Python.**
+Nothing in `wato_ingest` names a dataset, vehicle or topic (the `wato_` prefix
+is the repo namespace every package carries, like `wato_common`). Ingest
+validates the configured topics' message types up front, detects the rosbag2
+storage plugin itself, and stops with a named error rather than writing
+artifacts that look complete but aren't (ingest README "Ingesting a new bag").
+Keep it that way: a quirk of one recording belongs in its profile YAML or is
+rejected with a clear error, not special-cased in code.
+
 Single command: `./watod run ingest <bag>` invokes
 `python -m wato_ingest run --bag <bag>` which calls
 `wato_ingest.pipeline.run_bag()`. That orchestrates:
@@ -121,7 +154,7 @@ inputs/        decoders/         artifacts/
 bags.py        cameras.py        frame_index.py
 calibration.py lidar.py          quality.py
 chunks.py      poses.py          manifest.py
-topics.py      pose_interpolation.py
+topics.py
 ```
 
 Outputs land at `data/artifacts/raw/<bag_id>/` per the schema in
@@ -129,16 +162,45 @@ Outputs land at `data/artifacts/raw/<bag_id>/` per the schema in
 documents the table shapes the artifacts use). `frame_index.parquet` is the
 contract every downstream component reads.
 
-**Pose source**: configurable via `topics.pose` in
-`src/ingest/config/ingest.yaml`. Canonical source is eidos's `slam/odometry`
-(stamped at LiDAR keyframe sensor time, map frame, child=base_footprint).
-Do NOT consume `/tf` directly — eidos doesn't publish to it; eidos_transform
-does, and that stream is wall-clock-stamped which desyncs from LiDAR.
+**Pose lookup — one place, at each datum's own time**: every pose (a sweep's,
+a deskewed point's, a camera frame's) is interpolated from `poses.parquet`
+through `wato_common.pose_lookup.PoseLookup`, called at the timestamp of the
+data being placed. `frame_index.world_T_ego` is the SWEEP's pose; anything
+projecting into an image looks the pose up at `camera_timestamp_ns` instead
+(perception_2d depth anchors, semantic_lifting) — they're up to 44 ms apart on
+WATO, 120 ms on nuScenes.
+
+**Pose source — must be dense and smooth**: `topics.pose` (one
+`nav_msgs/Odometry` topic whose `child_frame_id` equals `ego_frame`, or a
+`PoseStamped` / `PoseWithCovarianceStamped`, whose body frame can't be checked). Every
+pose is linearly interpolated between two samples, so ingest enforces
+`pose_requirements` (see ingest README "Pose requirements"): a chunk whose
+pose span is < `min_dense_fraction` covered by samples ≤ `max_bracket_ms`
+apart ABORTS ingest; stretches between distant samples or across a jump are
+marked in `poses.parquet` (`interval_drop_reason`), and nothing inside them
+gets a valid pose (sweeps: `valid_pose=False` + `pose_drop_reason`). Passing the
+checks is necessary, not sufficient — they can't see a mis-stamped or
+attitude-biased stream (ingest README "How good are the poses"). Eidos topics:
+`liso/odometry` = per-scan front-end pose stamped at scan time (agrees with the
+INS to ~5 cm/s; no ground truth exists); `slam/odometry` = back-end
+newest-KEYFRAME pose — one per 5 m on eidos main (aborts); in
+ring_road_corrected it is bit-identical LISO poses stamped 244–450 ms late (median 310 ms; LISO processing latency + wait for the next SLAM tick, so no constant shift corrects it).
+Eidos main's GPS/loop-closure-corrected keyframe poses were never compared to
+LISO (no recording has both). WATO profiles:
+`ingest.wato.yaml` (eidos `slam/odometry`, child `base_footprint`) and
+`ingest.wato_novatel.yaml` (`/novatel/oem7/odom`, UTM, child `base_link`,
+50 Hz position; NOT validated for labeling — ~2° attitude bias vs the LiDAR
+frame, mount vs INS error undetermined). The two WATO profiles must differ only in `topics.pose`/
+`ego_frame` (a test enforces it). Do NOT consume `/tf` directly — eidos
+doesn't publish to it; eidos_transform does, and that stream is
+wall-clock-stamped which desyncs from LiDAR.
 
 **Calibration**: auto-extracted from the bag itself. `freeze_from_bag()` reads
-`/<cam>/camera_info` (intrinsics, distortion, frame_id), first PointCloud2
+each camera's `info` topic (intrinsics, distortion, frame_id), first PointCloud2
 per LiDAR (frame_id), and the configured TF topic (extrinsics via BFS chain).
-`--calibration <file>` overrides with a hand-authored JSON.
+`--calibration <file>` overrides with a hand-authored JSON (the bag's `info` /
+`tf_static` topics are then not required). Either way `require_complete()`
+aborts ingest if a configured sensor has no intrinsics or extrinsics.
 
 ## CI / ghcr — the lessons that took several iterations to learn
 
@@ -354,6 +416,7 @@ testable change — not by hand-editing a lock:
 ## Build / test smoke check
 
 ```bash
-PYTHONPATH=src/common/src:src/ingest/src python3 -m pytest src/ingest/tests
-# 31 passing tests, all without ROS installed (lazy ROS imports in rosbag_reader).
+PYTHONPATH=src/common/src:src/ingest/src python3 -m pytest -p no:anyio src/ingest/tests
+# 81 passing tests, all without ROS installed (lazy ROS imports in rosbag_reader).
+# `-p no:anyio`: the host's anyio pytest plugin doesn't load under its pytest.
 ```

@@ -1,4 +1,4 @@
-"""Tests for the two-pass global static map prior (UniLiPs IWU).
+"""Tests for the two-pass global static map prior (one-time log-odds boost).
 
 Covers:
   * GlobalMapPrior.query_sweep returns the expected (map_hit, r_star) for
@@ -327,8 +327,8 @@ def _write_world_sweep_with_ground(
     )
 
 
-def test_iwu_boost_excludes_ground_points(tmp_env):
-    """Ground points are filtered from the IWU boost query.
+def test_prior_boost_excludes_ground_points(tmp_env):
+    """Ground points are filtered from the prior boost query.
 
     Regression: the boost previously used the full sweep xyz, so a ground
     voxel matching the global static map got a phantom log_odds entry that no
@@ -339,7 +339,7 @@ def test_iwu_boost_excludes_ground_points(tmp_env):
     evidence but is credited no endpoint hit, so whatever the ground voxel
     ends up with must come from carving — never from the prior.
     """
-    bag_id, chunk_id = "bag_iwu_ground", "chunk0"
+    bag_id, chunk_id = "bag_prior_ground", "chunk0"
     chunk_origin = np.array([0.0, 0.0, 0.0], dtype=np.float64)
     xyz = np.array([[10.0, 0.0, 0.0], [0.0, 5.0, 0.0]])
     ground = np.array([False, True])
@@ -390,6 +390,6 @@ def test_iwu_boost_excludes_ground_points(tmp_env):
             int(n_hits[gnd_idx]) == 0
         ), "ground endpoint must never be credited an occupancy hit"
         assert float(lo_vals[gnd_idx]) <= 0.0, (
-            f"ground voxel (key={ground_key}) was boosted by the IWU prior "
+            f"ground voxel (key={ground_key}) was boosted by the global-map prior "
             f"with no measurement behind it — Bug 4 regression"
         )

@@ -28,6 +28,12 @@ _MAX_STATIC_HTML_PTS = 350_000
 _MAX_DYNAMIC_HTML_PTS = 650_000
 _STATIC_RGB = np.array([74, 143, 217], dtype=np.uint8)
 _DYNAMIC_RGB = np.array([232, 77, 61], dtype=np.uint8)
+# Proposal-layer palette, lowest to highest priority (later paints over).
+_PROPOSAL_ATTACH_RGB = np.array([140, 140, 150], dtype=np.uint8)  # attach-only
+_PROPOSAL_SEED_RGB = np.array([240, 210, 60], dtype=np.uint8)  # seed source
+_PROPOSAL_IWU_RGB = np.array([200, 80, 200], dtype=np.uint8)  # IWU_EVICTED
+_PROPOSAL_FILL_RGB = np.array([245, 160, 40], dtype=np.uint8)  # BOX_FILL
+_PROPOSAL_MOVING_RGB = _DYNAMIC_RGB  # member of a cluster with motion_score > 1
 
 
 def _sample_indices(n: int, max_points: int, seed: int) -> np.ndarray:
@@ -181,19 +187,88 @@ def _load_sweep_payload(bag_id: str, chunk_id: str, sweep_id: int) -> dict:
     }
 
 
+def _load_proposals_payload(bag_id: str, chunk_id: str) -> dict:
+    """Chunk payload whose "dynamic" cloud is Step F's proposal points.
+
+    Colours (the viewer's static/dynamic colour mode): grey = attach-only
+    (AMBIGUOUS/UNMAPPED), yellow = a seed source, magenta = IWU_EVICTED,
+    orange = BOX_FILL, red = member of a cluster passing Chen's criterion.
+    """
+    from wato_lidar_preprocessing.motion_proposals import (
+        BOX_FILL,
+        IWU_EVICTED,
+        SEED_BITS,
+    )
+    from wato_lidar_preprocessing.viz_data import load_chunk_proposal_viz_data
+
+    data = load_chunk_proposal_viz_data(bag_id, chunk_id)
+    static_idx = _sample_indices(len(data.static_xyz), _MAX_STATIC_HTML_PTS, seed=17)
+    idx = _sample_indices(len(data.xyz), _MAX_DYNAMIC_HTML_PTS, seed=29)
+    xyz = data.xyz[idx].astype(np.float32)
+    sweep_id = data.sweep_id[idx]
+    bits = data.source_bits[idx]
+    moving = data.moving[idx]
+    order = np.argsort(sweep_id, kind="stable")
+    xyz, sweep_id, bits, moving = (
+        xyz[order],
+        sweep_id[order],
+        bits[order],
+        moving[order],
+    )
+
+    colors = np.repeat(_PROPOSAL_ATTACH_RGB[None, :], len(xyz), axis=0)
+    colors[(bits & SEED_BITS) != 0] = _PROPOSAL_SEED_RGB
+    colors[(bits & IWU_EVICTED) != 0] = _PROPOSAL_IWU_RGB
+    colors[(bits & BOX_FILL) != 0] = _PROPOSAL_FILL_RGB
+    colors[moving] = _PROPOSAL_MOVING_RGB
+
+    static_xyz = data.static_xyz[static_idx].astype(np.float32)
+    parts = [a for a in (static_xyz, xyz) if len(a)]
+    bounds = np.vstack(parts) if parts else np.zeros((1, 3))
+    return {
+        "title": f"lidar_preprocessing proposals chunk {chunk_id}",
+        "bag_id": bag_id,
+        "chunk_id": chunk_id,
+        "mode": "chunk",
+        "static_xyz": _array_spec(static_xyz, np.float32),
+        "dynamic_xyz": _array_spec(xyz, np.float32),
+        "dynamic_sweep_id": _array_spec(sweep_id.astype(np.int32), np.int32),
+        "dynamic_intensity": _empty_spec((0,), np.float32),
+        "dynamic_rgb": _array_spec(colors, np.uint8),
+        "has_intensity": False,
+        "bounds_min": bounds.min(axis=0).astype(float).tolist(),
+        "bounds_max": bounds.max(axis=0).astype(float).tolist(),
+        "counts": {
+            "static": int(len(static_xyz)),
+            "dynamic": int(len(xyz)),
+            "dynamic_sampled_from": int(len(data.xyz)),
+            "moving": int(moving.sum()),
+        },
+    }
+
+
 def write_html_viewer(
     bag_id: str,
     chunk_id: str,
     *,
     sweep_id: int | None = None,
     out_path: str | Path | None = None,
+    layer: str = "classification",
 ) -> Path:
-    """Write a standalone HTML/WebGL point-cloud viewer and return its path."""
-    payload = (
-        _load_sweep_payload(bag_id, chunk_id, sweep_id)
-        if sweep_id is not None
-        else _load_chunk_payload(bag_id, chunk_id)
-    )
+    """Write a standalone HTML/WebGL point-cloud viewer and return its path.
+
+    layer="proposals" shows Step F's motion proposals (chunk-level only).
+    """
+    if layer == "proposals":
+        if sweep_id is not None:
+            raise ValueError("the proposals layer is chunk-level; omit sweep_id")
+        payload = _load_proposals_payload(bag_id, chunk_id)
+    else:
+        payload = (
+            _load_sweep_payload(bag_id, chunk_id, sweep_id)
+            if sweep_id is not None
+            else _load_chunk_payload(bag_id, chunk_id)
+        )
     out = (
         Path(out_path)
         if out_path is not None
@@ -201,7 +276,13 @@ def write_html_viewer(
     )
     if out.suffix.lower() != ".html":
         out.mkdir(parents=True, exist_ok=True)
-        name = f"sweep_{sweep_id:06d}.html" if sweep_id is not None else "chunk.html"
+        name = (
+            "proposals.html"
+            if layer == "proposals"
+            else f"sweep_{sweep_id:06d}.html"
+            if sweep_id is not None
+            else "chunk.html"
+        )
         out = out / name
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(_render_html(payload), encoding="utf-8")

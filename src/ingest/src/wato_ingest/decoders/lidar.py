@@ -1,4 +1,11 @@
-"""Decode LiDAR PointCloud2 messages into per-sweep .npz files."""
+"""Decode LiDAR PointCloud2 messages into per-sweep .npz files.
+
+sweep_id is one counter per chunk shared by every LiDAR, assigned in record
+order, so it names a sweep uniquely within the chunk even on a multi-LiDAR
+rig.  Downstream components key per-sweep files and joins on
+(bag_id, chunk_id, sweep_id); per-LiDAR counters would make the scanners
+overwrite each other's outputs.
+"""
 
 from __future__ import annotations
 
@@ -52,7 +59,8 @@ def decode_chunk(
     for lidar_id in lidar_topics:
         ensure_local_dir(lidar_dir(bag_id, chunk_id, lidar_id))
 
-    sweep_per_lidar: dict[str, int] = {lid: 0 for lid in lidar_topics}
+    sweeps_per_lidar: dict[str, int] = {lid: 0 for lid in lidar_topics}
+    next_sweep_id = 0
     rows: list[dict] = []
 
     with messages(
@@ -64,25 +72,25 @@ def decode_chunk(
     ) as iterator:
         for topic, msg, record_ts_ns in iterator:
             lidar_id = topic_to_lidar[topic]
-            seq = sweep_per_lidar[lidar_id]
             row = _write_sweep(
                 msg=msg,
                 bag_id=bag_id,
                 chunk_id=chunk_id,
                 lidar_id=lidar_id,
-                sweep_id=seq,
+                sweep_id=next_sweep_id,
                 record_ts_ns=record_ts_ns,
             )
             if row is not None:
                 rows.append(row)
-                sweep_per_lidar[lidar_id] = seq + 1
+                next_sweep_id += 1
+                sweeps_per_lidar[lidar_id] += 1
 
     write_table(rows, LIDAR_SWEEPS_SCHEMA, lidar_sweeps_path(bag_id, chunk_id))
 
     return [
         LidarDecodeResult(
             lidar_id=lidar_id,
-            sweeps_written=sweep_per_lidar[lidar_id],
+            sweeps_written=sweeps_per_lidar[lidar_id],
             output_dir=lidar_dir(bag_id, chunk_id, lidar_id),
         )
         for lidar_id in lidar_topics

@@ -133,6 +133,24 @@ def mf_mos_score_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
     return _join(lidar_proc_dir(bag_id, chunk_id), f"{sweep_id:06d}_mf_mos_score.npy")
 
 
+def motion_proposals_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
+    """Per-sweep recall-oriented moving-object proposals (Step F).
+
+    npz with `source_bits` uint8[N] and `cluster_id` int32[N], aligned to the
+    sweep's world NPZ. Deterministic path, not an index column: every seg
+    method rewrites lidar_proc_index.parquet, so a column would be dropped by
+    whichever rewrite forgot to carry it.
+    """
+    return _join(
+        lidar_proc_dir(bag_id, chunk_id), f"{sweep_id:06d}_motion_proposals.npz"
+    )
+
+
+def motion_clusters_path(bag_id: str, chunk_id: str) -> str:
+    """Per-chunk proposal clusters with soft motion features (Step F)."""
+    return _join(chunk_root(bag_id, chunk_id), "motion_clusters.parquet")
+
+
 def lidar_proc_index_path(bag_id: str, chunk_id: str) -> str:
     return _join(chunk_root(bag_id, chunk_id), "lidar_proc_index.parquet")
 
@@ -159,6 +177,15 @@ def global_static_map_path(bag_id: str) -> str:
 
 def global_ground_path(bag_id: str) -> str:
     return _join(bag_root(bag_id), "global_ground.npz")
+
+
+def global_iwu_path(bag_id: str) -> str:
+    """Bag-level UniLiPs IWU result over global_static_map.npz (Step E).
+
+    Separate from global_static_map.npz so the CLI's post-run re-reduce can
+    never overwrite it.
+    """
+    return _join(bag_root(bag_id), "global_iwu.npz")
 
 
 def voxel_occupancy_path(bag_id: str, chunk_id: str) -> str:

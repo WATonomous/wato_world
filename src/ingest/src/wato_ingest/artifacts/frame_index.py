@@ -3,15 +3,19 @@
 Inputs (already on disk):
   - lidar_sweeps.parquet       (one row per LiDAR sweep)
   - camera_frames.parquet      (one row per camera image)
-  - poses.parquet              (sparse, walked by pose_interpolation)
+  - poses.parquet              (pose samples, read via wato_common.pose_lookup)
   - calibration.json           (path embedded into each row)
 
 Output:
   - frame_index.parquet        (one row per (sweep_id, cam_id))
 
 For each LiDAR sweep, find the nearest camera frame per camera. Drop any
-camera whose offset to the sweep exceeds `max_cam_offset_ms`. Interpolate
-ego pose at the sweep timestamp and embed it.
+camera whose offset to the sweep exceeds `max_cam_offset_ms`. Look up the ego
+pose at the SWEEP timestamp and embed it; a sweep that falls in an untrusted
+stretch of the pose stream (samples too far apart, or a jump) gets
+valid_pose=False and a `pose_drop_reason` (see PoseLookup.at).  The embedded
+pose is the sweep's: a component projecting into a camera image looks the
+pose up at `camera_timestamp_ns` itself.
 """
 
 from __future__ import annotations
@@ -26,8 +30,8 @@ from wato_common.artifact_store import (
 )
 from wato_common.geometry import flatten_se3
 from wato_common.io.parquet_io import read_rows, write_table
+from wato_common.pose_lookup import PoseLookup
 from wato_common.schemas import FRAME_INDEX_SCHEMA, FrameIndexRow
-from wato_ingest.decoders.pose_interpolation import interpolate_at, load_samples
 
 
 @dataclass
@@ -43,11 +47,9 @@ def build(
     chunk_id: str,
     *,
     max_cam_offset_ms: float,
-    max_pose_gap_ns: int,
 ) -> FrameIndexResult:
     sweeps = read_rows(lidar_sweeps_path(bag_id, chunk_id))
     camera_frames = read_rows(camera_frames_path(bag_id, chunk_id))
-    pose_samples = load_samples(bag_id, chunk_id)
     calib_uri = calibration_path(bag_id)
 
     rows = _build_rows(
@@ -55,10 +57,9 @@ def build(
         chunk_id=chunk_id,
         sweeps=sweeps,
         camera_frames=camera_frames,
-        pose_samples=pose_samples,
+        poses=PoseLookup.load(bag_id, chunk_id),
         calib_uri=calib_uri,
         max_cam_offset_ms=max_cam_offset_ms,
-        max_pose_gap_ns=max_pose_gap_ns,
     )
 
     out_uri = frame_index_path(bag_id, chunk_id)
@@ -80,10 +81,9 @@ def _build_rows(
     chunk_id: str,
     sweeps: list[dict],
     camera_frames: list[dict],
-    pose_samples,
+    poses: PoseLookup,
     calib_uri: str,
     max_cam_offset_ms: float,
-    max_pose_gap_ns: int,
 ) -> list[FrameIndexRow]:
     """Pure logic exposed for unit testing without artifact files on disk."""
     # Group camera frames by cam_id, sorted by header timestamp.
@@ -107,7 +107,7 @@ def _build_rows(
         lidar_id = sw["lidar_id"]
         lidar_path = sw["lidar_path"]
 
-        pose = interpolate_at(pose_samples, sweep_ts, max_gap_ns=max_pose_gap_ns)
+        pose = poses.at(sweep_ts)
 
         for cam_id in cam_ids:
             nearest, offset_ns = _nearest(by_cam[cam_id], sweep_ts)
@@ -144,6 +144,7 @@ def _build_rows(
                     else None,
                     pose_interp_error=pose.interp_error_ns if pose.valid else None,
                     valid_pose=pose.valid,
+                    pose_drop_reason=pose.drop_reason,
                     calibration_path=calib_uri,
                 )
             )

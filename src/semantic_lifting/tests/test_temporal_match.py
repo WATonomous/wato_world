@@ -70,30 +70,30 @@ def test_match_exact_timestamp_zero_offset():
 
 def test_compute_cam_T_world_identity_transforms():
     """When ego pose and extrinsic are identity, cam_T_world is identity."""
-    I = np.eye(4, dtype=np.float64)
-    result = compute_cam_T_world(I, I)
-    np.testing.assert_allclose(result, I, atol=1e-10)
+    eye = np.eye(4, dtype=np.float64)
+    result = compute_cam_T_world(eye, eye)
+    np.testing.assert_allclose(result, eye, atol=1e-10)
 
 
 def test_compute_cam_T_world_ego_translation():
     """Ego 1 m forward in world → a world point maps 1 m back in the camera."""
-    I = np.eye(4, dtype=np.float64)
-    world_T_ego_frame = I.copy()
+    eye = np.eye(4, dtype=np.float64)
+    world_T_ego_frame = eye.copy()
     world_T_ego_frame[0, 3] = 1.0  # ego 1 m forward in world
 
-    result = compute_cam_T_world(world_T_ego_frame, I)
-    # cam_T_world = inv(I) @ inv(world_T_ego_frame) = translation of -1 on x.
-    expected = I.copy()
+    result = compute_cam_T_world(world_T_ego_frame, eye)
+    # cam_T_world = inv(eye) @ inv(world_T_ego_frame) = translation of -1 on x.
+    expected = eye.copy()
     expected[0, 3] = -1.0
     np.testing.assert_allclose(result, expected, atol=1e-10)
 
 
 def test_compute_cam_T_world_round_trips_a_point():
     """A world point at the ego origin projects to the camera's own offset."""
-    I = np.eye(4, dtype=np.float64)
-    world_T_ego_frame = I.copy()
+    eye = np.eye(4, dtype=np.float64)
+    world_T_ego_frame = eye.copy()
     world_T_ego_frame[:3, 3] = [10.0, 5.0, 0.0]  # ego somewhere in the world
-    ego_T_cam = I.copy()
+    ego_T_cam = eye.copy()
     ego_T_cam[:3, 3] = [0.5, 0.0, 1.2]  # camera mounted forward + up of ego
 
     cam_T_world = compute_cam_T_world(world_T_ego_frame, ego_T_cam)

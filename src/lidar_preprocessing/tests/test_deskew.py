@@ -407,7 +407,7 @@ def test_empty_poses_writes_empty_index(tmp_env):
     assert rows == []
 
 
-def test_deskewed_flag_false_when_no_point_time(tmp_env):
+def test_deskewed_flag_true_when_times_synthesized(tmp_env):
     bag_id, chunk_id = "bag2", "chunk0"
     _write_calibration(bag_id)
     T = np.eye(4)
@@ -461,9 +461,11 @@ def test_deskewed_flag_false_when_no_point_time(tmp_env):
             }
         ],
     )
-    cfg = ComponentConfig()
+    cfg = ComponentConfig()  # synthesize_per_point_times defaults to True
     results = process_chunk(cfg, bag_id, chunk_id)
-    assert results[0].deskewed is False
+    # No time field, but times were synthesized from azimuth: deskewed.
+    assert results[0].deskewed is True
+    assert read_rows(lidar_proc_index_path(bag_id, chunk_id))[0]["deskewed"] is True
 
 
 def _rot_x(theta_rad: float) -> np.ndarray:
@@ -1370,3 +1372,127 @@ def test_process_chunk_populates_frame_id(tmp_env):
 
     rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
     assert [r["frame_id"] for r in rows] == [0, 1, 2]
+
+
+# ---------------------------------------------------------------------------
+# All-zero time field and header stamp position
+# ---------------------------------------------------------------------------
+def _moving_sweep(
+    bag_id: str, chunk_id: str, *, t_offset_us=None, has_point_time: bool
+):
+    """Ego moving +x at 200 m/s (10 m per 50 ms sweep), poses at -50/0/+50 ms.
+
+    One sweep stamped at t=0 with a point at azimuth 0 (sensor (5,0,0)) and one
+    at azimuth pi (sensor (-5,0,0)), half a rotation apart.
+    """
+    from wato_common.artifact_store import lidar_sweep_path
+
+    _write_calibration(bag_id)
+    poses = []
+    for t_ms, x in ((-50, -10.0), (0, 0.0), (50, 10.0)):
+        T = np.eye(4)
+        T[0, 3] = x
+        poses.append(
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "timestamp_ns": t_ms * 1_000_000,
+                "x": x,
+                "y": 0.0,
+                "z": 0.0,
+                "qx": 0.0,
+                "qy": 0.0,
+                "qz": 0.0,
+                "qw": 1.0,
+                "world_T_ego_flat": _flat(T),
+                "source": "odom",
+                "valid": True,
+            }
+        )
+    _write_poses(bag_id, chunk_id, poses)
+    arrays = {
+        "x": np.array([5.0, -5.0], dtype=np.float32),
+        "y": np.zeros(2, dtype=np.float32),
+        "z": np.zeros(2, dtype=np.float32),
+    }
+    if t_offset_us is not None:
+        arrays["t_offset_us"] = np.asarray(t_offset_us, dtype=np.float32)
+    _write_raw_sweep(bag_id, chunk_id, 0, **arrays)
+    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
+    _write_sweep_index(
+        bag_id,
+        chunk_id,
+        [
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "lidar_id": "LIDAR_TOP",
+                "sweep_id": 0,
+                "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
+                "header_timestamp_ns": 0,
+                "record_timestamp_ns": 0,
+                "num_points": 2,
+                "has_ring": False,
+                "has_intensity": False,
+                "has_point_time": has_point_time,
+                "min_range_m": 5.0,
+                "max_range_m": 5.0,
+                "valid": True,
+                "drop_reason": None,
+            }
+        ],
+    )
+
+
+def _world_x(bag_id: str, chunk_id: str) -> np.ndarray:
+    return np.load(local_path(lidar_world_path(bag_id, chunk_id, 0)))["x"]
+
+
+def test_sweep_start_stamp_puts_first_point_at_the_stamp(tmp_env):
+    _moving_sweep("b_start", "c", has_point_time=False)
+    process_chunk(ComponentConfig(header_stamp_at="sweep_start"), "b_start", "c")
+    # Azimuth-0 point at t=0 (ego x=0), azimuth-pi point at +25 ms (ego x=5).
+    np.testing.assert_allclose(_world_x("b_start", "c"), [5.0, 0.0], atol=1e-3)
+
+
+def test_sweep_end_stamp_counts_times_back_from_the_stamp(tmp_env):
+    _moving_sweep("b_end", "c", has_point_time=False)
+    process_chunk(ComponentConfig(header_stamp_at="sweep_end"), "b_end", "c")
+    # First-fired point one rotation before the stamp (-50 ms, ego x=-10),
+    # the azimuth-pi point half a rotation before it (-25 ms, ego x=-5).
+    np.testing.assert_allclose(_world_x("b_end", "c"), [-5.0, -10.0], atol=1e-3)
+
+
+def test_all_zero_time_field_is_treated_as_missing(tmp_env):
+    _moving_sweep("b_zero", "c", t_offset_us=[0.0, 0.0], has_point_time=True)
+    results = process_chunk(ComponentConfig(header_stamp_at="sweep_end"), "b_zero", "c")
+    # Same answer as a sweep with no time field at all.
+    np.testing.assert_allclose(_world_x("b_zero", "c"), [-5.0, -10.0], atol=1e-3)
+    assert results[0].deskewed is True
+
+
+def test_all_zero_time_field_without_synthesis_is_not_deskewed(tmp_env):
+    _moving_sweep("b_zero_off", "c", t_offset_us=[0.0, 0.0], has_point_time=True)
+    cfg = ComponentConfig(
+        synthesize_per_point_times=False, allow_uncompensated_motion=True
+    )
+    results = process_chunk(cfg, "b_zero_off", "c")
+    # Every point at the header pose (ego x=0).
+    np.testing.assert_allclose(_world_x("b_zero_off", "c"), [5.0, -5.0], atol=1e-3)
+    assert results[0].deskewed is False
+
+
+def test_all_zero_time_field_without_synthesis_or_opt_out_fails_the_sweep(tmp_env):
+    _moving_sweep("b_zero_err", "c", t_offset_us=[0.0, 0.0], has_point_time=True)
+    cfg = ComponentConfig(synthesize_per_point_times=False)
+    assert process_chunk(cfg, "b_zero_err", "c") == []
+    row = read_rows(lidar_proc_index_path("b_zero_err", "c"))[0]
+    assert row["valid"] is False and "missing or all zero" in row["drop_reason"]
+
+
+def test_real_time_field_wins_over_stamp_position(tmp_env):
+    # A non-zero field is used as-is (offsets from the stamp), whatever
+    # header_stamp_at says.
+    _moving_sweep("b_real", "c", t_offset_us=[0.0, 0.025], has_point_time=True)
+    process_chunk(ComponentConfig(header_stamp_at="sweep_end"), "b_real", "c")
+    np.testing.assert_allclose(_world_x("b_real", "c"), [5.0, 0.0], atol=1e-3)
