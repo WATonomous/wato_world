@@ -251,12 +251,16 @@ def _deskew_sweep(
     synthesize_per_point_times: bool = False,
     sweep_duration_ns: float = 0.0,
     rotation_dir: str = "ccw",
+    header_stamp_at: str = "sweep_start",
     allow_uncompensated_motion: bool = False,
-) -> dict[str, np.ndarray]:
+) -> tuple[dict[str, np.ndarray], str]:
     """Transform one sweep from sensor frame to world frame (float64 xyz).
 
-    Returns a dict of arrays ready for np.savez_compressed. Includes a
-    `ground_mask` bool array when Patchwork++ is available.
+    Returns (arrays, time_source).  ``arrays`` is ready for
+    np.savez_compressed and includes a `ground_mask` bool array when
+    Patchwork++ is available.  ``time_source`` says where the per-point times
+    came from: "point_time" (the sweep's own field), "azimuth" (synthesized)
+    or "none" (every point at the header pose — not deskewed).
     """
     data = np.load(local_path(raw_path))
     x = data["x"].astype(np.float64)
@@ -287,6 +291,13 @@ def _deskew_sweep(
     # Per-sweep ground extraction runs in SENSOR frame.
     ground_mask = _estimate_ground_mask(xyz_lidar, pw)
 
+    # A per-point time field that is present but all zero carries no timing —
+    # every point would get the header pose.  The WATO Velodyne bags publish
+    # exactly that, so treat it as missing and let the azimuth fallback below
+    # compensate the sweep.
+    if t_offset is not None and n > 0 and not np.any(t_offset != 0):
+        t_offset = None
+
     if has_point_time and t_offset is not None:
         offset_ns = t_offset.astype(np.float64) * unit_scale
         # Fail loudly on mis-configured point_time_unit (offsets explode by
@@ -299,26 +310,33 @@ def _deskew_sweep(
                 "mis-configured for this lidar."
             )
         t_ns = header_timestamp_ns + offset_ns
+        time_source = "point_time"
     elif synthesize_per_point_times and n > 0 and sweep_duration_ns > 0:
-        # Raw NPZ has no per-point timestamps — synthesize from azimuth.
+        # No usable per-point timestamps — synthesize from azimuth.
         # Without compensation, all points share the header pose, producing
         # ~ego_speed × sweep_duration / 2 of intra-sweep smear that spreads
         # statics across voxels (the "buildings-as-dynamic" failure mode).
         offset_ns = _synthesize_t_offset_ns_from_azimuth(
             xyz_lidar, sweep_duration_ns, rotation_dir
         )
+        if header_stamp_at == "sweep_end":
+            # The stamp marks the last-fired point, so the first-fired point
+            # (offset 0) was measured one rotation earlier.
+            offset_ns = offset_ns - sweep_duration_ns
         t_ns = header_timestamp_ns + offset_ns
+        time_source = "azimuth"
     elif n == 0 or allow_uncompensated_motion:
         t_ns = np.full(n, float(header_timestamp_ns), dtype=np.float64)
+        time_source = "none"
     else:
         raise ValueError(
             "deskew has no way to compensate intra-sweep ego motion: the raw "
-            "NPZ has no per-point timestamps AND synthesize_per_point_times "
-            "is False. Either (a) re-ingest with a bag that has per-point "
-            "times, (b) set synthesize_per_point_times: true to synthesize "
-            "from azimuth (recommended for rotating LiDARs), or (c) set "
-            "allow_uncompensated_motion: true if you accept smeared statics "
-            "potentially leaking into dynamic_map.npz."
+            "NPZ has no usable per-point timestamps (missing or all zero) AND "
+            "synthesize_per_point_times is False. Either (a) re-ingest with a "
+            "bag that has per-point times, (b) set synthesize_per_point_times: "
+            "true to synthesize from azimuth (recommended for rotating "
+            "LiDARs), or (c) set allow_uncompensated_motion: true if you "
+            "accept smeared statics potentially leaking into dynamic_map.npz."
         )
 
     unique_ts, inv = np.unique(t_ns.astype(np.int64), return_inverse=True)
@@ -348,7 +366,7 @@ def _deskew_sweep(
         out["ring"] = ring
     if ground_mask is not None:
         out["ground_mask"] = ground_mask
-    return out
+    return out, time_source
 
 
 def process_chunk(
@@ -366,9 +384,10 @@ def process_chunk(
         write_table([], PROCESSED_SWEEPS_SCHEMA, index_uri)
         return []
 
-    # Sweeps ingest flagged as pose-invalid (no interpolatable pose within
-    # max_pose_gap_ms — e.g. before SLAM converges at bag start) are skipped
-    # rather than clamped to a stale pose. None = no frame_index → process all.
+    # Sweeps ingest flagged as pose-invalid (outside the pose span, e.g. before
+    # SLAM converges; bracketing poses too far apart; or a pose jump — see
+    # ingest's pose_requirements) are skipped rather than deskewed with an
+    # untrustworthy pose. None = no frame_index → process all.
     pose_valid_sweep_ids = load_pose_valid_sweep_ids(bag_id, chunk_id)
 
     unit_scale = cfg.point_time_scale_to_ns()
@@ -392,6 +411,7 @@ def process_chunk(
 
     results: list[DeskewResult] = []
     meta_rows: list[dict] = []
+    n_zero_time_field = 0
 
     for row in tqdm(
         sweep_rows,
@@ -439,7 +459,7 @@ def process_chunk(
         ego_T_lidar = ego_T_lidar_by_id[lid]
 
         try:
-            arrays = _deskew_sweep(
+            arrays, time_source = _deskew_sweep(
                 raw_path=raw_path,
                 header_timestamp_ns=header_ts,
                 has_point_time=has_pt,
@@ -451,6 +471,7 @@ def process_chunk(
                 synthesize_per_point_times=cfg.synthesize_per_point_times,
                 sweep_duration_ns=sensor.sweep_duration_ns,
                 rotation_dir=sensor.rotation_dir,
+                header_stamp_at=cfg.header_stamp_at,
                 allow_uncompensated_motion=cfg.allow_uncompensated_motion,
             )
         except Exception as exc:  # noqa: BLE001 — record failure, keep going
@@ -478,6 +499,10 @@ def process_chunk(
             )
             continue
 
+        if has_pt and time_source != "point_time":
+            n_zero_time_field += 1
+        deskewed = time_source != "none"
+
         out_uri = lidar_world_path(bag_id, chunk_id, sweep_id)
         np.savez_compressed(local_path(out_uri), **arrays)
 
@@ -498,7 +523,7 @@ def process_chunk(
             sweep_id=sweep_id,
             lidar_id=lid,
             n_points=n,
-            deskewed=has_pt,
+            deskewed=deskewed,
             world_path=out_uri,
         )
         results.append(result)
@@ -516,7 +541,7 @@ def process_chunk(
             world_path=out_uri,
             dynamic_mask_path="",
             has_intensity="intensity" in arrays,
-            deskewed=has_pt,
+            deskewed=deskewed,
             world_xmin=xmin,
             world_xmax=xmax,
             world_ymin=ymin,
@@ -529,6 +554,14 @@ def process_chunk(
     # Assign frame_id before persisting the parquet so the on-disk index
     # already carries it (classify reads the column back).
     _assign_frame_ids(meta_rows, cfg.frame_sync)
+
+    if n_zero_time_field:
+        log.info(
+            "chunk %s: %d sweeps carry an all-zero per-point time field; "
+            "treated as missing (times synthesized from azimuth where enabled)",
+            chunk_id,
+            n_zero_time_field,
+        )
 
     write_table(meta_rows, PROCESSED_SWEEPS_SCHEMA, index_uri)
     log.info("deskewed %d sweeps for chunk %s", len(results), chunk_id)

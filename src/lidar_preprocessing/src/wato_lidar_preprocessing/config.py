@@ -385,6 +385,79 @@ class UnionParams(BaseModel):
         return v
 
 
+class IWUParams(BaseModel):
+    """Step E — UniLiPs Iterative Weighted Update over the bag static map.
+
+    Bag-level and seg-agnostic: runs on whichever global_static_map.npz the
+    chosen segmentation method produced. The update constants (alpha, tau,
+    initial probability) are the paper's and live in iwu/_core.py; the match
+    radius is global_map_voxel_size_m. What is left here is a compute trade.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    # Updates per second per lidar. The EMA (alpha=0.7) is dominated by its
+    # last ~10 updates, so consecutive 20 Hz sweeps are nearly redundant; the
+    # per-lidar stride is round(sweep_rate / update_rate_hz) from each
+    # scanner's datasheet rate, so the same value works on any rig.
+    update_rate_hz: float = 4.0
+
+    @field_validator("update_rate_hz")
+    @classmethod
+    def _positive_rate(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"update_rate_hz must be > 0, got {v}")
+        return v
+
+
+class MotionProposalParams(BaseModel):
+    """Step F — recall-oriented moving-object proposals (Chen et al. 2022).
+
+    A seg-agnostic consumer layer: flags each point with every heuristic that
+    calls it a mover (source_bits), clusters the strong sources per frame
+    with HDBSCAN, and scores each cluster's motion with the shared
+    wato_common.tracking tracker. Nothing is dropped on motion evidence —
+    false positives are expected and left for downstream association.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    # Points lower than this over Step C's ground grid are never flagged.
+    # Same reasoning as union.ground_height_veto_m: road false positives are
+    # invisible to every voxel test. Wheels/feet below it come back through
+    # BOX_FILL on moving clusters. 0.0 disables.
+    min_height_above_ground_m: float = 0.25
+    # Chen N_min — smallest cluster kept (HDBSCAN min_cluster_size).
+    min_cluster_pts: int = 5
+    # Chen T_size — clusters whose longest BEV side exceeds this are structure.
+    max_side_m: float = 20.0
+    # Chen box fill: points inside a moving cluster's box get BOX_FILL.
+    box_fill: bool = True
+
+    @field_validator("min_height_above_ground_m")
+    @classmethod
+    def _nonneg_height(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError(f"min_height_above_ground_m must be >= 0, got {v}")
+        return v
+
+    @field_validator("min_cluster_pts")
+    @classmethod
+    def _min_cluster(cls, v: int) -> int:
+        if v < 2:  # HDBSCAN's floor
+            raise ValueError(f"min_cluster_pts must be >= 2, got {v}")
+        return v
+
+    @field_validator("max_side_m")
+    @classmethod
+    def _positive_side(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"max_side_m must be > 0, got {v}")
+        return v
+
+
 class ComponentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -452,6 +525,14 @@ class ComponentConfig(BaseModel):
     # Options: "seconds" | "microseconds" | "nanoseconds"
     point_time_unit: str = "seconds"
 
+    # Where in the rotation a sweep's header stamp sits, for per-point times
+    # synthesized from azimuth: "sweep_start" puts the first-fired point at the
+    # stamp, "sweep_end" puts the last-fired point there.  A property of the
+    # LiDAR driver, not the scanner (Velodyne's `timestamp_first_packet`), so
+    # it is set per dataset profile.  Unused when the sweep carries real
+    # per-point times — those are offsets from the stamp either way.
+    header_stamp_at: Literal["sweep_start", "sweep_end"] = "sweep_start"
+
     # Step C — Patchwork++ parameters.
     patchwork: PatchworkParams = PatchworkParams()
 
@@ -463,6 +544,12 @@ class ComponentConfig(BaseModel):
 
     # Fusion parameters (used only when segmentation == "union").
     union: UnionParams = UnionParams()
+
+    # Step E — bag-level UniLiPs IWU (any segmentation method).
+    iwu: IWUParams = IWUParams()
+
+    # Step F — per-chunk recall-oriented motion proposals (any method).
+    motion_proposals: MotionProposalParams = MotionProposalParams()
 
     # voxel_occupancy.npz alongside static_map.npz. Includes ALL occupied
     # voxels (static + dynamic) — that's what MinkUNet consumes.

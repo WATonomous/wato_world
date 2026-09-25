@@ -4,6 +4,10 @@ ROS deps (`rosbag2_py`, `rclpy`, `rosidl_runtime_py`) are imported on first
 use so this module can be imported on hosts without ROS installed (for tests
 that exercise everything else).  Anything that touches the bag itself must be
 called inside a container with ROS 2 Jazzy on PYTHONPATH.
+
+`storage_id` defaults to "" everywhere, which lets rosbag2 detect the storage
+plugin (mcap, sqlite3) from the bag itself, so the caller never needs to know
+how a bag was recorded.
 """
 
 from __future__ import annotations
@@ -11,6 +15,14 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator
+
+# rosbag2 hands messages back in record-time order: by index for an indexed
+# bag, in write (= arrival) order for an unindexed MCAP.  Every bag measured
+# (nuScenes mini, may_30, the unfinalized ring_road_corrected_0-001) came back
+# with no message older than one already read.  So `messages` stops reading
+# once a message is past the window instead of scanning to the end of the bag
+# on every call; this margin guards against a writer that reorders slightly.
+_READ_PAST_END_NS = 1_000_000_000
 
 
 @dataclass
@@ -54,8 +66,11 @@ def _load_rclpy_serialization():
     return deserialize_message, get_message
 
 
-def open_reader(bag_path: str, storage_id: str = "sqlite3"):
-    """Open a rosbag2 reader.  Returns a SequentialReader configured for the bag."""
+def open_reader(bag_path: str, storage_id: str = ""):
+    """Open a rosbag2 reader.  Returns a SequentialReader configured for the bag.
+
+    An empty ``storage_id`` lets rosbag2 detect the storage plugin.
+    """
     rosbag2_py = _load_rosbag2()
     storage_options = rosbag2_py.StorageOptions(uri=bag_path, storage_id=storage_id)
     converter_options = rosbag2_py.ConverterOptions(
@@ -66,8 +81,12 @@ def open_reader(bag_path: str, storage_id: str = "sqlite3"):
     return reader
 
 
-def summarize(bag_path: str, storage_id: str = "sqlite3") -> BagSummary:
-    """Read the bag's metadata (topics, durations, message counts) without scanning."""
+def summarize(bag_path: str, storage_id: str = "") -> BagSummary:
+    """Read the bag's metadata (topics, durations, message counts) without scanning.
+
+    ``BagSummary.storage_id`` is the plugin rosbag2 actually used (detected
+    when ``storage_id`` is empty).
+    """
     rosbag2_py = _load_rosbag2()
     info = rosbag2_py.Info().read_metadata(bag_path, storage_id)
     topics = [
@@ -81,7 +100,7 @@ def summarize(bag_path: str, storage_id: str = "sqlite3") -> BagSummary:
     ]
     return BagSummary(
         storage_path=bag_path,
-        storage_id=storage_id,
+        storage_id=str(getattr(info, "storage_identifier", "") or storage_id),
         topics=topics,
         duration_ns=int(info.duration.nanoseconds),
         starting_time_ns=int(info.starting_time.nanoseconds),
@@ -93,15 +112,19 @@ def summarize(bag_path: str, storage_id: str = "sqlite3") -> BagSummary:
 def messages(
     bag_path: str,
     *,
-    storage_id: str = "sqlite3",
+    storage_id: str = "",
     topics: list[str] | None = None,
     t_start_ns: int | None = None,
     t_end_ns: int | None = None,
 ) -> Iterator[Iterator[tuple[str, object, int]]]:
     """Context manager yielding (topic, deserialized_msg, timestamp_ns) tuples.
 
-    Filters by topic and time range.  Looks up the message type per topic from
-    the bag's metadata, so the caller does not need to know types up front.
+    Filters by topic and by record time (``timestamp_ns`` is the time the
+    message was recorded, not its header stamp).  Reading starts at the
+    beginning of the bag and stops once a message is more than
+    ``_READ_PAST_END_NS`` past ``t_end_ns``.  Looks up the message type per
+    topic from the bag's metadata, so the caller does not need to know types
+    up front.
     """
     rosbag2_py = _load_rosbag2()
     deserialize_message, get_message = _load_rclpy_serialization()
@@ -121,6 +144,8 @@ def messages(
             if t_start_ns is not None and ts < t_start_ns:
                 continue
             if t_end_ns is not None and ts > t_end_ns:
+                if ts > t_end_ns + _READ_PAST_END_NS:
+                    return
                 continue
             cls = msg_class_cache.get(topic)
             if cls is None:

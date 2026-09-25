@@ -11,6 +11,7 @@ import click
 from wato_common.progress import configure_tqdm
 from wato_lidar_preprocessing.config import load_config
 from wato_lidar_preprocessing.pipeline import run as run_pipeline
+from wato_lidar_preprocessing.pipeline import run_proposals
 from wato_lidar_preprocessing.reduce import reduce_ground_map, reduce_static_map
 
 log = logging.getLogger(__name__)
@@ -99,14 +100,28 @@ def main(log_level: str) -> None:
 @click.option(
     "--two-pass/--no-two-pass",
     "two_pass",
+    default=False,
+    help=(
+        "Off by default. Run classification twice: pass 1 builds a rough "
+        "static map, reduce builds the bag-level global_static_map.npz, then "
+        "pass 2 re-classifies every chunk with that map as a global-map prior "
+        "(a one-time log-odds boost for map-matched voxels — NOT UniLiPs IWU, "
+        "which is the separate `iwu` step).  Roughly doubles classify wall "
+        "time; improves static recall on long-range structure sparsely "
+        "observed in any single chunk, and sharpens union's static veto."
+    ),
+)
+@click.option(
+    "--proposals/--no-proposals",
+    "proposals",
     default=True,
     help=(
-        "Enabled by default: run classification twice — pass 1 builds a rough "
-        "static map, then reduce builds the bag-level global_static_map.npz, "
-        "then pass 2 re-classifies every chunk using that map as a per-sweep "
-        "KDTree prior (UniLiPs IWU).  Roughly doubles wall time but improves "
-        "static recall on long-range structure sparsely observed in any single "
-        "chunk.  Use --no-two-pass for the legacy single-pass behavior."
+        "After reduce, run Step E (bag-level UniLiPs IWU → global_iwu.npz) and "
+        "Step F (per-chunk recall-oriented motion proposals → "
+        "*_motion_proposals.npz + motion_clusters.parquet). On by default. "
+        "With --chunk only Step F runs for that chunk. Skipped with "
+        "--no-auto-reduce — run `reduce`, `iwu`, `proposals` once every chunk "
+        "is done."
     ),
 )
 def run_cmd(
@@ -118,8 +133,9 @@ def run_cmd(
     workers: int,
     auto_reduce: bool,
     two_pass: bool,
+    proposals: bool,
 ) -> None:
-    """Run deskew → (aw|mos|union) → ground for all chunks (or one chunk) of a bag."""
+    """Run deskew → (aw|mos|union) → ground → [reduce → iwu → proposals]."""
     bag_id = _resolve_bag_id(bag_id)
     cfg = load_config(config_path)
     if seg is not None:
@@ -141,6 +157,81 @@ def run_cmd(
         static_out = reduce_static_map(bag_id, cfg)
         ground_out = reduce_ground_map(bag_id, cfg)
         log.info("auto-reduce complete: %s  %s", static_out, ground_out)
+
+    if proposals:
+        if chunk_id is None and not auto_reduce:
+            log.info(
+                "--no-auto-reduce: skipping iwu + proposals — run `reduce`, `iwu` "
+                "and `proposals` once every chunk is done"
+            )
+        else:
+            run_proposals(
+                cfg,
+                bag_id=bag_id,
+                chunk_id=chunk_id,
+                force=force,
+                workers=workers,
+                config_path=config_path,
+            )
+
+
+@main.command("iwu")
+@click.option("--bag", "bag_id", required=True, help="bag_id or bag path.")
+@click.option(
+    "--config",
+    "config_path",
+    default="/ws/src/lidar_preprocessing/config/lidar_preprocessing.yaml",
+)
+def iwu_cmd(bag_id: str, config_path: str) -> None:
+    """Step E — UniLiPs IWU over global_static_map.npz → global_iwu.npz.
+
+    Needs `reduce` first. Seg-agnostic: refines whichever static map the
+    chosen segmentation method produced.
+    """
+    from wato_lidar_preprocessing.iwu import run_iwu
+
+    bag_id = _resolve_bag_id(bag_id)
+    res = run_iwu(load_config(config_path), bag_id)
+    click.echo(
+        f"IWU evicted {res.n_evicted}/{res.n_map_points} map points over "
+        f"{res.n_sweeps_used} sweeps → {res.out_uri}"
+    )
+
+
+@main.command("proposals")
+@click.option("--bag", "bag_id", required=True, help="bag_id or bag path.")
+@click.option("--chunk", "chunk_id", default=None, help="optional single chunk.")
+@click.option(
+    "--config",
+    "config_path",
+    default="/ws/src/lidar_preprocessing/config/lidar_preprocessing.yaml",
+)
+@click.option(
+    "--force",
+    "-f",
+    "force",
+    is_flag=True,
+    default=False,
+    help="re-run chunks whose motion_clusters.parquet is already up to date.",
+)
+@click.option("--workers", "workers", default=1, type=int, help="worker processes.")
+def proposals_cmd(
+    bag_id: str, chunk_id: str | None, config_path: str, force: bool, workers: int
+) -> None:
+    """Step F — recall-oriented motion proposals per chunk.
+
+    Reads global_iwu.npz when present (run `iwu` first for IWU_EVICTED).
+    """
+    bag_id = _resolve_bag_id(bag_id)
+    run_proposals(
+        load_config(config_path),
+        bag_id=bag_id,
+        chunk_id=chunk_id,
+        force=force,
+        workers=workers,
+        config_path=config_path,
+        with_iwu=False,
+    )
 
 
 @main.command("reduce")
@@ -184,8 +275,13 @@ def reduce_cmd(bag_id: str, config_path: str) -> None:
 @click.option(
     "--layer",
     default="classification",
-    type=click.Choice(["classification", "dynamic", "static", "ground", "global"]),
-    help="Artifact to visualize. Native backends require a non-classification layer.",
+    type=click.Choice(
+        ["classification", "proposals", "dynamic", "static", "ground", "global"]
+    ),
+    help=(
+        "Artifact to visualize. `proposals` = Step F motion proposals (html "
+        "backend, chunk-level). Native backends require dynamic/static/ground/global."
+    ),
 )
 @click.option(
     "--backend",
@@ -290,10 +386,12 @@ def viz_cmd(
         return
 
     if backend == "html":
-        if layer != "classification":
+        if layer not in ("classification", "proposals"):
             raise click.ClickException(
-                "--backend html supports --layer classification only"
+                "--backend html supports --layer classification or proposals"
             )
+        if layer == "proposals" and sweep_id is not None:
+            raise click.ClickException("--layer proposals is chunk-level; omit --sweep")
         from wato_lidar_preprocessing.html_viz import open_html_file, write_html_viewer
 
         chunk_ids = selected_chunks()
@@ -301,7 +399,9 @@ def viz_cmd(
             target = out_path
             if out_path is not None and len(chunk_ids) > 1:
                 target = str(Path(out_path) / cid)
-            written = write_html_viewer(bag_id, cid, sweep_id=sweep_id, out_path=target)
+            written = write_html_viewer(
+                bag_id, cid, sweep_id=sweep_id, out_path=target, layer=layer
+            )
             click.echo(f"wrote {written}")
             if open_after_write:
                 if open_html_file(written):
@@ -318,7 +418,7 @@ def viz_cmd(
         raise click.ClickException(
             "--sweep is only supported by --backend html or --export"
         )
-    if layer == "classification":
+    if layer in ("classification", "proposals"):
         raise click.ClickException(
             "native backends require --layer dynamic, static, ground, or global"
         )

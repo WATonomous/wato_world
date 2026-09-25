@@ -15,6 +15,7 @@ declare -a COMPOSE_FILES=(
 ALL_MODULES=(
     ingest
     perception_2d
+    semantic_lifting
     lidar_preprocessing
     proposal_generation
     tracking

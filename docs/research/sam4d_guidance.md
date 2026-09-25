@@ -57,10 +57,11 @@ produces temporally consistent 3D masks without human annotation.
 
 | SAM4D component | Our equivalent | Status |
 |-----------------|---------------|--------|
-| LiDAR voxelization at 0.15 m | `voxel_size_m: 0.15` in `classify.py` | ✓ Done |
-| Ego-motion per-point deskewing | `deskew.py` (`batch_interpolate_poses`) | ✓ Done |
-| Static / dynamic separation | `classify.py` (voxel sweep-count threshold) | ✓ Done |
-| Ground plane removal | `ground.py` (Patchwork++ + height grid) | ✓ Done |
+| LiDAR voxelization at 0.15 m | `voxel_size_m` in `classify/` (schema 0.15; shipped profiles 0.25) | ✓ Done |
+| Ego-motion per-point deskewing | `deskew/` (`batch_interpolate_poses`) | ✓ Done |
+| Static / dynamic separation | `classify/` AW log-odds ray casting (`--seg aw`, default), MF-MOS (`--seg mos`) or their fusion (`--seg union`) | ✓ Done |
+| Moving-object proposals | Step F `motion_proposals/` (recall-oriented, per-cluster motion scores; see `lidar_mos_guidance.md`) | ✓ Done |
+| Ground plane removal | `ground/` (Patchwork++ + height grid) | ✓ Done |
 | Camera intrinsics + extrinsics | `calibration.json` (from TF + camera_info) | ✓ Done |
 | Multi-LiDAR coverage | 3 Velodynes vs. Waymo's 1 top LiDAR | ✓ Richer |
 | Multi-camera coverage | 12 cameras vs. Waymo's 5 | ✓ Richer |
@@ -77,15 +78,11 @@ is translation-invariant and intensity-agnostic.
 
 **What we do**: store float64 xyz + float32 intensity in world-frame NPZ.
 
-**What to add**: in `lidar_preprocessing`, optionally produce a per-chunk
-`voxel_occupancy.npz` alongside the existing world NPZ files.  MinkUNet
-consumes sparse (coords, features) pairs; the coords are the voxel integer
-indices and the feature is a scalar `1.0` per occupied voxel.  This is a
-two-liner on top of the existing `voxel_indices()` call in `classify.py`.
-
-**File to touch**: `src/lidar_preprocessing/src/wato_lidar_preprocessing/classify.py`
-(add a `save_voxel_occupancy` flag to `ComponentConfig` and write the occupancy
-NPZ alongside `static_map.npz`).
+**Done.** `lidar_preprocessing` writes a per-chunk `voxel_occupancy.npz`
+(`save_voxel_occupancy`, default on) and, with
+`save_per_frame_voxel_occupancy`, one `voxel_occupancy_frame_NNNN.npz` per
+`frame_id` — sparse int voxel coords, the (coords, features=1.0) pairs
+MinkUNet consumes. Written by `classify/occupancy_export.py`.
 
 ### 2. Camera-LiDAR projection (depth lifting)
 
@@ -118,9 +115,12 @@ then temporal propagation across frames.
 - Feed the boxes as prompts to SAM2's video predictor, which segments each box
   and propagates it across the frame stream into a tracked masklet — no separate
   DEVA pass; SAM2 does both segmentation and temporal association.
-- For SAM4D-style cross-modal prompting (future): project LiDAR dynamic-mask
-  points (from `dynamic_masks/*.npy`) into image space and use them as additional
-  SAM2 point prompts.  This can recover objects that GroundingDINO missed.
+- For SAM4D-style cross-modal prompting (future): project LiDAR moving-object
+  proposals into image space and use them as additional SAM2 point prompts —
+  the points of `motion_clusters.parquet` clusters with `motion_score > 1`
+  (via `lidar_proc/*_motion_proposals.npz` `cluster_id`), not raw per-point
+  bits, which are false-positive tolerant by design. This can recover objects
+  that GroundingDINO missed.
 - Output per-chunk: `detections_2d.parquet` + `tracklets_2d.parquet` + `masks_2d/`.
 
 ### 4. Temporal memory across chunks (MCMA)
@@ -129,15 +129,16 @@ then temporal propagation across frames.
 positions are transformed by the SE(3) ego-motion before attention so that
 objects remain aligned despite vehicle motion.
 
-**What we have**: `deskew.py` already stores all points in the SLAM world
+**What we have**: `deskew/` already stores all points in the SLAM world
 frame, so there is no ego-motion drift issue within a chunk.  Across chunks
 the world frame is consistent by construction.
 
-**What to add**: DEVA already provides frame-level temporal consistency within
-a video clip.  For cross-chunk consistency the ingest `chunks_index.parquet`
-carries overlapping time windows (`t_overlap_start_ns`, `t_overlap_end_ns`).
-`perception_2d` should process each chunk with a short look-back into the
-previous chunk's overlap window so DEVA can bridge chunk boundaries.
+**What to add**: the SAM2 video predictor already provides frame-level
+temporal consistency within a chunk's camera stream.  For cross-chunk
+consistency the ingest `chunks/index.parquet` carries overlapping time windows
+(`t_overlap_start_ns`, `t_overlap_end_ns`).  `perception_2d` should process
+each chunk with a short look-back into the previous chunk's overlap window so
+SAM2 can bridge chunk boundaries.
 
 ### 5. Multi-LiDAR fusion
 
@@ -161,12 +162,11 @@ positions.  To exploit this:
 
 ## Summary of actionable steps
 
-1. `lidar_preprocessing`: add optional `voxel_occupancy.npz` export (sparse
-   (N,3) int coords + ones) alongside existing static_map.npz.
-2. `perception_2d` / `proposal_generation`: implement `projection.py` with
-   `project_lidar_to_image()` and `lift_image_to_3d()` using calibration.json.
+1. ~~`lidar_preprocessing`: optional `voxel_occupancy.npz` export~~ — done.
+2. ~~Shared projection~~ — done as `wato_common.geometry.projection`
+   (`project_lidar_to_image`, `lift_pixel_to_world`).
 3. `perception_2d`: GroundingDINO → SAM2 video-tracker pipeline (done);
-   add LiDAR-dynamic-point cross-modal prompting.
+   add LiDAR cross-modal prompting from Step F's moving clusters.
 4. `perception_2d`: handle cross-chunk consistency via chunk overlap windows.
 5. Multi-LiDAR: treat merged world-frame points (all three LiDARs) as the
    canonical dense point cloud for downstream perception steps.

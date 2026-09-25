@@ -50,12 +50,12 @@ pseudo-labels match performance of detectors trained on GT labels.
 | Per-camera 2D masks | `masks_2d/` from `perception_2d` | `perception_2d` output |
 | Camera intrinsics K | `calibration.json` → `cameras[cam_id].K` | ingest output |
 | Camera extrinsics | `calibration.json` → `ego_T_cam` (via TF chain) | ingest output |
-| LiDAR world-frame points | `world/*.npz` from `lidar_preprocessing` | lidar_preprocessing output |
-| Dynamic object points | `dynamic_masks/*.npy` (per-sweep bool mask) | lidar_preprocessing output |
+| LiDAR world-frame points | `lidar_proc/<sweep>_world.npz` | lidar_preprocessing output |
+| Dynamic object points | `lidar_proc/<sweep>_dynamic_mask.npy` (precision verdict) and `lidar_proc/<sweep>_motion_proposals.npz` + `motion_clusters.parquet` (recall: clustered, boxed, motion-scored) | lidar_preprocessing output |
 | Ground plane height | `ground.npz` → `height_grid`, `grid_origin`, `cell_size` | lidar_preprocessing output |
 | Surface normals | `ground.npz` → `normal_grid` | lidar_preprocessing output |
 
-The `ground.py` step was built precisely to produce the height grid and surface
+Step C (`ground/`) was built precisely to produce the height grid and surface
 normal grid that the SLF ground alignment loss term consumes.
 
 ---
@@ -179,8 +179,13 @@ SLF produces shape-accurate boxes from 2D masks.  A LiDAR-only detector
 (CenterPoint or similar) produces accurate position + orientation but noisier
 shape.  The paper suggests fusing both:
 
-- Run LiDAR detector on the dynamic point cloud (from `dynamic_masks/*.npy`
-  applied to `world/*.npz`).
+- Run the LiDAR detector on the full non-ground world-frame sweeps
+  (`lidar_proc/*_world.npz`) — not only the dynamic cloud: parked vehicles
+  are labels too.
+- Add lidar_preprocessing's Step F clusters (`motion_clusters.parquet`) as a
+  third, class-less proposal source (`provenance="lidar_mos"`), gated on
+  their soft features (`motion_score`, `n_sources`, `frac_persistent`). Their
+  box columns already use `ProposalRow`'s names.
 - For each LiDAR proposal, check if a matching SLF proposal exists (IoU > 0.3
   in bird's-eye view).
 - If match: use SLF shape, LiDAR position (LiDAR has better position accuracy).

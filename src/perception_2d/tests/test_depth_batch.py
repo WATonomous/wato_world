@@ -25,9 +25,8 @@ def _frame(seq: int) -> CameraFrameInfo:
         cam_id="cam_front",
         image_path=f"/img/{seq}.jpg",
         camera_seq=seq,
-        world_T_ego_flat=None,
+        camera_timestamp_ns=seq * 83_000_000,
         valid_camera=True,
-        valid_pose=True,
     )
 
 
@@ -74,7 +73,7 @@ def _run(
     monkeypatch.setattr(
         pipeline,
         "_align_and_write_depth",
-        lambda cfg, bag, chunk, cam, frame, rel_depth, calib, fb: aligned.append(
+        lambda cfg, bag, chunk, cam, frame, rel_depth, calib, poses, fb: aligned.append(
             (frame.camera_seq, float(rel_depth[0, 0]))
         ),
     )

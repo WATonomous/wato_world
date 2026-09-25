@@ -46,7 +46,9 @@ def main() -> None:
 # ---------------------------------------------------------------------------
 @main.command("inspect-bag")
 @click.option("--bag", "bag_path", required=True, type=click.Path(exists=True))
-@click.option("--storage-id", default="sqlite3")
+@click.option(
+    "--storage-id", default="", help="rosbag2 storage plugin; detected when omitted."
+)
 def inspect_bag(bag_path: str, storage_id: str) -> None:
     """Print the bag's topics + duration without writing anything."""
     from wato_common.io.rosbag_reader import summarize
@@ -68,7 +70,9 @@ def inspect_bag(bag_path: str, storage_id: str) -> None:
 @main.command("register")
 @click.option("--bag", "bag_path", required=True, type=click.Path(exists=True))
 @click.option("--bag-id", default=None)
-@click.option("--storage-id", default="sqlite3")
+@click.option(
+    "--storage-id", default="", help="rosbag2 storage plugin; detected when omitted."
+)
 def register_cmd(bag_path: str, bag_id: str | None, storage_id: str) -> None:
     """Inspect + write bag_meta.json under raw/<bag_id>/."""
     meta = bags.register(bag_path, bag_id=bag_id, storage_id=storage_id)
@@ -142,6 +146,15 @@ def decode_chunk_cmd(
     if chunk is None:
         click.echo(f"chunk {chunk_id} not found in chunks/index.parquet", err=True)
         sys.exit(2)
+    # Poses first so a stream failing the pose requirements aborts early.
+    pose_result = poses.extract(
+        bag_path,
+        bag_id,
+        chunk_id,
+        t_start_ns=int(chunk["t_overlap_start_ns"]),
+        t_end_ns=int(chunk["t_overlap_end_ns"]),
+        cfg=cfg,
+    )
     cam_results = cameras.decode_chunk(
         bag_path,
         bag_id,
@@ -151,14 +164,6 @@ def decode_chunk_cmd(
         cfg=cfg,
     )
     lid_results = lidar.decode_chunk(
-        bag_path,
-        bag_id,
-        chunk_id,
-        t_start_ns=int(chunk["t_overlap_start_ns"]),
-        t_end_ns=int(chunk["t_overlap_end_ns"]),
-        cfg=cfg,
-    )
-    pose_result = poses.extract(
         bag_path,
         bag_id,
         chunk_id,
@@ -179,6 +184,8 @@ def decode_chunk_cmd(
                 "poses": {
                     "rows": pose_result.rows_written,
                     "uri": pose_result.output_uri,
+                    "dense_fraction": pose_result.dense_fraction,
+                    "held_positions_dropped": pose_result.n_held_dropped,
                 },
             },
             indent=2,
@@ -192,7 +199,7 @@ def decode_chunk_cmd(
 @click.option("--chunk-id", required=True)
 @click.option("--config", "config_path", default="/ws/src/ingest/config/ingest.yaml")
 def build_frame_index_cmd(bag_id: str, chunk_id: str, config_path: str) -> None:
-    """Match LiDAR sweeps to nearest camera frame per camera and interpolate poses."""
+    """Match LiDAR sweeps to nearest camera frame per camera and look up sweep poses."""
     cfg = load_config(config_path)
     result = frame_index.build(
         bag_id,

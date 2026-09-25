@@ -1,14 +1,26 @@
-"""Tests for inputs/calibration.build_calibration_dict — the pure-logic part
-that assembles calibration.json from already-decoded inputs.  Doesn't touch
-the rosbag or the filesystem.
+"""Tests for inputs/calibration: build_calibration_dict (the pure-logic part
+that assembles calibration.json from already-decoded inputs) and
+require_complete.  Doesn't touch the rosbag or the filesystem.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
+import pytest
 
 from wato_common.geometry import make_se3
-from wato_ingest.inputs.calibration import _resolve_chain, build_calibration_dict
+from wato_ingest.config import load_config
+from wato_ingest.inputs import calibration
+from wato_ingest.inputs.calibration import (
+    CalibrationError,
+    _resolve_chain,
+    build_calibration_dict,
+    require_complete,
+)
+
+CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
 
 
 def _identity():
@@ -134,3 +146,58 @@ def test_intrinsics_round_trip_K_matrix_shape():
     assert K[0][0] == 1500.0  # fx
     assert K[1][1] == 1500.0  # fy
     assert K[2][2] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# require_complete: every configured sensor must be calibrated
+# ---------------------------------------------------------------------------
+def _one_of_each_cfg():
+    cfg = load_config(str(CONFIG_DIR / "ingest.yaml"))
+    topics = cfg.topics.model_copy(
+        update={
+            "cameras": {"CAM": cfg.topics.cameras["CAM_FRONT"]},
+            "lidars": {"LIDAR": "/LIDAR_TOP"},
+        }
+    )
+    return cfg.model_copy(update={"topics": topics})
+
+
+def _calib(static):
+    return build_calibration_dict(
+        camera_infos={"CAM": _camera_info("cam")},
+        lidar_frame_ids={"LIDAR": "lidar"},
+        static_transforms=static,
+        ego_frame="base_link",
+        bag_id="b",
+    )
+
+
+def test_complete_calibration_passes():
+    static = {("base_link", "cam"): _xyz(1.0), ("base_link", "lidar"): _xyz(0.5)}
+    require_complete(_calib(static), _one_of_each_cfg())
+
+
+def test_unresolved_extrinsic_fails_ingest():
+    calib = _calib({("base_link", "cam"): _xyz(1.0)})
+    with pytest.raises(CalibrationError, match="lidar LIDAR: no transform"):
+        require_complete(calib, _one_of_each_cfg())
+
+
+def test_sensor_missing_from_calibration_fails_ingest():
+    calib = _calib({("base_link", "cam"): _xyz(1.0), ("base_link", "lidar"): _xyz(0)})
+    del calib["cameras"]["CAM"]
+    with pytest.raises(CalibrationError, match="camera CAM: no entry"):
+        require_complete(calib, _one_of_each_cfg())
+
+
+def test_freeze_from_bag_needs_info_and_tf_topics(monkeypatch):
+    cfg = _one_of_each_cfg()
+    topics = cfg.topics.model_copy(update={"tf_static": None})
+    cfg = cfg.model_copy(update={"topics": topics})
+
+    def no_bag(*_a, **_kw):
+        raise AssertionError("must fail before reading the bag")
+
+    monkeypatch.setattr(calibration, "messages", no_bag)
+    with pytest.raises(CalibrationError, match="topics.tf_static"):
+        calibration.freeze_from_bag("bag", "b", cfg)

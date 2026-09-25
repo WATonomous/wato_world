@@ -41,20 +41,35 @@ def run_bag(
 
     Steps:
       1. Register the bag and write `bag_meta.json`.
-      2. Validate required camera, LiDAR, and pose topics.
-      3. Freeze calibration when a calibration source is supplied.
+      2. Validate that the configured camera, LiDAR, pose (and, when
+         calibrating from the bag, CameraInfo + TF) topics exist with message
+         types ingest can decode.
+      3. Freeze calibration — from the bag, or from `calibration_source` —
+         and require every configured sensor to be calibrated.
       4. Compute virtual chunks and write `chunks/index.parquet`.
-      5. For each selected chunk, decode sensor data, build the frame index,
+      5. For each selected chunk, extract poses (raising PoseRequirementError
+         on a sparse stream or a child-frame mismatch — see the README's
+         "Pose requirements"), decode cameras + LiDAR, build the frame index,
          compute quality metrics, and write the manifest.
     """
     meta = bags.register(bag_path, bag_id=bag_id, storage_id=cfg.storage_id)
     bag_id = meta.bag_id
-    log.info("registered bag_id=%s duration=%.1fs", bag_id, meta.duration_s)
+    log.info(
+        "registered bag_id=%s storage=%s duration=%.1fs",
+        bag_id,
+        meta.storage_type,
+        meta.duration_s,
+    )
 
-    topic_check = topics.validate({t: "" for t in meta.topics}, cfg)
+    topic_check = topics.validate(
+        {t: meta.topic_types.get(t, "") for t in meta.topics},
+        cfg,
+        calibration_from_bag=calibration_source is None,
+    )
     if not topic_check.ok:
         raise RuntimeError(
-            f"bag {bag_id} missing topics required by ingest: {topic_check.missing}"
+            f"bag {bag_id} doesn't match the ingest config: {topic_check.describe()}. "
+            "`python -m wato_ingest inspect-bag --bag <bag>` lists its topics and types."
         )
 
     # Calibration: prefer auto-extraction from the bag's own CameraInfo +
@@ -66,6 +81,7 @@ def run_bag(
     else:
         calib_uri = calibration.freeze_from_bag(bag_path, bag_id, cfg)
         log.info("calibration: auto-extracted from bag -> %s", calib_uri)
+    calibration.require_complete(calibration.load(bag_id), cfg)
 
     chunk_rows = chunks.compute_chunks(bag_path, bag_id, cfg)
     chunks.write_chunk_index(bag_id, chunk_rows)
@@ -85,6 +101,18 @@ def run_bag(
         leave=True,
     )
     for c in chunk_rows:
+        # Poses first: a pose stream that fails the density / frame
+        # requirements aborts the bag before the expensive image + LiDAR decode.
+        bar.set_description(f"ingest {c.chunk_id} poses")
+        poses.extract(
+            bag_path,
+            bag_id,
+            c.chunk_id,
+            t_start_ns=c.t_overlap_start_ns,
+            t_end_ns=c.t_overlap_end_ns,
+            cfg=cfg,
+        )
+        bar.update()
         bar.set_description(f"ingest {c.chunk_id} cameras")
         cameras.decode_chunk(
             bag_path,
@@ -105,22 +133,11 @@ def run_bag(
             cfg=cfg,
         )
         bar.update()
-        bar.set_description(f"ingest {c.chunk_id} poses")
-        poses.extract(
-            bag_path,
-            bag_id,
-            c.chunk_id,
-            t_start_ns=c.t_overlap_start_ns,
-            t_end_ns=c.t_overlap_end_ns,
-            cfg=cfg,
-        )
-        bar.update()
         bar.set_description(f"ingest {c.chunk_id} frame_index")
         frame_index_result = frame_index.build(
             bag_id,
             c.chunk_id,
             max_cam_offset_ms=cfg.max_cam_offset_ms,
-            max_pose_gap_ns=int(cfg.max_pose_gap_ms * 1e6),
         )
         bar.update()
         bar.set_description(f"ingest {c.chunk_id} quality")

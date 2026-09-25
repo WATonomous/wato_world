@@ -3,7 +3,13 @@
 Strategy:
 - For CompressedImage messages: write the original compressed bytes verbatim.
   No re-encoding — preserves quality and skips the decode/encode round-trip.
-- For raw Image messages: decode with numpy + Pillow and write a JPEG.
+  The file type comes from the bytes themselves (JPEG or PNG), not from the
+  free-text `format` field, which drivers fill inconsistently.
+- For raw Image messages: convert rgb8 / bgr8 / rgba8 / bgra8 / mono8 to an
+  RGB (or grayscale) PNG with numpy + Pillow.
+
+Anything else (a video codec, Bayer, 16-bit, YUV) raises UnsupportedImageError
+rather than writing files no downstream component can read.
 
 Writes one row per emitted image to `camera_frames.parquet` so perception_2d can
 read directly from disk without touching the bag.
@@ -28,6 +34,22 @@ from wato_ingest.config import IngestConfig
 
 log = logging.getLogger(__name__)
 
+_JPEG_MAGIC = b"\xff\xd8\xff"
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+# Raw sensor_msgs/Image encodings ingest converts: (channels, stored as BGR).
+_RAW_ENCODINGS = {
+    "rgb8": (3, False),
+    "bgr8": (3, True),
+    "rgba8": (4, False),
+    "bgra8": (4, True),
+    "mono8": (1, False),
+}
+
+
+class UnsupportedImageError(ValueError):
+    """A camera topic carries images ingest can't write as a JPEG/PNG file."""
+
 
 @dataclass
 class CameraDecodeResult:
@@ -40,19 +62,41 @@ def _header_ts_ns(header) -> int:
     return int(header.stamp.sec) * 1_000_000_000 + int(header.stamp.nanosec)
 
 
-def _ext_for_format(fmt: str) -> str:
-    """Map sensor_msgs/CompressedImage.format to a file extension."""
-    f = (fmt or "").lower()
-    if "jpeg" in f or "jpg" in f:
+def _ext_for_compressed(data: bytes, fmt: str, cam_id: str) -> str:
+    """File extension for CompressedImage bytes, from their magic number."""
+    if data.startswith(_JPEG_MAGIC):
         return "jpg"
-    if "png" in f:
+    if data.startswith(_PNG_MAGIC):
         return "png"
-    log.warning(
-        "CompressedImage.format %r is not jpeg/png — writing raw bytes as .bin; "
-        "downstream perception will not be able to open this file",
-        fmt,
+    raise UnsupportedImageError(
+        f"camera {cam_id}: CompressedImage (format {fmt!r}) is neither JPEG nor "
+        "PNG; ingest writes images verbatim and downstream components read "
+        "only JPEG/PNG. Use a JPEG/PNG image_transport topic or a raw Image topic."
     )
-    return "bin"
+
+
+def _raw_to_array(msg, cam_id: str):
+    """sensor_msgs/Image → uint8 array, (H, W, 3) RGB or (H, W) grayscale."""
+    import numpy as np
+
+    enc = (msg.encoding or "").lower()
+    if enc not in _RAW_ENCODINGS:
+        raise UnsupportedImageError(
+            f"camera {cam_id}: raw Image encoding {msg.encoding!r} is not "
+            f"supported (supported: {sorted(_RAW_ENCODINGS)}). Debayer / convert "
+            "it on the robot, or record a JPEG/PNG CompressedImage topic."
+        )
+    channels, is_bgr = _RAW_ENCODINGS[enc]
+    height, width, step = int(msg.height), int(msg.width), int(msg.step)
+    rows = np.frombuffer(bytes(msg.data), dtype=np.uint8, count=height * step)
+    # `step` may include row padding beyond width * channels.
+    arr = rows.reshape(height, step)[:, : width * channels]
+    if channels == 1:
+        return np.ascontiguousarray(arr)
+    arr = arr.reshape(height, width, channels)[..., :3]  # drop alpha
+    if is_bgr:
+        arr = arr[..., ::-1]
+    return np.ascontiguousarray(arr)
 
 
 def decode_chunk(
@@ -147,9 +191,9 @@ def _write_one_image(
         return None, False
 
     if is_compressed:
-        ext = _ext_for_format(getattr(msg, "format", ""))
-        out_uri = camera_image_path(bag_id, chunk_id, cam_id, seq, ext)
         img_bytes = bytes(msg.data)
+        ext = _ext_for_compressed(img_bytes, getattr(msg, "format", ""), cam_id)
+        out_uri = camera_image_path(bag_id, chunk_id, cam_id, seq, ext)
         with open(local_path(out_uri), "wb") as fh:
             fh.write(img_bytes)
         width, height = _dims_from_compressed(img_bytes)
@@ -169,27 +213,14 @@ def _write_one_image(
         )
         return row.model_dump(), True
 
-    # Raw Image — minimal path.  Re-encode to PNG to preserve precision.
+    # Raw Image — convert to RGB / grayscale and write a lossless PNG.
     if msg_type == "Image":
         try:
-            import numpy as np
             from PIL import Image
         except ImportError as e:
-            raise RuntimeError("Pillow + numpy required for raw Image decode") from e
+            raise RuntimeError("Pillow required for raw Image decode") from e
 
-        arr = np.frombuffer(bytes(msg.data), dtype=np.uint8).reshape(
-            msg.height, msg.step
-        )
-        # Strip row padding if step > width * channels.
-        bytes_per_pixel = max(msg.step // max(msg.width, 1), 1)
-        arr = arr[:, : msg.width * bytes_per_pixel]
-        if (
-            "rgb" in (msg.encoding or "").lower()
-            or "bgr" in (msg.encoding or "").lower()
-        ):
-            arr = arr.reshape(msg.height, msg.width, 3)
-        else:
-            arr = arr.reshape(msg.height, msg.width)
+        arr = _raw_to_array(msg, cam_id)
         out_uri = camera_image_path(bag_id, chunk_id, cam_id, seq, "png")
         Image.fromarray(arr).save(local_path(out_uri), format="PNG")
         row = CameraFrameRow(

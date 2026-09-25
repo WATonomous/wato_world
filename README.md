@@ -4,7 +4,7 @@ Dockerized 3D auto-labeling pipeline for the WATonomous self driving car (dubbed
 
 ## Architecture
 
-Eight components communicate only through artifacts on disk (`data/artifacts/`). No in-process imports across component boundaries.
+Nine components communicate only through artifacts on disk (`data/artifacts/`). No in-process imports across component boundaries.
 
 ```mermaid
 flowchart TD
@@ -14,8 +14,8 @@ flowchart TD
         I["decode sensor streams\nbag_meta · calibration · chunks\ncamera_frames · lidar_sweeps\nposes · frame_index"]
     end
 
-    subgraph lidar_prep["lidar_preprocessing  ·  CPU"]
-        LP["motion compensation\nstatic / dynamic split\nground mesh extraction"]
+    subgraph lidar_prep["lidar_preprocessing  ·  CPU (GPU for --seg mos/union)"]
+        LP["motion compensation\nstatic / dynamic split (aw · mos · union)\nground mesh extraction\nUniLiPs IWU · motion proposals"]
     end
 
     subgraph perception_2d["perception_2d  ·  GPU"]
@@ -53,7 +53,7 @@ flowchart TD
     lidar_prep -- "preprocessed sweeps · ground mesh" --> semantic_lifting
     perception_2d -- "masks_2d · depth_2d · tracklets_2d" --> semantic_lifting
     semantic_lifting -- "lifted_labels · DINOv2 embeddings" --> proposal_gen
-    lidar_prep -- "preprocessed sweeps · ground mesh" --> proposal_gen
+    lidar_prep -- "preprocessed sweeps · ground mesh\nmotion proposals" --> proposal_gen
     proposal_gen -- "3D proposals" --> tracking
     tracking -- "3D tracks" --> label_ref
     tracking -- "rare-class track candidates" --> ovd
@@ -63,8 +63,8 @@ flowchart TD
 
 `frame_index.parquet` (written by **ingest**) is the cross-component contract: downstream stages read interpolated ego pose (`world_T_ego_flat`) and per-sweep validity (`valid_pose`) from it rather than consuming raw bag topics. Most stages read `world_T_ego_flat` directly; **lidar_preprocessing** re-interpolates from `poses.parquet` for per-point deskewing but honors `frame_index`'s `valid_pose` flag to skip sweeps with no usable pose (e.g. the start-of-bag window before SLAM converges), and that skip propagates to MF-MOS and classify.
 
-**ingest** and **perception_2d** are implemented end-to-end (and **semantic_lifting**'s
-core lifting algorithm). The remaining components are stubs.
+**ingest**, **lidar_preprocessing** and **perception_2d** are implemented end-to-end (and
+**semantic_lifting**'s core lifting algorithm). The remaining components are stubs.
 
 ## Layout
 
@@ -74,7 +74,7 @@ wato_world/
 ├── watod-config.sh          # user-editable defaults
 ├── watod_scripts/           # helpers invoked by watod
 ├── src/                         # one Python package per pipeline component
-│   ├── common/                  # shared lib: storage, schemas, geometry, calib
+│   ├── common/                  # shared lib: storage, schemas, geometry, calib, tracking
 │   ├── ingest/
 │   ├── perception_2d/
 │   ├── lidar_preprocessing/
@@ -125,7 +125,7 @@ watod down all
 | `ingest` | Decode rosbag → frames + lidar + poses + frame_index | CPU | no |
 | `perception_2d` | GroundingDINO + SAM2 video tracker + Depth Anything V2 + DINOv2 (optional Florence-2 discovery) | CUDA | yes |
 | `semantic_lifting` | Occlusion-aware 2D→3D label lifting (UniLiPs Eq.1) | CPU | no |
-| `lidar_preprocessing` | Motion comp, static/dynamic split, ground mesh | CPU | no |
+| `lidar_preprocessing` | Motion comp, static/dynamic split (`--seg aw\|mos\|union`), ground mesh, UniLiPs IWU, recall-oriented motion proposals | CUDA | only for `--seg mos\|union` |
 | `proposal_generation` | LiDAR detector + Segment-Lift-Fit + fusion | CUDA | yes |
 | `tracking` | 3D Kalman + masklet association + DINOv2 ReID | CUDA | yes (light) |
 | `label_refinement` | Multimodal LabelFormer (bootstrap → learned) | CUDA | yes |

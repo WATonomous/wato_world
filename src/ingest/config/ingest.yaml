@@ -23,23 +23,52 @@ reference_clock: lidar       # which sensor stream defines a "frame"
 # ---------------------------------------------------------------------------
 max_cam_offset_ms: 50.0      # drop a (sweep, cam) row if the camera frame is
                              # more than this far from the LiDAR sweep timestamp
-max_pose_gap_ms: 200.0       # mark valid_pose=False if the nearest pose sample is
-                             # farther than this from the sweep timestamp.
-                             # nuScenes /odom is ~50 Hz (~20ms spacing), so 200ms
-                             # is comfortably loose without admitting stale poses.
 
 # ---------------------------------------------------------------------------
-# rosbag2 storage backend.  Usually "sqlite3"; "mcap" if the bag was recorded
-# with the MCAP plugin.
+# Pose requirements — the pose topic must be DENSE and SMOOTH.  Every sweep
+# pose and every deskewed LiDAR point is linearly interpolated between the two
+# pose samples around it (constant-velocity assumption), so ingest refuses a
+# sparse stream instead of interpolating across seconds.  Physics, not
+# dataset tuning: both profiles use the same values.  README "Pose
+# requirements" has the measured rationale.  nuScenes /odom: 50 Hz, 20 ms
+# median / 45 ms max spacing, <= 9 m/s, dense fraction 1.0 — passes.
 # ---------------------------------------------------------------------------
-storage_id: mcap
+pose_requirements:
+  min_dense_fraction: 0.9      # chunk: share of the pose span whose samples are
+                               # <= max_bracket_ms apart; below this ingest
+                               # ABORTS (PoseRequirementError).  Dense streams
+                               # measure 1.0; keyframe-rate eidos 0.0.
+  max_bracket_ms: 250.0        # stretch: two consecutive poses further apart
+                               # than this can't be interpolated between
+                               # (pose_gap_*); no sweep, point or camera frame
+                               # inside the stretch gets a valid pose.  Measured
+                               # on WATO: at 200-250 ms a point 30 m out moves
+                               # ~11 cm p95 (mostly rotation); at 350-500 ms
+                               # ~23 cm p95.
+  max_speed_mps: 30.0          # stretch: implied ego speed between two
+                               # consecutive poses above this is a jump (loop
+                               # closure, INS reset), not motion (pose_jump_*).
+                               # Raise it for highway data (>108 km/h).
+
+# rosbag2's storage plugin (mcap / sqlite3) is detected from the bag; set
+# `storage_id: <plugin>` only to force one.
 
 # ---------------------------------------------------------------------------
 # Topic mapping.  LEFT side is the logical name ingest uses for outputs
 # (cam_<id>/, lidar_<id>/, etc.).  RIGHT side is the actual topic in the bag.
 #
 # If your recording uses different topic names, edit this section — no Python
-# change required.
+# change required.  `python -m wato_ingest inspect-bag --bag <bag>` lists a
+# bag's topics and message types.  Accepted types:
+#   cameras.*.image  sensor_msgs/CompressedImage (JPEG/PNG) or sensor_msgs/Image
+#                    (rgb8, bgr8, rgba8, bgra8, mono8)
+#   cameras.*.info   sensor_msgs/CameraInfo
+#   lidars.*         sensor_msgs/PointCloud2 (one topic per physical LiDAR)
+#   pose             nav_msgs/Odometry, geometry_msgs/PoseStamped or
+#                    geometry_msgs/PoseWithCovarianceStamped
+#   tf_static        tf2_msgs/TFMessage
+# `info` and `tf_static` feed calibration.json and may be left out when
+# passing --calibration <file>.
 # ---------------------------------------------------------------------------
 topics:
   # Each camera gets two topics: the image stream + its CameraInfo (intrinsics,

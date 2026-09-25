@@ -30,23 +30,29 @@ def register(
     bag_path: str,
     *,
     bag_id: str | None = None,
-    storage_id: str = "sqlite3",
+    storage_id: str = "",
     vehicle: str | None = None,
     calibration_version: str | None = None,
     recording_date: str | None = None,
 ) -> BagMeta:
-    """Inspect the bag, build a BagMeta, write bag_meta.json to artifacts."""
+    """Inspect the bag, build a BagMeta, write bag_meta.json to artifacts.
+
+    An empty `storage_id` lets rosbag2 detect the storage plugin; the one it
+    used is recorded as `storage_type`.
+    """
     final_bag_id = derive_bag_id(bag_path, bag_id)
 
     summary = summarize(bag_path, storage_id=storage_id)
     topic_counts = {t.name: t.message_count for t in summary.topics}
+    topic_types = {t.name: t.type for t in summary.topics}
 
     meta = BagMeta(
         bag_id=final_bag_id,
         source_path=os.path.abspath(bag_path),
         duration_s=summary.duration_ns / 1e9,
-        storage_type=storage_id,
+        storage_type=summary.storage_id,
         topics=topic_counts,
+        topic_types=topic_types,
         vehicle=vehicle,
         calibration_version=calibration_version,
         recording_date=recording_date,

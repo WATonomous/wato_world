@@ -74,7 +74,9 @@ To upgrade a model: change its revision in `model_registry.py`, re-run
 every manifest written afterwards, so old and new labels stay distinguishable.
 
 **2. Run on a bag** — `ingest` and `lidar_preprocessing` must have run first
-(perception_2d reads `frame_index`, calibration, and static LiDAR points):
+(perception_2d reads `frame_index`, `poses.parquet`, calibration, and static
+LiDAR points; each image's LiDAR anchors are projected with the ego pose at
+that image's own timestamp, not the LiDAR sweep's):
 
 ```bash
 ./watod run perception_2d run --bag <bag_id>            # all chunks

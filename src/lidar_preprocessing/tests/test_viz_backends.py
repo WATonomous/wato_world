@@ -111,3 +111,38 @@ def test_open_html_file_resolves_relative_paths(tmp_path, monkeypatch):
 
     assert open_html_file(html) is True
     assert opened == [(html.resolve().as_uri(), 2)]
+
+
+def test_proposals_layer_viz_data_and_html(tmp_path, monkeypatch):
+    """The proposals layer gathers every flagged point, marks moving-cluster
+    members, and renders through the standalone HTML viewer."""
+    import pytest
+
+    from wato_lidar_preprocessing.html_viz import (
+        _load_proposals_payload,
+        write_html_viewer,
+    )
+    from wato_lidar_preprocessing.motion_proposals import process_chunk
+    from wato_lidar_preprocessing.viz_data import load_chunk_proposal_viz_data
+
+    from .test_motion_proposals import _cfg, _stage_scene
+
+    monkeypatch.setenv("ARTIFACT_ROOT_URI", str(tmp_path))
+    bag_id, chunk_id = "bag_viz_prop", "c0"
+    _stage_scene(bag_id, chunk_id)
+    process_chunk(_cfg(), bag_id, chunk_id)
+
+    data = load_chunk_proposal_viz_data(bag_id, chunk_id)
+    assert data.xyz.shape[0] == data.source_bits.shape[0] == data.moving.shape[0] > 0
+    assert (data.source_bits != 0).all()
+    assert data.moving.any() and not data.moving.all()
+
+    payload = _load_proposals_payload(bag_id, chunk_id)
+    assert payload["counts"]["moving"] > 0
+    assert "dynamic_rgb" in payload
+
+    out = write_html_viewer(bag_id, chunk_id, out_path=tmp_path, layer="proposals")
+    assert out.name == "proposals.html"
+    assert "proposals chunk c0" in out.read_text(encoding="utf-8")
+    with pytest.raises(ValueError, match="chunk-level"):
+        write_html_viewer(bag_id, chunk_id, sweep_id=0, layer="proposals")

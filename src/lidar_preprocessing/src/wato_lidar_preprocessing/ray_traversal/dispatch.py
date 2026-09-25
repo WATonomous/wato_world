@@ -246,7 +246,7 @@ def apply_global_map_boost(
     clamp: float,
     log_odds,
 ) -> None:
-    """UniLiPs IWU boost for endpoints matched in the global static map.
+    """Global-map prior boost for endpoints matched in the global static map.
 
     For each unique voxel key the sweep hit, take the max r_star across the
     sweep's hits and add `l_occ_boost * max_r_star` to that voxel's

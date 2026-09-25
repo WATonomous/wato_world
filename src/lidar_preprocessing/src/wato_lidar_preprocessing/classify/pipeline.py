@@ -50,7 +50,7 @@ from .io_helpers import (
     estimate_cache_bytes,
     origin_from_index,
 )
-from .log_odds import build_log_odds_grid, classify_from_log_odds
+from .log_odds import CLASS_AMBIGUOUS, build_log_odds_grid, classify_from_log_odds
 from .masking import apply_classification_to_sweep
 from .occupancy_export import (
     write_chunk_voxel_diagnostics,
@@ -85,6 +85,7 @@ def _write_empty_outputs(
         origin=np.zeros(3, dtype=np.float64),
         static_voxel_keys=np.empty(0, dtype=np.int64),
         dynamic_voxel_keys=np.empty(0, dtype=np.int64),
+        ambiguous_voxel_keys=np.empty(0, dtype=np.int64),
     )
     np.savez_compressed(
         local_path(dynamic_map_path(bag_id, chunk_id)),
@@ -286,6 +287,11 @@ def process_chunk(
     # veto exempts candidates in them — AW corroborates the motion there, so
     # a static neighbour must not delete them.
     save_kwargs["dynamic_voxel_keys"] = dynamic_arr
+    # Evidenced voxels with hits whose p_occ sits between the dynamic and
+    # static thresholds, sorted. Neither cloud uses them (conservative), but
+    # Step F's recall-oriented motion proposals flag them (AW_AMBIGUOUS) and
+    # attach them to clusters seeded by stronger sources.
+    save_kwargs["ambiguous_voxel_keys"] = unique_keys[classification == CLASS_AMBIGUOUS]
     np.savez_compressed(local_path(out_uri), **save_kwargs)
 
     dyn_save_kwargs: dict[str, np.ndarray] = {}

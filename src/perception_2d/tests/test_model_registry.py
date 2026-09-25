@@ -125,6 +125,6 @@ def test_hf_loaders_pass_the_pinned_revision(monkeypatch):
         obj._load()
         assert calls, f"{cls.__name__} made no from_pretrained call"
         for repo_id, kw in calls:
-            assert kw.get("revision") == reg.hf_revision(repo_id), (
-                f"{cls.__name__} loaded {repo_id} without the pinned revision"
-            )
+            assert kw.get("revision") == reg.hf_revision(
+                repo_id
+            ), f"{cls.__name__} loaded {repo_id} without the pinned revision"

@@ -11,13 +11,17 @@ import numpy as np
 from wato_common.artifact_store import (
     dynamic_map_path,
     dynamic_mask_path,
+    global_iwu_path,
     global_static_map_path,
     ground_path,
     lidar_world_path,
     local_path,
+    motion_clusters_path,
+    motion_proposals_path,
     static_map_path,
     voxel_diag_path,
 )
+from wato_common.io.parquet_io import read_rows
 
 
 def load_world_sweep(
@@ -78,3 +82,34 @@ def load_voxel_diag(bag_id: str, chunk_id: str) -> dict[str, np.ndarray]:
     FileNotFoundError.
     """
     return dict(np.load(local_path(voxel_diag_path(bag_id, chunk_id))))
+
+
+def load_motion_proposals(
+    bag_id: str, chunk_id: str, sweep_id: int
+) -> dict[str, np.ndarray]:
+    """Load Step F's per-sweep motion proposals (aligned to the world NPZ).
+
+    Keys:
+      source_bits uint8 (N,) — which heuristics flagged the point; decode with
+                               wato_lidar_preprocessing.motion_proposals.decode_bits
+      cluster_id  int32 (N,) — row in motion_clusters.parquet, −1 = none
+
+    Recall-oriented and false-positive tolerant. Use dynamic_mask.npy, not
+    this, wherever a point must be trusted static (e.g. depth anchors).
+    """
+    return dict(np.load(local_path(motion_proposals_path(bag_id, chunk_id, sweep_id))))
+
+
+def load_motion_clusters(bag_id: str, chunk_id: str) -> list[dict]:
+    """Load Step F's per-chunk cluster rows (MotionClusterRow dicts)."""
+    return read_rows(motion_clusters_path(bag_id, chunk_id))
+
+
+def load_global_iwu(bag_id: str) -> dict[str, np.ndarray]:
+    """Load Step E's bag-level IWU result.
+
+    Keys: xyz (N,3), p_static, n_match, n_seen_through, evicted (bool), plus
+    the constants it ran with (alpha, tau_static, update_rate_hz,
+    n_sweeps_used).
+    """
+    return dict(np.load(local_path(global_iwu_path(bag_id))))

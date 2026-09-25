@@ -2,7 +2,8 @@
 
 **Paper reference**: UniLiPs (light.princeton.edu/unilips), Section 3.2
 (occlusion-aware semantic lifting) and Section 3.3 (geometry-grounded fusion).
-**Component**: NEW. Lives between `perception_2d` + `lidar_preprocessing` and
+**Component**: `src/semantic_lifting/`. The core algorithm (Steps 1–7 below)
+is implemented. It lives between `perception_2d` + `lidar_preprocessing` and
 `proposal_generation` in the pipeline DAG.
 
 The `semantic_lifting` component takes per-camera 2D instance masks and dense
@@ -14,9 +15,12 @@ aggregated across cameras with a confidence count.
 
 This component implements UniLiPs Equation 1 (the occlusion-aware visibility
 test) and the multi-camera `(label, count)` accumulation scheme described in
-Section 3.3. UniLiPs' downstream Algorithm 1 (probabilistic KD-tree
-propagation) and `f_IWU` (iterative weighted update) are scoped as future
-additions to this same component — see "Future extensions" below.
+Section 3.3. UniLiPs' Algorithm 1 (probabilistic KD-tree propagation) is a
+future addition here. `f_IWU` (iterative weighted update) was implemented
+geometry-only in `lidar_preprocessing` Step E, because it operates on the bag
+static map and feeds that component's motion proposals (see
+`lidar_mos_guidance.md`). The one IWU term that needs this component is the
+label consensus C(m) — see "Future extensions" below.
 
 ---
 
@@ -35,9 +39,10 @@ Could have lived in `perception_2d`, but doesn't, because:
    for SLF, tracking for cross-modal data-association cues, label_refinement
    for the final per-point labels. Producing it inside perception_2d would
    force every consumer to depend on perception_2d directly.
-4. **It is the natural home for UniLiPs' probabilistic propagation and
-   iterative weighted update** if those become needed. Both operate on the
-   accumulated point cloud, not on per-frame data.
+4. **It is the natural home for UniLiPs' probabilistic propagation** and for
+   the accumulated `(label, count)` map that would feed IWU's consensus term
+   back to `lidar_preprocessing`. Both operate on the accumulated point cloud,
+   not on per-frame data.
 
 Could have lived in `proposal_generation`, but doesn't, because:
 
@@ -59,10 +64,10 @@ Could have lived in `proposal_generation`, but doesn't, because:
                                  │
                                  ▼
                 ┌──────── lidar_preprocessing ────────┐
-                │  world_T_ego per frame              │
-                │  static map points                  │
-                │  per-sweep dynamic points           │
-                │  calibration.json                   │
+                │  lidar_proc/*_world.npz (world xyz) │
+                │  lidar_proc_index.parquet           │
+                │  (+ ingest: calibration.json,       │
+                │     frame_index.parquet)            │
                 └──────────────┬────────────────────┘
                                  │
                                  ▼
@@ -99,31 +104,35 @@ Could have lived in `proposal_generation`, but doesn't, because:
 
 ## Inputs
 
-From `perception_2d/v2/<chunk_id>/`:
-- `masks_2d/<cam>/<frame>/<det>.png` — binary instance masks
+All under `data/artifacts/raw/<bag_id>/`.
+
+From perception_2d (`chunks/<chunk_id>/`):
+- `masks_2d/<masklet_id>/<camera_seq:06d>.png` — binary instance masks
 - `depth_2d/<cam>/<frame>.npz` — metric depth + confidence + coverage mask
-- `detections_2d.parquet` — class, score, track_id, global_object_id per masklet
-- `tracklets_2d.parquet` — temporal associations within camera streams
+- `tracklets_2d.parquet` — per-masklet class, score, frames present
 
-From `lidar_preprocessing/v1/<chunk_id>/`:
-- `world/<frame>.npz` — `world_T_ego` per ego frame
-- `static_map.npz` or per-sweep static points (depends on prior decision)
-- `dynamic_points/<sweep>.npy` — moving-object LiDAR points per sweep
-- `calibration.json` — `ego_T_lidar`, `ego_T_cam_*`, `K_*` per camera
+From lidar_preprocessing (`chunks/<chunk_id>/`):
+- `lidar_proc_index.parquet` — per-sweep `world_path` (and `dynamic_mask_path`,
+  carried for the dynamic-point handling below, not yet read)
+- `lidar_proc/<sweep_id:06d>_world.npz` — deskewed world-frame points
 
-From `ingest/v1/<chunk_id>/`:
-- `frame_index.parquet` — sweep timestamps and nearest-frame mapping per camera
+From ingest:
+- `calibration.json` (bag level) — `ego_T_lidar`, `ego_T_cam_*`, `K_*` per camera
+- `chunks/<chunk_id>/frame_index.parquet` — sweep timestamps and nearest-frame
+  mapping per camera
 
 ---
 
 ## Outputs
 
 ```
-data/artifacts/raw/<bag_id>/semantic_lifting/v1/<chunk_id>/
+data/artifacts/raw/<bag_id>/chunks/<chunk_id>/semantic_lifting/
 ├── lifted_labels/<sweep_id>.npz          (per-sweep, primary output)
-├── lifted_stats.parquet                  (per-sweep diagnostics)
-└── camera_assignments/<sweep_id>.npz     (debug: which camera contributed each label)
+└── lifted_stats.parquet                  (per-sweep diagnostics)
 ```
+
+(A `camera_assignments/<sweep_id>.npz` debug artifact — which camera
+contributed each label — was designed but is not written.)
 
 ### `lifted_labels/<sweep_id>.npz` schema
 
@@ -165,8 +174,10 @@ One row per sweep, for monitoring and debugging:
 
 For each LiDAR sweep at time `t_sweep`, find the nearest frame from each
 camera's stream. Reject cameras where `|t_sweep - t_frame| > max_offset_s`
-(default 0.05 s = 50 ms — half a camera period at 12 Hz). Use
-`frame_index.parquet` for this mapping.
+(default 0.05 s = 50 ms — half a camera period at 12 Hz). `t_sweep` is the
+sweep's `reference_timestamp_ns` (lidar_preprocessing's index) and `t_frame`
+the frame's `camera_timestamp_ns` (`frame_index.parquet`, one reference per
+camera frame).
 
 ### Step 2: ego-motion compensation (UniLiPs-borrowed)
 
@@ -182,6 +193,15 @@ cam_T_lidar = inv(world_T_ego(t_frame)) ∘ inv(ego_T_cam)
 
 This transforms a LiDAR point captured at `t_sweep` into the camera frame
 captured at `t_frame`. The ~25 ms of ego motion is now compensated.
+
+**As implemented**, the `world_T_ego(t_sweep) ∘ ego_T_lidar` half is already
+done upstream: lidar_preprocessing writes every point in world coordinates,
+each at its own measurement time. Lifting therefore only needs
+`cam_T_world = inv(ego_T_cam) ∘ inv(world_T_ego(t_frame))`, with
+`world_T_ego(t_frame)` looked up at `camera_timestamp_ns` through
+`wato_common.pose_lookup` (`io.load_frame_refs`). `frame_index.world_T_ego` is
+the sweep's pose and is not used here: on the WATO rig it misplaced a point
+30 m away by 17 cm median, up to 87 cm.
 
 Note: this only compensates ego motion, not scene motion. Dynamic objects
 will still project to slightly the wrong pixel by `Δt × v_object`. Mitigated
@@ -261,8 +281,10 @@ Pack into `lifted_labels/<sweep_id>.npz` with the schema above.
 
 ## Dynamic-point handling
 
-Per `lidar_preprocessing/classify.py`, dynamic points (moving objects) are
-already separated from static points in upstream artifacts.
+lidar_preprocessing separates dynamic points upstream in two artifacts:
+`lidar_proc/*_dynamic_mask.npy` (the `--seg` method's precision verdict) and
+`lidar_proc/*_motion_proposals.npz` + `motion_clusters.parquet` (the
+recall-oriented proposals, with per-cluster motion scores).
 
 **For dynamic points**, the projection and visibility test still work, but
 the temporal offset issue is more severe: a moving car's LiDAR points at
@@ -272,7 +294,9 @@ captured the car at `t_frame`, where the car is now displaced by
 
 UniLiPs handles this implicitly through its iterative weighted update
 (`f_IWU`) — they let dynamic points be initially misclassified, then catch
-them via map-inconsistency. We don't yet have f_IWU, so do this instead:
+them via map-inconsistency. Our IWU lives in lidar_preprocessing (Step E) and
+surfaces its floaters as `IWU_EVICTED` proposals, but it does not change the
+labels lifted here. So for lifting itself, do this:
 
 1. For dynamic points, additionally compensate for the object's velocity if
    it's known from the tracker output. Otherwise, accept the temporal slop.
@@ -283,9 +307,9 @@ them via map-inconsistency. We don't yet have f_IWU, so do this instead:
    (the label probably came from a stale pixel).
 
 In v1, accept some noise on dynamic points and rely on SLF's L_lidar +
-L_mask combination to resolve it during pose fitting. Plan to add `f_IWU`
-later if dynamic-point labels prove unreliable enough to bottleneck label
-quality.
+L_mask combination to resolve it during pose fitting. When the tracker's
+velocities exist (item 1), `motion_clusters.parquet`'s per-cluster motion
+features are the natural first signal for which points to compensate.
 
 ---
 
@@ -315,23 +339,21 @@ label distribution; assign argmax label as the final.
 
 Add as `propagation.py`, called optionally after the per-sweep lifting.
 
-### Iterative Weighted Update (UniLiPs `f_IWU`, Eqs. 3-4)
+### Iterative Weighted Update (UniLiPs `f_IWU`, Eqs. 3-4) — consensus feedback
 
-Removes "floaters" (moving objects mistakenly registered as static map
-points) and detects moving objects from inconsistencies between scans and
-the accumulated map. Update each map point's static probability across
-sweeps based on:
+**The geometry is implemented** in `lidar_preprocessing` Step E (`iwu/`):
+the update runs over the bag static map, evicted floaters become
+`IWU_EVICTED` proposals, and the rule is adapted for sparse 32/16-beam
+scanners. Details and measurements are in `lidar_mos_guidance.md`. UniLiPs
+reports IWU carries the bulk of their 3D box quality (Table 8a ablation: mAP
+31.0 → 11.7 without it).
 
-- How often it has a nearest map-point hit
-- A class-prior credibility factor
-- A range-distance influence factor
-
-Map points with static probability below threshold are evicted and
-reclassified as moving. UniLiPs reports this is responsible for the bulk
-of their 3D bounding-box quality (Table 8a ablation: mAP 31.0 → 11.7
-without it).
-
-Add as `iterative_update.py` if dynamic-point labels prove unreliable.
+**What remains for this component** is the label-consensus term
+`C(m) = max_j n_mj / Σ_j n_mj`. It is 0 in Step E because lidar_preprocessing
+has no semantics. After the multi-sweep aggregation below exists, export the
+per-map-point `(label, count)` consensus and pass it to
+`wato_lidar_preprocessing.iwu.update_with_sweep(..., consensus=...)`. That
+makes both reinforcement (×(1+C)) and decay (×(1−C)) label-aware.
 
 ### Multi-sweep label aggregation
 
@@ -344,34 +366,26 @@ point cloud (label_refinement, ovd).
 
 ## Configuration schema
 
+The shipped schema (authoritative: `src/semantic_lifting/config/semantic_lifting.yaml`
+and its Pydantic model in `config.py`):
+
 ```yaml
-# src/semantic_lifting/config/semantic_lifting.yaml
-semantic_lifting:
-  temporal:
-    max_offset_s: 0.05              # reject cameras farther than this from sweep time
-  visibility:
-    tolerance_m: 0.5                # UniLiPs Eq. 1 τ
-    neighborhood: 3                 # min over 3x3 patch in depth_2d
-    require_depth_coverage: false   # if true, require lidar_coverage[u,v]=True
-  projection:
-    min_depth_m: 0.5
-    max_depth_m: 250.0
-  voting:
-    overlap_resolution: innermost   # for nested masks, innermost wins
-    confidence_min: 0.2             # drop labels below this
-    disagreement_threshold: 0.4     # margin below which label is dropped
-  dynamic_points:
-    enabled: true
-    drop_low_confidence_pixels: true
-    confidence_threshold: 0.5
-  outputs:
-    save_camera_assignments: false  # debug artifact, expensive
-    dtype: float16
-  upstream_versions:
-    perception_2d: v2
-    lidar_preprocessing: v1
-    ingest: v1
+temporal:
+  max_offset_s: 0.05           # reject cameras farther than this from sweep time
+visibility:
+  tolerance_m: 0.5             # UniLiPs Eq. 1 τ
+  neighborhood: 3              # min over the NxN patch in depth_2d
+voting:
+  min_supporting_cameras: 1
+  innermost_wins: true         # for nested masks, innermost wins
+depth:
+  skip_on_fit_failure: true    # skip a camera whose depth fit_status == 2
+upstream_versions: {}
 ```
+
+The design's `projection.*`, `voting.confidence_min` /
+`disagreement_threshold`, `dynamic_points.*` and `outputs.*` keys were not
+implemented; add them to the YAML and `config.py` together if they are.
 
 ---
 
@@ -478,6 +492,8 @@ implementation. Single source of truth for the projection math.
 
 ## Summary of actionable steps
 
+Status: 1, 3–8 and 10–12 are done (4 landed as `wato_common/geometry/projection.py`). 2 is partial: `LiftedStatsRow` is in `wato_common.schemas`, but the lifted-labels NPZ has no row schema and the config model lives in the component's `config.py`. 9 is superseded.
+
 1. Create `src/semantic_lifting/` directory structure mirroring
    `src/perception_2d/`.
 2. Define `LiftedLabelRow` and `SemanticLiftingConfig` schemas in
@@ -494,11 +510,13 @@ implementation. Single source of truth for the projection math.
    majority-vote disagreement handling.
 8. Build `pipeline.py` orchestrator: loop over sweeps, project into
    matched cameras, run visibility + lookup + voting, write outputs.
-9. Wire into `config/pipeline.yaml` with version `v1`.
+9. ~~Wire into `config/pipeline.yaml`~~ — superseded: the component owns
+   `src/semantic_lifting/config/semantic_lifting.yaml`.
 10. Update `docs/research/segment_lift_fit_guidance.md` to describe SLF
     consuming the `lifted_labels` artifact (per-instance LiDAR subset
     selection, mask correspondence).
 11. Update top-level README mermaid diagram to include the new component.
 12. Add Dockerfile `docker/semantic_lifting.Dockerfile` — light on
-    dependencies, mostly NumPy + Open3D for KDTree (preempting Algorithm 1
-    addition later).
+    dependencies: NumPy/SciPy/Pillow/pyarrow, all from PyPI. ~~Open3D for
+    KDTree~~ — dropped while nothing imports it; Algorithm 1 can use
+    `scipy.spatial.cKDTree`, or re-add Open3D when it lands.

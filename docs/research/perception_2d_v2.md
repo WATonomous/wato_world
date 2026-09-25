@@ -137,8 +137,20 @@ and for downstream Segment-Lift-Fit.
 - **Static-only anchors** (`use_static_anchors_only`, non-optional): cameras
   (~12 Hz) and LiDARs (~20 Hz) are unsynchronized. A dynamic LiDAR point
   projects to where the object *was* at LiDAR time, not where it is in the
-  current image, which wrecks the affine fit. Only `lidar_preprocessing`'s
-  static points are used as anchors.
+  current image, which wrecks the affine fit. Only points outside
+  `lidar_preprocessing`'s `dynamic_mask` (the precision artifact) are used as
+  anchors — never the Step F `motion_proposals`, which are recall-oriented and
+  false-positive tolerant. (`~dynamic_mask` also admits ambiguous,
+  under-evidenced and near-ego points; static-voxel membership would be the
+  stricter anchor set — a known follow-up.)
+- **Camera-time pose**: the static points are world-frame (each deskewed at
+  its own time), so they are projected with the ego pose when the *image* was
+  taken — looked up at the frame's `camera_timestamp_ns` through
+  `wato_common.pose_lookup` — not `frame_index.world_T_ego`, which is the
+  LiDAR sweep's pose. The two are up to ~44 ms apart on the WATO rig and
+  ~120 ms on nuScenes; using the sweep's pose misplaced a point 30 m away by
+  15–17 cm median and up to 0.9–1.3 m. A frame whose time falls in an
+  untrusted stretch of the pose stream gets no anchors.
 - **Sky filter**: DA-V2 emits enormous unreliable values for sky; the top
   `sky_mask_top_fraction` of the image is masked before fitting.
 - **RANSAC affine fit**: solve `d_lidar ≈ a·d_da + b` over the matched pairs

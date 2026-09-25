@@ -189,3 +189,70 @@ def load_sweep_viz_data(bag_id: str, chunk_id: str, sweep_id: int) -> SweepVizDa
         n_hits=None if diag_stats is None else diag_stats["n_hits"],
         classification=None if diag_stats is None else diag_stats["classification"],
     )
+
+
+@dataclass
+class ProposalVizData:
+    bag_id: str
+    chunk_id: str
+    static_xyz: np.ndarray
+    xyz: np.ndarray  # every point with any proposal bit
+    sweep_id: np.ndarray
+    source_bits: np.ndarray
+    moving: np.ndarray  # bool — member of a cluster with motion_score > 1
+
+
+def load_chunk_proposal_viz_data(bag_id: str, chunk_id: str) -> ProposalVizData:
+    """Gather Step F proposal points across a chunk's sweeps."""
+    from wato_common.artifact_store import lidar_proc_index_path
+    from wato_common.io.parquet_io import read_rows
+    from wato_lidar_preprocessing.io import (
+        load_motion_clusters,
+        load_motion_proposals,
+        load_static_map,
+        load_world_sweep,
+    )
+    from wato_lidar_preprocessing.motion_proposals import MOVING_SCORE
+
+    try:
+        static_xyz = load_static_map(bag_id, chunk_id)["xyz"]
+    except FileNotFoundError:
+        static_xyz = np.empty((0, 3))
+    moving_ids = np.array(
+        [
+            int(r["cluster_id"])
+            for r in load_motion_clusters(bag_id, chunk_id)
+            if r["motion_score"] > MOVING_SCORE
+        ],
+        dtype=np.int64,
+    )
+    xyz_parts, sid_parts, bit_parts, mov_parts = [], [], [], []
+    for row in read_rows(lidar_proc_index_path(bag_id, chunk_id)):
+        if row.get("valid") is False:
+            continue
+        sid = int(row["sweep_id"])
+        try:
+            prop = load_motion_proposals(bag_id, chunk_id, sid)
+        except FileNotFoundError:
+            continue
+        bits = prop["source_bits"]
+        keep = bits != 0
+        if not keep.any():
+            continue
+        w = load_world_sweep(bag_id, chunk_id, sid)
+        xyz = np.column_stack([w["x"], w["y"], w["z"]])[keep]
+        xyz_parts.append(xyz)
+        sid_parts.append(np.full(xyz.shape[0], sid, dtype=np.int32))
+        bit_parts.append(bits[keep])
+        mov_parts.append(np.isin(prop["cluster_id"][keep], moving_ids))
+    if xyz_parts:
+        xyz = np.concatenate(xyz_parts)
+        sweep_id = np.concatenate(sid_parts)
+        bits = np.concatenate(bit_parts)
+        moving = np.concatenate(mov_parts)
+    else:
+        xyz = np.empty((0, 3))
+        sweep_id = np.empty(0, np.int32)
+        bits = np.empty(0, np.uint8)
+        moving = np.empty(0, bool)
+    return ProposalVizData(bag_id, chunk_id, static_xyz, xyz, sweep_id, bits, moving)

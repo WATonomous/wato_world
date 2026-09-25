@@ -69,6 +69,7 @@ def _make_bag(tmp_path, monkeypatch, *, valid_camera: bool):
             "cam_id": ["cam_front"],
             "image_path": [img_path],
             "camera_seq": [0],
+            "camera_timestamp_ns": [0],
             "world_T_ego_flat": pa.array([pose_flat], type=pa.list_(pa.float64())),
             "valid_camera": [valid_camera],
             "valid_pose": [True],

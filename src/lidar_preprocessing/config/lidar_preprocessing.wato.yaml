@@ -39,8 +39,17 @@ lidar_preprocessing:
 
   global_map_voxel_size_m: 0.30
 
-  # Velodyne per-point "t" field is in seconds.
+  # Velodyne per-point "time" field is in seconds.  In every WATO bag measured
+  # so far it is all zeros; deskew treats an all-zero field as missing and
+  # synthesizes the times from azimuth instead (README Step A).
   point_time_unit: "seconds"
+
+  # The car's Velodyne driver stamps each sweep with its LAST packet
+  # (`timestamp_first_packet: false` in wato_monorepo
+  # src/interfacing/sensor_interfacing/config/velodyne_lidar_config.yaml, all
+  # three scanners).  Synthesized per-point times therefore count back from
+  # the stamp.
+  header_stamp_at: sweep_end
 
   patchwork:
     sensor_height: 1.8
@@ -85,6 +94,20 @@ lidar_preprocessing:
 
     moving_cluster_voxel_m: 0.5
     moving_min_cluster_pts: 8
+
+  # Steps E/F: same as the nuScenes profile.  The IWU stride is per lidar
+  # from each scanner's datasheet rate, and proposals cluster per
+  # frame_sync frame, so the three per-corner sweeps form one object.
+  iwu:
+    enabled: true
+    update_rate_hz: 4.0
+
+  motion_proposals:
+    enabled: true
+    min_height_above_ground_m: 0.25
+    min_cluster_pts: 5
+    max_side_m: 20.0
+    box_fill: true
 
   save_voxel_occupancy: true
   save_voxel_diagnostics: true

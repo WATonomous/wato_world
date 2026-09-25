@@ -25,16 +25,30 @@ max_cam_offset_ms: 60.0      # drop a (sweep, cam) row if the camera frame is
                              # LiDAR ~19.8 Hz (~50 ms), so the nearest camera to a
                              # sweep can sit ~42 ms away — 60 ms leaves margin
                              # without admitting a full frame of skew.
-max_pose_gap_ms: 200.0       # mark valid_pose=False if the nearest pose sample is
-                             # farther than this from the sweep timestamp.
-                             # slam/odometry runs ~9.1 Hz (~110 ms spacing), so the
-                             # nearest pose is <=~55 ms away; 200 ms is comfortably
-                             # loose without admitting stale poses.
 
 # ---------------------------------------------------------------------------
-# rosbag2 storage backend.  WATO bags are recorded with the MCAP plugin.
+# Pose requirements — the pose topic must be DENSE and SMOOTH (same values as
+# ingest.yaml; README "Pose requirements").  Measured on WATO bags:
+#   ring_road_corrected slam/odometry  dense 1.0 → passes the checks, but its
+#                                      poses are liso/odometry poses stamped
+#                                      244-450 ms late (README "How good are
+#                                      the poses") — the checks can't see that
+#   ring_road_corrected liso/odometry  dense 1.0, 50 ms → passes; agrees with
+#                                      the NovAtel INS to ~5 cm per second
+#   may_30 slam/odometry (eidos main)  908 ms median (1 pose / 5 m), dense 0.0
+#                                      → ABORTS
 # ---------------------------------------------------------------------------
-storage_id: mcap
+pose_requirements:
+  min_dense_fraction: 0.9      # chunk: share of the pose span whose samples are
+                               # <= max_bracket_ms apart; below this ingest
+                               # ABORTS (PoseRequirementError).  Dense streams
+                               # measure 1.0; keyframe-rate eidos 0.0.
+  max_bracket_ms: 250.0        # stretch: two consecutive poses further apart
+                               # than this can't be interpolated between; no
+                               # sweep, point or camera frame inside gets a pose.
+  max_speed_mps: 30.0          # stretch: implied speed between two consecutive
+                               # poses above this is a jump (loop closure, INS
+                               # reset), not motion.
 
 # ---------------------------------------------------------------------------
 # Topic mapping.  LEFT side is the logical name ingest uses for outputs
@@ -65,9 +79,16 @@ topics:
     lidar_cc: /lidar_cc/velodyne_points   # centre VLP-32C (canonical)
     lidar_ne: /lidar_ne/velodyne_points   # corner VLP-16
     lidar_nw: /lidar_nw/velodyne_points   # corner VLP-16
-  # Pose: eidos SLAM odometry — stamped at the LiDAR keyframe sensor time, in
-  # the SLAM-optimized map frame, child=base_footprint.  This is the canonical
-  # WATO pose source.  Do NOT use /tf (wall-clock-stamped; desyncs from LiDAR).
+  # Pose: eidos SLAM odometry — SLAM map frame, child=base_footprint.  This is
+  # the back end's newest-KEYFRAME pose: on eidos main one pose per 5 m, which
+  # ingest aborts on (pose_requirements above).  In ring_road_corrected it is
+  # liso/odometry resampled at 10 Hz and stamped 244-450 ms late (median 310).
+  # /world_modeling/liso/odometry (per scan, stamped at scan time, same child
+  # frame) is the better per-sweep pose there — README "How good are the
+  # poses".
+  # Bags without eidos topics: no shipped profile — /novatel/oem7/odom
+  # (ego_frame base_link) is not validated for labeling, README "Profiles".
+  # Do NOT use /tf (wall-clock-stamped; desyncs from LiDAR).
   pose: /world_modeling/slam/odometry
   # WATO publishes rigid sensor extrinsics on /tf_static (read once at bag
   # scope to populate calibration.json).
@@ -75,7 +96,8 @@ topics:
 
 # ---------------------------------------------------------------------------
 # Ego frame name used as the TF parent when resolving ego_T_cam / ego_T_lidar
-# from /tf_static.  eidos's slam/odometry has child_frame_id=base_footprint.
+# from /tf_static.  MUST equal the pose topic's child_frame_id — ingest checks
+# and aborts otherwise.  eidos's slam/odometry has child_frame_id=base_footprint.
 # ---------------------------------------------------------------------------
 ego_frame: base_footprint
 

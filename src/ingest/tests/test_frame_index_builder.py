@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from wato_common.geometry import PoseSample
+from wato_common.pose_lookup import PoseLookup, interval_drop_reasons
 from wato_ingest.artifacts.frame_index import _build_rows
 
 
@@ -54,6 +55,16 @@ def _identity_pose_at(ts_ns: int) -> PoseSample:
     return PoseSample(ts_ns, np.zeros(3), _id_quat())
 
 
+def _lookup(samples: list[PoseSample], *, max_bracket_ns: int) -> PoseLookup:
+    """Samples marked the way ingest's poses.extract marks them."""
+    return PoseLookup(
+        samples,
+        interval_drop_reasons(
+            samples, max_bracket_ns=max_bracket_ns, max_speed_mps=30.0
+        ),
+    )
+
+
 def test_one_camera_two_sweeps_within_threshold():
     sweeps = [_sweep(0, 100_000_000), _sweep(1, 200_000_000)]
     cams = [
@@ -66,10 +77,9 @@ def test_one_camera_two_sweeps_within_threshold():
         chunk_id="0000",
         sweeps=sweeps,
         camera_frames=cams,
-        pose_samples=poses,
+        poses=_lookup(poses, max_bracket_ns=10_000_000_000),
         calib_uri="file:///x",
         max_cam_offset_ms=50.0,
-        max_pose_gap_ns=10_000_000_000,
     )
     assert len(rows) == 2
     assert all(r.valid_camera for r in rows)
@@ -86,10 +96,9 @@ def test_camera_drops_when_offset_exceeds_threshold():
         chunk_id="0000",
         sweeps=sweeps,
         camera_frames=cams,
-        pose_samples=[_identity_pose_at(0)],
+        poses=_lookup([_identity_pose_at(0)], max_bracket_ns=10_000_000_000),
         calib_uri="x",
         max_cam_offset_ms=50.0,
-        max_pose_gap_ns=10_000_000_000,
     )
     assert len(rows) == 1
     assert rows[0].valid_camera is False
@@ -104,10 +113,9 @@ def test_two_cameras_each_get_their_own_row():
         chunk_id="0000",
         sweeps=sweeps,
         camera_frames=cams,
-        pose_samples=[_identity_pose_at(0)],
+        poses=_lookup([_identity_pose_at(0)], max_bracket_ns=10_000_000_000),
         calib_uri="x",
         max_cam_offset_ms=50.0,
-        max_pose_gap_ns=10_000_000_000,
     )
     assert len(rows) == 2
     assert {r.cam_id for r in rows} == {"CAM_FRONT", "CAM_LEFT"}
@@ -116,16 +124,56 @@ def test_two_cameras_each_get_their_own_row():
 def test_pose_marked_invalid_when_no_samples_close_enough():
     sweeps = [_sweep(0, 100_000_000)]
     cams = [_cam("CAM_FRONT", 0, 100_000_000)]
-    # Only sample is 1 second away; max_pose_gap_ns at 50 ms → invalid_pose.
+    # Only sample is 1 second after the sweep: nothing brackets it.
     rows = _build_rows(
         bag_id="b",
         chunk_id="0000",
         sweeps=sweeps,
         camera_frames=cams,
-        pose_samples=[_identity_pose_at(1_100_000_000)],
+        poses=_lookup([_identity_pose_at(1_100_000_000)], max_bracket_ns=250_000_000),
         calib_uri="x",
         max_cam_offset_ms=50.0,
-        max_pose_gap_ns=50_000_000,
     )
     assert rows[0].valid_pose is False
     assert rows[0].world_T_ego_flat is None
+    assert rows[0].pose_drop_reason == "outside_pose_span"
+
+
+def test_sweep_between_distant_poses_gets_pose_gap_reason():
+    sweeps = [_sweep(0, 500_000_000)]
+    cams = [_cam("CAM_FRONT", 0, 500_000_000)]
+    # Keyframe-rate spacing (1 s) around the sweep: interpolation not trusted.
+    rows = _build_rows(
+        bag_id="b",
+        chunk_id="0000",
+        sweeps=sweeps,
+        camera_frames=cams,
+        poses=_lookup(
+            [_identity_pose_at(0), _identity_pose_at(1_000_000_000)],
+            max_bracket_ns=250_000_000,
+        ),
+        calib_uri="x",
+        max_cam_offset_ms=50.0,
+    )
+    assert rows[0].valid_pose is False
+    assert rows[0].pose_drop_reason == "pose_gap_1000ms"
+    assert rows[0].world_T_ego_flat is None
+
+
+def test_valid_pose_has_no_drop_reason():
+    sweeps = [_sweep(0, 50_000_000)]
+    cams = [_cam("CAM_FRONT", 0, 50_000_000)]
+    rows = _build_rows(
+        bag_id="b",
+        chunk_id="0000",
+        sweeps=sweeps,
+        camera_frames=cams,
+        poses=_lookup(
+            [_identity_pose_at(0), _identity_pose_at(100_000_000)],
+            max_bracket_ns=250_000_000,
+        ),
+        calib_uri="x",
+        max_cam_offset_ms=50.0,
+    )
+    assert rows[0].valid_pose is True
+    assert rows[0].pose_drop_reason is None

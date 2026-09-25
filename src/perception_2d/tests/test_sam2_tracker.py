@@ -106,9 +106,8 @@ def _frames(n: int, cam: str = "cam_front") -> list[CameraFrameInfo]:
             cam_id=cam,
             image_path=f"/tmp/{i}.png",
             camera_seq=i,
-            world_T_ego_flat=None,
+            camera_timestamp_ns=None,
             valid_camera=True,
-            valid_pose=False,
         )
         for i in range(n)
     ]

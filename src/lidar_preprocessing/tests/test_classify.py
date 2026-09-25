@@ -28,6 +28,7 @@ from wato_common.io.parquet_io import write_table
 from wato_common.schemas import PROCESSED_SWEEPS_SCHEMA
 from wato_lidar_preprocessing.classify import process_chunk
 from wato_lidar_preprocessing.config import ComponentConfig
+from wato_lidar_preprocessing.voxel import voxel_indices
 
 # Sensor behind the scene on -x so a same-point sweep never self-carves.
 _SENSOR = np.array([-5.0, 0.0, 0.0])
@@ -520,6 +521,34 @@ def test_static_map_carries_dynamic_voxel_keys(tmp_env):
         static["dynamic_voxel_keys"].size >= 1
     ), "the carved voxel must appear in dynamic_voxel_keys"
     assert np.all(np.diff(static["dynamic_voxel_keys"]) >= 0), "keys must be sorted"
+
+
+def test_static_map_carries_ambiguous_voxel_keys(tmp_env):
+    """static_map.npz exports the ambiguous band for Step F's AW_AMBIGUOUS.
+
+    One hit (l_occ ≈ +1.99) then three carves (3 × l_free ≈ −1.22) leaves the
+    voxel evidenced, with hits, and between the dynamic and static
+    thresholds — neither cloud uses it, but motion proposals flag it.
+    """
+    bag_id, chunk_id = "bag_ambkeys", "chunk0"
+    hit_xyz = np.array([[0.0, 0.0, 0.0]])
+    beyond_xyz = np.array([[8.0, 0.0, 0.0]])
+    _write_world_sweep(bag_id, chunk_id, 0, hit_xyz, origin=_SENSOR)
+    xyz_per_sweep = [hit_xyz]
+    for i in range(1, 4):
+        _write_world_sweep(bag_id, chunk_id, i, beyond_xyz, origin=_SENSOR)
+        xyz_per_sweep.append(beyond_xyz)
+    _write_proc_index(bag_id, chunk_id, list(range(4)), xyz_per_sweep=xyz_per_sweep)
+
+    cfg = ComponentConfig()
+    process_chunk(cfg, bag_id, chunk_id)
+
+    static = np.load(local_path(static_map_path(bag_id, chunk_id)))
+    hit_key = voxel_indices(hit_xyz, static["origin"], float(static["voxel_size"]))[0]
+    assert hit_key in static["ambiguous_voxel_keys"]
+    assert hit_key not in static["dynamic_voxel_keys"]
+    assert hit_key not in static["static_voxel_keys"]
+    assert np.all(np.diff(static["ambiguous_voxel_keys"]) >= 0), "keys must be sorted"
 
 
 def test_classify_raises_when_world_npz_missing_origin(tmp_env):

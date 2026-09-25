@@ -1,4 +1,9 @@
-"""Global static map prior for two-pass classification (UniLiPs IWU).
+"""Global static map prior for two-pass classification.
+
+A one-time, credibility-weighted log-odds boost for voxels matched in the
+bag-level static map. Not UniLiPs IWU — that is the per-map-point static
+probability EMA in wato_lidar_preprocessing.iwu, which this module predates
+and was previously (mis)labelled as.
 
 cKDTree over the bag-level global_static_map.npz: query_sweep returns, per
 point, whether it matches a known static surface and its range to the sensor.

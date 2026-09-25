@@ -61,11 +61,11 @@ applied to frames where the object is far away and point-sparse.
 | LabelFormer input | Our artifact | Where |
 |-------------------|-------------|-------|
 | Initial box proposals | `proposals.parquet` | `proposal_generation` output |
-| Per-frame LiDAR points in box | `world/*.npz` + `dynamic_masks/*.npy` | `lidar_preprocessing` |
+| Per-frame LiDAR points in box | `lidar_proc/<sweep>_world.npz` (+ `ground_mask`) | `lidar_preprocessing` |
 | Track IDs + frame associations | `tracks.parquet` | `tracking` output |
 | World-frame coordinate system | deskewed xyz in consistent world frame | `lidar_preprocessing` |
 
-The world-frame coordinate system from `deskew.py` is especially important:
+The world-frame coordinate system from `deskew/` is especially important:
 because all LiDAR points are already in a single consistent world frame,
 object positions across frames are directly comparable without an additional
 ego-motion compensation step inside LabelFormer.
@@ -100,19 +100,19 @@ that fall inside the initial bounding box.  This needs to happen in
 `label_refinement` before the model runs.
 
 ```python
-def crop_box(world_npz_path, dynamic_mask_path, cx, cy, cz, w, l, h, heading):
+from wato_common.schemas import Box3D
+from wato_common.tracking import points_in_box
+
+
+def crop_box(world_npz_path: str, box: Box3D) -> np.ndarray:
     data = np.load(world_npz_path)
-    mask = np.load(dynamic_mask_path)        # (N,) bool — True = dynamic
-    xyz = np.stack([data["x"], data["y"], data["z"]], 1)[mask]
-    # rotate to box-local frame, keep points within ±(w/2, l/2, h/2)
-    R = heading_to_rotation(heading)         # (3,3)
-    local = (xyz - np.array([cx,cy,cz])) @ R
-    inside = (
-        (np.abs(local[:,0]) < w/2) &
-        (np.abs(local[:,1]) < l/2) &
-        (np.abs(local[:,2]) < h/2)
-    )
-    return local[inside]                     # (M, 3) in box-local frame
+    xyz = np.stack([data["x"], data["y"], data["z"]], 1)
+    # The box is the selector. Do NOT pre-filter by dynamic_mask: parked
+    # vehicles are tracks too, and the precision mask misses mover points.
+    keep = ~data["ground_mask"] & points_in_box(xyz, box)
+    c, s = np.cos(box.heading), np.sin(box.heading)
+    R = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])  # box → world
+    return (xyz[keep] - [box.cx, box.cy, box.cz]) @ R  # (M, 3), l along x
 ```
 
 With 3 LiDARs, the merged world-frame points already contain all three sensors'

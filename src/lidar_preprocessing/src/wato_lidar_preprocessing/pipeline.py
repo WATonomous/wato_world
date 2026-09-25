@@ -19,7 +19,11 @@ runs BEFORE the fusion (union's ground-height veto reads ground.npz's height
 grid; ground itself only needs static_map.npz, so the swap is safe).
 
 Step D (reduce) runs separately via the `reduce` CLI subcommand. In
-two_pass mode (aw only), run() invokes reduce + a classify-only pass 2.
+two_pass mode (aw/union), run() invokes reduce + a classify-only pass 2.
+
+Steps E (iwu, bag-level UniLiPs IWU) and F (motion_proposals, per-chunk
+recall-oriented moving-object proposals) run after reduce via
+run_proposals(). Both are seg-agnostic consumers of Steps B–D.
 
 Idempotency: chunks whose summary parquet exists (written last, after every
 step) for the same segmentation method are skipped unless force=True.
@@ -39,11 +43,13 @@ from wato_common.artifact_store import (
     chunks_index_path,
     dynamic_map_path,
     frame_index_path,
+    global_iwu_path,
     ground_path,
     lidar_proc_index_path,
     lidar_proc_summary_path,
     lidar_sweeps_path,
     local_path,
+    motion_clusters_path,
     poses_path,
     static_map_path,
 )
@@ -53,7 +59,9 @@ from wato_lidar_preprocessing import (
     classify,
     deskew,
     ground,
+    iwu as iwu_step,
     mf_mos as mf_mos_step,
+    motion_proposals,
     union as union_step,
 )
 from wato_lidar_preprocessing.config import ComponentConfig
@@ -181,30 +189,44 @@ def _validate_chunk_inputs(bag_id: str, chunk_id: str) -> None:
         )
 
 
-def _write_chunk_manifest(bag_id: str, chunk_id: str, config_path: str | None) -> None:
+def _write_chunk_manifest(
+    bag_id: str,
+    chunk_id: str,
+    config_path: str | None,
+    *,
+    with_proposals: bool = False,
+) -> None:
     """Record what this chunk was produced from, and by what.
 
     Best-effort: a manifest failure must never fail a chunk that otherwise
     succeeded — losing traceability for one chunk is better than discarding
-    the compute that produced it.
+    the compute that produced it. Step F rewrites it with with_proposals=True
+    so the manifest also covers motion_clusters.parquet and the bag-level
+    global_iwu.npz it read (hashed like every other input).
     """
+    inputs = {
+        "lidar_sweeps": lidar_sweeps_path(bag_id, chunk_id),
+        "poses": poses_path(bag_id, chunk_id),
+        "frame_index": frame_index_path(bag_id, chunk_id),
+    }
+    outputs = {
+        "static_map": static_map_path(bag_id, chunk_id),
+        "dynamic_map": dynamic_map_path(bag_id, chunk_id),
+        "ground": ground_path(bag_id, chunk_id),
+        "lidar_proc_index": lidar_proc_index_path(bag_id, chunk_id),
+        "lidar_proc_summary": lidar_proc_summary_path(bag_id, chunk_id),
+    }
+    if with_proposals:
+        if os.path.exists(local_path(global_iwu_path(bag_id))):
+            inputs["global_iwu"] = global_iwu_path(bag_id)
+        outputs["motion_clusters"] = motion_clusters_path(bag_id, chunk_id)
     try:
         common_manifest.write(
             component="lidar_preprocessing",
             bag_id=bag_id,
             chunk_id=chunk_id,
-            inputs={
-                "lidar_sweeps": lidar_sweeps_path(bag_id, chunk_id),
-                "poses": poses_path(bag_id, chunk_id),
-                "frame_index": frame_index_path(bag_id, chunk_id),
-            },
-            outputs={
-                "static_map": static_map_path(bag_id, chunk_id),
-                "dynamic_map": dynamic_map_path(bag_id, chunk_id),
-                "ground": ground_path(bag_id, chunk_id),
-                "lidar_proc_index": lidar_proc_index_path(bag_id, chunk_id),
-                "lidar_proc_summary": lidar_proc_summary_path(bag_id, chunk_id),
-            },
+            inputs=inputs,
+            outputs=outputs,
             config_path=config_path,
             filename=common_manifest.component_manifest_name("lidar_preprocessing"),
         )
@@ -404,7 +426,7 @@ def run(
     chunk_id: str | None = None,
     force: bool = False,
     workers: int = 1,
-    two_pass: bool = True,
+    two_pass: bool = False,
     config_path: str | None = None,
 ) -> None:
     """Process all chunks (or one) for a bag.
@@ -415,17 +437,19 @@ def run(
         chunk_id: optional single-chunk filter.
         force: re-process chunks whose ground.npz already exists.
         workers: concurrent worker processes (>=1).
-        two_pass: when True (default), after pass 1 builds the bag-level
-            global_static_map.npz via reduce_static_map and re-runs classify
-            on every chunk using that map as a per-sweep KDTree prior
-            (UniLiPs IWU). Roughly doubles wall time; improves static recall
-            on long-range structure sparsely observed in any one chunk.
+        two_pass: when True (default False), after pass 1 builds the
+            bag-level global_static_map.npz via reduce_static_map and re-runs
+            classify on every chunk using that map as a global-map prior (a
+            one-time log-odds boost for map-matched voxels — not UniLiPs IWU,
+            which is the bag-level `iwu` step). Roughly doubles classify wall
+            time; improves static recall on long-range structure sparsely
+            observed in any one chunk.
         config_path: path to the config file that produced ``cfg``. Recorded
             (as a hash) in each chunk's manifest so a label can be traced back
             to the exact parameters that produced it. Optional only so the
             existing tests can call run() without one.
     """
-    # The global-map prior (UniLiPs IWU) is an Amanatides-Woo log-odds boost.
+    # The global-map prior is an Amanatides-Woo log-odds boost.
     # `mos` has no log-odds to boost, so it runs single-pass. `union` does have
     # an AW half, and a better static map sharpens the dynamic veto, so it
     # keeps two-pass (pass 2 re-classifies + re-fuses; MF-MOS is not re-run).
@@ -524,4 +548,97 @@ def run(
         _run_classify_pass2(cfg, bag_id, chunk_id, workers, global_map_path_str)
 
 
-__all__ = ["run", "_chunk_complete", "_process_one_chunk"]
+def _proposals_chunk_worker(
+    chunk_id: str, cfg: ComponentConfig, bag_id: str, config_path: str | None
+) -> tuple[str, bool, str]:
+    """Step F for one chunk. Module-scope so ProcessPoolExecutor can pickle it."""
+    try:
+        motion_proposals.process_chunk(cfg, bag_id, chunk_id)
+        _write_chunk_manifest(bag_id, chunk_id, config_path, with_proposals=True)
+        return (chunk_id, True, "")
+    except Exception as exc:  # noqa: BLE001 — one chunk failing must not stop the rest
+        log.exception("proposals chunk %s failed", chunk_id)
+        return (
+            chunk_id,
+            False,
+            f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+        )
+
+
+def run_proposals(
+    cfg: ComponentConfig,
+    *,
+    bag_id: str,
+    chunk_id: str | None = None,
+    force: bool = False,
+    workers: int = 1,
+    config_path: str | None = None,
+    with_iwu: bool = True,
+) -> None:
+    """Steps E + F: bag-level IWU, then per-chunk motion proposals.
+
+    Needs Steps A–D done (global_static_map.npz for IWU; each chunk's
+    lidar_proc_index / static_map / dynamic masks for F).
+
+    Args:
+        chunk_id: restrict F to one chunk. IWU is bag-level, so it is skipped
+            and F uses whatever global_iwu.npz already exists (IWU_EVICTED is
+            never set when none does).
+        force: re-run F on chunks whose motion_clusters.parquet is newer than
+            every input it read.
+        with_iwu: False skips Step E (the `proposals` subcommand; `iwu` is its
+            own subcommand for multi-machine runs).
+    """
+    if with_iwu and chunk_id is None and cfg.iwu.enabled:
+        log.info("=== bag %s: step E — iwu ===", bag_id)
+        try:
+            iwu_step.run_iwu(cfg, bag_id)
+        except FileNotFoundError as exc:
+            log.warning("bag %s: IWU skipped (%s)", bag_id, exc)
+
+    if not cfg.motion_proposals.enabled:
+        log.info("motion_proposals.enabled=false — skipping step F")
+        return
+
+    chunk_rows = read_rows(chunks_index_path(bag_id))
+    if chunk_id:
+        chunk_rows = [r for r in chunk_rows if r["chunk_id"] == chunk_id]
+    pending: list[str] = []
+    for r in chunk_rows:
+        cid = r["chunk_id"]
+        if not os.path.exists(local_path(lidar_proc_summary_path(bag_id, cid))):
+            log.warning("chunk %s: not processed by steps A–C — no proposals", cid)
+            continue
+        if not force and motion_proposals.proposals_up_to_date(bag_id, cid):
+            continue
+        pending.append(cid)
+    log.info(
+        "=== bag %s: step F — motion proposals on %d chunk(s) (%d up to date) ===",
+        bag_id,
+        len(pending),
+        len(chunk_rows) - len(pending),
+    )
+    if not pending:
+        return
+
+    worker = functools.partial(
+        _proposals_chunk_worker, cfg=cfg, bag_id=bag_id, config_path=config_path
+    )
+    failures: list[tuple[str, str]] = []
+    if workers <= 1:
+        for cid in pending:
+            _, ok, err = worker(cid)
+            if not ok:
+                failures.append((cid, err))
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            for cid, ok, err in pool.map(worker, pending):
+                if not ok:
+                    failures.append((cid, err))
+    if failures:
+        log.warning("step F failed chunks:")
+        for cid, err in failures:
+            log.warning("--- chunk %s ---\n%s", cid, err)
+
+
+__all__ = ["run", "run_proposals", "_chunk_complete", "_process_one_chunk"]
