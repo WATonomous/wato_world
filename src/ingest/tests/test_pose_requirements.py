@@ -268,9 +268,7 @@ def test_other_message_types_are_not_poses():
 # ---------------------------------------------------------------------------
 # Shipped configs
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    "name", ["ingest.yaml", "ingest.wato.yaml", "ingest.wato_novatel.yaml"]
-)
+@pytest.mark.parametrize("name", ["ingest.yaml", "ingest.wato.yaml"])
 def test_shipped_profiles_load(name):
     cfg = load_config(str(CONFIG_DIR / name))
     assert 0 < cfg.pose_requirements.min_dense_fraction <= 1
@@ -282,21 +280,3 @@ def test_old_max_pose_gap_key_is_rejected():
     data["max_pose_gap_ms"] = 200.0
     with pytest.raises(pydantic.ValidationError):
         IngestConfig.model_validate(data)
-
-
-def test_wato_profiles_differ_only_in_pose_source():
-    # The NovAtel profile is a copy of the eidos one; guard against drift.
-    eidos = load_config(str(CONFIG_DIR / "ingest.wato.yaml")).model_dump()
-    novatel = load_config(str(CONFIG_DIR / "ingest.wato_novatel.yaml")).model_dump()
-    assert (eidos["topics"]["pose"], eidos["ego_frame"]) == (
-        "/world_modeling/slam/odometry",
-        "base_footprint",
-    )
-    assert (novatel["topics"]["pose"], novatel["ego_frame"]) == (
-        "/novatel/oem7/odom",
-        "base_link",
-    )
-    for d in (eidos, novatel):
-        d["topics"].pop("pose")
-        d.pop("ego_frame")
-    assert eidos == novatel

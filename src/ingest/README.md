@@ -28,7 +28,7 @@ traceability manifests.
 | Input | Where it comes from | Notes |
 |---|---|---|
 | rosbag2 recording | `data/bags/<bag>` or a bind-mounted path | The bag remains the source of truth. |
-| Ingest config | `src/ingest/config/ingest.yaml` (nuScenes, default), `ingest.wato.yaml` (WATO + dense eidos pose), `ingest.wato_novatel.yaml` (WATO + NovAtel INS pose) | Chunk size, topic mapping, timing tolerance, pose requirements, quality thresholds. Pick one with `--config <path>`. The config is the only per-dataset part of ingest — see [Ingesting a new bag](#ingesting-a-new-bag). |
+| Ingest config | `src/ingest/config/ingest.yaml` (nuScenes, default), `ingest.wato.yaml` (WATO + dense eidos pose) | Chunk size, topic mapping, timing tolerance, pose requirements, quality thresholds. Pick one with `--config <path>`. The config is the only per-dataset part of ingest — see [Ingesting a new bag](#ingesting-a-new-bag). |
 | Calibration | Auto-extracted from each camera's `info` topic + the `tf_static` topic | Override with `--calibration <file.json>` when the bag's intrinsics or extrinsics are missing or wrong. |
 | Artifact root | `ARTIFACT_ROOT_URI`, defaulting to `file:///data/artifacts` | Backed by `wato_common.artifact_store`. |
 
@@ -258,7 +258,7 @@ runs over the same data.
 | `ring_road_corrected_0-001` | `/world_modeling/slam/odometry` | 100 ms median | 1.0 | pass; largest step 2.46 m in 100 ms, a stamping artifact (below) |
 | `ring_road_corrected_0-001` | `/world_modeling/liso/odometry` | 50 ms median, 202 ms max | 1.0 | pass; no jumps |
 | `may_30_ring_road_test_3_3` | `/world_modeling/slam/odometry` | 908 ms median, 5.8 s max — one pose per 5 m | 0.0 | **abort** |
-| `ring_road_July_1-2` | `/novatel/oem7/odom` | 20 ms median after dropping held repeats (29,755 of 67,797 messages) | 1.0 | pass (`ingest.wato_novatel.yaml`) |
+| `ring_road_July_1-2` | `/novatel/oem7/odom` | 20 ms median after dropping held repeats (29,755 of 67,797 messages) | 1.0 | pass |
 | `may_30_ring_road_test_3_3` | `/novatel/oem7/odom` | 2 ms median, but in bursts: fixes held up to 11.7 s, jumps up to 34 m (INS not converged) | 0.10 | **abort** |
 
 **What the `may_30` abort prevents (measured on that bag).** Its 586
@@ -452,15 +452,17 @@ recorded in the bag (`may_30` didn't record it).
 |---|---|---|---|
 | `ingest.yaml` | `/odom` | `base_link` | nuScenes |
 | `ingest.wato.yaml` | `/world_modeling/slam/odometry` | `base_footprint` | WATO bags with eidos topics. Aborts on eidos `main`'s keyframe-rate stream. On `ring_road_corrected` it passes, but the stream is late-stamped LISO (section 1); `liso/odometry` is better there. |
-| `ingest.wato_novatel.yaml` | `/novatel/oem7/odom` | `base_link` | WATO bags without eidos topics. **Not validated for labeling**: as recorded its attitude smears LiDAR, and whether that's a fixed mount offset or INS attitude error is undetermined (section 6). |
 
-**The `ring_road_July` bags can't be ingested yet under either profile**: they
+**There is no NovAtel profile.** For WATO bags without eidos topics, copy
+`ingest.wato.yaml` and set `topics.pose: /novatel/oem7/odom`,
+`ego_frame: base_link`. That pose is **not validated for labeling**: as
+recorded its attitude smears LiDAR, and whether that's a fixed mount offset or
+INS attitude error is undetermined (section 6).
+
+**The `ring_road_July` bags can't be ingested yet**: they
 record no camera images (only `/camera_pano_nw/camera_info`) and no `lidar_nw`
 messages, and ingest requires every configured camera topic. Their NovAtel
 pose passes the checks; camera-less ingest is a separate change.
-
-The two WATO profiles are identical apart from `topics.pose` and `ego_frame`
-(`tests/test_pose_requirements.py` enforces this — edit them together).
 
 NovAtel is a GNSS+IMU INS pose: no scan matching or loop closure, and in
 **absolute UTM coordinates** (x ≈ 5×10⁵, y ≈ 4.8×10⁶ m). lidar_preprocessing's

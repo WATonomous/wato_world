@@ -86,8 +86,9 @@ topics:
   # /world_modeling/liso/odometry (per scan, stamped at scan time, same child
   # frame) is the better per-sweep pose there — README "How good are the
   # poses".
-  # Bags without eidos topics use ingest.wato_novatel.yaml.  Do NOT use /tf
-  # (wall-clock-stamped; desyncs from LiDAR).
+  # Bags without eidos topics: no shipped profile — /novatel/oem7/odom
+  # (ego_frame base_link) is not validated for labeling, README "Profiles".
+  # Do NOT use /tf (wall-clock-stamped; desyncs from LiDAR).
   pose: /world_modeling/slam/odometry
   # WATO publishes rigid sensor extrinsics on /tf_static (read once at bag
   # scope to populate calibration.json).

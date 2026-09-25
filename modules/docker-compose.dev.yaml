@@ -57,6 +57,22 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix
       - /mnt/wslg:/mnt/wslg
 
+  semantic_lifting_dev:
+    profiles: ["semantic_lifting_dev"]
+    extends:
+      file: docker-compose.yaml
+      service: semantic_lifting
+    build:
+      target: develop
+      args: { USERNAME: "${USERNAME}", USER_UID: "${SETUID}", USER_GID: "${SETGID}", CLAUDE_CODE: "${CLAUDE_CODE}" }
+    image: "${SEMANTIC_LIFTING_IMAGE}:dev_${TAG}"
+    command: sleep infinity
+    volumes:
+      - ${WATO_WORLD_DIR}/src/common:/ws/src/common
+      - ${WATO_WORLD_DIR}/src/semantic_lifting:/ws/src/semantic_lifting
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/config:/config:ro
+
   lidar_preprocessing_dev:
     profiles: ["lidar_preprocessing_dev"]
     extends:

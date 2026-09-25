@@ -34,11 +34,11 @@ MODULES_DIR="${WATO_WORLD_DIR}/modules"
 # Module registry.  Each module declares which base flavor it FROM's so we
 # only build the bases that are actually needed.
 # ---------------------------------------------------------------------------
-ALL_MODULES=(ingest perception_2d lidar_preprocessing proposal_generation tracking label_refinement open_vocab_discovery student_training)
+ALL_MODULES=(ingest perception_2d semantic_lifting lidar_preprocessing proposal_generation tracking label_refinement open_vocab_discovery student_training)
 
 base_flavor_for() {
     case "$1" in
-        ingest) echo "cpu" ;;
+        ingest|semantic_lifting) echo "cpu" ;;
         lidar_preprocessing|perception_2d|proposal_generation|tracking|label_refinement|open_vocab_discovery|student_training) echo "cuda" ;;
         *) echo "" ;;
     esac

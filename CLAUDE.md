@@ -186,12 +186,11 @@ INS to ~5 cm/s; no ground truth exists); `slam/odometry` = back-end
 newest-KEYFRAME pose — one per 5 m on eidos main (aborts); in
 ring_road_corrected it is bit-identical LISO poses stamped 244–450 ms late (median 310 ms; LISO processing latency + wait for the next SLAM tick, so no constant shift corrects it).
 Eidos main's GPS/loop-closure-corrected keyframe poses were never compared to
-LISO (no recording has both). WATO profiles:
-`ingest.wato.yaml` (eidos `slam/odometry`, child `base_footprint`) and
-`ingest.wato_novatel.yaml` (`/novatel/oem7/odom`, UTM, child `base_link`,
-50 Hz position; NOT validated for labeling — ~2° attitude bias vs the LiDAR
-frame, mount vs INS error undetermined). The two WATO profiles must differ only in `topics.pose`/
-`ego_frame` (a test enforces it). Do NOT consume `/tf` directly — eidos
+LISO (no recording has both). WATO profile: `ingest.wato.yaml` (eidos
+`slam/odometry`, child `base_footprint`). No NovAtel profile ships:
+`/novatel/oem7/odom` (UTM, child `base_link`, 50 Hz position) is NOT validated
+for labeling — ~2° attitude bias vs the LiDAR frame, mount vs INS error
+undetermined. Do NOT consume `/tf` directly — eidos
 doesn't publish to it; eidos_transform does, and that stream is
 wall-clock-stamped which desyncs from LiDAR.
 
@@ -417,6 +416,6 @@ testable change — not by hand-editing a lock:
 
 ```bash
 PYTHONPATH=src/common/src:src/ingest/src python3 -m pytest -p no:anyio src/ingest/tests
-# 81 passing tests, all without ROS installed (lazy ROS imports in rosbag_reader).
+# 79 passing tests, all without ROS installed (lazy ROS imports in rosbag_reader).
 # `-p no:anyio`: the host's anyio pytest plugin doesn't load under its pytest.
 ```

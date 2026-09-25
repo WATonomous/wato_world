@@ -517,5 +517,6 @@ Status: 1, 3–8 and 10–12 are done (4 landed as `wato_common/geometry/project
     selection, mask correspondence).
 11. Update top-level README mermaid diagram to include the new component.
 12. Add Dockerfile `docker/semantic_lifting.Dockerfile` — light on
-    dependencies, mostly NumPy + Open3D for KDTree (preempting Algorithm 1
-    addition later).
+    dependencies: NumPy/SciPy/Pillow/pyarrow, all from PyPI. ~~Open3D for
+    KDTree~~ — dropped while nothing imports it; Algorithm 1 can use
+    `scipy.spatial.cKDTree`, or re-add Open3D when it lands.
