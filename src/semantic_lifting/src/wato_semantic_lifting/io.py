@@ -1,8 +1,4 @@
-"""Artifact I/O helpers for semantic_lifting.
-
-Reads upstream artifacts from ingest + lidar_preprocessing + perception_2d.
-Writes: lifted_labels/<sweep_id>.npz, lifted_stats.parquet.
-"""
+"""Artifact I/O helpers for composite physical LiDAR sweeps."""
 
 from __future__ import annotations
 
@@ -32,17 +28,18 @@ from wato_semantic_lifting.temporal_match import CameraFrameRef
 
 @dataclass
 class LidarSweepInfo:
+    lidar_id: str
     sweep_id: int
     timestamp_ns: int
     world_path: str
-    dynamic_mask_path: str
+    dynamic_mask_path: Optional[str]
+    static_mask_path: Optional[str]
 
 
 @dataclass
 class CalibrationInfo:
     K: np.ndarray        # (3, 3) float64 intrinsic
     ego_T_cam: np.ndarray   # (4, 4) float64 SE3
-    ego_T_lidar: np.ndarray  # (4, 4) float64 SE3
 
 
 def load_chunks(bag_id: str) -> list[dict]:
@@ -58,10 +55,20 @@ def load_sweeps(bag_id: str, chunk_id: str) -> list[LidarSweepInfo]:
             continue
         result.append(
             LidarSweepInfo(
+                lidar_id=str(r["lidar_id"]),
                 sweep_id=int(r["sweep_id"]),
-                timestamp_ns=int(r.get("timestamp_ns", 0)),
+                timestamp_ns=int(r["reference_timestamp_ns"]),
                 world_path=local_path(str(r["world_path"])),
-                dynamic_mask_path=local_path(str(r["dynamic_mask_path"])),
+                dynamic_mask_path=(
+                    local_path(str(r["dynamic_mask_path"]))
+                    if r.get("dynamic_mask_path")
+                    else None
+                ),
+                static_mask_path=(
+                    local_path(str(r["static_mask_path"]))
+                    if r.get("static_mask_path")
+                    else None
+                ),
             )
         )
     return result
@@ -82,7 +89,7 @@ def load_frame_refs(bag_id: str, chunk_id: str) -> list[CameraFrameRef]:
             CameraFrameRef(
                 cam_id=str(r["cam_id"]),
                 camera_seq=int(r["camera_seq"]),
-                timestamp_ns=int(r.get("timestamp_ns", 0)),
+                timestamp_ns=int(r["reference_timestamp_ns"]),
                 world_T_ego=world_T_ego,
             )
         )
@@ -90,21 +97,16 @@ def load_frame_refs(bag_id: str, chunk_id: str) -> list[CameraFrameRef]:
 
 
 def load_calibration(bag_id: str) -> dict[str, CalibrationInfo]:
-    """Load per-camera K, ego_T_cam, and shared ego_T_lidar from calibration.json."""
+    """Load camera calibration; LiDAR points are already in world frame."""
     calib_file = local_path(calibration_path(bag_id))
     with open(calib_file, "r", encoding="utf-8") as fh:
         calib = json.load(fh)
-
-    ego_T_lidar = np.asarray(
-        calib.get("lidar", {}).get("ego_T_lidar", np.eye(4).tolist()),
-        dtype=np.float64,
-    )
 
     result: dict[str, CalibrationInfo] = {}
     for cam_id, entry in calib.get("cameras", {}).items():
         K = np.asarray(entry["K"], dtype=np.float64)
         ego_T_cam = np.asarray(entry["ego_T_cam"], dtype=np.float64)
-        result[cam_id] = CalibrationInfo(K=K, ego_T_cam=ego_T_cam, ego_T_lidar=ego_T_lidar)
+        result[cam_id] = CalibrationInfo(K=K, ego_T_cam=ego_T_cam)
     return result
 
 
@@ -190,6 +192,7 @@ def _decode_frames_present(encoded) -> list[int]:
 def write_lifted_labels(
     bag_id: str,
     chunk_id: str,
+    lidar_id: str,
     sweep_id: int,
     point_indices: np.ndarray,
     instance_ids: list[str],
@@ -199,7 +202,7 @@ def write_lifted_labels(
     n_disagreeing: np.ndarray,
 ) -> None:
     """Write the per-point label assignment for one sweep."""
-    path = local_path(lifted_labels_path(bag_id, chunk_id, str(sweep_id)))
+    path = local_path(lifted_labels_path(bag_id, chunk_id, lidar_id, sweep_id))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     np.savez_compressed(
         path,

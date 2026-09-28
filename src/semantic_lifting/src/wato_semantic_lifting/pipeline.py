@@ -76,7 +76,7 @@ def _process_chunk(
         if pts_world is None or pts_world.shape[0] == 0:
             stats_rows.append(
                 build_stats_row(
-                    bag_id, chunk_id, sweep.sweep_id,
+                    bag_id, chunk_id, sweep.lidar_id, sweep.sweep_id,
                     n_points_total=0,
                     labeled_points=[],
                     n_points_in_any_mask=0,
@@ -170,10 +170,12 @@ def _process_chunk(
 
         labeled = accumulate_votes(all_votes, n_total)
 
-        _write_sweep_labels(bag_id, chunk_id, sweep.sweep_id, labeled)
+        _write_sweep_labels(
+            bag_id, chunk_id, sweep.lidar_id, sweep.sweep_id, labeled
+        )
         stats_rows.append(
             build_stats_row(
-                bag_id, chunk_id, sweep.sweep_id,
+                bag_id, chunk_id, sweep.lidar_id, sweep.sweep_id,
                 n_points_total=n_total,
                 labeled_points=labeled,
                 n_points_in_any_mask=n_in_any_mask,
@@ -192,12 +194,13 @@ def _process_chunk(
 def _write_sweep_labels(
     bag_id: str,
     chunk_id: str,
+    lidar_id: str,
     sweep_id: int,
     labeled: list[LabeledPoint],
 ) -> None:
     if not labeled:
         write_lifted_labels(
-            bag_id, chunk_id, sweep_id,
+            bag_id, chunk_id, lidar_id, sweep_id,
             np.array([], dtype=np.int32),
             [], [],
             np.array([], dtype=np.float32),
@@ -207,7 +210,7 @@ def _write_sweep_labels(
         return
 
     write_lifted_labels(
-        bag_id, chunk_id, sweep_id,
+        bag_id, chunk_id, lidar_id, sweep_id,
         point_indices=np.array([p.point_idx for p in labeled], dtype=np.int32),
         instance_ids=[p.instance_id for p in labeled],
         classes=[p.cls for p in labeled],

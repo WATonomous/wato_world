@@ -9,6 +9,7 @@ from wato_semantic_lifting.voting import LabeledPoint
 def build_stats_row(
     bag_id: str,
     chunk_id: str,
+    lidar_id: str,
     sweep_id: int,
     n_points_total: int,
     labeled_points: list[LabeledPoint],
@@ -26,6 +27,7 @@ def build_stats_row(
     )
     return LiftedStatsRow(
         sweep_id=str(sweep_id),
+        lidar_id=lidar_id,
         bag_id=bag_id,
         chunk_id=chunk_id,
         n_points_total=n_points_total,
