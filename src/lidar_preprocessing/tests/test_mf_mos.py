@@ -481,19 +481,14 @@ def test_process_chunk_first_sweep_pads_zero_residuals(tmp_env, monkeypatch):
     result = process_chunk(cfg, bag_id, chunk_id)
 
     assert result.n_sweeps_processed == 1
-    mask = np.load(local_path(mf_mos_mask_path(bag_id, chunk_id, 0)))
+    mask = np.load(local_path(mf_mos_mask_path(bag_id, chunk_id, "LIDAR_TOP", 0)))
     assert mask.dtype == bool
     assert mask.shape == (xyz.shape[0],)
     assert not mask.any()
 
 
-def test_process_chunk_pose_gap_writes_zero_mask(tmp_env, monkeypatch):
-    """Sweep beyond max_pose_gap_ms from last pose → zero-LENGTH sentinel mask.
-
-    _write_zero_mask writes a (0,) array (not a full-length all-False mask) so
-    the sweep is excluded from the chunk-wide vote denominator rather than
-    diluting vote fractions for genuine movers in adjacent sweeps.
-    """
+def test_process_chunk_pose_gap_records_unavailable_status(tmp_env, monkeypatch):
+    """A pose gap has no mask and cannot be confused with all-False success."""
     monkeypatch.setattr(mf_mos_mod, "_load_model", _stub_load_model)
 
     bag_id, chunk_id = "bag_gap", "chunk0"
@@ -509,9 +504,13 @@ def test_process_chunk_pose_gap_writes_zero_mask(tmp_env, monkeypatch):
     result = process_chunk(cfg, bag_id, chunk_id)
 
     assert result.n_sweeps_skipped_pose == 1
-    mask = np.load(local_path(mf_mos_mask_path(bag_id, chunk_id, 8)))
-    assert mask.shape == (0,)
-    assert not mask.any()
+    assert not os.path.exists(
+        local_path(mf_mos_mask_path(bag_id, chunk_id, "LIDAR_TOP", 8))
+    )
+    [row] = read_rows(lidar_proc_index_path(bag_id, chunk_id))
+    assert row["mf_mos_status"] == "skipped_pose"
+    assert row["mf_mos_mask_path"] is None
+    assert row["mf_mos_error"]
 
 
 def test_process_chunk_skips_deskew_invalid_sweeps(tmp_env, monkeypatch, caplog):
@@ -535,10 +534,10 @@ def test_process_chunk_skips_deskew_invalid_sweeps(tmp_env, monkeypatch, caplog)
     assert result.n_sweeps_processed == 1
     assert result.n_sweeps_skipped_invalid == 1
     assert result.n_sweeps_skipped_pose == 0
-    assert any(sid == 0 for sid, _ in result.skip_reasons)
+    assert any(sid == 0 for _lid, sid, _reason in result.skip_reasons)
     # No mask for the skipped sweep; the valid one gets one.
-    assert not os.path.exists(local_path(mf_mos_mask_path(bag_id, chunk_id, 0)))
-    assert os.path.exists(local_path(mf_mos_mask_path(bag_id, chunk_id, 1)))
+    assert not os.path.exists(local_path(mf_mos_mask_path(bag_id, chunk_id, "LIDAR_TOP", 0)))
+    assert os.path.exists(local_path(mf_mos_mask_path(bag_id, chunk_id, "LIDAR_TOP", 1)))
     # The noisy per-sweep pose-gap WARNING must NOT fire for the skipped sweep.
     assert "writing zero mask" not in caplog.text
 
@@ -557,7 +556,7 @@ def test_process_chunk_empty_pointcloud_writes_zero_length_mask(tmp_env, monkeyp
     result = process_chunk(cfg, bag_id, chunk_id)
 
     assert result.n_sweeps_skipped_empty == 1
-    mask = np.load(local_path(mf_mos_mask_path(bag_id, chunk_id, 0)))
+    mask = np.load(local_path(mf_mos_mask_path(bag_id, chunk_id, "LIDAR_TOP", 0)))
     assert mask.shape == (0,)
 
 
@@ -581,7 +580,7 @@ def test_mask_length_equals_raw_point_count(tmp_env, monkeypatch):
 
     assert result.n_sweeps_processed == len(sweeps)
     for sid, xyz in sweeps:
-        mask = np.load(local_path(mf_mos_mask_path(bag_id, chunk_id, sid)))
+        mask = np.load(local_path(mf_mos_mask_path(bag_id, chunk_id, "LIDAR_TOP", sid)))
         assert mask.shape == (
             xyz.shape[0],
         ), f"sweep {sid}: mask len {mask.shape} != raw len {xyz.shape[0]}"
@@ -602,7 +601,9 @@ def test_lidar_proc_index_carries_mf_mos_mask_path(tmp_env, monkeypatch):
 
     rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
     assert len(rows) == 1
-    assert rows[0]["mf_mos_mask_path"] == mf_mos_mask_path(bag_id, chunk_id, 0)
+    assert rows[0]["mf_mos_mask_path"] == mf_mos_mask_path(bag_id, chunk_id, "LIDAR_TOP", 0)
+    assert rows[0]["mf_mos_status"] == "ok"
+    assert rows[0]["mf_mos_error"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -613,7 +614,7 @@ def test_lidar_proc_index_carries_mf_mos_mask_path(tmp_env, monkeypatch):
 def _write_world_sweep(
     bag_id: str, chunk_id: str, sweep_id: int, xyz: np.ndarray
 ) -> None:
-    path = local_path(lidar_world_path(bag_id, chunk_id, sweep_id))
+    path = local_path(lidar_world_path(bag_id, chunk_id, "LIDAR_TOP", sweep_id))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     np.savez_compressed(path, x=xyz[:, 0], y=xyz[:, 1], z=xyz[:, 2])
 
@@ -622,7 +623,7 @@ def _write_world_sweep_with_origin(
     bag_id: str, chunk_id: str, sweep_id: int, xyz: np.ndarray, origin: np.ndarray
 ) -> None:
     """Write a world NPZ including the `origin` field required by the log_odds path."""
-    path = local_path(lidar_world_path(bag_id, chunk_id, sweep_id))
+    path = local_path(lidar_world_path(bag_id, chunk_id, "LIDAR_TOP", sweep_id))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     np.savez_compressed(
         path,
@@ -634,7 +635,7 @@ def _write_world_sweep_with_origin(
 
 
 def _write_mf_mask(bag_id: str, chunk_id: str, sweep_id: int, mask: np.ndarray) -> str:
-    uri = mf_mos_mask_path(bag_id, chunk_id, sweep_id)
+    uri = mf_mos_mask_path(bag_id, chunk_id, "LIDAR_TOP", sweep_id)
     ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
     np.save(local_path(uri), mask)
     return uri
@@ -654,7 +655,7 @@ def _proc_row_with_mask(
         "n_points_static": 0,
         "n_points_dynamic": 0,
         "n_points_ground": 0,
-        "world_path": lidar_world_path(bag_id, chunk_id, sweep_id),
+        "world_path": lidar_world_path(bag_id, chunk_id, "LIDAR_TOP", sweep_id),
         "dynamic_mask_path": "",
         "has_intensity": False,
         "deskewed": True,
@@ -668,6 +669,8 @@ def _proc_row_with_mask(
         "world_zmax": float(xyz[:, 2].max()) if n else None,
         "frame_id": None,
         "mf_mos_mask_path": mf_uri,
+        "mf_mos_status": "ok" if mf_uri is not None else "not_requested",
+        "mf_mos_error": None,
     }
 
 
@@ -1052,7 +1055,7 @@ def test_prime_window_recovers_first_sweep_residual(tmp_env, monkeypatch):
     process_chunk(cfg, bag_id, "chunk1")
 
     # sid=4 is chunk1's first sweep; mover is point index 0.
-    mask = np.load(local_path(mf_mos_mask_path(bag_id, "chunk1", 4)))
+    mask = np.load(local_path(mf_mos_mask_path(bag_id, "chunk1", "LIDAR_TOP", 4)))
     assert bool(mask[0]), (
         "primed window: chunk1's first sweep should detect the mover using the "
         "prior chunk's tail to fill the residual channel"
@@ -1082,7 +1085,7 @@ def test_no_prime_window_first_sweep_cold_starts(tmp_env, monkeypatch):
     cfg = _enabled_cfg(residual_steps=[1], prime_window_from_prior_chunk=False)
     process_chunk(cfg, bag_id, "chunk1")
 
-    mask = np.load(local_path(mf_mos_mask_path(bag_id, "chunk1", 4)))
+    mask = np.load(local_path(mf_mos_mask_path(bag_id, "chunk1", "LIDAR_TOP", 4)))
     assert not mask.any(), (
         "no priming: chunk1's first sweep has no past scan, so the residual is "
         "zero and the mover is missed"

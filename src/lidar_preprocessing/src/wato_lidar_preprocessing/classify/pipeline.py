@@ -82,6 +82,7 @@ def _write_empty_outputs(
         local_path(dynamic_map_path(bag_id, chunk_id)),
         xyz=np.empty((0, 3), dtype=np.float64),
         sweep_id=np.empty(0, dtype=np.int32),
+        lidar_id=np.empty(0, dtype="<U1"),
     )
     return ClassifyResult(0, 0, out_uri)
 
@@ -143,9 +144,19 @@ def process_chunk(
     if origin is None:
         return _write_empty_outputs(bag_id, chunk_id, cfg.voxel_size_m)
 
-    sensor_model = cfg.build_sensor_model()
+    valid_models = [
+        cfg.profile_for(str(row["lidar_id"])).build_sensor_model()
+        for row in meta_rows
+        if row.get("valid") is not False
+    ]
+    sensor_model = valid_models[0] if valid_models else cfg.build_sensor_model()
     pose_sigma_m = _estimate_pose_sigma_m(
-        bag_id, chunk_id, floor_m=sensor_model.range_sigma_m
+        bag_id,
+        chunk_id,
+        floor_m=max(
+            (model.range_sigma_m for model in valid_models),
+            default=sensor_model.range_sigma_m,
+        ),
     )
 
     (
@@ -167,7 +178,7 @@ def process_chunk(
     )
     (
         static_arr,
-        not_dynamic_arr,
+        dynamic_arr,
         classification,
         diag,
     ) = classify_from_log_odds(
@@ -180,6 +191,7 @@ def process_chunk(
     dyn_xyz_chunks: list[np.ndarray] = []
     dyn_intensity_chunks: list[np.ndarray] = []
     dyn_sweep_id_chunks: list[np.ndarray] = []
+    dyn_lidar_id_chunks: list[np.ndarray] = []
     total_static = 0
     total_dynamic = 0
     updated_meta: list[dict] = []
@@ -193,30 +205,48 @@ def process_chunk(
         )
     ):
         sweep_id = int(row["sweep_id"])
+        lidar_id = str(row["lidar_id"])
         if row.get("valid") is False:
             updated_meta.append(_invalid_meta_row(row, sweep_id))
             continue
 
         # Fusion uses the per-sweep mask directly (already 3D-denoised at
         # generation time); no chunk-wide vote aggregation.
-        sweep_mf_mos_dynamic_arr = None
-        if (
-            cfg.mf_mos.enabled
-            and cfg.mf_mos.fusion_mode != "independent"
-            and keys.shape[0] > 0
-        ):
+        profile = cfg.profile_for(lidar_id)
+        sweep_mf_mos_mask = None
+        if profile.mf_mos.enabled and profile.mf_mos.fusion_mode != "independent":
+            status = row.get("mf_mos_status")
+            if profile.mf_mos.fusion_mode == "mfmos_only" and status != "ok":
+                raise RuntimeError(
+                    "mfmos_only requires status='ok' and an aligned mask for "
+                    f"({lidar_id!r}, {sweep_id}); status={status!r}, "
+                    f"error={row.get('mf_mos_error')!r}"
+                )
             mf_mask = load_mf_mos_world_mask(
                 bag_id, chunk_id, row, keys.shape[0], cfg.filter_nonfinite_points
             )
             if mf_mask is not None:
-                sweep_mf_mos_dynamic_arr = np.sort(np.unique(keys[mf_mask]))
+                sweep_mf_mos_mask = mf_mask
+            elif profile.mf_mos.fusion_mode == "mfmos_only":
+                raise RuntimeError(
+                    "mfmos_only requires status='ok' and an aligned mask for "
+                    f"({lidar_id!r}, {sweep_id})"
+                )
+            else:
+                log.warning(
+                    "chunk %s sweep (%s, %d): union degraded to AW because "
+                    "MF-MOS output is unavailable",
+                    chunk_id,
+                    lidar_id,
+                    sweep_id,
+                )
 
         result = apply_classification_to_sweep(
             row,
             sweep_id,
             keys,
             static_arr,
-            not_dynamic_arr,
+            dynamic_arr,
             xyz_cache[i],
             intensity_cache[i],
             ground_mask_cache[i],
@@ -224,7 +254,7 @@ def process_chunk(
             bag_id,
             chunk_id,
             any_intensity,
-            sweep_mf_mos_dynamic_arr=sweep_mf_mos_dynamic_arr,
+            sweep_mf_mos_mask=sweep_mf_mos_mask,
         )
         total_static += result.n_static
         total_dynamic += result.n_dynamic
@@ -235,6 +265,7 @@ def process_chunk(
         if result.dyn_xyz is not None:
             dyn_xyz_chunks.append(result.dyn_xyz)
             dyn_sweep_id_chunks.append(result.dyn_sweep_id)
+            dyn_lidar_id_chunks.append(result.dyn_lidar_id)
         if result.dyn_intensity is not None:
             dyn_intensity_chunks.append(result.dyn_intensity)
 
@@ -248,9 +279,15 @@ def process_chunk(
                 n_points_total=keys.shape[0],
                 n_points_static=result.n_static,
                 n_points_dynamic=result.n_dynamic,
+                n_points_ground_candidate=int(
+                    row.get("n_points_ground_candidate")
+                    or row.get("n_points_ground")
+                    or 0
+                ),
                 n_points_ground=int(row.get("n_points_ground") or 0),
                 world_path=row["world_path"],
                 dynamic_mask_path=result.mask_uri,
+                static_mask_path=result.static_mask_uri,
                 has_intensity=bool(row.get("has_intensity", False)),
                 deskewed=bool(row.get("deskewed", False)),
                 valid=True,
@@ -263,6 +300,8 @@ def process_chunk(
                 world_zmax=row.get("world_zmax"),
                 frame_id=row.get("frame_id"),
                 mf_mos_mask_path=row.get("mf_mos_mask_path"),
+                mf_mos_status=row.get("mf_mos_status") or "not_requested",
+                mf_mos_error=row.get("mf_mos_error"),
             ).model_dump()
         )
 
@@ -287,11 +326,13 @@ def process_chunk(
     if dyn_xyz_chunks:
         dyn_save_kwargs["xyz"] = np.concatenate(dyn_xyz_chunks, axis=0)
         dyn_save_kwargs["sweep_id"] = np.concatenate(dyn_sweep_id_chunks)
+        dyn_save_kwargs["lidar_id"] = np.concatenate(dyn_lidar_id_chunks)
         if any_intensity and dyn_intensity_chunks:
             dyn_save_kwargs["intensity"] = np.concatenate(dyn_intensity_chunks)
     else:
         dyn_save_kwargs["xyz"] = np.empty((0, 3), dtype=np.float64)
         dyn_save_kwargs["sweep_id"] = np.empty(0, dtype=np.int32)
+        dyn_save_kwargs["lidar_id"] = np.empty(0, dtype="<U1")
     np.savez_compressed(
         local_path(dynamic_map_path(bag_id, chunk_id)), **dyn_save_kwargs
     )
@@ -362,9 +403,13 @@ def _invalid_meta_row(row: dict, sweep_id: int) -> dict:
         n_points_total=int(row.get("n_points_total") or 0),
         n_points_static=0,
         n_points_dynamic=0,
+        n_points_ground_candidate=int(
+            row.get("n_points_ground_candidate") or row.get("n_points_ground") or 0
+        ),
         n_points_ground=int(row.get("n_points_ground") or 0),
         world_path=row.get("world_path", ""),
-        dynamic_mask_path="",
+        dynamic_mask_path=None,
+        static_mask_path=None,
         has_intensity=bool(row.get("has_intensity", False)),
         deskewed=bool(row.get("deskewed", False)),
         valid=False,
@@ -377,4 +422,6 @@ def _invalid_meta_row(row: dict, sweep_id: int) -> dict:
         world_zmax=row.get("world_zmax"),
         frame_id=row.get("frame_id"),
         mf_mos_mask_path=row.get("mf_mos_mask_path"),
+        mf_mos_status=row.get("mf_mos_status") or "not_requested",
+        mf_mos_error=row.get("mf_mos_error"),
     ).model_dump()

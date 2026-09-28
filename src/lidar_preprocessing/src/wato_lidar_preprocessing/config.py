@@ -6,12 +6,16 @@ sensor_model.profile (see sensor_model.py), not configured as raw numbers.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal, Optional
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from wato_lidar_preprocessing.sensor_model import SensorModel, get_sensor_model
+
+
+_SAFE_LIDAR_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 class SensorModelParams(BaseModel):
@@ -196,6 +200,74 @@ class MFMosParams(BaseModel):
         return v
 
 
+class MFMosProfile(BaseModel):
+    """Sensor-specific MF-MOS projection and fusion contract."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    fusion_mode: Literal["independent", "union", "mfmos_only"] = "independent"
+    range_image_h: int = 32
+    range_image_w: int = 1024
+    fov_up_deg: float = 10.0
+    fov_down_deg: float = -30.0
+    min_range_m: float = 2.0
+    max_range_m: float = 50.0
+    intensity_scale: float = 255.0
+    occlusion_range_tol_m: float = 1.0
+
+    @field_validator("range_image_h", "range_image_w")
+    @classmethod
+    def _positive_image_size(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"range-image dimensions must be >= 1, got {v}")
+        return v
+
+    @field_validator(
+        "min_range_m", "max_range_m", "intensity_scale", "occlusion_range_tol_m"
+    )
+    @classmethod
+    def _positive_geometry_value(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"MF-MOS geometry values must be > 0, got {v}")
+        return v
+
+    @model_validator(mode="after")
+    def _valid_range_interval(self) -> "MFMosProfile":
+        if self.max_range_m <= self.min_range_m:
+            raise ValueError("max_range_m must be greater than min_range_m")
+        return self
+
+
+class LidarProfile(BaseModel):
+    """Physical parameters that must be resolved independently per LiDAR."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sensor_model: SensorModelParams = Field(default_factory=SensorModelParams)
+    lidar_sweep_duration_ms: float = 100.0
+    point_time_unit: Literal["seconds", "microseconds", "nanoseconds"] = "seconds"
+    patchwork_sensor_height: float = 1.8
+    mf_mos: MFMosProfile = Field(default_factory=MFMosProfile)
+
+    @field_validator("lidar_sweep_duration_ms", "patchwork_sensor_height")
+    @classmethod
+    def _positive_physical_value(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"LiDAR physical values must be > 0, got {v}")
+        return v
+
+    def point_time_scale_to_ns(self) -> float:
+        return {
+            "seconds": 1e9,
+            "microseconds": 1e3,
+            "nanoseconds": 1.0,
+        }[self.point_time_unit]
+
+    def build_sensor_model(self) -> SensorModel:
+        return self.sensor_model.build()
+
+
 class ComponentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -259,6 +331,12 @@ class ComponentConfig(BaseModel):
     # Step A.5 — MF-MOS learned moving-object segmentation.
     mf_mos: MFMosParams = MFMosParams()
 
+    # Explicit profiles make sensor membership strict unless a default is
+    # supplied. With neither field set, legacy global fields form the implicit
+    # default profile so existing configuration files remain loadable.
+    default_lidar_profile: Optional[LidarProfile] = None
+    lidar_profiles: dict[str, LidarProfile] = Field(default_factory=dict)
+
     # voxel_occupancy.npz alongside static_map.npz. Includes ALL occupied
     # voxels (static + dynamic) — that's what MinkUNet consumes.
     save_voxel_occupancy: bool = True
@@ -291,6 +369,86 @@ class ComponentConfig(BaseModel):
         if v < 1:
             raise ValueError(f"value must be >= 1, got {v}")
         return v
+
+    @field_validator("lidar_profiles")
+    @classmethod
+    def _safe_lidar_profile_keys(
+        cls, profiles: dict[str, LidarProfile]
+    ) -> dict[str, LidarProfile]:
+        invalid = [
+            lidar_id
+            for lidar_id in profiles
+            if not _SAFE_LIDAR_ID.fullmatch(lidar_id)
+        ]
+        if invalid:
+            raise ValueError(
+                "lidar_id profile keys must match [A-Za-z0-9_.-]+; "
+                f"got {invalid!r}"
+            )
+        return profiles
+
+    @model_validator(mode="after")
+    def _compatible_aw_profile_contracts(self) -> "ComponentConfig":
+        profiles = list(self.lidar_profiles.values())
+        if self.default_lidar_profile is not None:
+            profiles.append(self.default_lidar_profile)
+        contracts = {
+            (
+                profile.build_sensor_model().p_hit,
+                profile.build_sensor_model().p_miss,
+                profile.build_sensor_model().p_clamp,
+                profile.build_sensor_model().p_map_prior,
+            )
+            for profile in profiles
+        }
+        if len(contracts) > 1:
+            raise ValueError(
+                "all LiDAR profiles sharing an AW grid must use the same "
+                "inverse-occupancy probabilities and decision thresholds"
+            )
+        return self
+
+    def _legacy_lidar_profile(self) -> LidarProfile:
+        return LidarProfile(
+            sensor_model=self.sensor_model,
+            lidar_sweep_duration_ms=self.lidar_sweep_duration_ms,
+            point_time_unit=self.point_time_unit,
+            patchwork_sensor_height=self.patchwork.sensor_height,
+            mf_mos=MFMosProfile(
+                enabled=self.mf_mos.enabled,
+                fusion_mode=self.mf_mos.fusion_mode,
+                range_image_h=self.mf_mos.range_image_h,
+                range_image_w=self.mf_mos.range_image_w,
+                fov_up_deg=self.mf_mos.fov_up_deg,
+                fov_down_deg=self.mf_mos.fov_down_deg,
+                min_range_m=self.mf_mos.min_range_m,
+                max_range_m=self.mf_mos.max_range_m,
+                intensity_scale=self.mf_mos.intensity_scale,
+                occlusion_range_tol_m=self.mf_mos.occlusion_range_tol_m,
+            ),
+        )
+
+    def profile_for(self, lidar_id: str) -> LidarProfile:
+        """Resolve one physical LiDAR without treating frame_id as identity."""
+        if not _SAFE_LIDAR_ID.fullmatch(lidar_id):
+            raise ValueError(
+                "lidar_id must match [A-Za-z0-9_.-]+; " f"got {lidar_id!r}"
+            )
+        if lidar_id in self.lidar_profiles:
+            return self.lidar_profiles[lidar_id]
+        if self.default_lidar_profile is not None:
+            return self.default_lidar_profile
+        if self.lidar_profiles:
+            raise ValueError(
+                f"unknown lidar_id {lidar_id!r}; configured sensors: "
+                f"{sorted(self.lidar_profiles)}"
+            )
+        return self._legacy_lidar_profile()
+
+    def patchwork_for(self, lidar_id: str) -> PatchworkParams:
+        return self.patchwork.model_copy(
+            update={"sensor_height": self.profile_for(lidar_id).patchwork_sensor_height}
+        )
 
     def point_time_scale_to_ns(self) -> float:
         """Multiplier to convert t_offset_us values to nanoseconds."""

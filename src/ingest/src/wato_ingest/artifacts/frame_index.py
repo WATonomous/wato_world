@@ -7,7 +7,7 @@ Inputs (already on disk):
   - calibration.json           (path embedded into each row)
 
 Output:
-  - frame_index.parquet        (one row per (sweep_id, cam_id))
+  - frame_index.parquet        (one row per (lidar_id, sweep_id, cam_id))
 
 For each LiDAR sweep, find the nearest camera frame per camera. Drop any
 camera whose offset to the sweep exceeds `max_cam_offset_ms`. Interpolate
@@ -122,7 +122,10 @@ def _build_rows(
 
             rows.append(
                 FrameIndexRow(
-                    frame_id=f"{bag_id}__{chunk_id}__{sweep_id:06d}__{cam_id}",
+                    frame_id=(
+                        f"{bag_id}__{chunk_id}__{lidar_id}__"
+                        f"{sweep_id:06d}__{cam_id}"
+                    ),
                     bag_id=bag_id,
                     chunk_id=chunk_id,
                     sweep_id=sweep_id,

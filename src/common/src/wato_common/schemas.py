@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional
 
 import pyarrow as pa
 from pydantic import BaseModel, ConfigDict, Field
@@ -251,9 +251,11 @@ class ProcessedSweepMeta(BaseModel):
     n_points_total: int
     n_points_static: int
     n_points_dynamic: int
+    n_points_ground_candidate: int = 0
     n_points_ground: int = 0
     world_path: str
-    dynamic_mask_path: str
+    dynamic_mask_path: Optional[str] = None
+    static_mask_path: Optional[str] = None
     has_intensity: bool
     deskewed: bool
     valid: bool = True
@@ -274,6 +276,15 @@ class ProcessedSweepMeta(BaseModel):
     # cfg.mf_mos.enabled is True; None otherwise.  Points to a (n_raw,) bool
     # NPY file aligned to the raw sweep (same length as the raw lidar NPZ).
     mf_mos_mask_path: Optional[str] = None
+    mf_mos_status: Literal[
+        "not_requested",
+        "ok",
+        "skipped_invalid",
+        "skipped_allowlist",
+        "skipped_pose",
+        "error",
+    ] = "not_requested"
+    mf_mos_error: Optional[str] = None
 
 
 PROCESSED_SWEEPS_SCHEMA = pa.schema(
@@ -286,9 +297,11 @@ PROCESSED_SWEEPS_SCHEMA = pa.schema(
         pa.field("n_points_total", pa.int64()),
         pa.field("n_points_static", pa.int64()),
         pa.field("n_points_dynamic", pa.int64()),
+        pa.field("n_points_ground_candidate", pa.int64()),
         pa.field("n_points_ground", pa.int64()),
         pa.field("world_path", pa.string()),
         pa.field("dynamic_mask_path", pa.string()),
+        pa.field("static_mask_path", pa.string()),
         pa.field("has_intensity", pa.bool_()),
         pa.field("deskewed", pa.bool_()),
         pa.field("valid", pa.bool_()),
@@ -301,6 +314,8 @@ PROCESSED_SWEEPS_SCHEMA = pa.schema(
         pa.field("world_zmax", pa.float64()),
         pa.field("frame_id", pa.int64()),
         pa.field("mf_mos_mask_path", pa.string()),
+        pa.field("mf_mos_status", pa.string()),
+        pa.field("mf_mos_error", pa.string()),
     ]
 )
 
@@ -324,7 +339,7 @@ class ChunkSummaryRow(BaseModel):
     n_points_static: int
     n_points_dynamic: int
     n_points_ground: int
-    n_dropped_dynamic_ground: int
+    n_rejected_dynamic_ground: int
     cache_auto_disabled: bool
     estimated_cache_bytes: int
     ground_status: str  # "ok" | "skipped_no_ground_mask" | "empty"
@@ -345,7 +360,7 @@ CHUNK_SUMMARY_SCHEMA = pa.schema(
         pa.field("n_points_static", pa.int64()),
         pa.field("n_points_dynamic", pa.int64()),
         pa.field("n_points_ground", pa.int64()),
-        pa.field("n_dropped_dynamic_ground", pa.int64()),
+        pa.field("n_rejected_dynamic_ground", pa.int64()),
         pa.field("cache_auto_disabled", pa.bool_()),
         pa.field("estimated_cache_bytes", pa.int64()),
         pa.field("ground_status", pa.string()),
@@ -480,6 +495,7 @@ class LiftedStatsRow(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     sweep_id: str
+    lidar_id: str
     bag_id: str
     chunk_id: str
     n_points_total: int
@@ -494,6 +510,7 @@ class LiftedStatsRow(BaseModel):
 LIFTED_STATS_SCHEMA = pa.schema(
     [
         pa.field("sweep_id", pa.string()),
+        pa.field("lidar_id", pa.string()),
         pa.field("bag_id", pa.string()),
         pa.field("chunk_id", pa.string()),
         pa.field("n_points_total", pa.int64()),

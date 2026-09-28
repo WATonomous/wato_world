@@ -14,15 +14,17 @@ import numpy as np
 import pytest
 
 from wato_common.artifact_store import (
+    dynamic_mask_path,
     ground_path,
     lidar_proc_index_path,
     lidar_world_path,
     local_path,
     static_map_path,
 )
-from wato_common.io.parquet_io import write_table
+from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.schemas import PROCESSED_SWEEPS_SCHEMA
 from wato_lidar_preprocessing.config import ComponentConfig
+from wato_lidar_preprocessing.classify import process_chunk as classify_chunk
 from wato_lidar_preprocessing.ground import _build_height_grid, process_chunk
 
 
@@ -105,7 +107,7 @@ def _write_world_sweep_with_mask(
     xyz: np.ndarray,
     ground_mask: np.ndarray | None,
 ):
-    path = local_path(lidar_world_path(bag_id, chunk_id, sweep_id))
+    path = local_path(lidar_world_path(bag_id, chunk_id, "LIDAR_TOP", sweep_id))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     kwargs = {"x": xyz[:, 0], "y": xyz[:, 1], "z": xyz[:, 2]}
     if ground_mask is not None:
@@ -142,9 +144,19 @@ def _write_static_map_covering_all(
     )
 
 
-def _write_proc_index(bag_id: str, chunk_id: str, sweep_ids: list[int]):
+def _write_proc_index(
+    bag_id: str,
+    chunk_id: str,
+    sweep_ids: list[int],
+    dynamic_masks: list[np.ndarray] | None = None,
+):
+    if dynamic_masks is None:
+        dynamic_masks = [np.zeros(0, dtype=bool) for _ in sweep_ids]
     rows = []
-    for sid in sweep_ids:
+    for sid, dynamic_mask in zip(sweep_ids, dynamic_masks):
+        mask_uri = dynamic_mask_path(bag_id, chunk_id, "LIDAR_TOP", sid)
+        os.makedirs(os.path.dirname(local_path(mask_uri)), exist_ok=True)
+        np.save(local_path(mask_uri), dynamic_mask)
         rows.append(
             {
                 "bag_id": bag_id,
@@ -155,8 +167,8 @@ def _write_proc_index(bag_id: str, chunk_id: str, sweep_ids: list[int]):
                 "n_points_total": 0,
                 "n_points_static": 0,
                 "n_points_dynamic": 0,
-                "world_path": lidar_world_path(bag_id, chunk_id, sid),
-                "dynamic_mask_path": "",
+                "world_path": lidar_world_path(bag_id, chunk_id, "LIDAR_TOP", sid),
+                "dynamic_mask_path": mask_uri,
                 "has_intensity": False,
                 "deskewed": True,
             }
@@ -183,8 +195,12 @@ def test_aggregates_per_sweep_ground_masks(tmp_env):
         all_pts.append(
             xyz[mask]
         )  # ground points only — those need to pass intersection
-    _write_proc_index(bag_id, chunk_id, list(range(n_per_sweep)))
-    _write_static_map_covering_all(bag_id, chunk_id, np.concatenate(all_pts))
+    _write_proc_index(
+        bag_id,
+        chunk_id,
+        list(range(n_per_sweep)),
+        [np.zeros(150, dtype=bool) for _ in range(n_per_sweep)],
+    )
 
     cfg = ComponentConfig()
     result = process_chunk(cfg, bag_id, chunk_id)
@@ -206,7 +222,7 @@ def test_no_masks_writes_sentinel(tmp_env):
     xyz = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
     _write_world_sweep_with_mask(bag_id, chunk_id, 0, xyz, ground_mask=None)
     _write_proc_index(bag_id, chunk_id, [0])
-    _write_static_map_covering_all(bag_id, chunk_id, xyz)
+    # Ground resolution is unavailable without a final point-aligned dynamic mask.
 
     cfg = ComponentConfig()
     result = process_chunk(cfg, bag_id, chunk_id)
@@ -256,14 +272,8 @@ def _write_static_voxel_set(
     )
 
 
-def test_intersection_drops_dynamic_ground_points(tmp_env):
-    """Ground points whose voxel ended up dynamic must be dropped from ground.npz.
-
-    Setup: one sweep with two ground-flagged points.  Only one of them
-    falls in a voxel that classify marked static.  The other is filtered
-    out, n_dropped_dynamic reports it, and ground.npz contains only the
-    survivor.
-    """
+def test_ground_keeps_unknown_and_rejects_only_explicit_dynamic(tmp_env):
+    """Unknown/non-static ground survives; only its aligned dynamic bit vetoes it."""
     bag_id, chunk_id = "bag_g_inter", "chunk0"
     # Two ground points; only the first is in the static voxel set.
     static_pt = np.array([[10.0, 10.0, 0.0]])
@@ -271,46 +281,22 @@ def test_intersection_drops_dynamic_ground_points(tmp_env):
     sweep_xyz = np.concatenate([static_pt, dynamic_pt], axis=0)
     ground_mask = np.array([True, True])  # both flagged ground by Patchwork++
     _write_world_sweep_with_mask(bag_id, chunk_id, 0, sweep_xyz, ground_mask)
-    _write_proc_index(bag_id, chunk_id, [0])
-
-    # static_map.npz contains only static_pt.  Voxel size 1 m so the two
-    # points land in clearly distinct voxels.
-    _write_static_voxel_set(bag_id, chunk_id, static_pt, voxel_size=1.0)
+    _write_proc_index(
+        bag_id, chunk_id, [0], dynamic_masks=[np.array([False, True])]
+    )
 
     cfg = ComponentConfig(voxel_size_m=1.0)
     result = process_chunk(cfg, bag_id, chunk_id)
     assert result.status == "ok"
-    assert result.n_ground == 1, "only the static-voxel point should survive"
-    assert result.n_dropped_dynamic == 1
+    assert result.n_ground == 1, "unknown non-dynamic ground must survive"
+    assert result.n_rejected_dynamic_ground == 1
 
     data = np.load(local_path(ground_path(bag_id, chunk_id)))
     np.testing.assert_allclose(data["ground_xyz"], static_pt)
 
 
-def test_intersection_raises_on_legacy_static_map(tmp_env):
-    """Legacy static_map.npz without static_voxel_keys → loud KeyError
-    pointing at the re-run command, not silent passthrough."""
-    bag_id, chunk_id = "bag_g_legacy", "chunk0"
-    rng = np.random.default_rng(3)
-    xy = rng.uniform(-5, 5, size=(50, 2))
-    z = np.zeros(50)
-    xyz = np.column_stack([xy, z])
-    mask = np.ones(50, dtype=bool)
-    _write_world_sweep_with_mask(bag_id, chunk_id, 0, xyz, mask)
-    _write_proc_index(bag_id, chunk_id, [0])
-
-    path = local_path(static_map_path(bag_id, chunk_id))
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    np.savez_compressed(path, xyz=xyz, origin=np.zeros(3), voxel_size=np.float32(0.15))
-
-    cfg = ComponentConfig()
-    with pytest.raises(KeyError, match="re-run lidar_preprocessing with --force"):
-        process_chunk(cfg, bag_id, chunk_id)
-
-
-def test_intersection_raises_on_missing_static_map(tmp_env):
-    """No static_map.npz at all → FileNotFoundError, not a silent skip."""
-    bag_id, chunk_id = "bag_g_no_static", "chunk0"
+def test_ground_raises_when_final_dynamic_mask_is_missing(tmp_env):
+    bag_id, chunk_id = "bag_g_no_dynamic", "chunk0"
     rng = np.random.default_rng(3)
     xy = rng.uniform(-5, 5, size=(10, 2))
     z = np.zeros(10)
@@ -318,9 +304,12 @@ def test_intersection_raises_on_missing_static_map(tmp_env):
     mask = np.ones(10, dtype=bool)
     _write_world_sweep_with_mask(bag_id, chunk_id, 0, xyz, mask)
     _write_proc_index(bag_id, chunk_id, [0])
+    [row] = read_rows(lidar_proc_index_path(bag_id, chunk_id))
+    row["dynamic_mask_path"] = None
+    write_table([row], PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
 
     cfg = ComponentConfig()
-    with pytest.raises(FileNotFoundError, match="run Step B"):
+    with pytest.raises(RuntimeError, match="dynamic_mask"):
         process_chunk(cfg, bag_id, chunk_id)
 
 
@@ -426,11 +415,10 @@ def test_deskew_estimates_ground_in_sensor_frame(tmp_env):
     deskew_chunk(cfg, bag_id, chunk_id)
 
     # World NPZ should contain a ground_mask (Patchwork++ ran).
-    world = np.load(local_path(lidar_world_path(bag_id, chunk_id, 0)))
+    world = np.load(local_path(lidar_world_path(bag_id, chunk_id, "LIDAR_TOP", 0)))
     assert "ground_mask" in world
     assert world["ground_mask"].sum() > 1000  # most ground points detected
-    world_xyz = np.column_stack([world["x"], world["y"], world["z"]])
-    _write_static_map_covering_all(bag_id, chunk_id, world_xyz)
+    classify_chunk(cfg, bag_id, chunk_id)
 
     result = process_chunk(cfg, bag_id, chunk_id)
     assert result.status == "ok"

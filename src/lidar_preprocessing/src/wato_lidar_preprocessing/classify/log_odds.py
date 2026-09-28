@@ -72,28 +72,15 @@ def build_log_odds_grid(
     cov_dicts = make_cov_dicts()
 
     voxel_size = cfg.voxel_size_m
-    l_occ = sensor_model.l_occ
-    l_free = sensor_model.l_free
     clamp = sensor_model.log_odds_clamp
-    d_star = sensor_model.credibility_crossover_m(voxel_size)
-    margin_m = sensor_model.carve_margin_m(pose_sigma_m)
-    grazing_cos = sensor_model.grazing_cos_threshold(voxel_size)
-    max_len = cfg.effective_max_ray_length_m()
     log.info(
-        "chunk %s log-odds model (%s): l_occ=%.3f l_free=%.3f clamp=%.3f "
-        "d*=%.1fm carve_margin=%.3fm grazing_cos=%.2f (σ_range=%.3f "
-        "σ_pose=%.3f) max_ray=%.1fm",
+        "chunk %s shared log-odds contract: l_occ=%.3f l_free=%.3f "
+        "clamp=%.3f (physical ray parameters resolved per LiDAR, σ_pose=%.3f)",
         chunk_id,
-        sensor_model.name,
-        l_occ,
-        l_free,
+        sensor_model.l_occ,
+        sensor_model.l_free,
         clamp,
-        d_star,
-        margin_m,
-        grazing_cos,
-        sensor_model.range_sigma_m,
         pose_sigma_m,
-        max_len,
     )
 
     # Two-pass global prior: accumulate per-voxel max credibility across all
@@ -174,6 +161,15 @@ def build_log_odds_grid(
             xyz = xyz_cache[i]
         else:
             xyz, _, _, _ = load_world_full(row["world_path"])
+        sweep_model = cfg.profile_for(str(row["lidar_id"])).build_sensor_model()
+        margin_m = sweep_model.carve_margin_m(pose_sigma_m)
+        max_len = (
+            float(cfg.max_ray_length_m)
+            if cfg.max_ray_length_m is not None
+            else sweep_model.max_range_m
+        )
+        d_star = sweep_model.credibility_crossover_m(voxel_size)
+        grazing_cos = sweep_model.grazing_cos_threshold(voxel_size)
 
         if cfg.ground_endpoint_strategy == "skip_endpoint":
             # Kernel skips +l_occ at ground endpoints but still carves the ray.
@@ -195,8 +191,8 @@ def build_log_odds_grid(
                 log_odds_dict,
                 n_obs_dict,
                 n_hits_dict,
-                l_occ,
-                l_free,
+                sweep_model.l_occ,
+                sweep_model.l_free,
                 clamp,
                 d_star,
                 normal_dicts=normal_dicts,
@@ -215,7 +211,7 @@ def build_log_odds_grid(
             if boost_xyz.shape[0] > 0:
                 map_hit, ranges = global_map_prior.query_sweep(boost_xyz, sweep_origin)
                 if map_hit.any():
-                    cred = sensor_model.range_weight(ranges[map_hit], voxel_size)
+                    cred = sweep_model.range_weight(ranges[map_hit], voxel_size)
                     prior_keys_parts.append(boost_keys[map_hit])
                     prior_cred_parts.append(cred.astype(np.float32))
 
@@ -250,12 +246,12 @@ def classify_from_log_odds(
     cfg: ComponentConfig,
     sensor_model: SensorModel,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, int]]:
-    """Return (static_arr, not_dynamic_arr, classification, diag).
+    """Return (static_arr, dynamic_arr, classification, diag).
 
     static if p_occ ≥ p_static (= p_hit), dynamic if p_occ < p_dynamic
     (= 1-p_hit); the band between is AMBIGUOUS → not-dynamic (conservative).
-    not_dynamic_arr is the union of (static + free_only + under-with-hits +
-    ambiguous); points in any of those get mask=False.
+    Only explicit CLASS_DYNAMIC keys enter dynamic_arr. A sweep point whose
+    key is absent from the evidence grid is unknown, not implicitly dynamic.
     """
     if unique_keys.size == 0:
         empty = np.empty(0, dtype=np.int64)
@@ -282,10 +278,7 @@ def classify_from_log_odds(
     static_arr = unique_keys[static_mask]
 
     free_only_mask = n_hits_vals < cfg.min_occupied_hits
-    free_only_arr = unique_keys[free_only_mask]
-
     under_evidenced_with_hits_mask = (~evidenced) & has_hits
-    under_arr = unique_keys[under_evidenced_with_hits_mask]
 
     ambiguous_mask = (
         evidenced
@@ -293,21 +286,10 @@ def classify_from_log_odds(
         & (p_occ < p_static_threshold)
         & (p_occ >= p_dynamic_threshold)
     )
-    ambiguous_arr = unique_keys[ambiguous_mask]
-
-    parts = [
-        a for a in (static_arr, free_only_arr, under_arr, ambiguous_arr) if a.size > 0
-    ]
-    if not parts:
-        not_dynamic_arr = np.empty(0, dtype=np.int64)
-    elif len(parts) == 1:
-        not_dynamic_arr = parts[0]
-    else:
-        not_dynamic_arr = np.unique(np.concatenate(parts))
-
     # CLASS_FREE_ONLY is the default; predicates below are mutually
     # exclusive partitions of (evidenced, has_hits, p_occ) space.
     dynamic_mask = evidenced & has_hits & (p_occ < p_dynamic_threshold)
+    dynamic_arr = unique_keys[dynamic_mask]
     classification = np.full(unique_keys.shape[0], CLASS_FREE_ONLY, dtype=np.int8)
     classification[under_evidenced_with_hits_mask] = CLASS_UNDER_EVIDENCED
     classification[dynamic_mask] = CLASS_DYNAMIC
@@ -320,4 +302,4 @@ def classify_from_log_odds(
         "n_ambiguous": int(ambiguous_mask.sum()),
         "n_free_only": int(free_only_mask.sum()),
     }
-    return static_arr, not_dynamic_arr, classification, diag
+    return static_arr, dynamic_arr, classification, diag

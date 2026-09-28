@@ -19,8 +19,10 @@ from wato_common.io.parquet_io import read_rows
 log = logging.getLogger(__name__)
 
 
-def load_pose_valid_sweep_ids(bag_id: str, chunk_id: str) -> set[int] | None:
-    """Sweep_ids that ingest marked pose-valid in frame_index.parquet.
+def load_pose_valid_sweep_ids(
+    bag_id: str, chunk_id: str
+) -> set[tuple[str, int]] | None:
+    """Composite sweep identities ingest marked pose-valid in frame_index.
 
     frame_index carries one row per (sweep_id, cam_id) with a per-sweep
     ``valid_pose`` flag: ingest sets it False when no ego pose could be
@@ -43,7 +45,11 @@ def load_pose_valid_sweep_ids(bag_id: str, chunk_id: str) -> set[int] | None:
             chunk_id,
         )
         return None
-    return {int(r["sweep_id"]) for r in rows if r.get("valid_pose", False)}
+    return {
+        (str(r["lidar_id"]), int(r["sweep_id"]))
+        for r in rows
+        if r.get("valid_pose", False)
+    }
 
 
 def load_pose_samples(bag_id: str, chunk_id: str) -> list[PoseSample]:

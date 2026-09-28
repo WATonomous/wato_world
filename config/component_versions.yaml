@@ -12,7 +12,7 @@
 
 ingest: v1
 perception_2d: v1
-lidar_preprocessing: v1
+lidar_preprocessing: v2
 proposal_generation: v1
 tracking: v1
 label_refinement: v1

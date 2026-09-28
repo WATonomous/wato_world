@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from wato_common.artifact_store import dynamic_mask_path, local_path
+from wato_common.artifact_store import dynamic_mask_path, local_path, static_mask_path
 from wato_lidar_preprocessing.config import ComponentConfig
 
 from .io_helpers import load_world_xyz_intensity
@@ -25,11 +25,13 @@ class SweepMaskResult:
     n_static: int
     n_dynamic: int
     mask_uri: str
+    static_mask_uri: str
     static_xyz: np.ndarray | None = None
     static_intensity: np.ndarray | None = None
     dyn_xyz: np.ndarray | None = None
     dyn_intensity: np.ndarray | None = None
     dyn_sweep_id: np.ndarray | None = None
+    dyn_lidar_id: np.ndarray | None = None
 
 
 def apply_classification_to_sweep(
@@ -37,7 +39,7 @@ def apply_classification_to_sweep(
     sweep_id: int,
     keys: np.ndarray,
     static_arr: np.ndarray,
-    not_dynamic_arr: np.ndarray,
+    dynamic_arr: np.ndarray,
     xyz_cache_i: np.ndarray | None,
     intensity_cache_i: np.ndarray | None,
     ground_mask_cache_i: np.ndarray | None,
@@ -45,43 +47,42 @@ def apply_classification_to_sweep(
     bag_id: str,
     chunk_id: str,
     any_intensity: bool,
-    sweep_mf_mos_dynamic_arr: np.ndarray | None = None,
+    sweep_mf_mos_mask: np.ndarray | None = None,
 ) -> SweepMaskResult:
     """Compute dynamic mask for one sweep, save it, return per-sweep stats.
 
     `keys` is full-length (matches the world NPZ) so the saved mask stays
     length-aligned with the downstream xyz array.
 
-    `sweep_mf_mos_dynamic_arr`: per-sweep MF-MOS-flagged voxel keys, fused via
-    searchsorted. In mfmos_only mode an AW-dynamic point not flagged by MF-MOS
-    is dropped from both maps (MF-MOS is authoritative for dynamic).
+    `sweep_mf_mos_mask` is point-aligned. Keeping fusion point-aligned avoids
+    broadcasting one MF-MOS vote to unrelated points sharing an AW voxel.
     """
     n = keys.shape[0]
     has_intensity = bool(row.get("has_intensity", False))
-    dyn_uri = dynamic_mask_path(bag_id, chunk_id, sweep_id)
+    lidar_id = str(row["lidar_id"])
+    dyn_uri = dynamic_mask_path(bag_id, chunk_id, lidar_id, sweep_id)
+    static_uri = static_mask_path(bag_id, chunk_id, lidar_id, sweep_id)
+    fusion_mode = cfg.profile_for(lidar_id).mf_mos.fusion_mode
 
     if n == 0:
         mask = np.zeros(0, dtype=bool)
         np.save(local_path(dyn_uri), mask)
-        return SweepMaskResult(n_static=0, n_dynamic=0, mask_uri=dyn_uri)
+        np.save(local_path(static_uri), mask)
+        return SweepMaskResult(
+            n_static=0,
+            n_dynamic=0,
+            mask_uri=dyn_uri,
+            static_mask_uri=static_uri,
+        )
 
-    # not_dynamic_arr covers static + free-only + under-evidenced-with-hits
-    # + ambiguous voxels.
-    if not_dynamic_arr.size > 0:
-        pos = np.searchsorted(not_dynamic_arr, keys)
-        pos = np.clip(pos, 0, not_dynamic_arr.size - 1)
-        is_not_dynamic = not_dynamic_arr[pos] == keys
+    # Select only explicit AW dynamic evidence. Negating a conservative
+    # not-dynamic set would incorrectly turn absent/unknown voxels dynamic.
+    if dynamic_arr.size > 0:
+        pos = np.searchsorted(dynamic_arr, keys)
+        pos = np.clip(pos, 0, dynamic_arr.size - 1)
+        mask = dynamic_arr[pos] == keys
     else:
-        is_not_dynamic = np.zeros(n, dtype=bool)
-    mask = ~is_not_dynamic
-
-    # Patchwork++ ground mask is authoritative: ground points must never
-    # appear in dynamic_map.npz. The not_dynamic_arr classification doesn't
-    # reliably catch them — ground voxels can fall through whenever no
-    # non-ground ray traverses them (skip_endpoint) or aren't traversed at
-    # all (skip_ray).
-    if ground_mask_cache_i is not None:
-        mask &= ~ground_mask_cache_i
+        mask = np.zeros(n, dtype=bool)
 
     n_dyn = int(mask.sum())
 
@@ -104,37 +105,44 @@ def apply_classification_to_sweep(
         is_static &= ~ground_mask_cache_i
         n_static = int(is_static.sum())
 
-    if sweep_mf_mos_dynamic_arr is not None and sweep_mf_mos_dynamic_arr.size > 0:
+    if sweep_mf_mos_mask is not None and fusion_mode != "independent":
+        if sweep_mf_mos_mask.shape != (n,):
+            raise ValueError(
+                f"MF-MOS mask for ({lidar_id!r}, {sweep_id}) has shape "
+                f"{sweep_mf_mos_mask.shape}, expected {(n,)}"
+            )
         n_dyn_before_mf = n_dyn
-        pos = np.searchsorted(sweep_mf_mos_dynamic_arr, keys)
-        pos = np.clip(pos, 0, sweep_mf_mos_dynamic_arr.size - 1)
-        is_mf_mos_dyn = sweep_mf_mos_dynamic_arr[pos] == keys
-        if cfg.mf_mos.fusion_mode == "union":
-            mask = mask | is_mf_mos_dyn
+        if fusion_mode == "union":
+            mask = mask | sweep_mf_mos_mask
         else:  # mfmos_only
-            mask = is_mf_mos_dyn
-        # Re-apply ground filter: an MF-MOS vote applies to the whole voxel,
-        # so without this re-AND, union/mfmos_only would re-introduce
-        # co-voxel ground points that the earlier ground filter removed.
-        if ground_mask_cache_i is not None:
-            mask &= ~ground_mask_cache_i
+            mask = sweep_mf_mos_mask.copy()
         n_dyn = int(mask.sum())
         log.debug(
             "sweep %s mf_mos fusion: %d pts matched mf_mos voxels, "
             "%d pts flipped to dynamic (n_dyn %d→%d)",
             row.get("sweep_id"),
-            int(is_mf_mos_dyn.sum()),
+            int(sweep_mf_mos_mask.sum()),
             n_dyn - n_dyn_before_mf,
             n_dyn_before_mf,
             n_dyn,
         )
-        # A point now labelled dynamic can't also live in the static cloud.
-        is_static = is_static & ~mask
-        n_static = int(is_static.sum())
+    # Final confident static excludes both selected motion and Patchwork's
+    # candidate ground. Unknown/ambiguous/free-only points remain in neither
+    # point mask.
+    is_static &= ~mask
+    if ground_mask_cache_i is not None:
+        is_static &= ~ground_mask_cache_i
+    n_static = int(is_static.sum())
 
     np.save(local_path(dyn_uri), mask)
+    np.save(local_path(static_uri), is_static)
 
-    result = SweepMaskResult(n_static=n_static, n_dynamic=n_dyn, mask_uri=dyn_uri)
+    result = SweepMaskResult(
+        n_static=n_static,
+        n_dynamic=n_dyn,
+        mask_uri=dyn_uri,
+        static_mask_uri=static_uri,
+    )
 
     if n_static == 0 and n_dyn == 0:
         return result
@@ -157,6 +165,7 @@ def apply_classification_to_sweep(
     if n_dyn > 0:
         result.dyn_xyz = xyz[mask]
         result.dyn_sweep_id = np.full(n_dyn, sweep_id, dtype=np.int32)
+        result.dyn_lidar_id = np.full(n_dyn, lidar_id, dtype=f"<U{max(1, len(lidar_id))}")
         if any_intensity:
             if has_intensity and intensity is not None:
                 result.dyn_intensity = intensity[mask].astype(np.float32)

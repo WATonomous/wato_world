@@ -4,9 +4,9 @@ Reads each world-frame sweep NPZ. Sweeps carrying a `ground_mask` contribute
 their ground points to the chunk-level ground cloud, which is then binned
 into a 2D height grid + surface-normal grid.
 
-Each candidate ground point is intersected against the static-voxel set
-from Step B (classify) — points in non-static voxels are dropped, which
-removes vehicle-underside contamination.
+Each candidate ground point is retained unless the final point-aligned motion
+mask explicitly marks it dynamic. Unknown or under-evidenced AW state is not
+a reason to discard road surface.
 
 When no sweep carries a ground mask (Patchwork++ unavailable upstream),
 writes a sentinel ground.npz with status="skipped_no_ground_mask" so
@@ -16,7 +16,6 @@ downstream consumers can distinguish "unavailable" from "not yet processed".
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -28,11 +27,10 @@ from wato_common.artifact_store import (
     ground_path,
     lidar_proc_index_path,
     local_path,
-    static_map_path,
 )
-from wato_common.io.parquet_io import read_rows
+from wato_common.io.parquet_io import read_rows, write_table
+from wato_common.schemas import PROCESSED_SWEEPS_SCHEMA
 from wato_lidar_preprocessing.config import ComponentConfig, PatchworkParams
-from wato_lidar_preprocessing.voxel import voxel_indices
 
 log = logging.getLogger(__name__)
 
@@ -45,60 +43,7 @@ class GroundResult:
     n_nonground: int
     ground_path: str
     status: str = "ok"  # "ok" | "skipped_no_ground_mask" | "empty"
-    n_dropped_dynamic: int = 0  # rejected by static-voxel intersection
-
-
-def _load_static_voxel_set(
-    bag_id: str, chunk_id: str
-) -> tuple[np.ndarray, np.ndarray, float]:
-    """Load classify's static-voxel keys + origin/voxel_size.
-
-    Returns (sorted_keys, origin_xyz, voxel_size).
-    Raises FileNotFoundError if classify hasn't run; KeyError if the file
-    predates the static-voxel-keys / origin / voxel_size export (re-run
-    classify with --force).
-    """
-    path = local_path(static_map_path(bag_id, chunk_id))
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"static_map.npz missing for chunk {chunk_id!r} — run Step B (classify) first."
-        )
-    data = np.load(path)
-    missing = [
-        k for k in ("static_voxel_keys", "origin", "voxel_size") if k not in data
-    ]
-    if missing:
-        raise KeyError(
-            f"static_map.npz for chunk {chunk_id!r} is missing keys {missing} — "
-            "predates the ground/static-intersection feature; "
-            "re-run lidar_preprocessing with --force on this chunk."
-        )
-    keys = np.asarray(data["static_voxel_keys"], dtype=np.int64)
-    keys.sort()
-    origin = np.asarray(data["origin"], dtype=np.float64)
-    voxel_size = float(data["voxel_size"])
-    return keys, origin, voxel_size
-
-
-def _filter_by_static_voxels(
-    xyz: np.ndarray,
-    static_keys: np.ndarray,
-    origin: np.ndarray,
-    voxel_size: float,
-    *,
-    chunk_id: str,
-) -> np.ndarray:
-    """Keep only rows of `xyz` whose voxel key is in `static_keys`.
-
-    Uses the same voxel_indices helper as classify so keys align bit-for-bit.
-    """
-    if xyz.shape[0] == 0 or static_keys.size == 0:
-        return np.empty((0, 3), dtype=xyz.dtype)
-    keys = voxel_indices(xyz, origin, voxel_size, chunk_id=chunk_id)
-    pos = np.searchsorted(static_keys, keys)
-    pos = np.clip(pos, 0, static_keys.size - 1)
-    keep = static_keys[pos] == keys
-    return xyz[keep]
+    n_rejected_dynamic_ground: int = 0
 
 
 def _build_height_grid(
@@ -202,11 +147,8 @@ def process_chunk(
     # "Patchwork said non-ground" rather than "Patchwork never ran".
     n_classified_pts = 0
     n_with_mask = 0
-    n_dropped_dynamic = 0
-
-    static_keys, static_origin, static_voxel_size = _load_static_voxel_set(
-        bag_id, chunk_id
-    )
+    n_ground_candidates = 0
+    n_rejected_dynamic_ground = 0
 
     for row in tqdm(
         meta_rows,
@@ -222,31 +164,55 @@ def process_chunk(
         if "ground_mask" not in data:
             continue
         n_with_mask += 1
-        mask = data["ground_mask"]
-        n_classified_pts += int(mask.shape[0])
-        if mask.sum() == 0:
+        candidate_mask = np.asarray(data["ground_mask"], dtype=bool)
+        n_world = int(data["x"].shape[0])
+        if candidate_mask.shape != (n_world,):
+            raise RuntimeError(
+                f"ground_mask for ({row['lidar_id']!r}, {row['sweep_id']}) "
+                f"has shape {candidate_mask.shape}, expected {(n_world,)}"
+            )
+        dynamic_uri = row.get("dynamic_mask_path")
+        if not dynamic_uri:
+            raise RuntimeError(
+                f"dynamic_mask_path missing for ({row['lidar_id']!r}, "
+                f"{row['sweep_id']}); classify must complete before ground"
+            )
+        dynamic_mask = np.asarray(np.load(local_path(dynamic_uri)), dtype=bool)
+        if dynamic_mask.shape != (n_world,):
+            raise RuntimeError(
+                f"dynamic_mask for ({row['lidar_id']!r}, {row['sweep_id']}) "
+                f"has shape {dynamic_mask.shape}, expected {(n_world,)}"
+            )
+        resolved_mask = candidate_mask & ~dynamic_mask
+        n_candidate = int(candidate_mask.sum())
+        n_ground = int(resolved_mask.sum())
+        row["n_points_ground_candidate"] = n_candidate
+        row["n_points_ground"] = n_ground
+        n_classified_pts += n_world
+        n_ground_candidates += n_candidate
+        n_rejected_dynamic_ground += int((candidate_mask & dynamic_mask).sum())
+        if n_ground == 0:
             continue
         xyz = np.stack(
-            [data["x"][mask], data["y"][mask], data["z"][mask]],
+            [
+                data["x"][resolved_mask],
+                data["y"][resolved_mask],
+                data["z"][resolved_mask],
+            ],
             axis=1,
         ).astype(np.float64)
-        n_before = xyz.shape[0]
-        xyz = _filter_by_static_voxels(
-            xyz,
-            static_keys,
-            static_origin,
-            static_voxel_size,
-            chunk_id=chunk_id,
-        )
-        n_dropped_dynamic += n_before - xyz.shape[0]
-        if xyz.shape[0] == 0:
-            continue
         ground_chunks.append(xyz)
 
     if n_with_mask == 0:
         log.warning(
-            "chunk %s: no sweeps carry ground_mask (pypatchworkpp unavailable upstream); writing sentinel ground.npz",
+            "chunk %s: no sweeps carry ground_mask "
+            "(pypatchworkpp unavailable upstream); writing sentinel ground.npz",
             chunk_id,
+        )
+        write_table(
+            meta_rows,
+            PROCESSED_SWEEPS_SCHEMA,
+            lidar_proc_index_path(bag_id, chunk_id),
         )
         return _save_ground(
             bag_id,
@@ -262,16 +228,22 @@ def process_chunk(
         ground_pts = np.empty((0, 3), dtype=np.float64)
 
     n_ground = ground_pts.shape[0]
-    n_nonground = n_classified_pts - n_ground - n_dropped_dynamic
+    n_nonground = n_classified_pts - n_ground_candidates
     log.info(
-        "chunk %s: aggregated ground=%d nonground=%d dropped_dynamic=%d across %d classified sweeps",
+        "chunk %s: aggregated ground=%d nonground=%d "
+        "rejected_dynamic_ground=%d across %d classified sweeps",
         chunk_id,
         n_ground,
         n_nonground,
-        n_dropped_dynamic,
+        n_rejected_dynamic_ground,
         n_with_mask,
     )
 
+    write_table(
+        meta_rows,
+        PROCESSED_SWEEPS_SCHEMA,
+        lidar_proc_index_path(bag_id, chunk_id),
+    )
     return _save_ground(
         bag_id,
         chunk_id,
@@ -279,7 +251,7 @@ def process_chunk(
         cfg.patchwork,
         status="ok" if n_ground > 0 else "empty",
         n_nonground=n_nonground,
-        n_dropped_dynamic=n_dropped_dynamic,
+        n_rejected_dynamic_ground=n_rejected_dynamic_ground,
     )
 
 
@@ -291,7 +263,7 @@ def _save_ground(
     *,
     status: str = "ok",
     n_nonground: int = 0,
-    n_dropped_dynamic: int = 0,
+    n_rejected_dynamic_ground: int = 0,
 ) -> GroundResult:
     height_grid, normal_grid, grid_origin = _build_height_grid(
         ground_pts, cell_size=params.ground_cell_size_m
@@ -311,5 +283,5 @@ def _save_ground(
         n_nonground=int(n_nonground),
         ground_path=out_uri,
         status=status,
-        n_dropped_dynamic=int(n_dropped_dynamic),
+        n_rejected_dynamic_ground=int(n_rejected_dynamic_ground),
     )

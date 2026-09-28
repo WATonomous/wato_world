@@ -63,7 +63,7 @@ def main(log_level: str) -> None:
     "force",
     is_flag=True,
     default=False,
-    help="re-process chunks whose ground.npz already exists.",
+    help="re-process chunks even when an exact completion record matches.",
 )
 @click.option(
     "--workers",
@@ -77,10 +77,8 @@ def main(log_level: str) -> None:
     "auto_reduce",
     default=True,
     help=(
-        "after all chunks finish, automatically run the bag-level reduce "
-        "(global_static_map.npz + global_ground.npz). "
-        "Disable with --no-auto-reduce when processing chunks in parallel "
-        "across multiple machines — run 'reduce' manually once all chunks are done."
+        "deprecated compatibility flag; full-bag transactional runs always "
+        "publish global reductions and chunk-only runs never do"
     ),
 )
 @click.option(
@@ -116,13 +114,11 @@ def run_cmd(
         workers=workers,
         two_pass=two_pass,
     )
-    # Two-pass already built one global_static_map.npz to seed pass 2; we
-    # re-reduce here so the final on-disk map reflects pass-2 outputs.
-    if auto_reduce and chunk_id is None:
-        log.info("auto-reduce: building global_static_map.npz + global_ground.npz ...")
-        static_out = reduce_static_map(bag_id, cfg)
-        ground_out = reduce_ground_map(bag_id, cfg)
-        log.info("auto-reduce complete: %s  %s", static_out, ground_out)
+    if not auto_reduce:
+        log.warning(
+            "--no-auto-reduce is deprecated; publication policy is determined "
+            "by full-bag versus chunk-only scope"
+        )
 
 
 @main.command("reduce")
@@ -164,13 +160,25 @@ def reduce_cmd(bag_id: str, config_path: str) -> None:
     help="optional specific sweep_id (stages A/B only).",
 )
 @click.option(
+    "--lidar-id",
+    default=None,
+    help=(
+        "physical LiDAR for --sweep; optional only when that sweep_id has "
+        "exactly one sensor match"
+    ),
+)
+@click.option(
     "--stage",
     default="all",
     type=click.Choice(["A", "B", "C", "D", "all"]),
     help="Pipeline stage to visualize (default: all).",
 )
 def viz_cmd(
-    bag_id: str, chunk_id: str | None, sweep_id: int | None, stage: str
+    bag_id: str,
+    chunk_id: str | None,
+    sweep_id: int | None,
+    lidar_id: str | None,
+    stage: str,
 ) -> None:
     """Open interactive Open3D / matplotlib windows for pipeline artifacts.
 
@@ -194,7 +202,13 @@ def viz_cmd(
         chunk_ids = [r["chunk_id"] for r in rows]
 
     for cid in chunk_ids:
-        viz_chunk(bag_id, cid, sweep_id=sweep_id, stage=stage)
+        viz_chunk(
+            bag_id,
+            cid,
+            sweep_id=sweep_id,
+            lidar_id=lidar_id,
+            stage=stage,
+        )
 
     if stage == "all":
         try:

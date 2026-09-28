@@ -27,6 +27,7 @@ from wato_common.schemas import (
     FrameIndexRow,
 )
 from wato_lidar_preprocessing.config import ComponentConfig, FrameSyncParams
+from wato_lidar_preprocessing._inputs import load_pose_valid_sweep_ids
 from wato_lidar_preprocessing.deskew import _assign_frame_ids, process_chunk
 
 
@@ -96,6 +97,37 @@ def _flat(T):
     return T.flatten().tolist()
 
 
+def test_pose_validity_is_keyed_by_lidar_and_sweep(tmp_env):
+    bag_id, chunk_id = "bag_pose_identity", "chunk0"
+    rows = [
+        FrameIndexRow(
+            frame_id=f"{bag_id}__{chunk_id}__LIDAR_LEFT__000000__CAM0",
+            bag_id=bag_id,
+            chunk_id=chunk_id,
+            sweep_id=0,
+            lidar_id="LIDAR_LEFT",
+            lidar_path="",
+            reference_timestamp_ns=0,
+            cam_id="CAM0",
+            valid_pose=True,
+        ).model_dump(),
+        FrameIndexRow(
+            frame_id=f"{bag_id}__{chunk_id}__LIDAR_RIGHT__000000__CAM0",
+            bag_id=bag_id,
+            chunk_id=chunk_id,
+            sweep_id=0,
+            lidar_id="LIDAR_RIGHT",
+            lidar_path="",
+            reference_timestamp_ns=0,
+            cam_id="CAM0",
+            valid_pose=False,
+        ).model_dump(),
+    ]
+    write_table(rows, FRAME_INDEX_SCHEMA, frame_index_path(bag_id, chunk_id))
+
+    assert load_pose_valid_sweep_ids(bag_id, chunk_id) == {("LIDAR_LEFT", 0)}
+
+
 def test_static_transform_no_motion(tmp_env):
     """All poses identical → world-frame points should equal sensor-frame points."""
     bag_id, chunk_id = "bag0", "chunk0"
@@ -156,7 +188,7 @@ def test_static_transform_no_motion(tmp_env):
     results = process_chunk(cfg, bag_id, chunk_id)
     assert len(results) == 1
 
-    world_data = np.load(local_path(lidar_world_path(bag_id, chunk_id, 0)))
+    world_data = np.load(local_path(lidar_world_path(bag_id, chunk_id, "LIDAR_TOP", 0)))
     np.testing.assert_allclose(world_data["x"], [1.0, 2.0, 3.0], atol=1e-6)
     np.testing.assert_allclose(world_data["y"], [0.0, 0.0, 0.0], atol=1e-6)
     np.testing.assert_allclose(world_data["z"], [1.0, 1.0, 1.0], atol=1e-6)
@@ -220,7 +252,7 @@ def test_translation_applied(tmp_env):
 
     cfg = ComponentConfig()
     process_chunk(cfg, bag_id, chunk_id)
-    world_data = np.load(local_path(lidar_world_path(bag_id, chunk_id, 0)))
+    world_data = np.load(local_path(lidar_world_path(bag_id, chunk_id, "LIDAR_TOP", 0)))
     np.testing.assert_allclose(world_data["x"], [11.0, 12.0], atol=1e-6)
     np.testing.assert_allclose(world_data["y"], [0.0, 0.0], atol=1e-6)
 
@@ -299,7 +331,7 @@ def test_skips_pose_invalid_sweeps(tmp_env):
 
     # Only sweep 1 is deskewed; sweep 0 produced no world NPZ.
     assert [r.sweep_id for r in results] == [1]
-    assert not os.path.exists(local_path(lidar_world_path(bag_id, chunk_id, 0)))
+    assert not os.path.exists(local_path(lidar_world_path(bag_id, chunk_id, "LIDAR_TOP", 0)))
 
     # Sweep 0 is recorded as an explicit valid=False row with a pose reason.
     meta = {r["sweep_id"]: r for r in read_rows(lidar_proc_index_path(bag_id, chunk_id))}
@@ -365,7 +397,7 @@ def test_drops_nonfinite_points(tmp_env):
     cfg = ComponentConfig()
     results = process_chunk(cfg, bag_id, chunk_id)
     assert results[0].n_points == 3  # 2 dropped
-    world_data = np.load(local_path(lidar_world_path(bag_id, chunk_id, 0)))
+    world_data = np.load(local_path(lidar_world_path(bag_id, chunk_id, "LIDAR_TOP", 0)))
     assert world_data["x"].shape[0] == 3
     np.testing.assert_allclose(world_data["x"], [1.0, 2.0, 3.0], atol=1e-6)
 
@@ -611,7 +643,7 @@ def test_non_identity_ego_T_lidar(tmp_env, case):
     cfg = ComponentConfig()
     process_chunk(cfg, bag_id, chunk_id)
 
-    world = np.load(local_path(lidar_world_path(bag_id, chunk_id, 0)))
+    world = np.load(local_path(lidar_world_path(bag_id, chunk_id, "LIDAR_TOP", 0)))
     actual = np.array([world["x"][0], world["y"][0], world["z"][0]])
     np.testing.assert_allclose(actual, case["expected_world"], atol=1e-6)
 
@@ -705,7 +737,7 @@ def test_motion_compensation_with_per_point_timestamps(tmp_env):
     results = process_chunk(cfg, bag_id, chunk_id)
     assert results[0].deskewed is True
 
-    world = np.load(local_path(lidar_world_path(bag_id, chunk_id, 0)))
+    world = np.load(local_path(lidar_world_path(bag_id, chunk_id, "LIDAR_TOP", 0)))
     # Point 0 (t=0): world ego at origin → sensor (1,0,0) → world (1,0,0).
     # Point 1 (t=0.2 s): world ego at (10,0,0) → sensor (1,0,0) → world (11,0,0).
     np.testing.assert_allclose(world["x"], [1.0, 11.0], atol=1e-6)
@@ -1094,7 +1126,7 @@ def test_synthesis_eliminates_intra_sweep_smear_for_static_wall(tmp_env):
     results = process_chunk(cfg, bag_id, chunk_id)
     assert results, "deskew should have processed one sweep"
 
-    world = np.load(local_path(lidar_world_path(bag_id, chunk_id, 0)))
+    world = np.load(local_path(lidar_world_path(bag_id, chunk_id, "LIDAR_TOP", 0)))
     # Point 0 at azimuth 0, t=0: ego at (0,0,0) + sensor (5,0,0) = world (5,0,0).
     # Point 1 at azimuth π, t=0.5 s: ego at (5,0,0) + sensor (-5,0,0) = world (0,0,0).
     np.testing.assert_allclose(world["x"], [5.0, 0.0], atol=1e-3)
@@ -1136,7 +1168,7 @@ def test_synthesis_eliminates_intra_sweep_smear_for_static_wall(tmp_env):
         allow_uncompensated_motion=True,
     )
     process_chunk(cfg_off, bag2, chunk2)
-    world_off = np.load(local_path(lidar_world_path(bag2, chunk2, 0)))
+    world_off = np.load(local_path(lidar_world_path(bag2, chunk2, "LIDAR_TOP", 0)))
     (
         np.testing.assert_allclose(world_off["x"], [5.0, -5.0], atol=1e-3),
         (

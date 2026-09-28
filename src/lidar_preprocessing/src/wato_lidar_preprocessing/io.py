@@ -16,20 +16,34 @@ from wato_common.artifact_store import (
     lidar_world_path,
     local_path,
     static_map_path,
+    static_mask_path,
     voxel_diag_path,
 )
 
 
 def load_world_sweep(
-    bag_id: str, chunk_id: str, sweep_id: int
+    bag_id: str, chunk_id: str, lidar_id: str, sweep_id: int
 ) -> dict[str, np.ndarray]:
     """Load a deskewed world-frame sweep NPZ."""
-    return dict(np.load(local_path(lidar_world_path(bag_id, chunk_id, sweep_id))))
+    return dict(
+        np.load(local_path(lidar_world_path(bag_id, chunk_id, lidar_id, sweep_id)))
+    )
 
 
-def load_dynamic_mask(bag_id: str, chunk_id: str, sweep_id: int) -> np.ndarray:
+def load_dynamic_mask(
+    bag_id: str, chunk_id: str, lidar_id: str, sweep_id: int
+) -> np.ndarray:
     """Load per-point dynamic boolean mask (True = dynamic) for a sweep."""
-    return np.load(local_path(dynamic_mask_path(bag_id, chunk_id, sweep_id)))
+    return np.load(
+        local_path(dynamic_mask_path(bag_id, chunk_id, lidar_id, sweep_id))
+    )
+
+
+def load_static_mask(
+    bag_id: str, chunk_id: str, lidar_id: str, sweep_id: int
+) -> np.ndarray:
+    """Load the confident-static point mask aligned to the world sweep."""
+    return np.load(local_path(static_mask_path(bag_id, chunk_id, lidar_id, sweep_id)))
 
 
 def load_static_map(bag_id: str, chunk_id: str) -> dict[str, np.ndarray]:
@@ -42,7 +56,8 @@ def load_dynamic_map(bag_id: str, chunk_id: str) -> dict[str, np.ndarray]:
 
     Keys:
       xyz       float64 (M, 3) — dynamic-classified world-frame points
-      sweep_id  int32   (M,)   — originating sweep_id per point
+      lidar_id  str     (M,)   — originating physical LiDAR per point
+      sweep_id  int32   (M,)   — sensor-local sweep_id per point
       intensity float32 (M,)   — only present when any contributing sweep
                                  had intensity (mirrors static_map.npz).
     """

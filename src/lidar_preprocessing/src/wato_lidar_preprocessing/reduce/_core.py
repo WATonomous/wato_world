@@ -95,6 +95,7 @@ def reduce_static_map(bag_id: str, cfg: ComponentConfig) -> str:
             "bag %s: no static map chunks found, writing empty global map", bag_id
         )
         out_uri = global_static_map_path(bag_id)
+        os.makedirs(os.path.dirname(local_path(out_uri)), exist_ok=True)
         np.savez_compressed(
             local_path(out_uri),
             xyz=np.empty((0, 3), dtype=np.float64),
@@ -171,6 +172,7 @@ def reduce_ground_map(bag_id: str, cfg: ComponentConfig) -> str:
         height_grid, normal_grid, grid_origin = _build_height_grid(
             np.empty((0, 3), dtype=np.float64), cell_size=cell_size
         )
+        os.makedirs(os.path.dirname(local_path(out_uri)), exist_ok=True)
         np.savez_compressed(
             local_path(out_uri),
             height_grid=height_grid,

@@ -68,6 +68,62 @@ def test_lidar_sweep_path_is_zero_padded():
     )
 
 
+def test_lidar_processed_sweep_paths_are_versioned_and_sensor_scoped(
+    tmp_path, monkeypatch
+):
+    versions = tmp_path / "component_versions.yaml"
+    versions.write_text("lidar_preprocessing: v2\n", encoding="utf-8")
+    monkeypatch.setenv("COMPONENT_VERSIONS_PATH", str(versions))
+
+    left = artifact_store.lidar_world_path("b", "0000", "LIDAR_LEFT", 42)
+    right = artifact_store.lidar_world_path("b", "0000", "LIDAR_RIGHT", 42)
+
+    assert left == (
+        "file:///data/artifacts/lidar_preprocessing/v2/b/0000/"
+        "sweeps/LIDAR_LEFT/000042_world.npz"
+    )
+    assert right != left
+    assert artifact_store.static_mask_path("b", "0000", "LIDAR_LEFT", 42).endswith(
+        "/sweeps/LIDAR_LEFT/000042_static_mask.npy"
+    )
+
+
+def test_lidar_publication_metadata_lives_in_v2_tree(tmp_path, monkeypatch):
+    versions = tmp_path / "component_versions.yaml"
+    versions.write_text("lidar_preprocessing: v2\n", encoding="utf-8")
+    monkeypatch.setenv("COMPONENT_VERSIONS_PATH", str(versions))
+
+    assert artifact_store.lidar_completion_path("b", "0000").endswith(
+        "/lidar_preprocessing/v2/b/0000/completion.json"
+    )
+    assert artifact_store.lidar_bag_manifest_path("b").endswith(
+        "/lidar_preprocessing/v2/b/manifest.json"
+    )
+
+
+def test_lidar_staging_redirect_only_changes_local_v2_artifacts(
+    tmp_path, monkeypatch
+):
+    versions = tmp_path / "component_versions.yaml"
+    versions.write_text("lidar_preprocessing: v2\n", encoding="utf-8")
+    monkeypatch.setenv("COMPONENT_VERSIONS_PATH", str(versions))
+    monkeypatch.setenv("WATO_LIDAR_STAGING_ROOT", str(tmp_path / "stage"))
+
+    staged = artifact_store.local_path(
+        artifact_store.ground_path("b", "0000")
+    )
+    raw = artifact_store.local_path(artifact_store.poses_path("b", "0000"))
+
+    assert staged == str(tmp_path / "stage" / "b" / "0000" / "ground.npz")
+    assert raw == "/data/artifacts/raw/b/chunks/0000/poses.parquet"
+
+
+@pytest.mark.parametrize("lidar_id", ["../escape", "lidar/left", "", "left lidar"])
+def test_processed_sweep_paths_reject_unsafe_lidar_ids(lidar_id):
+    with pytest.raises(ValueError, match="lidar_id"):
+        artifact_store.lidar_world_path("b", "0000", lidar_id, 0)
+
+
 def test_local_path_resolves_file_uri():
     assert artifact_store.local_path("file:///foo/bar") == "/foo/bar"
 

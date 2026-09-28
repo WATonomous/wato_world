@@ -9,9 +9,13 @@ library (e.g. PIL, pyarrow's local writer).
 from __future__ import annotations
 
 import os
+import re
 from urllib.parse import urlparse
 
-from wato_common.storage import artifact_root
+from wato_common.storage import artifact_root, artifact_uri
+
+
+_SAFE_LIDAR_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def _join(*parts: str) -> str:
@@ -92,70 +96,120 @@ def manifest_path(bag_id: str, chunk_id: str) -> str:
 # ---------------------------------------------------------------------------
 # lidar_preprocessing artifacts.
 # ---------------------------------------------------------------------------
+def _validated_lidar_id(lidar_id: str) -> str:
+    if not _SAFE_LIDAR_ID.fullmatch(lidar_id):
+        raise ValueError(
+            "lidar_id must match [A-Za-z0-9_.-]+; "
+            f"got {lidar_id!r}"
+        )
+    return lidar_id
+
+
+def lidar_preprocessing_root(bag_id: str) -> str:
+    return artifact_uri("lidar_preprocessing", bag_id)
+
+
+def lidar_chunk_root(bag_id: str, chunk_id: str) -> str:
+    return artifact_uri("lidar_preprocessing", bag_id, chunk_id)
+
+
 def lidar_proc_dir(bag_id: str, chunk_id: str) -> str:
-    return _join(chunk_root(bag_id, chunk_id), "lidar_proc")
+    return _join(lidar_chunk_root(bag_id, chunk_id), "sweeps")
 
 
-def lidar_world_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
-    return _join(lidar_proc_dir(bag_id, chunk_id), f"{sweep_id:06d}_world.npz")
+def lidar_sweep_proc_dir(bag_id: str, chunk_id: str, lidar_id: str) -> str:
+    return _join(lidar_proc_dir(bag_id, chunk_id), _validated_lidar_id(lidar_id))
 
 
-def dynamic_mask_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
-    return _join(lidar_proc_dir(bag_id, chunk_id), f"{sweep_id:06d}_dynamic_mask.npy")
+def lidar_world_path(bag_id: str, chunk_id: str, lidar_id: str, sweep_id: int) -> str:
+    return _join(
+        lidar_sweep_proc_dir(bag_id, chunk_id, lidar_id),
+        f"{sweep_id:06d}_world.npz",
+    )
 
 
-def mf_mos_mask_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
+def dynamic_mask_path(bag_id: str, chunk_id: str, lidar_id: str, sweep_id: int) -> str:
+    return _join(
+        lidar_sweep_proc_dir(bag_id, chunk_id, lidar_id),
+        f"{sweep_id:06d}_dynamic_mask.npy",
+    )
+
+
+def static_mask_path(bag_id: str, chunk_id: str, lidar_id: str, sweep_id: int) -> str:
+    return _join(
+        lidar_sweep_proc_dir(bag_id, chunk_id, lidar_id),
+        f"{sweep_id:06d}_static_mask.npy",
+    )
+
+
+def mf_mos_mask_path(bag_id: str, chunk_id: str, lidar_id: str, sweep_id: int) -> str:
     """Per-sweep MF-MOS moving-object mask.  Shape (n_raw,) bool, True = moving.
 
     Length matches the raw lidar NPZ (before deskew's nonfinite filter), so
     consumers loading the raw NPZ get index-aligned arrays.
     """
-    return _join(lidar_proc_dir(bag_id, chunk_id), f"{sweep_id:06d}_mf_mos_mask.npy")
+    return _join(
+        lidar_sweep_proc_dir(bag_id, chunk_id, lidar_id),
+        f"{sweep_id:06d}_mf_mos_mask.npy",
+    )
 
 
-def mf_mos_score_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
+def mf_mos_score_path(bag_id: str, chunk_id: str, lidar_id: str, sweep_id: int) -> str:
     """Per-sweep MF-MOS per-point moving probability.  Shape (n_raw,) float32.
 
     Only written when cfg.mf_mos.save_scores is True.
     """
-    return _join(lidar_proc_dir(bag_id, chunk_id), f"{sweep_id:06d}_mf_mos_score.npy")
+    return _join(
+        lidar_sweep_proc_dir(bag_id, chunk_id, lidar_id),
+        f"{sweep_id:06d}_mf_mos_score.npy",
+    )
 
 
 def lidar_proc_index_path(bag_id: str, chunk_id: str) -> str:
-    return _join(chunk_root(bag_id, chunk_id), "lidar_proc_index.parquet")
+    return _join(lidar_chunk_root(bag_id, chunk_id), "lidar_proc_index.parquet")
 
 
 def lidar_proc_summary_path(bag_id: str, chunk_id: str) -> str:
-    return _join(chunk_root(bag_id, chunk_id), "lidar_proc_summary.parquet")
+    return _join(lidar_chunk_root(bag_id, chunk_id), "lidar_proc_summary.parquet")
+
+
+def lidar_completion_path(bag_id: str, chunk_id: str) -> str:
+    """Publication record written last after a complete chunk is promoted."""
+    return _join(lidar_chunk_root(bag_id, chunk_id), "completion.json")
+
+
+def lidar_bag_manifest_path(bag_id: str) -> str:
+    """Bag-level publication record for a complete full-bag run."""
+    return _join(lidar_preprocessing_root(bag_id), "manifest.json")
 
 
 def static_map_path(bag_id: str, chunk_id: str) -> str:
-    return _join(chunk_root(bag_id, chunk_id), "static_map.npz")
+    return _join(lidar_chunk_root(bag_id, chunk_id), "static_map.npz")
 
 
 def dynamic_map_path(bag_id: str, chunk_id: str) -> str:
-    return _join(chunk_root(bag_id, chunk_id), "dynamic_map.npz")
+    return _join(lidar_chunk_root(bag_id, chunk_id), "dynamic_map.npz")
 
 
 def ground_path(bag_id: str, chunk_id: str) -> str:
-    return _join(chunk_root(bag_id, chunk_id), "ground.npz")
+    return _join(lidar_chunk_root(bag_id, chunk_id), "ground.npz")
 
 
 def global_static_map_path(bag_id: str) -> str:
-    return _join(bag_root(bag_id), "global_static_map.npz")
+    return _join(lidar_preprocessing_root(bag_id), "global_static_map.npz")
 
 
 def global_ground_path(bag_id: str) -> str:
-    return _join(bag_root(bag_id), "global_ground.npz")
+    return _join(lidar_preprocessing_root(bag_id), "global_ground.npz")
 
 
 def voxel_occupancy_path(bag_id: str, chunk_id: str) -> str:
-    return _join(chunk_root(bag_id, chunk_id), "voxel_occupancy.npz")
+    return _join(lidar_chunk_root(bag_id, chunk_id), "voxel_occupancy.npz")
 
 
 def voxel_occupancy_frame_path(bag_id: str, chunk_id: str, frame_id: int) -> str:
     return _join(
-        chunk_root(bag_id, chunk_id), f"voxel_occupancy_frame_{frame_id:04d}.npz"
+        lidar_chunk_root(bag_id, chunk_id), f"voxel_occupancy_frame_{frame_id:04d}.npz"
     )
 
 
@@ -168,7 +222,7 @@ def voxel_diag_path(bag_id: str, chunk_id: str) -> str:
     voxel's p_occ to triage threshold-edge leakage vs deep-carving leakage.
     Only written when cfg.save_voxel_diagnostics is True.
     """
-    return _join(chunk_root(bag_id, chunk_id), "voxel_diag.npz")
+    return _join(lidar_chunk_root(bag_id, chunk_id), "voxel_diag.npz")
 
 
 # ---------------------------------------------------------------------------
@@ -223,9 +277,16 @@ def semantic_lifting_dir(bag_id: str, chunk_id: str) -> str:
     return _join(chunk_root(bag_id, chunk_id), "semantic_lifting")
 
 
-def lifted_labels_path(bag_id: str, chunk_id: str, sweep_id: str) -> str:
+def lifted_labels_path(
+    bag_id: str, chunk_id: str, lidar_id: str, sweep_id: int
+) -> str:
     """Per-sweep npz: point_idx, class_id, instance_id, confidence, etc."""
-    return _join(semantic_lifting_dir(bag_id, chunk_id), "lifted_labels", f"{sweep_id}.npz")
+    return _join(
+        semantic_lifting_dir(bag_id, chunk_id),
+        "lifted_labels",
+        _validated_lidar_id(lidar_id),
+        f"{sweep_id:06d}.npz",
+    )
 
 
 def lifted_stats_path(bag_id: str, chunk_id: str) -> str:
@@ -255,7 +316,13 @@ def local_path(uri: str) -> str:
     """Resolve a file:// URI to a real filesystem path.  Errors on remote URIs."""
     parsed = urlparse(uri)
     if parsed.scheme in ("", "file"):
-        return parsed.path or uri
+        path = parsed.path or uri
+        staging_root = os.environ.get("WATO_LIDAR_STAGING_ROOT")
+        marker = "/lidar_preprocessing/v2/"
+        if staging_root and marker in path:
+            relative = path.split(marker, maxsplit=1)[1]
+            return os.path.join(staging_root, relative)
+        return path
     raise ValueError(f"local_path() called on non-local URI: {uri}")
 
 

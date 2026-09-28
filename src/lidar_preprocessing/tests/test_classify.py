@@ -21,6 +21,7 @@ from wato_common.artifact_store import (
     local_path,
     mf_mos_mask_path,
     static_map_path,
+    static_mask_path,
     voxel_occupancy_path,
 )
 from wato_common.io.parquet_io import write_table
@@ -47,7 +48,7 @@ def _write_world_sweep(
     origin: np.ndarray | None = None,
     ground_mask: np.ndarray | None = None,
 ):
-    path = local_path(lidar_world_path(bag_id, chunk_id, sweep_id))
+    path = local_path(lidar_world_path(bag_id, chunk_id, "LIDAR_TOP", sweep_id))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     kwargs = {"x": xyz[:, 0], "y": xyz[:, 1], "z": xyz[:, 2]}
     if origin is not None:
@@ -76,7 +77,7 @@ def _proc_row(
         "n_points_total": n,
         "n_points_static": 0,
         "n_points_dynamic": 0,
-        "world_path": lidar_world_path(bag_id, chunk_id, sweep_id),
+        "world_path": lidar_world_path(bag_id, chunk_id, "LIDAR_TOP", sweep_id),
         "dynamic_mask_path": "",
         "has_intensity": has_intensity,
         "deskewed": True,
@@ -121,7 +122,7 @@ def test_all_sweeps_present_classified_static(tmp_env):
     assert result.n_static == n_sweeps * 3
 
     for i in range(n_sweeps):
-        mask = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, i)))
+        mask = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, "LIDAR_TOP", i)))
         assert not mask.any(), f"sweep {i}: expected all static"
 
     static_data = np.load(local_path(static_map_path(bag_id, chunk_id)))
@@ -151,7 +152,7 @@ def test_single_sweep_point_then_carved_is_dynamic(tmp_env):
 
     result = process_chunk(ComponentConfig(), bag_id, chunk_id)
 
-    mask0 = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
+    mask0 = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, "LIDAR_TOP", 0)))
     assert mask0[0], "voxel carved by many later rays must be dynamic"
     assert result.n_dynamic >= 1
 
@@ -218,7 +219,7 @@ def test_intensity_backfilled_when_first_sweep_lacks_it(tmp_env):
     n_sweeps = 5
     pts = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
     for i in range(n_sweeps):
-        path = local_path(lidar_world_path(bag_id, chunk_id, i))
+        path = local_path(lidar_world_path(bag_id, chunk_id, "LIDAR_TOP", i))
         os.makedirs(os.path.dirname(path), exist_ok=True)
         kwargs = {
             "x": pts[:, 0],
@@ -329,7 +330,7 @@ def test_log_odds_free_only_voxel_not_dynamic(tmp_env):
     )
     process_chunk(cfg, bag_id, chunk_id)
 
-    mask1 = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 1)))
+    mask1 = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, "LIDAR_TOP", 1)))
     assert not mask1[0], "ground point in free-only voxel must not be dynamic"
 
 
@@ -411,9 +412,13 @@ def test_under_evidenced_with_hits_not_dynamic(tmp_env):
     assert result.n_static == 0, "under-evidenced voxel must not be static"
     assert result.n_dynamic == 0, "under-evidenced voxel WITH hits must not be dynamic"
 
-    mask = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
+    mask = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, "LIDAR_TOP", 0)))
     assert mask.shape == (1,)
     assert not mask[0]
+    static_mask = np.load(
+        local_path(static_mask_path(bag_id, chunk_id, "LIDAR_TOP", 0))
+    )
+    assert not static_mask[0], "unknown point must not be promoted to static"
 
 
 def test_skip_endpoint_isolated_ground_voxel_not_dynamic(tmp_env):
@@ -435,7 +440,7 @@ def test_skip_endpoint_isolated_ground_voxel_not_dynamic(tmp_env):
     )
     process_chunk(cfg, bag_id, chunk_id)
 
-    mask = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
+    mask = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, "LIDAR_TOP", 0)))
     assert not mask[0], "isolated ground voxel must not leak into dynamic"
     dyn = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
     assert dyn["xyz"].shape[0] == 0, "dynamic_map.npz must be empty"
@@ -461,7 +466,7 @@ def test_skip_ray_ground_not_dynamic(tmp_env):
     )
     process_chunk(cfg, bag_id, chunk_id)
 
-    mask = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
+    mask = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, "LIDAR_TOP", 0)))
     assert mask.shape == (2,), (
         f"mask length must match total world NPZ points (2), got {mask.shape[0]}"
     )
@@ -476,7 +481,7 @@ def test_skip_ray_ground_not_dynamic(tmp_env):
 def _write_mf_mos_mask(
     bag_id: str, chunk_id: str, sweep_id: int, mask: np.ndarray
 ) -> str:
-    uri = mf_mos_mask_path(bag_id, chunk_id, sweep_id)
+    uri = mf_mos_mask_path(bag_id, chunk_id, "LIDAR_TOP", sweep_id)
     path = local_path(uri)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     np.save(path, mask.astype(bool))
@@ -492,6 +497,7 @@ def _proc_row_mf_mos(
 ) -> dict:
     row = _proc_row(bag_id, chunk_id, sweep_id, xyz)
     row["mf_mos_mask_path"] = mf_mos_mask_uri
+    row["mf_mos_status"] = "ok" if mf_mos_mask_uri is not None else "not_requested"
     return row
 
 
@@ -554,13 +560,13 @@ def test_independent_mode_no_mf_mos_effect(tmp_env):
     assert result.n_dynamic == 0, "independent fusion must not apply MF-MOS masks"
 
 
-def test_union_fusion_must_not_reintroduce_ground_via_mf_mos(tmp_env):
-    """union fusion ORs the per-sweep MF-MOS mask in, then must re-apply the
-    ground filter so a co-voxel ground point isn't dragged into dynamic."""
+def test_union_fusion_preserves_explicit_dynamic_ground_until_ground_resolution(tmp_env):
+    """Classification persists explicit motion even for a ground candidate;
+    ground extraction owns the later dynamic veto."""
     bag_id, chunk_id = "bag_union_ground", "chunk0"
     xyz = np.array([[5.0, 0.0, 0.0], [5.0, 0.0, 0.05]])
     ground_mask = np.array([True, False])
-    mf_flags = np.array([False, True])
+    mf_flags = np.array([True, False])
 
     _write_world_sweep(
         bag_id, chunk_id, 0, xyz,
@@ -580,14 +586,13 @@ def test_union_fusion_must_not_reintroduce_ground_via_mf_mos(tmp_env):
 
     dyn = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
     is_ground_pt = np.all(np.isclose(dyn["xyz"], xyz[0]), axis=1)
-    assert not is_ground_pt.any(), "ground point must not appear in dynamic_map.npz"
-    mask = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
-    assert not mask[0], "ground point's dynamic-mask bit must be False under union"
+    assert is_ground_pt.any(), "explicitly moving ground candidate must remain dynamic"
+    mask = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, "LIDAR_TOP", 0)))
+    assert mask[0], "ground veto belongs to ground extraction, not classification"
 
 
-def test_mfmos_only_fusion_must_not_label_ground_dynamic(tmp_env):
-    """mfmos_only mode overwrites the mask with the MF-MOS mask; the ground
-    filter must be re-applied so a co-voxel ground point isn't flagged."""
+def test_mfmos_only_fusion_is_point_aligned_not_voxel_broadcast(tmp_env):
+    """A moving vote must not spread to an unflagged co-voxel point."""
     bag_id, chunk_id = "bag_mfonly_ground", "chunk0"
     xyz = np.array([[5.0, 0.0, 0.0], [5.0, 0.0, 0.05]])
     ground_mask = np.array([True, False])
@@ -612,8 +617,53 @@ def test_mfmos_only_fusion_must_not_label_ground_dynamic(tmp_env):
     dyn = np.load(local_path(dynamic_map_path(bag_id, chunk_id)))
     is_ground_pt = np.all(np.isclose(dyn["xyz"], xyz[0]), axis=1)
     assert not is_ground_pt.any(), (
-        "ground point must not appear in dynamic_map.npz under mfmos_only"
+        "unflagged co-voxel point must not inherit the MF-MOS vote"
     )
+
+
+def test_mfmos_only_all_false_success_clears_aw_dynamic(tmp_env):
+    bag_id, chunk_id = "bag_mfonly_all_false", "chunk0"
+    hit = np.array([[5.0, 0.0, 0.0]])
+    beyond = np.array([[10.0, 0.0, 0.0]])
+    origin = np.array([-1.0, 0.0, 0.0])
+    rows = []
+    for sid, xyz in enumerate([hit] + [beyond] * 12):
+        _write_world_sweep(bag_id, chunk_id, sid, xyz, origin=origin)
+        mf_uri = _write_mf_mos_mask(bag_id, chunk_id, sid, np.array([False]))
+        rows.append(_proc_row_mf_mos(bag_id, chunk_id, sid, xyz, mf_uri))
+    write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
+
+    result = process_chunk(
+        ComponentConfig(
+            min_observations=3,
+            min_occupied_hits=1,
+            mf_mos={"enabled": True, "fusion_mode": "mfmos_only"},
+        ),
+        bag_id,
+        chunk_id,
+    )
+
+    assert result.n_dynamic == 0
+    assert not np.load(
+        local_path(dynamic_mask_path(bag_id, chunk_id, "LIDAR_TOP", 0))
+    ).any()
+
+
+def test_mfmos_only_requires_ok_status_and_aligned_mask(tmp_env):
+    bag_id, chunk_id = "bag_mfonly_missing", "chunk0"
+    xyz = np.array([[5.0, 0.0, 0.0]])
+    _write_world_sweep(bag_id, chunk_id, 0, xyz, origin=_SENSOR)
+    row = _proc_row(bag_id, chunk_id, 0, xyz)
+    row["mf_mos_status"] = "error"
+    row["mf_mos_error"] = "inference failed"
+    write_table([row], PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id))
+
+    with pytest.raises(RuntimeError, match="mfmos_only.*LIDAR_TOP.*0"):
+        process_chunk(
+            ComponentConfig(mf_mos={"enabled": True, "fusion_mode": "mfmos_only"}),
+            bag_id,
+            chunk_id,
+        )
 
 
 def test_classify_raises_when_world_npz_missing_origin(tmp_env):
@@ -737,5 +787,5 @@ def test_min_occupied_hits_filters_below_threshold(tmp_env):
     assert not is_hit_pt.any(), (
         "voxel with n_hits=1 < min_occupied_hits=3 must be free-only, not dynamic"
     )
-    mask0 = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
+    mask0 = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, "LIDAR_TOP", 0)))
     assert not mask0[0]

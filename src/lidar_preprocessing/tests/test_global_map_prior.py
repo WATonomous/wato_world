@@ -48,7 +48,7 @@ def _write_world_sweep(
     *,
     origin: np.ndarray,
 ):
-    path = local_path(lidar_world_path(bag_id, chunk_id, sweep_id))
+    path = local_path(lidar_world_path(bag_id, chunk_id, "LIDAR_TOP", sweep_id))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     np.savez_compressed(
         path,
@@ -70,7 +70,7 @@ def _proc_row(bag_id: str, chunk_id: str, sweep_id: int, xyz: np.ndarray) -> dic
         "n_points_total": n,
         "n_points_static": 0,
         "n_points_dynamic": 0,
-        "world_path": lidar_world_path(bag_id, chunk_id, sweep_id),
+        "world_path": lidar_world_path(bag_id, chunk_id, "LIDAR_TOP", sweep_id),
         "dynamic_mask_path": "",
         "has_intensity": False,
         "deskewed": True,
@@ -318,7 +318,7 @@ def _write_world_sweep_with_ground(
     *,
     origin: np.ndarray,
 ) -> None:
-    path = local_path(lidar_world_path(bag_id, chunk_id, sweep_id))
+    path = local_path(lidar_world_path(bag_id, chunk_id, "LIDAR_TOP", sweep_id))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     np.savez_compressed(
         path,

@@ -14,13 +14,17 @@ from wato_common.artifact_store import (
     chunks_index_path,
     ensure_local_dir,
     ground_path,
+    global_ground_path,
+    global_static_map_path,
+    lidar_completion_path,
+    lidar_proc_index_path,
     lidar_proc_dir,
     lidar_sweep_path,
     lidar_sweeps_path,
     local_path,
     poses_path,
 )
-from wato_common.io.parquet_io import write_table
+from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.schemas import (
     CHUNK_SCHEMA,
     LIDAR_SWEEPS_SCHEMA,
@@ -124,6 +128,42 @@ def _write_chunks_index(bag_id: str, chunk_ids: list[str]):
     write_table(rows, CHUNK_SCHEMA, chunks_index_path(bag_id))
 
 
+def _bootstrap_three_sensor_chunk(bag_id: str, chunk_id: str):
+    _bootstrap_chunk(bag_id, chunk_id, sweep_id=7)
+    calib_path = local_path(calibration_path(bag_id))
+    with open(calib_path) as fh:
+        calib = json.load(fh)
+    calib["lidars"] = {
+        lidar_id: {"frame_id": lidar_id, "ego_T_lidar": np.eye(4).tolist()}
+        for lidar_id in ("CENTER", "LEFT", "RIGHT")
+    }
+    with open(calib_path, "w") as fh:
+        json.dump(calib, fh)
+
+    base = read_rows(lidar_sweeps_path(bag_id, chunk_id))[0]
+    rows = []
+    for lidar_id in ("CENTER", "LEFT", "RIGHT"):
+        raw_uri = lidar_sweep_path(bag_id, chunk_id, lidar_id, 7)
+        raw_path = local_path(raw_uri)
+        os.makedirs(os.path.dirname(raw_path), exist_ok=True)
+        np.savez_compressed(
+            raw_path,
+            x=np.array([1.0, 2.0], dtype=np.float32),
+            y=np.zeros(2, dtype=np.float32),
+            z=np.zeros(2, dtype=np.float32),
+        )
+        rows.append(
+            {
+                **base,
+                "lidar_id": lidar_id,
+                "lidar_path": raw_uri,
+                "header_timestamp_ns": 0,
+                "record_timestamp_ns": 0,
+            }
+        )
+    write_table(rows, LIDAR_SWEEPS_SCHEMA, lidar_sweeps_path(bag_id, chunk_id))
+
+
 def test_validates_chunks_index(tmp_env):
     """No chunks index for the bag → FileNotFoundError with a helpful message."""
     cfg = ComponentConfig()
@@ -132,17 +172,16 @@ def test_validates_chunks_index(tmp_env):
 
 
 def test_skips_completed_chunks(tmp_env):
-    """If ground.npz exists, the chunk is skipped and deskew not invoked."""
+    """Only an exact completion record allows a chunk to be skipped."""
     bag_id = "bag_skip"
     _write_chunks_index(bag_id, ["chunk0"])
-    # Pretend chunk0 was already processed.
-    out = local_path(ground_path(bag_id, "chunk0"))
-    os.makedirs(os.path.dirname(out), exist_ok=True)
-    np.savez_compressed(out, ground_xyz=np.empty((0, 3)))
+    _bootstrap_chunk(bag_id, "chunk0")
 
     cfg = ComponentConfig()
+    pipeline.run(cfg, bag_id=bag_id, chunk_id="chunk0", two_pass=False)
+    assert os.path.exists(local_path(lidar_completion_path(bag_id, "chunk0")))
     with mock.patch.object(pipeline.deskew, "process_chunk") as mock_deskew:
-        pipeline.run(cfg, bag_id=bag_id)
+        pipeline.run(cfg, bag_id=bag_id, chunk_id="chunk0", two_pass=False)
     mock_deskew.assert_not_called()
 
 
@@ -163,18 +202,46 @@ def test_force_flag_overrides_skip(tmp_env):
     assert "height_grid" in data
 
 
-def test_isolates_chunk_failures(tmp_env):
-    """One chunk failing must not stop subsequent chunks."""
+def test_failed_run_does_not_publish_successful_chunks(tmp_env):
+    """All chunks are attempted, but any failure prevents every promotion."""
     bag_id = "bag_iso"
     _write_chunks_index(bag_id, ["chunk_bad", "chunk_good"])
     # Bootstrap only chunk_good — chunk_bad has no calibration/poses, so deskew raises.
     _bootstrap_chunk(bag_id, "chunk_good")
 
     cfg = ComponentConfig()
-    pipeline.run(cfg, bag_id=bag_id)
-    # chunk_good produced ground.npz; chunk_bad did not.
-    assert os.path.exists(local_path(ground_path(bag_id, "chunk_good")))
+    with pytest.raises(RuntimeError, match="1/2 chunks failed"):
+        pipeline.run(cfg, bag_id=bag_id, two_pass=False)
+    # chunk_good completed in staging, but none of the staged run was published.
+    assert not os.path.exists(local_path(ground_path(bag_id, "chunk_good")))
     assert not os.path.exists(local_path(ground_path(bag_id, "chunk_bad")))
+
+
+def test_failed_staged_rerun_preserves_existing_publication(tmp_env):
+    bag_id = "bag_preserve"
+    _write_chunks_index(bag_id, ["chunk0"])
+    _bootstrap_chunk(bag_id, "chunk0")
+    cfg = ComponentConfig()
+    pipeline.run(cfg, bag_id=bag_id, chunk_id="chunk0", two_pass=False)
+
+    ground_file = local_path(ground_path(bag_id, "chunk0"))
+    completion_file = local_path(lidar_completion_path(bag_id, "chunk0"))
+    old_ground = open(ground_file, "rb").read()
+    old_completion = open(completion_file, "rb").read()
+
+    with mock.patch.object(
+        pipeline.ground, "process_chunk", side_effect=RuntimeError("ground failed")
+    ), pytest.raises(RuntimeError, match="1/1 chunks failed"):
+        pipeline.run(
+            cfg,
+            bag_id=bag_id,
+            chunk_id="chunk0",
+            force=True,
+            two_pass=False,
+        )
+
+    assert open(ground_file, "rb").read() == old_ground
+    assert open(completion_file, "rb").read() == old_completion
 
 
 def test_all_failures_raise(tmp_env):
@@ -184,8 +251,8 @@ def test_all_failures_raise(tmp_env):
     # No calibration / poses written → deskew will fail.
 
     cfg = ComponentConfig()
-    with pytest.raises(RuntimeError, match="all 1 chunks failed"):
-        pipeline.run(cfg, bag_id=bag_id)
+    with pytest.raises(RuntimeError, match="1/1 chunks failed"):
+        pipeline.run(cfg, bag_id=bag_id, two_pass=False)
 
 
 def test_parallel_workers(tmp_env):
@@ -248,6 +315,79 @@ def test_chunk_summary_written(tmp_env):
     assert row["cache_auto_disabled"] is False
     # No Patchwork++ in tests → ground status flags it.
     assert row["ground_status"] in ("ok", "skipped_no_ground_mask", "empty")
+
+
+def test_pass_two_regenerates_ground_and_summary(tmp_env):
+    bag_id = "bag_pass2_regen"
+    _write_chunks_index(bag_id, ["chunk0"])
+    _bootstrap_chunk(bag_id, "chunk0")
+    cfg = ComponentConfig()
+
+    with mock.patch.object(
+        pipeline.ground,
+        "process_chunk",
+        wraps=pipeline.ground.process_chunk,
+    ) as ground_step, mock.patch.object(
+        pipeline,
+        "_write_chunk_summary",
+        wraps=pipeline._write_chunk_summary,
+    ) as summary_step:
+        pipeline.run(cfg, bag_id=bag_id, chunk_id="chunk0", two_pass=True)
+
+    assert ground_step.call_count == 2
+    assert summary_step.call_count == 2
+
+
+def test_chunk_local_two_pass_does_not_publish_bag_globals(tmp_env):
+    bag_id = "bag_local_prior"
+    _write_chunks_index(bag_id, ["chunk0", "chunk1"])
+    _bootstrap_chunk(bag_id, "chunk0")
+    cfg = ComponentConfig()
+
+    pipeline.run(cfg, bag_id=bag_id, chunk_id="chunk0", two_pass=True)
+
+    assert not os.path.exists(local_path(global_static_map_path(bag_id)))
+    assert not os.path.exists(local_path(global_ground_path(bag_id)))
+    with open(local_path(lidar_completion_path(bag_id, "chunk0"))) as fh:
+        completion = json.load(fh)
+    assert completion["mode"] == "two_pass_local"
+
+
+def test_three_sensor_duplicate_sweep_ids_survive_canonical_grouping(tmp_env):
+    bag_id = "bag_three_sensor"
+    _write_chunks_index(bag_id, ["chunk0"])
+    _bootstrap_three_sensor_chunk(bag_id, "chunk0")
+    cfg = ComponentConfig.model_validate(
+        {"frame_sync": {"canonical_lidar": "CENTER", "tolerance_ms": 25.0}}
+    )
+
+    pipeline.run(cfg, bag_id=bag_id, chunk_id="chunk0", two_pass=False)
+
+    rows = read_rows(lidar_proc_index_path(bag_id, "chunk0"))
+    assert {(row["lidar_id"], row["sweep_id"]) for row in rows} == {
+        ("CENTER", 7),
+        ("LEFT", 7),
+        ("RIGHT", 7),
+    }
+    assert {row["frame_id"] for row in rows} == {0}
+    assert len({row["world_path"] for row in rows}) == 3
+    with open(local_path(lidar_completion_path(bag_id, "chunk0"))) as fh:
+        completion = json.load(fh)
+    assert completion["expected_composite_sweeps"] == 3
+    assert completion["completed_composite_sweeps"] == 3
+
+
+def test_validation_rejects_missing_point_aligned_mask(tmp_env):
+    bag_id = "bag_validate_masks"
+    _write_chunks_index(bag_id, ["chunk0"])
+    _bootstrap_chunk(bag_id, "chunk0")
+    cfg = ComponentConfig()
+    pipeline.run(cfg, bag_id=bag_id, chunk_id="chunk0", two_pass=False)
+    row = read_rows(lidar_proc_index_path(bag_id, "chunk0"))[0]
+    os.remove(local_path(row["static_mask_path"]))
+
+    with pytest.raises(RuntimeError, match="static_mask_path"):
+        pipeline._validate_staged_chunk(bag_id, "chunk0")
 
 
 def test_cache_auto_disable_logged_in_summary(tmp_env, monkeypatch):

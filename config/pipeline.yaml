@@ -10,7 +10,7 @@ semantic_lifting:
   upstream_versions:
     ingest: v1
     perception_2d: v1
-    lidar_preprocessing: v1
+    lidar_preprocessing: v2
 
 proposal_generation:
   lidar_detectors:
@@ -26,7 +26,7 @@ proposal_generation:
   upstream_versions:
     ingest: v1
     perception_2d: v1
-    lidar_preprocessing: v1
+    lidar_preprocessing: v2
 
 tracking:
   kalman_motion_model:
@@ -57,7 +57,7 @@ label_refinement:
     train_min_confidence: 0.85
   upstream_versions:
     perception_2d: v1
-    lidar_preprocessing: v1
+    lidar_preprocessing: v2
     tracking: v1
 
 open_vocab_discovery:
@@ -65,7 +65,7 @@ open_vocab_discovery:
   min_persistence_frames: 10
   upstream_versions:
     perception_2d: v1
-    lidar_preprocessing: v1
+    lidar_preprocessing: v2
 
 student_training:
   architecture: bevfusion

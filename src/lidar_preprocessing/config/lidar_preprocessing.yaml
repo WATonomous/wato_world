@@ -19,6 +19,36 @@ lidar_preprocessing:
   sensor_model:
     profile: nuscenes
 
+  # Native multi-LiDAR contract. Every physical sweep resolves one profile;
+  # sensor-specific overrides belong in lidar_profiles keyed by the exact,
+  # case-sensitive lidar_id. This default covers single-LiDAR NuScenes bags.
+  default_lidar_profile:
+    sensor_model:
+      profile: nuscenes
+    lidar_sweep_duration_ms: 50.0
+    point_time_unit: seconds
+    patchwork_sensor_height: 1.8
+    mf_mos:
+      enabled: true
+      fusion_mode: mfmos_only
+      range_image_h: 32
+      range_image_w: 1024
+      fov_up_deg: 10.0
+      fov_down_deg: -30.0
+      min_range_m: 2.0
+      max_range_m: 50.0
+      intensity_scale: 255.0
+      occlusion_range_tol_m: 1.0
+
+  # Example heterogeneous override (disabled here):
+  # lidar_profiles:
+  #   lidar_cc:
+  #     sensor_model: {profile: velodyne_vlp}
+  #     lidar_sweep_duration_ms: 100.0
+  #     point_time_unit: seconds
+  #     patchwork_sensor_height: 1.8
+  #     mf_mos: {enabled: true, fusion_mode: union, range_image_h: 32}
+
   # ====================================================================
   # Step A — deskew (rolling-shutter motion compensation).
   # ====================================================================

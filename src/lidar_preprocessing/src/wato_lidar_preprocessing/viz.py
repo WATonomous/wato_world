@@ -35,6 +35,37 @@ _STATIC_CONTEXT_RGB = [0.30, 0.30, 0.30]  # gray (faint backdrop)
 _EGO_RGB = [1.00, 0.20, 0.85]  # magenta
 
 
+def resolve_sweep_lidar_id(
+    bag_id: str,
+    chunk_id: str,
+    sweep_id: int,
+    lidar_id: str | None,
+) -> str:
+    """Resolve a physical sweep without ever treating sweep_id as identity."""
+    from wato_common.artifact_store import lidar_proc_index_path
+    from wato_common.io.parquet_io import read_rows
+
+    matches = {
+        str(row["lidar_id"])
+        for row in read_rows(lidar_proc_index_path(bag_id, chunk_id))
+        if int(row["sweep_id"]) == sweep_id
+    }
+    if lidar_id is not None:
+        if lidar_id not in matches:
+            raise ValueError(
+                f"sweep ({lidar_id!r}, {sweep_id}) not found in chunk {chunk_id!r}"
+            )
+        return lidar_id
+    if len(matches) == 1:
+        return next(iter(matches))
+    if not matches:
+        raise ValueError(f"sweep_id {sweep_id} not found in chunk {chunk_id!r}")
+    raise ValueError(
+        f"sweep_id {sweep_id} matches multiple LiDARs {sorted(matches)}; "
+        "pass --lidar-id"
+    )
+
+
 def _o3d():
     try:
         import open3d as o3d
@@ -493,9 +524,9 @@ def _has_dynamic_data(bag_id: str, chunk_id: str) -> bool:
     if dyn["xyz"].shape[0] == 0:
         log.warning("dynamic cloud empty for chunk %s — nothing to visualize", chunk_id)
         return False
-    if "sweep_id" not in dyn:
+    if "sweep_id" not in dyn or "lidar_id" not in dyn:
         log.warning(
-            "dynamic_map.npz for chunk %s has no sweep_id field — "
+            "dynamic_map.npz for chunk %s lacks composite sweep provenance — "
             "cannot slider-scrub; opening aggregated view instead",
             chunk_id,
         )
@@ -517,27 +548,41 @@ def _run_sweep_slider(bag_id: str, chunk_id: str) -> None:
     dyn = load_dynamic_map(bag_id, chunk_id)
     xyz = dyn["xyz"]
     sweep_id_arr = dyn["sweep_id"].astype(np.int64)
+    lidar_id_arr = dyn["lidar_id"].astype(str)
     intensity_arr = dyn.get("intensity")
 
-    # Sort by sweep_id so per-sweep slices are contiguous (boolean masking
-    # every slider tick is too slow for big chunks).
-    order = np.argsort(sweep_id_arr, kind="stable")
+    # Sort by composite physical-sweep identity so duplicate local sweep IDs
+    # remain separate contiguous slider entries.
+    order = np.lexsort((lidar_id_arr, sweep_id_arr))
     xyz = xyz[order]
     sweep_id_arr = sweep_id_arr[order]
+    lidar_id_arr = lidar_id_arr[order]
     if intensity_arr is not None:
         intensity_arr = intensity_arr[order]
 
-    unique_sweeps, starts, counts = np.unique(
-        sweep_id_arr, return_index=True, return_counts=True
+    boundaries = np.flatnonzero(
+        np.r_[
+            True,
+            (sweep_id_arr[1:] != sweep_id_arr[:-1])
+            | (lidar_id_arr[1:] != lidar_id_arr[:-1]),
+        ]
     )
-    sweep_min = int(unique_sweeps.min())
-    sweep_max = int(unique_sweeps.max())
-    sweep_slices: dict[int, tuple[int, int]] = {
-        int(s): (int(st), int(st + c))
-        for s, st, c in zip(unique_sweeps, starts, counts)
+    starts = boundaries
+    ends = np.r_[boundaries[1:], len(sweep_id_arr)]
+    identities = [
+        (str(lidar_id_arr[start]), int(sweep_id_arr[start])) for start in starts
+    ]
+    sweep_min = 0
+    sweep_max = len(identities) - 1
+    sweep_slices = {
+        idx: (int(start), int(end))
+        for idx, (start, end) in enumerate(zip(starts, ends))
     }
+    group_ids = np.concatenate(
+        [np.full(end - start, idx) for idx, (start, end) in enumerate(zip(starts, ends))]
+    )
     # Precompute turbo colors so cumulative mode doesn't recompute per tick.
-    sweep_colors_all = _value_colors(sweep_id_arr.astype(np.float64), "turbo")
+    sweep_colors_all = _value_colors(group_ids.astype(np.float64), "turbo")
 
     # Load voxel_diag once at viewer open so color-mode switches are O(1)
     # lookups. None → diag-based color modes stay disabled.
@@ -666,25 +711,15 @@ def _run_sweep_slider(bag_id: str, chunk_id: str) -> None:
             lo, hi = sweep_slices[sid]
             return xyz[lo:hi], _slice_color(color_by, lo, hi)
         if mode == "cumulative":
-            idx = int(np.searchsorted(unique_sweeps, sid, side="right"))
-            if idx == 0:
-                return np.zeros((0, 3)), None
-            last_sid = int(unique_sweeps[idx - 1])
-            _, hi = sweep_slices[last_sid]
+            _, hi = sweep_slices[sid]
             # Default to sweep_id gradient when the user picked "uniform".
             cb = color_by if color_by != "uniform" else "sweep_id"
             return xyz[:hi], _slice_color(cb, 0, hi)
         if mode == "trail":
             k = state["trail_k"]
-            lo_sid = sid - k + 1
-            idx_lo = int(np.searchsorted(unique_sweeps, lo_sid, side="left"))
-            idx_hi = int(np.searchsorted(unique_sweeps, sid, side="right"))
-            if idx_lo >= idx_hi:
-                return np.zeros((0, 3)), None
-            first_sid = int(unique_sweeps[idx_lo])
-            last_sid = int(unique_sweeps[idx_hi - 1])
+            first_sid = max(sweep_min, sid - k + 1)
             lo = sweep_slices[first_sid][0]
-            hi = sweep_slices[last_sid][1]
+            hi = sweep_slices[sid][1]
             cb = color_by if color_by != "uniform" else "sweep_id"
             return xyz[lo:hi], _slice_color(cb, lo, hi)
         return np.zeros((0, 3)), None
@@ -699,12 +734,19 @@ def _run_sweep_slider(bag_id: str, chunk_id: str) -> None:
             if cols is not None:
                 pcd.colors = o3d.utility.Vector3dVector(cols)
             scene_widget.scene.add_geometry("__dyn", pcd, dyn_mat)
-        count_label.text = f"sweep {state['sweep']} / {sweep_max}  ·  {len(pts):,} pts"
+        lid, local_sid = identities[state["sweep"]]
+        count_label.text = (
+            f"{lid} sweep {local_sid} · {state['sweep'] + 1}/{len(identities)} "
+            f"· {len(pts):,} pts"
+        )
 
     em = window.theme.font_size
     panel = gui.Vert(0.5 * em, gui.Margins(em, 0.5 * em, em, 0.5 * em))
 
-    count_label = gui.Label(f"sweep {sweep_min} / {sweep_max}  ·  ... pts")
+    first_lid, first_sid = identities[0]
+    count_label = gui.Label(
+        f"{first_lid} sweep {first_sid} · 1/{len(identities)} · ... pts"
+    )
     sweep_slider = gui.Slider(gui.Slider.INT)
     sweep_slider.set_limits(sweep_min, sweep_max)
     sweep_slider.int_value = sweep_min
@@ -966,12 +1008,14 @@ def _viz_chunk_dynamic_aggregated(bag_id: str, chunk_id: str) -> None:
 # Per-sweep views (opt-in via --sweep).
 
 
-def viz_stage_A(bag_id: str, chunk_id: str, sweep_id: int) -> None:
+def viz_stage_A(
+    bag_id: str, chunk_id: str, lidar_id: str, sweep_id: int
+) -> None:
     """Single deskewed sweep, height-colored, ground in green. Press G to toggle ground."""
     o3d = _o3d()
     from wato_lidar_preprocessing.io import load_world_sweep
 
-    data = load_world_sweep(bag_id, chunk_id, sweep_id)
+    data = load_world_sweep(bag_id, chunk_id, lidar_id, sweep_id)
     x, y, z = data["x"], data["y"], data["z"]
     xyz = np.column_stack([x, y, z])
     colors = _height_colors(z)
@@ -989,28 +1033,38 @@ def viz_stage_A(bag_id: str, chunk_id: str, sweep_id: int) -> None:
         )
         _show(
             {"non_ground": ng, "ground": g},
-            f"sweep {sweep_id} — deskewed (height-colored, green=ground)",
+            f"{lidar_id} sweep {sweep_id} — deskewed (height-colored, green=ground)",
             toggle_keys={"G": "ground"},
         )
     else:
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(xyz)
         pcd.colors = o3d.utility.Vector3dVector(colors)
-        _show({"pcd": pcd}, f"sweep {sweep_id} — deskewed (height-colored)")
+        _show(
+            {"pcd": pcd},
+            f"{lidar_id} sweep {sweep_id} — deskewed (height-colored)",
+        )
 
 
-def viz_stage_B_sweep(bag_id: str, chunk_id: str, sweep_id: int) -> None:
-    """Single sweep colored by static (blue) vs dynamic (red). S/D to toggle."""
+def viz_stage_B_sweep(
+    bag_id: str, chunk_id: str, lidar_id: str, sweep_id: int
+) -> None:
+    """Single sweep with explicit static/dynamic states; unknown is omitted."""
     o3d = _o3d()
-    from wato_lidar_preprocessing.io import load_dynamic_mask, load_world_sweep
+    from wato_lidar_preprocessing.io import (
+        load_dynamic_mask,
+        load_static_mask,
+        load_world_sweep,
+    )
 
-    data = load_world_sweep(bag_id, chunk_id, sweep_id)
-    dynamic = load_dynamic_mask(bag_id, chunk_id, sweep_id)
+    data = load_world_sweep(bag_id, chunk_id, lidar_id, sweep_id)
+    dynamic = load_dynamic_mask(bag_id, chunk_id, lidar_id, sweep_id)
+    static = load_static_mask(bag_id, chunk_id, lidar_id, sweep_id)
     x, y, z = data["x"], data["y"], data["z"]
     xyz = np.column_stack([x, y, z])
 
     static_pcd = o3d.geometry.PointCloud()
-    static_pcd.points = o3d.utility.Vector3dVector(xyz[~dynamic])
+    static_pcd.points = o3d.utility.Vector3dVector(xyz[static])
     static_pcd.paint_uniform_color(_STATIC_RGB)
 
     dyn_pcd = o3d.geometry.PointCloud()
@@ -1018,8 +1072,12 @@ def viz_stage_B_sweep(bag_id: str, chunk_id: str, sweep_id: int) -> None:
     dyn_pcd.paint_uniform_color(_DYNAMIC_RGB)
 
     n_dyn = int(dynamic.sum())
-    n_static = len(xyz) - n_dyn
-    title = f"sweep {sweep_id} — static={n_static:,} (blue), dynamic={n_dyn:,} (red)"
+    n_static = int(static.sum())
+    n_unknown = len(xyz) - n_static - n_dyn
+    title = (
+        f"{lidar_id} sweep {sweep_id} — static={n_static:,} (blue), "
+        f"dynamic={n_dyn:,} (red), unknown={n_unknown:,} (hidden)"
+    )
     _show(
         {"static": static_pcd, "dynamic": dyn_pcd},
         title,
@@ -1097,6 +1155,7 @@ def viz_chunk(
     bag_id: str,
     chunk_id: str,
     sweep_id: int | None = None,
+    lidar_id: str | None = None,
     stage: str = "all",
 ) -> None:
     """Visualize a chunk.
@@ -1144,14 +1203,19 @@ def viz_chunk(
                 "stage A is per-sweep only — pass --sweep N to inspect a single deskewed sweep."
             )
     else:
+        resolved_lidar_id = resolve_sweep_lidar_id(
+            bag_id, chunk_id, sweep_id, lidar_id
+        )
         if do("A") and has_o3d:
             try:
-                viz_stage_A(bag_id, chunk_id, sweep_id)
+                viz_stage_A(bag_id, chunk_id, resolved_lidar_id, sweep_id)
             except Exception as exc:
                 log.warning("stage A failed for sweep %d: %s", sweep_id, exc)
         if do("B") and has_o3d:
             try:
-                viz_stage_B_sweep(bag_id, chunk_id, sweep_id)
+                viz_stage_B_sweep(
+                    bag_id, chunk_id, resolved_lidar_id, sweep_id
+                )
             except Exception as exc:
                 log.warning("stage B failed for sweep %d: %s", sweep_id, exc)
 

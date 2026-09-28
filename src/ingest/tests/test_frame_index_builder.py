@@ -113,6 +113,26 @@ def test_two_cameras_each_get_their_own_row():
     assert {r.cam_id for r in rows} == {"CAM_FRONT", "CAM_LEFT"}
 
 
+def test_frame_id_includes_lidar_for_duplicate_local_sweep_ids():
+    left = _sweep(0, 100_000_000)
+    left["lidar_id"] = "LIDAR_LEFT"
+    right = _sweep(0, 100_000_000)
+    right["lidar_id"] = "LIDAR_RIGHT"
+    rows = _build_rows(
+        bag_id="b",
+        chunk_id="0000",
+        sweeps=[left, right],
+        camera_frames=[_cam("CAM_FRONT", 0, 100_000_000)],
+        pose_samples=[_identity_pose_at(0)],
+        calib_uri="x",
+        max_cam_offset_ms=50.0,
+        max_pose_gap_ns=10_000_000_000,
+    )
+
+    assert len({row.frame_id for row in rows}) == 2
+    assert {row.lidar_id for row in rows} == {"LIDAR_LEFT", "LIDAR_RIGHT"}
+
+
 def test_pose_marked_invalid_when_no_samples_close_enough():
     sweeps = [_sweep(0, 100_000_000)]
     cams = [_cam("CAM_FRONT", 0, 100_000_000)]

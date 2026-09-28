@@ -23,6 +23,7 @@ from wato_common.artifact_store import (
     ensure_local_dir,
     lidar_proc_dir,
     lidar_proc_index_path,
+    lidar_sweep_proc_dir,
     lidar_sweeps_path,
     lidar_world_path,
     local_path,
@@ -373,8 +374,6 @@ def process_chunk(
     # rather than clamped to a stale pose. None = no frame_index → process all.
     pose_valid_sweep_ids = load_pose_valid_sweep_ids(bag_id, chunk_id)
 
-    unit_scale = cfg.point_time_scale_to_ns()
-
     sweep_rows = read_rows(lidar_sweeps_path(bag_id, chunk_id))
 
     lidar_ids = {r["lidar_id"] for r in sweep_rows if r.get("valid", True)}
@@ -385,11 +384,11 @@ def process_chunk(
         except (KeyError, ValueError) as exc:
             log.error("lidar %s: %s", lid, exc)
 
-    pw = _make_patchwork(cfg.patchwork, required=cfg.require_patchwork)
-
-    # Scan rotation direction is a fixed hardware property — read it from the
-    # datasheet sensor profile rather than probing azimuth signs per sweep.
-    rotation_dir = cfg.build_sensor_model().rotation_dir
+    profiles_by_id = {lid: cfg.profile_for(lid) for lid in lidar_ids}
+    pw_by_id = {
+        lid: _make_patchwork(cfg.patchwork_for(lid), required=cfg.require_patchwork)
+        for lid in lidar_ids
+    }
 
     results: list[DeskewResult] = []
     meta_rows: list[dict] = []
@@ -411,7 +410,10 @@ def process_chunk(
         # Honor ingest's per-sweep valid_pose: skip sweeps with no interpolatable
         # pose instead of clamping them to a stale one. Record an explicit
         # valid=False row so downstream distinguishes this from a missing sweep.
-        if pose_valid_sweep_ids is not None and sweep_id not in pose_valid_sweep_ids:
+        if (
+            pose_valid_sweep_ids is not None
+            and (lid, sweep_id) not in pose_valid_sweep_ids
+        ):
             meta_rows.append(
                 ProcessedSweepMeta(
                     bag_id=bag_id,
@@ -424,7 +426,7 @@ def process_chunk(
                     n_points_dynamic=0,
                     n_points_ground=0,
                     world_path="",
-                    dynamic_mask_path="",
+                    dynamic_mask_path=None,
                     has_intensity=False,
                     deskewed=False,
                     valid=False,
@@ -437,20 +439,21 @@ def process_chunk(
         has_pt = bool(row.get("has_point_time", False))
         raw_path = row["lidar_path"]
         ego_T_lidar = ego_T_lidar_by_id[lid]
+        profile = profiles_by_id[lid]
 
         try:
             arrays = _deskew_sweep(
                 raw_path=raw_path,
                 header_timestamp_ns=header_ts,
                 has_point_time=has_pt,
-                unit_scale=unit_scale,
+                unit_scale=profile.point_time_scale_to_ns(),
                 pose_samples=pose_samples,
                 ego_T_lidar=ego_T_lidar,
                 filter_nonfinite=cfg.filter_nonfinite_points,
-                pw=pw,
+                pw=pw_by_id[lid],
                 synthesize_per_point_times=cfg.synthesize_per_point_times,
-                sweep_duration_ns=cfg.lidar_sweep_duration_ms * 1_000_000.0,
-                rotation_dir=rotation_dir,
+                sweep_duration_ns=profile.lidar_sweep_duration_ms * 1_000_000.0,
+                rotation_dir=profile.build_sensor_model().rotation_dir,
                 allow_uncompensated_motion=cfg.allow_uncompensated_motion,
             )
         except Exception as exc:  # noqa: BLE001 — record failure, keep going
@@ -469,7 +472,7 @@ def process_chunk(
                     n_points_dynamic=0,
                     n_points_ground=0,
                     world_path="",
-                    dynamic_mask_path="",
+                    dynamic_mask_path=None,
                     has_intensity=False,
                     deskewed=False,
                     valid=False,
@@ -478,7 +481,8 @@ def process_chunk(
             )
             continue
 
-        out_uri = lidar_world_path(bag_id, chunk_id, sweep_id)
+        ensure_local_dir(lidar_sweep_proc_dir(bag_id, chunk_id, lid))
+        out_uri = lidar_world_path(bag_id, chunk_id, lid, sweep_id)
         np.savez_compressed(local_path(out_uri), **arrays)
 
         n = arrays["x"].shape[0]
@@ -512,9 +516,10 @@ def process_chunk(
             n_points_total=n,
             n_points_static=0,
             n_points_dynamic=0,
-            n_points_ground=n_ground,
+            n_points_ground_candidate=n_ground,
+            n_points_ground=0,
             world_path=out_uri,
-            dynamic_mask_path="",
+            dynamic_mask_path=None,
             has_intensity="intensity" in arrays,
             deskewed=has_pt,
             world_xmin=xmin,

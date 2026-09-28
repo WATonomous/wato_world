@@ -3,18 +3,16 @@
 Range-image-based deep MOS as an additional dynamic-point signal alongside
 the voxel classifier. Runs between deskew and classify.
 
-Outputs per sweep (when cfg.mf_mos.enabled):
-  <sweep_id:06d>_mf_mos_mask.npy   (n_raw,) bool   True == moving
-  <sweep_id:06d>_mf_mos_score.npy  (n_raw,) float32 [optional]
+Outputs per composite sweep (when its profile requests MF-MOS):
+  <lidar_id>/<sweep_id:06d>_mf_mos_mask.npy   (n_raw,) bool
+  <lidar_id>/<sweep_id:06d>_mf_mos_score.npy  (n_raw,) float32 [optional]
 
 Mask length matches the RAW sweep (before deskew's nonfinite filter) so
 consumers loading raw NPZs get index-aligned arrays.
 
-Skipped sweeps leave mf_mos_mask_path=None in the index. A sweep is skipped
-when deskew already flagged it invalid (valid=False — e.g. the start-of-bag
-window with no usable ego pose; MF-MOS defers to deskew rather than re-checking
-the pose gap itself), or for an empty sweep or inference error. enabled=False
-makes the whole step a no-op.
+Availability is explicit in mf_mos_status. Successful empty/all-false inference
+is ``ok``; unavailable pose, allowlist exclusion, invalid deskew, and inference
+errors keep a null path with distinct statuses.
 """
 
 from __future__ import annotations
@@ -30,6 +28,7 @@ from wato_common.artifact_store import (
     ensure_local_dir,
     lidar_proc_dir,
     lidar_proc_index_path,
+    lidar_sweep_proc_dir,
     lidar_sweeps_path,
     local_path,
     mf_mos_mask_path,
@@ -60,14 +59,13 @@ class MFMosResult:
     n_sweeps_skipped_inference_error: int = 0
     n_points_moving: int = 0
     n_points_total: int = 0
-    skip_reasons: list[tuple[int, str]] = field(default_factory=list)
+    skip_reasons: list[tuple[str, int, str]] = field(default_factory=list)
 
     @property
     def n_skipped(self) -> int:
         return (
             self.n_sweeps_skipped_invalid
             + self.n_sweeps_skipped_pose
-            + self.n_sweeps_skipped_empty
             + self.n_sweeps_skipped_inference_error
         )
 
@@ -79,25 +77,55 @@ def process_chunk(
 ) -> MFMosResult:
     """Run MF-MOS for every valid sweep in a chunk.
 
-    No-op when cfg.mf_mos.enabled is False.
+    Sensor request/fusion is resolved through ``profile_for(lidar_id)``.
     """
     params = cfg.mf_mos
-
-    if not params.enabled:
-        meta_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
-        n = sum(1 for r in meta_rows if r.get("valid", True) is not False)
-        return MFMosResult(n_sweeps_skipped_disabled=n)
-
     sweep_rows = read_rows(lidar_sweeps_path(bag_id, chunk_id))
     meta_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
-    meta_by_sid: dict[int, dict] = {int(r["sweep_id"]): r for r in meta_rows}
+    meta_by_key: dict[tuple[str, int], dict] = {
+        (str(r["lidar_id"]), int(r["sweep_id"])): r for r in meta_rows
+    }
+
+    requested_lidars = {
+        str(r["lidar_id"])
+        for r in sweep_rows
+        if r.get("valid", True) is not False
+        and cfg.profile_for(str(r["lidar_id"])).mf_mos.enabled
+    }
+    if not requested_lidars:
+        for meta in meta_rows:
+            meta["mf_mos_mask_path"] = None
+            meta["mf_mos_status"] = "not_requested"
+            meta["mf_mos_error"] = None
+        write_table(
+            meta_rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id)
+        )
+        n = sum(1 for r in meta_rows if r.get("valid", True) is not False)
+        return MFMosResult(n_sweeps_skipped_disabled=n)
 
     pose_samples = load_pose_samples(bag_id, chunk_id)
     if not pose_samples:
         log.warning(
             "chunk %s: no valid poses; MF-MOS skipped for entire chunk", chunk_id
         )
-        return MFMosResult()
+        result = MFMosResult()
+        for (lid, sid), meta in meta_by_key.items():
+            if lid in requested_lidars and meta.get("valid", True) is not False:
+                _record_meta(
+                    meta_by_key,
+                    lid,
+                    sid,
+                    status="skipped_pose",
+                    error="chunk has no valid poses",
+                )
+                result.n_sweeps_skipped_pose += 1
+                result.skip_reasons.append(
+                    (lid, sid, "chunk has no valid poses")
+                )
+        write_table(
+            meta_rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id)
+        )
+        return result
 
     # Cold-start fix: the residual sliding window resets per chunk, so the
     # first max(residual_steps) sweeps would otherwise get zero-padded
@@ -136,12 +164,14 @@ def process_chunk(
         if r.get("valid", True) is False:
             continue
         sid = int(r["sweep_id"])
-        meta = meta_by_sid.get(sid)
+        lid = str(r["lidar_id"])
+        meta = meta_by_key.get((lid, sid))
         if meta is not None and meta.get("valid", True) is False:
+            _record_meta(meta_by_key, lid, sid, status="skipped_invalid")
             skipped_invalid.append(sid)
             result.n_sweeps_skipped_invalid += 1
             result.skip_reasons.append(
-                (sid, meta.get("drop_reason") or "deskew marked sweep invalid")
+                (lid, sid, meta.get("drop_reason") or "deskew marked sweep invalid")
             )
             continue
         rows_by_lidar.setdefault(r["lidar_id"], []).append(r)
@@ -159,6 +189,18 @@ def process_chunk(
     max_k = max(params.residual_steps) if params.residual_steps else 0
 
     for lid, lid_rows in rows_by_lidar.items():
+        ensure_local_dir(lidar_sweep_proc_dir(bag_id, chunk_id, lid))
+        mf_profile = cfg.profile_for(lid).mf_mos
+        if not mf_profile.enabled:
+            for r in lid_rows:
+                _record_meta(
+                    meta_by_key,
+                    lid,
+                    int(r["sweep_id"]),
+                    status="not_requested",
+                )
+                result.n_sweeps_skipped_disabled += 1
+            continue
         # Allowlist filter must come BEFORE the calibration check: fov_up/down
         # and H/W are global, so running on a LiDAR with different mount
         # geometry would project into a non-KITTI-like range image and the
@@ -175,15 +217,29 @@ def process_chunk(
                 len(lid_rows),
             )
             for r in lid_rows:
+                _record_meta(
+                    meta_by_key,
+                    lid,
+                    int(r["sweep_id"]),
+                    status="skipped_allowlist",
+                )
                 result.n_sweeps_skipped_disabled += 1
             continue
 
         if lid not in ego_T_lidar_by_id:
             log.warning("lidar %s: no calibration; skipping MF-MOS for its sweeps", lid)
             for r in lid_rows:
+                sid = int(r["sweep_id"])
+                _record_meta(
+                    meta_by_key,
+                    lid,
+                    sid,
+                    status="error",
+                    error=f"no calibration for lidar {lid}",
+                )
                 result.n_sweeps_skipped_invalid += 1
                 result.skip_reasons.append(
-                    (int(r["sweep_id"]), f"no calibration for lidar {lid}")
+                    (lid, sid, f"no calibration for lidar {lid}")
                 )
             continue
 
@@ -232,23 +288,33 @@ def process_chunk(
                 log.warning(
                     "sweep %d: failed to load raw NPZ (%s); skipping MF-MOS", sid, exc
                 )
-                _record_meta_path(meta_by_sid, sid, None)
+                _record_meta(
+                    meta_by_key,
+                    lid,
+                    sid,
+                    status="error",
+                    error=f"raw load: {type(exc).__name__}: {exc}",
+                )
                 result.n_sweeps_skipped_invalid += 1
-                result.skip_reasons.append((sid, f"raw load: {exc}"))
+                result.skip_reasons.append((lid, sid, f"raw load: {exc}"))
                 continue
 
             if n_raw == 0:
                 np.save(
-                    local_path(mf_mos_mask_path(bag_id, chunk_id, sid)),
+                    local_path(mf_mos_mask_path(bag_id, chunk_id, lid, sid)),
                     np.zeros(0, dtype=bool),
                 )
                 if params.save_scores:
                     np.save(
-                        local_path(mf_mos_score_path(bag_id, chunk_id, sid)),
+                        local_path(mf_mos_score_path(bag_id, chunk_id, lid, sid)),
                         np.zeros(0, dtype=np.float32),
                     )
-                _record_meta_path(
-                    meta_by_sid, sid, mf_mos_mask_path(bag_id, chunk_id, sid)
+                _record_meta(
+                    meta_by_key,
+                    lid,
+                    sid,
+                    path=mf_mos_mask_path(bag_id, chunk_id, lid, sid),
+                    status="ok",
                 )
                 result.n_sweeps_skipped_empty += 1
                 past_window = (
@@ -266,32 +332,35 @@ def process_chunk(
             # KITTI remission is [0, 1]; NuScenes raw is [0, 255]. Rescale to
             # match training distribution — img_means/img_stds otherwise send
             # NuScenes intensity ~1000× out of range.
-            if intensity_cur is not None and params.intensity_scale != 1.0:
-                intensity_cur = intensity_cur / np.float32(params.intensity_scale)
+            if intensity_cur is not None and mf_profile.intensity_scale != 1.0:
+                intensity_cur = intensity_cur / np.float32(mf_profile.intensity_scale)
             n_finite = xyz_cur.shape[0]
 
             try:
                 pose_cur = _interpolate_pose(pose_samples, cur_ts, max_gap_ns)
             except _PoseGapError as exc:
-                log.warning("sweep %d: %s; MF-MOS writing zero mask", sid, exc)
-                _write_zero_mask(bag_id, chunk_id, sid, n_raw, params.save_scores)
-                _record_meta_path(
-                    meta_by_sid, sid, mf_mos_mask_path(bag_id, chunk_id, sid)
+                log.warning("sweep %d: %s; MF-MOS unavailable", sid, exc)
+                _record_meta(
+                    meta_by_key,
+                    lid,
+                    sid,
+                    status="skipped_pose",
+                    error=str(exc),
                 )
                 result.n_sweeps_skipped_pose += 1
-                result.skip_reasons.append((sid, str(exc)))
+                result.skip_reasons.append((lid, sid, str(exc)))
                 past_window = (past_window + [(cur_ts, xyz_cur)])[-max_k:]
                 continue
 
             range_img, pixel_to_point_idx, point_to_pixel = _range_project(
                 xyz_cur,
                 intensity_cur,
-                params.range_image_h,
-                params.range_image_w,
-                params.fov_up_deg,
-                params.fov_down_deg,
-                min_range_m=params.min_range_m,
-                max_range_m=params.max_range_m,
+                mf_profile.range_image_h,
+                mf_profile.range_image_w,
+                mf_profile.fov_up_deg,
+                mf_profile.fov_down_deg,
+                min_range_m=mf_profile.min_range_m,
+                max_range_m=mf_profile.max_range_m,
             )
 
             # One residual per configured step (zero image when unavailable).
@@ -301,7 +370,7 @@ def process_chunk(
                 if j < 0:
                     residuals.append(
                         np.zeros(
-                            (params.range_image_h, params.range_image_w),
+                            (mf_profile.range_image_h, mf_profile.range_image_w),
                             dtype=np.float32,
                         )
                     )
@@ -310,7 +379,7 @@ def process_chunk(
                 if abs(cur_ts - past_ts) > max_gap_ns or past_xyz.shape[0] == 0:
                     residuals.append(
                         np.zeros(
-                            (params.range_image_h, params.range_image_w),
+                            (mf_profile.range_image_h, mf_profile.range_image_w),
                             dtype=np.float32,
                         )
                     )
@@ -320,7 +389,7 @@ def process_chunk(
                 except _PoseGapError:
                     residuals.append(
                         np.zeros(
-                            (params.range_image_h, params.range_image_w),
+                            (mf_profile.range_image_h, mf_profile.range_image_w),
                             dtype=np.float32,
                         )
                     )
@@ -331,13 +400,13 @@ def process_chunk(
                         pose_cur,
                         pose_past,
                         ego_T_lidar,
-                        params.range_image_h,
-                        params.range_image_w,
-                        params.fov_up_deg,
-                        params.fov_down_deg,
+                        mf_profile.range_image_h,
+                        mf_profile.range_image_w,
+                        mf_profile.fov_up_deg,
+                        mf_profile.fov_down_deg,
                         range_img[0],
-                        min_range_m=params.min_range_m,
-                        max_range_m=params.max_range_m,
+                        min_range_m=mf_profile.min_range_m,
+                        max_range_m=mf_profile.max_range_m,
                     )
                 )
 
@@ -347,14 +416,19 @@ def process_chunk(
                 )  # (H, W) float32
             except Exception as exc:  # noqa: BLE001
                 log.exception(
-                    "sweep %d: MF-MOS inference failed; writing zero mask", sid
+                    "sweep %d: MF-MOS inference failed; mask unavailable", sid
                 )
-                _write_zero_mask(bag_id, chunk_id, sid, n_raw, params.save_scores)
-                _record_meta_path(
-                    meta_by_sid, sid, mf_mos_mask_path(bag_id, chunk_id, sid)
+                _record_meta(
+                    meta_by_key,
+                    lid,
+                    sid,
+                    status="error",
+                    error=f"infer: {type(exc).__name__}: {exc}",
                 )
                 result.n_sweeps_skipped_inference_error += 1
-                result.skip_reasons.append((sid, f"infer: {type(exc).__name__}: {exc}"))
+                result.skip_reasons.append(
+                    (lid, sid, f"infer: {type(exc).__name__}: {exc}")
+                )
                 past_window = (past_window + [(cur_ts, xyz_cur)])[-max_k:]
                 continue
 
@@ -369,7 +443,7 @@ def process_chunk(
                 n_finite,
                 point_ranges=point_ranges_cur,
                 pixel_range=range_img[0],
-                occlusion_range_tol_m=params.occlusion_range_tol_m,
+                occlusion_range_tol_m=mf_profile.occlusion_range_tol_m,
             )
 
             # Per-sweep spatial denoise: remove isolated single-sweep
@@ -390,7 +464,9 @@ def process_chunk(
                 full_mask.shape == (n_raw,)
             ), f"mf_mos mask len {full_mask.shape} != raw sweep len {n_raw} for sweep {sid}"
 
-            np.save(local_path(mf_mos_mask_path(bag_id, chunk_id, sid)), full_mask)
+            np.save(
+                local_path(mf_mos_mask_path(bag_id, chunk_id, lid, sid)), full_mask
+            )
 
             if params.save_scores:
                 mf_finite_scores = _unproject_scores(
@@ -399,17 +475,26 @@ def process_chunk(
                 full_scores = np.zeros(n_raw, dtype=np.float32)
                 full_scores[finite] = mf_finite_scores
                 np.save(
-                    local_path(mf_mos_score_path(bag_id, chunk_id, sid)), full_scores
+                    local_path(mf_mos_score_path(bag_id, chunk_id, lid, sid)),
+                    full_scores,
                 )
 
-            _record_meta_path(meta_by_sid, sid, mf_mos_mask_path(bag_id, chunk_id, sid))
+            _record_meta(
+                meta_by_key,
+                lid,
+                sid,
+                path=mf_mos_mask_path(bag_id, chunk_id, lid, sid),
+                status="ok",
+            )
             result.n_sweeps_processed += 1
             result.n_points_total += n_raw
             result.n_points_moving += int(full_mask.sum())
 
             past_window = (past_window + [(cur_ts, xyz_cur)])[-max_k:]
 
-    updated = [meta_by_sid[int(r["sweep_id"])] for r in meta_rows]
+    updated = [
+        meta_by_key[(str(r["lidar_id"]), int(r["sweep_id"]))] for r in meta_rows
+    ]
     write_table(
         updated, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id)
     )
@@ -852,32 +937,17 @@ def _interpolate_pose(
     return poses[0]
 
 
-def _write_zero_mask(
-    bag_id: str,
-    chunk_id: str,
+def _record_meta(
+    meta_by_key: dict[tuple[str, int], dict],
+    lidar_id: str,
     sweep_id: int,
-    n_raw: int,
-    save_scores: bool,
+    *,
+    status: str,
+    path: str | None = None,
+    error: str | None = None,
 ) -> None:
-    # Write a zero-LENGTH array (not zero-filled) to signal "skipped — no data"
-    # rather than "ran inference and found no movers."  load_mf_mos_world_mask
-    # treats length-0 as None so a skipped sweep is distinguishable from one
-    # that genuinely produced an all-False mask.
-    np.save(
-        local_path(mf_mos_mask_path(bag_id, chunk_id, sweep_id)),
-        np.zeros(0, dtype=bool),
-    )
-    if save_scores:
-        np.save(
-            local_path(mf_mos_score_path(bag_id, chunk_id, sweep_id)),
-            np.zeros(0, dtype=np.float32),
-        )
-
-
-def _record_meta_path(
-    meta_by_sid: dict[int, dict],
-    sweep_id: int,
-    path: str | None,
-) -> None:
-    if sweep_id in meta_by_sid:
-        meta_by_sid[sweep_id]["mf_mos_mask_path"] = path
+    meta = meta_by_key.get((lidar_id, sweep_id))
+    if meta is not None:
+        meta["mf_mos_mask_path"] = path
+        meta["mf_mos_status"] = status
+        meta["mf_mos_error"] = error
