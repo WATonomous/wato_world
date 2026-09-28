@@ -47,6 +47,10 @@ as a loose `.pt`, and DINOv2 into the torch.hub cache. The container points
 **2. Run on a bag** — `ingest` and `lidar_preprocessing` must have run first
 (perception_2d reads `frame_index`, calibration, and static LiDAR points):
 
+Depth alignment loads physical sweeps by `(lidar_id, sweep_id)` and reads the
+persisted `static_mask_path` directly. It never treats `~dynamic_mask` as
+static: unknown and ground-candidate points are not confident depth anchors.
+
 ```bash
 ./watod run perception_2d run --bag <bag_id>            # all chunks
 ./watod run perception_2d run --bag <bag_id> --chunk <chunk_id>

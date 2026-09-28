@@ -21,6 +21,7 @@ def _frame(seq: int) -> CameraFrameInfo:
         frame_id=f"f{seq}",
         bag_id="bag",
         chunk_id="chunk_0000",
+        lidar_id="LIDAR_TOP",
         sweep_id=seq,
         cam_id="cam_front",
         image_path=f"/img/{seq}.jpg",

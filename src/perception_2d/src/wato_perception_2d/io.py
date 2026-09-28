@@ -35,6 +35,7 @@ class CameraFrameInfo:
     frame_id: str
     bag_id: str
     chunk_id: str
+    lidar_id: str
     sweep_id: int
     cam_id: str
     image_path: str
@@ -70,6 +71,7 @@ def load_frame_index(bag_id: str, chunk_id: str) -> list[CameraFrameInfo]:
                 frame_id=str(r.get("frame_id", "")),
                 bag_id=bag_id,
                 chunk_id=chunk_id,
+                lidar_id=str(r["lidar_id"]),
                 sweep_id=int(r["sweep_id"]),
                 cam_id=str(r["cam_id"]),
                 image_path=local_path(str(r["image_path"])),
@@ -99,24 +101,26 @@ def load_calibration(bag_id: str) -> dict[str, CalibrationInfo]:
 # re-loaded) once per camera-frame. On nuScenes each sweep is referenced by ~6
 # cameras; without these the same parquet scan + npz load happens ~6×.
 # Cleared per chunk via clear_lidar_caches() to bound memory.
-_proc_index_cache: dict[tuple[str, str], dict[int, dict]] = {}
-_static_points_cache: dict[tuple[str, str, int], Optional[np.ndarray]] = {}
+_proc_index_cache: dict[tuple[str, str], dict[tuple[str, int], dict]] = {}
+_static_points_cache: dict[tuple[str, str, str, int], Optional[np.ndarray]] = {}
 
 
-def _proc_index(bag_id: str, chunk_id: str) -> dict[int, dict]:
-    """Return {sweep_id: row} for a chunk's lidar-proc index, built once."""
+def _proc_index(bag_id: str, chunk_id: str) -> dict[tuple[str, int], dict]:
+    """Return {(lidar_id, sweep_id): row} for a processed chunk."""
     key = (bag_id, chunk_id)
     cached = _proc_index_cache.get(key)
     if cached is None:
         cached = {}
         for r in read_rows(lidar_proc_index_path(bag_id, chunk_id)):
-            cached.setdefault(int(r["sweep_id"]), r)  # first-match, as before
+            cached[(str(r["lidar_id"]), int(r["sweep_id"]))] = r
         _proc_index_cache[key] = cached
     return cached
 
 
-def _load_lidar_proc_row(bag_id: str, chunk_id: str, sweep_id: int) -> Optional[dict]:
-    return _proc_index(bag_id, chunk_id).get(sweep_id)
+def _load_lidar_proc_row(
+    bag_id: str, chunk_id: str, lidar_id: str, sweep_id: int
+) -> Optional[dict]:
+    return _proc_index(bag_id, chunk_id).get((lidar_id, sweep_id))
 
 
 def clear_lidar_caches(bag_id: str, chunk_id: str) -> None:
@@ -128,10 +132,10 @@ def clear_lidar_caches(bag_id: str, chunk_id: str) -> None:
 
 
 def load_dynamic_lidar_points(
-    bag_id: str, chunk_id: str, sweep_id: int
+    bag_id: str, chunk_id: str, lidar_id: str, sweep_id: int
 ) -> Optional[np.ndarray]:
     """Return (N, 3) float64 world-frame dynamic points for one sweep, or None."""
-    row = _load_lidar_proc_row(bag_id, chunk_id, sweep_id)
+    row = _load_lidar_proc_row(bag_id, chunk_id, lidar_id, sweep_id)
     if row is None or row.get("valid") is False:
         return None
     world_p = local_path(str(row["world_path"]))
@@ -147,37 +151,44 @@ def load_dynamic_lidar_points(
 
 
 def load_static_lidar_points(
-    bag_id: str, chunk_id: str, sweep_id: int
+    bag_id: str, chunk_id: str, lidar_id: str, sweep_id: int
 ) -> Optional[np.ndarray]:
     """Return (N, 3) float64 world-frame static points for one sweep, or None.
 
-    Static points are the complement of the dynamic mask — used as depth
-    alignment anchors (dynamic points introduce ~75cm error at 25ms desync).
+    Static points come from lidar_preprocessing's explicit confidence mask;
+    unknown non-dynamic points are deliberately not depth anchors.
 
     Cached per (bag, chunk, sweep) so cameras sharing a sweep don't each reload
     it. Callers must treat the returned array as read-only.
     """
-    key = (bag_id, chunk_id, sweep_id)
+    key = (bag_id, chunk_id, lidar_id, sweep_id)
     if key in _static_points_cache:
         return _static_points_cache[key]
-    result = _compute_static_lidar_points(bag_id, chunk_id, sweep_id)
+    result = _compute_static_lidar_points(bag_id, chunk_id, lidar_id, sweep_id)
     _static_points_cache[key] = result
     return result
 
 
 def _compute_static_lidar_points(
-    bag_id: str, chunk_id: str, sweep_id: int
+    bag_id: str, chunk_id: str, lidar_id: str, sweep_id: int
 ) -> Optional[np.ndarray]:
-    row = _load_lidar_proc_row(bag_id, chunk_id, sweep_id)
+    row = _load_lidar_proc_row(bag_id, chunk_id, lidar_id, sweep_id)
     if row is None or row.get("valid") is False:
         return None
     world_p = local_path(str(row["world_path"]))
-    dyn_p = local_path(str(row["dynamic_mask_path"]))
-    if not os.path.exists(world_p) or not os.path.exists(dyn_p):
+    static_path = row.get("static_mask_path")
+    if not static_path:
+        return None
+    static_p = local_path(str(static_path))
+    if not os.path.exists(world_p) or not os.path.exists(static_p):
         return None
     data = np.load(world_p)
-    dynamic_mask = np.load(dyn_p)
-    static_mask = ~dynamic_mask
+    static_mask = np.asarray(np.load(static_p), dtype=bool)
+    if static_mask.shape != data["x"].shape:
+        raise ValueError(
+            f"static mask for ({lidar_id!r}, {sweep_id}) has shape "
+            f"{static_mask.shape}, expected {data['x'].shape}"
+        )
     if static_mask.sum() == 0:
         return None
     xyz = np.stack(

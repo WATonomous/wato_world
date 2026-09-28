@@ -104,6 +104,7 @@ def _frames(n: int, cam: str = "cam_front") -> list[CameraFrameInfo]:
             frame_id=f"f{i}",
             bag_id="bag0",
             chunk_id="chunk0",
+            lidar_id="LIDAR_TOP",
             sweep_id=i,
             cam_id=cam,
             image_path=f"/tmp/{i}.png",

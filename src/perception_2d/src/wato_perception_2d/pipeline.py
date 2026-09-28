@@ -202,7 +202,9 @@ def _align_and_write_depth(
         "fit_status": 2,
     }
 
-    static_pts = load_static_lidar_points(bag_id, chunk_id, frame.sweep_id)
+    static_pts = load_static_lidar_points(
+        bag_id, chunk_id, frame.lidar_id, frame.sweep_id
+    )
 
     if static_pts is not None and frame.valid_pose and frame.world_T_ego_flat:
         world_T_ego = unflatten_se3(frame.world_T_ego_flat)
