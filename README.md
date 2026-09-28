@@ -63,6 +63,12 @@ flowchart TD
 
 `frame_index.parquet` (written by **ingest**) is the cross-component contract: downstream stages read interpolated ego pose (`world_T_ego_flat`) and per-sweep validity (`valid_pose`) from it rather than consuming raw bag topics. Most stages read `world_T_ego_flat` directly; **lidar_preprocessing** re-interpolates from `poses.parquet` for per-point deskewing but honors `frame_index`'s `valid_pose` flag to skip sweeps with no usable pose (e.g. the start-of-bag window before SLAM converges), and that skip propagates to MF-MOS and classify.
 
+For native multi-LiDAR data, `(lidar_id, sweep_id)` is the physical-sweep
+identity. `frame_id` only groups synchronized sweeps. LiDAR preprocessing v2
+keeps each sensor's timing, ground height, and MF-MOS geometry in a per-LiDAR
+profile and publishes disjoint confident-static and dynamic point masks;
+unknown and ground-candidate states are not inferred by negating dynamic.
+
 **ingest** and **perception_2d** are implemented end-to-end (and **semantic_lifting**'s
 core lifting algorithm). The remaining components are stubs.
 
@@ -122,7 +128,7 @@ watod down all
 | `ingest` | Decode rosbag → frames + lidar + poses + frame_index | CPU | no |
 | `perception_2d` | GroundingDINO + SAM2 video tracker + Depth Anything V2 + DINOv2 (optional Florence-2 discovery) | CUDA | yes |
 | `semantic_lifting` | Occlusion-aware 2D→3D label lifting (UniLiPs Eq.1) | CPU | no |
-| `lidar_preprocessing` | Motion comp, static/dynamic split, ground mesh | CPU | no |
+| `lidar_preprocessing` | Native multi-LiDAR deskew, explicit motion/static masks, dynamic-vetoed ground, transactional v2 maps | CPU | no |
 | `proposal_generation` | LiDAR detector + Segment-Lift-Fit + fusion | CUDA | yes |
 | `tracking` | 3D Kalman + masklet association + DINOv2 ReID | CUDA | yes (light) |
 | `label_refinement` | Multimodal LabelFormer (bootstrap → learned) | CUDA | yes |

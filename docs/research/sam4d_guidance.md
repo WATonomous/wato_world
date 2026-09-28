@@ -144,18 +144,18 @@ previous chunk's overlap window so DEVA can bridge chunk boundaries.
 SAM4D assumes a single top-mounted LiDAR.  We have three Velodynes at different
 positions.  To exploit this:
 
-- In `lidar_preprocessing`, the world-frame NPZ files are already in a common
-  coordinate frame (because deskew applies the per-LiDAR `ego_T_lidar`
-  extrinsic before writing world xyz).  So the three LiDARs are already fused
-  spatially — they can be treated as a single denser point cloud.
+- In `lidar_preprocessing`, native physical sweeps retain composite
+  `(lidar_id, sweep_id)` identity even though their deskewed points share a
+  world frame. Concatenation is appropriate for selected voxel/model inputs,
+  but it must not erase sensor lineage or substitute merged geometry for each
+  LiDAR's MF-MOS profile.
 - For the voxel occupancy encoding, just concatenate all three LiDARs' points
   before voxelizing.  The chunk-level static/dynamic classification already
   does this implicitly since all sweeps feed into the same voxel key set.
-- The main gap is **per-sweep synchronization**: the three LiDARs have
-  independent trigger timing.  The current deskew uses header timestamps per
-  sweep, which is correct.  When feeding a "current frame" to SAM4D-like
-  models, define the canonical timestamp as the center LiDAR (`lidar_cc`)
-  and treat NE/NW sweeps within ±25 ms as part of the same frame.
+- The three LiDARs have independent trigger timing. Deskew uses each physical
+  sweep's timing profile. For a SAM4D "current frame", use `frame_id` only as
+  the configured synchronization group (for example center LiDAR ±25 ms), not
+  as an artifact identity.
 
 ---
 
@@ -168,5 +168,5 @@ positions.  To exploit this:
 3. `perception_2d`: GroundingDINO → SAM2 video-tracker pipeline (done);
    add LiDAR-dynamic-point cross-modal prompting.
 4. `perception_2d`: handle cross-chunk consistency via chunk overlap windows.
-5. Multi-LiDAR: treat merged world-frame points (all three LiDARs) as the
-   canonical dense point cloud for downstream perception steps.
+5. Multi-LiDAR: assemble synchronized model inputs by `frame_id` while keeping
+   composite sweep provenance and using `static_mask_path` for depth anchors.

@@ -89,16 +89,17 @@ ingest
        └─ calibration.json  (intrinsics, extrinsics, LiDAR frame IDs)
 
 lidar_preprocessing   reads: sweeps, poses, calibration
-  └─ per-chunk/
-       ├─ lidar_proc_index.parquet   (per-sweep stats, world_path, dynamic_mask_path, mf_mos_mask_path)
+  └─ lidar_preprocessing/v2/<bag>/<chunk>/
+       ├─ lidar_proc_index.parquet   (composite identity, explicit masks, MF-MOS status, ground counts)
        ├─ lidar_proc_summary.parquet (chunk-level stats: point counts, MF-MOS stats, cache budget)
-       ├─ lidar_proc/*.npz           (deskewed world-frame xyz + origin + ground_mask + intensity)
-       ├─ lidar_proc/*_dynamic_mask.npy    (per-sweep boolean dynamic mask from AW log-odds)
-       ├─ lidar_proc/*_mf_mos_mask.npy     (per-sweep MF-MOS moving mask; null when disabled)
+       ├─ sweeps/<lidar_id>/*_world.npz    (deskewed xyz + Patchwork candidate mask)
+       ├─ sweeps/<lidar_id>/*_{static,dynamic}_mask.npy (disjoint final masks)
+       ├─ sweeps/<lidar_id>/*_mf_mos_mask.npy (present only for status=ok)
        ├─ static_map.npz             (chunk static cloud + voxel keys + origin)
-       ├─ dynamic_map.npz            (chunk dynamic cloud + per-point sweep_id)
+       ├─ dynamic_map.npz            (chunk dynamic cloud + per-point lidar_id/sweep_id)
        ├─ voxel_occupancy.npz        (sparse int32 voxel coords for MinkUNet encoder; all sweeps)
-       └─ ground.npz                 (height grid + surface normals + raw ground points)
+       ├─ ground.npz                 (candidate minus fused dynamic; grid + normals)
+       └─ completion.json            (version, mode, config digest, run lineage, counts)
   └─ global_static_map.npz          (bag-level downsampled static cloud)
   └─ global_ground.npz              (bag-level height grid spanning all chunks)
 
@@ -111,8 +112,8 @@ perception_2d         reads: frames, lidar_proc_index, world/*.npz, calibration
 
 semantic_lifting      reads: world/*.npz, masks_2d, tracklets_2d, depth_2d, calibration
   └─ per-chunk/
-       ├─ lifted_labels/<sweep_id>.npz (per-point instance_id, class, confidence)
-       └─ lifted_stats.parquet         (per-sweep lifting statistics)
+       ├─ lifted_labels/<lidar_id>/<sweep_id>.npz (per-point labels)
+       └─ lifted_stats.parquet         (composite per-sweep lifting statistics)
 
 proposal_generation   reads: world/*.npz, lifted_labels, ground.npz, calibration
   └─ per-chunk/

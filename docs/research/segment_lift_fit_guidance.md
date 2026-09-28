@@ -50,13 +50,15 @@ pseudo-labels match performance of detectors trained on GT labels.
 | Per-camera 2D masks | `masks_2d/` from `perception_2d` | `perception_2d` output |
 | Camera intrinsics K | `calibration.json` → `cameras[cam_id].K` | ingest output |
 | Camera extrinsics | `calibration.json` → `ego_T_cam` (via TF chain) | ingest output |
-| LiDAR world-frame points | `world/*.npz` from `lidar_preprocessing` | lidar_preprocessing output |
-| Dynamic object points | `dynamic_masks/*.npy` (per-sweep bool mask) | lidar_preprocessing output |
+| LiDAR world-frame points | `v2/<bag>/<chunk>/sweeps/<lidar_id>/*_world.npz` | lidar_preprocessing output |
+| Confident static anchors | point-aligned `*_static_mask.npy` (never `~dynamic`) | lidar_preprocessing output |
+| Dynamic object points | point-aligned `*_dynamic_mask.npy` | lidar_preprocessing output |
 | Ground plane height | `ground.npz` → `height_grid`, `grid_origin`, `cell_size` | lidar_preprocessing output |
 | Surface normals | `ground.npz` → `normal_grid` | lidar_preprocessing output |
 
-The `ground.py` step was built precisely to produce the height grid and surface
-normal grid that the SLF ground alignment loss term consumes.
+The two masks are disjoint and unknown points occur in neither. `ground.py`
+retains Patchwork candidates unless the selected fused motion signal explicitly
+vetoes them, then produces the height and normal grids consumed by SLF.
 
 ---
 

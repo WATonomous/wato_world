@@ -105,10 +105,12 @@ From `perception_2d/v2/<chunk_id>/`:
 - `detections_2d.parquet` — class, score, track_id, global_object_id per masklet
 - `tracklets_2d.parquet` — temporal associations within camera streams
 
-From `lidar_preprocessing/v1/<chunk_id>/`:
-- `world/<frame>.npz` — `world_T_ego` per ego frame
-- `static_map.npz` or per-sweep static points (depends on prior decision)
-- `dynamic_points/<sweep>.npy` — moving-object LiDAR points per sweep
+From `lidar_preprocessing/v2/<bag_id>/<chunk_id>/` (v1 is not compatible and
+must be reprocessed):
+- `sweeps/<lidar_id>/<sweep_id>_world.npz` — filtered world-frame points
+- `sweeps/<lidar_id>/<sweep_id>_static_mask.npy` — confident depth anchors
+- `sweeps/<lidar_id>/<sweep_id>_dynamic_mask.npy` — explicit moving points
+- `lidar_proc_index.parquet` — composite identity and mask/MF-MOS status
 - `calibration.json` — `ego_T_lidar`, `ego_T_cam_*`, `K_*` per camera
 
 From `ingest/v1/<chunk_id>/`:
@@ -119,13 +121,13 @@ From `ingest/v1/<chunk_id>/`:
 ## Outputs
 
 ```
-data/artifacts/raw/<bag_id>/semantic_lifting/v1/<chunk_id>/
-├── lifted_labels/<sweep_id>.npz          (per-sweep, primary output)
+data/artifacts/.../semantic_lifting/<version>/<bag_id>/<chunk_id>/
+├── lifted_labels/<lidar_id>/<sweep_id>.npz (per-physical-sweep primary output)
 ├── lifted_stats.parquet                  (per-sweep diagnostics)
 └── camera_assignments/<sweep_id>.npz     (debug: which camera contributed each label)
 ```
 
-### `lifted_labels/<sweep_id>.npz` schema
+### `lifted_labels/<lidar_id>/<sweep_id>.npz` schema
 
 | Field | Dtype | Shape | Description |
 |---|---|---|---|
@@ -148,7 +150,7 @@ One row per sweep, for monitoring and debugging:
 
 | Field | Type | Description |
 |---|---|---|
-| `sweep_id` | str | |
+| `lidar_id`, `sweep_id` | str/int | Composite physical-sweep identity |
 | `n_points_total` | int | Points in this sweep |
 | `n_points_labeled` | int | Points with non-background label |
 | `n_points_in_any_mask` | int | Points projecting into any mask in any camera |
@@ -255,7 +257,7 @@ For each LiDAR point that received votes from one or more cameras, reduce:
 
 ### Step 7: write artifact
 
-Pack into `lifted_labels/<sweep_id>.npz` with the schema above.
+Pack into `lifted_labels/<lidar_id>/<sweep_id>.npz` with the schema above.
 
 ---
 
@@ -335,7 +337,8 @@ Add as `iterative_update.py` if dynamic-point labels prove unreliable.
 
 ### Multi-sweep label aggregation
 
-Currently each sweep produces an independent `lifted_labels/<sweep_id>.npz`.
+Each physical sweep produces an independent
+`lifted_labels/<lidar_id>/<sweep_id>.npz`.
 A future addition is to aggregate labels across all sweeps in a chunk into
 a single coherent map for downstream stages that operate on the accumulated
 point cloud (label_refinement, ovd).
@@ -369,7 +372,7 @@ semantic_lifting:
     dtype: float16
   upstream_versions:
     perception_2d: v2
-    lidar_preprocessing: v1
+    lidar_preprocessing: v2
     ingest: v1
 ```
 
@@ -404,7 +407,7 @@ implementation. Single source of truth for the projection math.
 ## Edge cases and risks
 
 - **Sweep with no temporally close frames**: e.g., a corrupted camera stream.
-  Write empty `lifted_labels/<sweep_id>.npz` with all points = background.
+  Write empty `lifted_labels/<lidar_id>/<sweep_id>.npz` with all points = background.
   Log a warning.
 - **Mask covering > 50% of image** (e.g., a building wall mistakenly tagged
   as "vehicle"): the visibility test still works, but the mask becomes

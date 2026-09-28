@@ -36,6 +36,25 @@ tracker for three reasons:
 lidar_preprocessing fixes all three. Its outputs are the stable spatial
 foundation that stages 3–6 are designed to consume.
 
+## Authoritative contract (v2)
+
+Native multi-LiDAR input is authoritative. A physical sweep is identified by
+the composite `(lidar_id, sweep_id)`; `sweep_id` is only sensor-local and may
+repeat across sensors. `frame_id` groups synchronized sweeps for consumers but
+is never an identity. A previously merged cloud remains usable as a single
+sensor input, but is not equivalent to native sensors with validated MF-MOS
+projection geometry.
+
+Every configured LiDAR resolves through a `LidarProfile`. The profile owns its
+sensor model, sweep timing/time unit, Patchwork sensor height, and MF-MOS
+geometry/fusion mode. Voxel size, frame synchronization, reductions, and
+diagnostics are shared. LiDAR IDs are case-sensitive and must match
+`[A-Za-z0-9_.-]+`. Profiles sharing one Adaptive-Witch grid must use compatible
+inverse-occupancy probabilities and decision thresholds.
+
+Corrected artifacts live under `lidar_preprocessing/v2`. Version 1 artifacts
+are left untouched and are not read: bags processed with v1 must be reprocessed.
+
 ## Processing steps
 
 ```
@@ -56,10 +75,11 @@ B.   classify/        voxel-based static / dynamic decomposition
                       persistence counting; optionally fuses MF-MOS votes)
     │
     ▼
-C.   ground/          aggregate per-sweep ground masks → height grid
+C.   ground/          retain Patchwork candidates unless the selected fused
+                      motion signal explicitly marks the point dynamic
     │
     ▼
-D.   reduce/          [separate command] bag-level global static map
+D.   reduce/          bag-level global static and ground maps (full-bag runs)
 ```
 
 ---
@@ -103,13 +123,14 @@ read from `calibration.json` written by ingest. If that entry is null (ingest
 could not resolve the `/tf_static` chain), deskew raises an error for that
 lidar rather than silently applying the wrong transform.
 
-**Outputs per sweep** (`lidar_proc/<sweep_id:06d>_world.npz`):
+**Outputs per sweep**
+(`lidar_preprocessing/v2/<bag>/<chunk>/sweeps/<lidar_id>/<sweep_id:06d>_world.npz`):
 
 | Field | Dtype | Description |
 |---|---|---|
 | `x`, `y`, `z` | float64 | World-frame coordinates (SLAM map frame) |
 | `origin` | float64 (3,) | Sensor position in world frame at sweep time — consumed by classify's AW ray traversal |
-| `ground_mask` | bool (N,) | Per-point ground flag from Patchwork++ (sensor frame) |
+| `ground_mask` | bool (N,) | Patchwork++ ground-candidate flag, not final ground |
 | `intensity` | float32 | If present in raw sweep |
 | `ring` | uint16 | If present in raw sweep |
 
@@ -117,15 +138,17 @@ lidar rather than silently applying the wrong transform.
 
 | Field | Type | Description |
 |---|---|---|
-| `bag_id`, `chunk_id`, `sweep_id`, `lidar_id` | str/int | Identity |
+| `bag_id`, `chunk_id`, `lidar_id`, `sweep_id` | str/int | Composite physical-sweep identity |
 | `reference_timestamp_ns` | int64 | Sweep timestamp (ns) |
 | `world_path` | str | URI to world-frame NPZ |
-| `dynamic_mask_path` | str | URI to per-point dynamic mask |
+| `dynamic_mask_path`, `static_mask_path` | str (nullable) | URIs to final point-aligned masks |
 | `mf_mos_mask_path` | str (nullable) | URI to raw-frame MF-MOS mask (null when MF-MOS disabled) |
-| `n_points_total`, `n_points_static`, `n_points_dynamic` | int32 | Point counts |
+| `mf_mos_status`, `mf_mos_error` | str | Inference availability and optional failure detail |
+| `n_points_total`, `n_points_static`, `n_points_dynamic` | int32 | Final point counts |
+| `n_points_ground_candidate`, `n_points_ground` | int32 | Patchwork candidate and final dynamic-vetoed counts |
 | `world_xmin/xmax/ymin/ymax/zmin/zmax` | float | Bounding box in world frame |
 | `has_intensity`, `deskewed` | bool | Feature flags |
-| `frame_id` | int64 (nullable) | Canonical-frame grouping per `frame_sync` config. When `canonical_lidar=null`, each lidar's sweeps are numbered sequentially. When set, non-canonical sweeps within `±tolerance_ms` inherit the canonical sweep's frame_id. |
+| `frame_id` | int64 (nullable) | Canonical synchronized-frame grouping; never a sweep identity |
 
 ---
 
@@ -163,54 +186,39 @@ concatenated and fed to a lightweight encoder-decoder. Output logits above
 - When `save_scores: true`, also writes a float32 `_mf_mos_score.npy` alongside
   each mask for threshold tuning.
 
-**Fusion with classify.** The relationship between MF-MOS and the AW log-odds
-classifier in Step B is controlled by `fusion_mode`:
+MF-MOS history and spherical projection are maintained independently for each
+LiDAR. A profile never consumes another sensor's historical sweep or geometry.
+Every sweep persists one status: `not_requested`, `ok`, `skipped_invalid`,
+`skipped_allowlist`, `skipped_pose`, or `error`. A successful empty or all-false
+mask is `ok`; it is not confused with unavailable inference.
+
+**Fusion with classify.** Each LiDAR profile selects its own `fusion_mode`:
 
 | `fusion_mode` | Behaviour |
 |---|---|
 | `independent` | MF-MOS masks are written but Step B ignores them. Both signals available independently. |
-| `union` | A voxel is dynamic if AW log-odds OR MF-MOS votes it dynamic. |
-| `mfmos_only` | Dynamic mask is derived from MF-MOS votes only; AW log-odds is used only for the static cloud. |
+| `union` | Final point dynamic is AW ∪ MF-MOS. Unavailable MF-MOS falls back to AW and is reported as degraded. |
+| `mfmos_only` | Final point dynamic comes only from MF-MOS. Every deskew-valid sweep must have `status="ok"` and an aligned mask or the chunk fails. |
 
-Fusion happens at **voxel level**, not per-point. For the log-odds path, MF-MOS
-votes are accumulated during Pass 1 of classify alongside the AW log-odds:
-
-```
-For each sweep in Pass 1:
-  1. AW ray traversal updates log_odds / n_obs / n_hits dicts (as usual)
-  2. Load MF-MOS mask for this sweep (aligned to world-frame length)
-  3. For each unique endpoint voxel this sweep:
-       n_sweep_hits[voxel] += 1
-  4. For each unique endpoint voxel labeled moving this sweep:
-       mf_mos_votes[voxel] += 1
-
-After Pass 1:
-  vote_fraction = mf_mos_votes / n_sweep_hits
-  mf_mos_dynamic_arr = voxels where votes >= min_mf_mos_votes
-                       AND vote_fraction >= mf_mos_vote_fraction_threshold
-```
-
-This means a single noisy sweep cannot force a voxel dynamic — cross-sweep
-agreement is required, exactly like the AW occupancy evidence. Votes are counted
-once per SWEEP (not per point) to prevent high-density voxels from inflating
-their vote fraction. For the persistence path, fusion falls back to per-sweep
-binary OR (since there are no DDA-derived unique_keys to anchor chunk-level votes).
+Fusion is point-aligned. An MF-MOS vote does not spread to unrelated points that
+happen to occupy the same voxel. AW remains voxel-based; the selected profile's
+fusion rule is applied when the final per-point masks are written.
 
 **Outputs per sweep:**
 
 | Artifact | Description |
 |---|---|
-| `lidar_proc/<sweep_id:06d>_mf_mos_mask.npy` | `bool[N_raw]`, aligned to raw sweep NPZ length |
-| `lidar_proc/<sweep_id:06d>_mf_mos_score.npy` | `float32[N_raw]`, logit scores (when `save_scores: true`) |
+| `sweeps/<lidar_id>/<sweep_id:06d>_mf_mos_mask.npy` | `bool[N_raw]`, aligned to raw sweep NPZ length |
+| `sweeps/<lidar_id>/<sweep_id:06d>_mf_mos_score.npy` | `float32[N_raw]`, scores (when `save_scores: true`) |
 
 ---
 
 ### Step B — Voxel classify (`classify/`)
 
 **What it does.** Treats the entire set of world-frame sweeps for a chunk as a
-4D occupancy volume and classifies every point as belonging to the static
-background or to a dynamic (moving) object. The output is a per-sweep boolean
-mask (`True` = dynamic) and per-chunk accumulated static/dynamic clouds.
+4D occupancy volume and preserves four distinct states: confident static,
+dynamic, ground candidate, and unknown. Static and dynamic masks align to the
+filtered world sweep, are disjoint, and unknown points appear in neither.
 
 **Two classification methods.** `classification_method` in the config chooses
 between them:
@@ -240,13 +248,13 @@ static_arr     = voxels where evidenced & has_hits & p_occ >= p_static_threshold
 free_only_arr  = voxels with n_hits == 0 (only ever traversed, never hit)
 under_arr      = voxels that are evidenced=False but have hits (benefit of doubt)
 
-not_dynamic_arr = union(static_arr, free_only_arr, under_arr)
+dynamic_arr = voxels explicitly satisfying the dynamic evidence gates
 ```
 
-A point is dynamic if and only if its voxel key is NOT in `not_dynamic_arr`.
-The separation of `static_arr` (used for the static cloud) from `not_dynamic_arr`
-(used for the dynamic mask) prevents under-evidenced voxels and free-space
-ground voxels from polluting `static_map.npz`.
+Absence of static evidence is not dynamic evidence. Ambiguous,
+under-evidenced, free-only, and untouched voxels remain unknown. After the
+profile's MF-MOS fusion, confident static is
+`AW_STATIC & ~dynamic & ~ground_candidate`.
 
 The Amanatides-Woo kernel is JIT-compiled by Numba for performance. The kernel
 hard-fails at import time if Numba is absent — install `numba>=0.59` in the
@@ -271,8 +279,7 @@ methods use two passes:
   voxel-key dicts and arrays are kept in memory; large coordinate arrays are
   cached only when `cache_world_xyz_in_memory: true` (default) and the estimated
   size is below `WATO_LIDAR_CACHE_BYTES`.
-- **Pass 2**: apply the resulting `static_arr` / `not_dynamic_arr` /
-  `mf_mos_dynamic_arr` via searchsorted to each sweep, write the dynamic mask,
+- **Pass 2**: apply AW state and point-aligned MF-MOS fusion, write both masks,
   and accumulate static/dynamic clouds.
 
 **Voxel key encoding.** Each voxel `(vx, vy, vz)` is encoded into a single
@@ -284,12 +291,13 @@ via `np.searchsorted` — no Python dict overhead in Pass 2.
 
 | Artifact | Description |
 |---|---|
-| `lidar_proc/<sweep_id:06d>_dynamic_mask.npy` | `bool[N]`, True = dynamic point |
+| `sweeps/<lidar_id>/<sweep_id:06d>_dynamic_mask.npy` | `bool[N]`, True = explicit final dynamic |
+| `sweeps/<lidar_id>/<sweep_id:06d>_static_mask.npy` | `bool[N]`, True = final confident static |
 | `static_map.npz` | Accumulated static cloud: `xyz` (float64, M×3), `intensity`, `voxel_size`, `origin`, `static_voxel_keys` |
-| `dynamic_map.npz` | Accumulated dynamic cloud: `xyz` (float64, M×3), `sweep_id` (int32, M), `intensity` (when present) |
+| `dynamic_map.npz` | Accumulated dynamic cloud with point-aligned `lidar_id` and `sweep_id` provenance |
 | `voxel_occupancy.npz` | Sparse int32 voxel coords for SAM4D / MinkUNet (all sweeps aggregated). Toggle via `save_voxel_occupancy` (default: true). |
 | `voxel_occupancy_frame_NNNN.npz` | Per-frame sparse voxel coords (what `perception_2d` feeds to MinkUNet). Written when `save_per_frame_voxel_occupancy: true`. |
-| `lidar_proc_index.parquet` | Updated with `n_points_static`, `n_points_dynamic`, `dynamic_mask_path` per sweep |
+| `lidar_proc_index.parquet` | Updated masks, counts, status, and composite identity per sweep |
 
 ---
 
@@ -297,8 +305,8 @@ via `np.searchsorted` — no Python dict overhead in Pass 2.
 
 **What it does.** Aggregates the per-sweep ground masks that Step A wrote into
 the world NPZs, then builds a 2D height grid and surface-normal grid over the
-extent of the chunk. Also intersects ground masks with the static-voxel set to
-drop any "ground" point whose voxel ended up classified dynamic by Step B.
+extent of the chunk. The world-sweep `ground_mask` remains a Patchwork candidate
+mask; final ground is `ground_candidate & ~dynamic_mask`.
 
 **Where Patchwork++ actually runs.** Patchwork++ runs *per sweep* inside Step A
 (`deskew/`), on sensor-frame xyz, before the world-frame transform is applied.
@@ -316,12 +324,10 @@ messages one at a time. Three reasons we kept the per-sweep formulation:
   per-sweep work is one pass over the data.
 - *Algorithm parity with the monorepo.*
 
-**Ground-dynamic intersection.** Points flagged ground by Patchwork++ whose
-voxel was classified dynamic by Step B are dropped before the height grid is
-built. This removes vehicle-underside contamination (low-riding cars that
-triggered ground classification in early sweeps before classify strips them as
-dynamic). The count of dropped points is reported in `n_dropped_dynamic_ground`
-in the chunk summary.
+**Dynamic veto only.** Unknown, ambiguous, under-evidenced, and free-only AW
+states do not remove road points. A candidate is rejected only when the selected
+fused point mask explicitly marks it dynamic. The rejected count is reported as
+`n_rejected_dynamic_ground`. Ground is rerun after pass-two classification.
 
 **Height grid.** The ground point cloud from Patchwork++ is rasterised into a
 2D grid at `ground_cell_size_m` resolution (default 0.25 m). Each cell stores
@@ -355,24 +361,36 @@ the `reduce` subcommand merges per-chunk artifacts into two bag-level outputs:
   chunk-boundary problem: a box fit near a chunk seam can query `z_ground(x, y)`
   over the full bag without stitching multiple per-chunk grids.
 
-**Why this is a separate command.** Steps A–C are chunk-parallel: different
-chunks of the same bag can run on different machines simultaneously. The global
-outputs require all chunks to be finished first. Separating reduce makes the
-dependency explicit.
-
-**Graceful partial runs.** If some chunks have not yet been processed, the reduce
-step silently skips them and processes whatever is available.
+The pipeline publishes these reductions automatically for full-bag runs only.
+The standalone `reduce` command remains a repair/inspection tool. Chunk-local
+two-pass runs build a temporary prior from that chunk, record mode
+`two_pass_local`, and never overwrite bag-global reductions.
 
 **Outputs:**
 
 | Artifact | Field | Dtype | Description |
 |---|---|---|---|
-| `raw/<bag_id>/global_static_map.npz` | `xyz` | float64, N×3 | Downsampled static world-frame points |
-| `raw/<bag_id>/global_ground.npz` | `height_grid` | float32, H×W | Ground Z (full bag) |
-| `raw/<bag_id>/global_ground.npz` | `normal_grid` | float32, H×W×3 | Unit surface normals |
-| `raw/<bag_id>/global_ground.npz` | `grid_origin` | float64, (2,) | [x₀, y₀] lower-left cell |
-| `raw/<bag_id>/global_ground.npz` | `cell_size` | float32 | Cell size in metres |
-| `raw/<bag_id>/global_ground.npz` | `ground_xyz` | float64, M×3 | Concatenated per-chunk ground points |
+| `lidar_preprocessing/v2/<bag>/global_static_map.npz` | `xyz` | float64, N×3 | Downsampled static world-frame points |
+| `lidar_preprocessing/v2/<bag>/global_ground.npz` | `height_grid`, `normal_grid`, `ground_xyz` | arrays | Full-bag ground model |
+
+### Publication and two-pass modes
+
+Deskew, MF-MOS, classify, ground, indexes, summaries, and diagnostics are first
+written to a run-scoped staging tree. The pipeline finishes all selected work
+to collect errors but promotes nothing if any required stage fails.
+
+- `two_pass_global`: every bag chunk completes staged pass one; the prior is
+  built strictly from those staged maps; classify, ground, and summary rerun for
+  every chunk; validation precedes promotion and bag reductions.
+- `two_pass_local`: the prior contains only the requested chunk; only that
+  chunk is promoted and bag globals are untouched.
+- `one_pass`: publishes the same per-chunk artifact set without a prior; a
+  full-bag invocation still publishes final global reductions.
+
+`completion.json` is written last for each promoted chunk and records artifact
+version, mode, configuration digest, run ID, and expected/completed composite
+sweep counts. A chunk is skipped only when that record is an exact contract
+match. Full-bag runs also write `manifest.json` after global reductions.
 
 ---
 
@@ -382,29 +400,28 @@ step silently skips them and processes whatever is available.
 |---|---|---|
 | `chunks/index.parquet` | ingest | Chunk window timestamps; drives the main loop |
 | `chunks/<chunk_id>/lidar_sweeps.parquet` | ingest | Per-sweep metadata |
-| `chunks/<chunk_id>/lidar/<sweep_id:06d>.npz` | ingest | Raw sensor-frame point cloud |
+| `chunks/<chunk_id>/lidar/<lidar_id>/<sweep_id:06d>.npz` | ingest | Native sensor-frame point cloud |
 | `chunks/<chunk_id>/poses.parquet` | ingest | Sparse ego poses for interpolation |
 | `calibration.json` | ingest | `ego_T_lidar` extrinsic per lidar ID |
 | `config/lidar_preprocessing.yaml` | this component | Algorithm parameters |
 
 ## Outputs
 
-All outputs are written under `data/artifacts/raw/<bag_id>/`.
+All corrected outputs are written under
+`data/artifacts/lidar_preprocessing/v2/<bag_id>/`.
 
 | Artifact | Description |
 |---|---|
-| `chunks/<chunk_id>/lidar_proc/<sweep_id:06d>_world.npz` | Deskewed world-frame sweep (xyz, origin, ground_mask, intensity) |
-| `chunks/<chunk_id>/lidar_proc/<sweep_id:06d>_dynamic_mask.npy` | Per-point dynamic boolean mask |
-| `chunks/<chunk_id>/lidar_proc/<sweep_id:06d>_mf_mos_mask.npy` | MF-MOS moving mask, raw-frame aligned (when MF-MOS enabled) |
-| `chunks/<chunk_id>/lidar_proc_index.parquet` | Per-sweep processing metadata |
-| `chunks/<chunk_id>/lidar_proc_summary.parquet` | Chunk-level aggregation: point counts, MF-MOS stats, cache budget |
-| `chunks/<chunk_id>/static_map.npz` | Accumulated static cloud + voxel keys |
-| `chunks/<chunk_id>/dynamic_map.npz` | Accumulated dynamic cloud + `sweep_id` per point |
-| `chunks/<chunk_id>/voxel_occupancy.npz` | Sparse int32 voxel coords, all sweeps aggregated |
-| `chunks/<chunk_id>/voxel_occupancy_frame_NNNN.npz` | Per-frame sparse voxel coords (when `save_per_frame_voxel_occupancy: true`) |
-| `chunks/<chunk_id>/ground.npz` | Height grid, normal grid, ground points |
+| `<chunk>/sweeps/<lidar_id>/<sweep_id>_world.npz` | Deskewed world-frame sweep with candidate ground mask |
+| `<chunk>/sweeps/<lidar_id>/<sweep_id>_{static,dynamic}_mask.npy` | Disjoint final point masks |
+| `<chunk>/sweeps/<lidar_id>/<sweep_id>_mf_mos_mask.npy` | MF-MOS mask when status is `ok` |
+| `<chunk>/lidar_proc_index.parquet` | Composite per-sweep processing metadata |
+| `<chunk>/lidar_proc_summary.parquet` | Final chunk aggregation and diagnostics |
+| `<chunk>/{static_map,dynamic_map,ground}.npz` | Final chunk maps |
+| `<chunk>/completion.json` | Exact publication contract and lineage |
 | `global_static_map.npz` | Bag-level downsampled static cloud (from `reduce`) |
 | `global_ground.npz` | Bag-level height grid + normal grid (from `reduce`) |
+| `manifest.json` | Full-bag publication lineage |
 
 **Chunk summary schema** (`lidar_proc_summary.parquet`):
 
@@ -413,7 +430,7 @@ All outputs are written under `data/artifacts/raw/<bag_id>/`.
 | `bag_id`, `chunk_id` | str | Identity |
 | `n_sweeps_total`, `n_sweeps_valid`, `n_sweeps_invalid` | int32 | Sweep counts |
 | `n_points_total`, `n_points_static`, `n_points_dynamic`, `n_points_ground` | int32 | Aggregated point counts |
-| `n_dropped_dynamic_ground` | int32 | Ground points dropped at dynamic-voxel intersection |
+| `n_rejected_dynamic_ground` | int32 | Candidate ground points explicitly vetoed dynamic |
 | `cache_auto_disabled` | bool | Whether cache was auto-disabled due to memory budget |
 | `estimated_cache_bytes` | int64 | Estimated memory if full caching was used |
 | `ground_status` | str | `"ok"`, `"skipped_no_ground_mask"`, or `"empty"` |
@@ -438,8 +455,8 @@ All outputs are written under `data/artifacts/raw/<bag_id>/`.
 # Re-process already-completed chunks (e.g. after a code change).
 ./watod run lidar_preprocessing --bag data/bags/NuScenes-v1.0-mini-scene-1100/ --force
 
-# Disable auto-reduce when processing chunks across multiple machines.
-./watod run lidar_preprocessing --bag <bag> --no-auto-reduce
+# A chunk-only two-pass run uses a local prior and never changes bag globals.
+./watod run lidar_preprocessing --bag <bag> --chunk 0000
 ./watod -t lidar_preprocessing_dev   # open a shell in the dev container
 python -m wato_lidar_preprocessing reduce --bag NuScenes_v1_0_mini_scene_1100
 
@@ -460,26 +477,26 @@ PYTHONPATH=src/common/src:src/lidar_preprocessing/src \
 import numpy as np
 
 # World-frame sweep — in absolute SLAM map coordinates.
-d = np.load("data/artifacts/raw/<bag_id>/chunks/<chunk_id>/lidar_proc/000000_world.npz")
+d = np.load("data/artifacts/lidar_preprocessing/v2/<bag_id>/<chunk_id>/sweeps/LIDAR_TOP/000000_world.npz")
 print("world-frame x range:", d['x'].min(), d['x'].max())
 print("sensor origin:", d['origin'])
 
 # Static map — denser than any single sweep.
-s = np.load("data/artifacts/raw/<bag_id>/chunks/<chunk_id>/static_map.npz")
+s = np.load("data/artifacts/lidar_preprocessing/v2/<bag_id>/<chunk_id>/static_map.npz")
 print("static points:", s['xyz'].shape[0])
 
 # Dynamic map (proposal_generation input).  sweep_id is per-point.
-dm = np.load("data/artifacts/raw/<bag_id>/chunks/<chunk_id>/dynamic_map.npz")
+dm = np.load("data/artifacts/lidar_preprocessing/v2/<bag_id>/<chunk_id>/dynamic_map.npz")
 print("dynamic points:", dm['xyz'].shape[0], "across",
-      len(np.unique(dm['sweep_id'])), "sweeps")
+      len(set(zip(dm['lidar_id'].tolist(), dm['sweep_id'].tolist()))), "sweeps")
 
 # Ground grid.
-g = np.load("data/artifacts/raw/<bag_id>/chunks/<chunk_id>/ground.npz")
+g = np.load("data/artifacts/lidar_preprocessing/v2/<bag_id>/<chunk_id>/ground.npz")
 print("height grid shape:", g['height_grid'].shape)
 print("grid origin:", g['grid_origin'])
 
 # Bag-level global ground (after `reduce`).  Spans all chunks.
-gg = np.load("data/artifacts/raw/<bag_id>/global_ground.npz")
+gg = np.load("data/artifacts/lidar_preprocessing/v2/<bag_id>/global_ground.npz")
 print("global ground grid:", gg['height_grid'].shape)
 ```
 
@@ -487,6 +504,42 @@ print("global ground grid:", gg['height_grid'].shape)
 
 All parameters live in [`config/lidar_preprocessing.yaml`](config/lidar_preprocessing.yaml).
 The Pydantic schema is in [`src/wato_lidar_preprocessing/config.py`](src/wato_lidar_preprocessing/config.py).
+
+### Per-LiDAR profiles
+
+`default_lidar_profile` supplies an optional fallback and `lidar_profiles` holds
+case-sensitive overrides. If overrides exist without a default, an unknown
+sensor is rejected rather than silently borrowing geometry. Legacy top-level
+sensor settings are interpreted as the default profile for migration.
+
+```yaml
+default_lidar_profile:
+  sensor_model: velodyne_vlp
+  lidar_sweep_duration_ms: 100.0
+  point_time_unit: seconds
+  patchwork_sensor_height: 1.8
+  mf_mos:
+    enabled: false
+    fusion_mode: independent
+
+lidar_profiles:
+  LIDAR_LEFT:
+    sensor_model: ouster
+    lidar_sweep_duration_ms: 50.0
+    point_time_unit: nanoseconds
+    patchwork_sensor_height: 1.65
+    mf_mos:
+      enabled: true
+      fusion_mode: union
+      range_image_h: 64
+      range_image_w: 2048
+```
+
+Ray timing, maximum range, and pose uncertainty are resolved per physical
+sweep. When multiple profiles contribute to one AW grid, incompatible
+inverse-occupancy probabilities or decision thresholds fail configuration.
+Global-prior reinforcement applies the maximum proposed one-time credibility
+contribution per voxel, making mixed-sensor ordering deterministic.
 
 ### Step B — Classification
 
@@ -543,11 +596,11 @@ The Pydantic schema is in [`src/wato_lidar_preprocessing/config.py`](src/wato_li
 | Parameter | Default | Description |
 |---|---|---|
 | `global_map_voxel_size_m` | 0.30 | Voxel size for global static map downsampling (m) |
-| `point_time_unit` | `"seconds"` | Unit of `t_offset_us` field: `"seconds"` \| `"microseconds"` \| `"nanoseconds"` |
+| `default_lidar_profile.point_time_unit` | `"seconds"` | Unit of the raw point-time field |
 | `cache_world_xyz_in_memory` | `true` | Cache world-frame xyz in memory for Pass 2. Auto-disabled when estimated size exceeds `WATO_LIDAR_CACHE_BYTES`. |
 | `save_voxel_occupancy` | `true` | Emit `voxel_occupancy.npz` (all sweeps aggregated — QA/visualization) |
 | `save_per_frame_voxel_occupancy` | `false` | Emit one `voxel_occupancy_frame_NNNN.npz` per `frame_id` — what `perception_2d` feeds to SAM4D's MinkUNet encoder |
-| `patchwork.sensor_height` | 1.8 | LiDAR height above ground (m) |
+| `default_lidar_profile.patchwork_sensor_height` | 1.8 | LiDAR height above ground (m) |
 | `patchwork.th_dist` | 0.15 | Ground inlier distance threshold (m) |
 | `patchwork.max_range` | 90.0 | Maximum range considered for ground (m) |
 | `patchwork.ground_cell_size_m` | 0.25 | Height-grid cell resolution (m) |

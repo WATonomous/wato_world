@@ -169,6 +169,16 @@ Downstream components consume ego pose through the frame index:
 - `tracking` reads it to track in the world frame and stitch tracks across chunk boundaries.
 - `label_refinement` reads it to smooth box trajectories.
 
+### Native multi-LiDAR identity
+
+Ingest preserves one row and one raw NPZ per physical sensor sweep. The
+authoritative identity is the case-sensitive composite `(lidar_id, sweep_id)`;
+different LiDARs may legitimately reuse the same local sweep ID. Ingest frame
+identifiers include `lidar_id` so those rows cannot collide. `frame_id` is a
+separate canonical synchronization group and must never replace physical sweep
+identity. A pre-merged cloud can be represented as one LiDAR source, but it
+does not provide independently validated sensor geometry to downstream MF-MOS.
+
 ## Frame validity & dropping
 
 Ingest never deletes frames. When people say a chunk "dropped N frames" (e.g.
