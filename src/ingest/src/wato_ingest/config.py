@@ -25,6 +25,11 @@ class CameraTopics(BaseModel):
     # sensor_msgs/CameraInfo.  Only needed when calibration comes from the bag;
     # omit it when the bag has none and pass --calibration instead.
     info: Optional[str] = None
+    # The image topic is rectified (image_proc-style output). Its intrinsics
+    # are then CameraInfo.P[:3, :3] with no distortion; CameraInfo.K and D
+    # describe the raw sensor image, which ingest never sees. False: the image
+    # is described by K and D.
+    rectified: bool = False
 
 
 class TopicMap(BaseModel):

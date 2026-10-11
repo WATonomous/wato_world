@@ -15,7 +15,8 @@ a *proposal* source whose false positives downstream association removes:
   * The coarse stage is a union of every heuristic we have, not one
     map-cleaning method. Each point records which ones fired (source_bits).
 
-Per point, source_bits (uint8):
+The artifacts and the bit layout belong to wato_common.artifacts.motion_proposals
+(consumers read them there). Per point, source_bits (uint8):
 
   bit  name            seeds?  source
   0    AW_DYNAMIC      seed    voxel in static_map.npz dynamic_voxel_keys (aw, union)
@@ -68,18 +69,24 @@ from wato_common.artifact_store import (
     lidar_proc_summary_path,
     local_path,
     motion_clusters_path,
-    motion_proposals_path,
     static_map_path,
 )
-from wato_common.io.parquet_io import read_rows, write_table
-from wato_common.schemas import (
-    CHUNK_SUMMARY_SCHEMA,
-    MOTION_CLUSTER_SCHEMA,
-    Box3D,
-    ChunkSummaryRow,
-    MotionClusterRow,
-    encode_int_list,
+from wato_common.artifacts import motion_proposals as proposals_artifact
+from wato_common.artifacts.lidar_sweeps import read_dynamic_mask
+from wato_common.artifacts.motion_proposals import (
+    ATTACH_BITS,
+    AW_AMBIGUOUS,
+    AW_DYNAMIC,
+    BOX_FILL,
+    IWU_EVICTED,
+    MF_MOS,
+    SEED_BITS,
+    SEG_DYNAMIC,
+    UNMAPPED,
+    MotionCluster,
 )
+from wato_common.io.parquet_io import read_rows, write_table
+from wato_common.schemas import CHUNK_SUMMARY_SCHEMA, Box3D, ChunkSummaryRow
 from wato_common.tracking import MultiObjectTracker, fit_bev_box, points_in_box
 from wato_lidar_preprocessing.config import ComponentConfig
 from wato_lidar_preprocessing.iwu import load_global_iwu
@@ -96,27 +103,6 @@ from wato_lidar_preprocessing.union.segment import (
 from wato_lidar_preprocessing.voxel import keys_in_sorted, voxel_indices
 
 log = logging.getLogger(__name__)
-
-AW_DYNAMIC = np.uint8(1 << 0)
-AW_AMBIGUOUS = np.uint8(1 << 1)
-IWU_EVICTED = np.uint8(1 << 2)
-MF_MOS = np.uint8(1 << 3)
-SEG_DYNAMIC = np.uint8(1 << 4)
-BOX_FILL = np.uint8(1 << 5)
-UNMAPPED = np.uint8(1 << 6)
-
-SEED_BITS = np.uint8(AW_DYNAMIC | IWU_EVICTED | MF_MOS | SEG_DYNAMIC)
-ATTACH_BITS = np.uint8(AW_AMBIGUOUS | UNMAPPED)
-
-BIT_NAMES: dict[int, str] = {
-    int(AW_DYNAMIC): "AW_DYNAMIC",
-    int(AW_AMBIGUOUS): "AW_AMBIGUOUS",
-    int(IWU_EVICTED): "IWU_EVICTED",
-    int(MF_MOS): "MF_MOS",
-    int(SEG_DYNAMIC): "SEG_DYNAMIC",
-    int(BOX_FILL): "BOX_FILL",
-    int(UNMAPPED): "UNMAPPED",
-}
 
 # Chen §III-D: an instance is moving if its trajectory exceeds its max side.
 MOVING_SCORE = 1.0
@@ -265,7 +251,7 @@ def _load_seg_mask(bag_id: str, chunk_id: str, sweep_id: int, n: int):
     path = local_path(dynamic_mask_path(bag_id, chunk_id, sweep_id))
     if not os.path.exists(path):
         return None
-    m = np.load(path).astype(bool)
+    m = read_dynamic_mask(path)
     return m if m.shape[0] == n else None
 
 
@@ -670,10 +656,9 @@ def process_chunk(cfg: ComponentConfig, bag_id: str, chunk_id: str) -> ProposalR
     n_points_proposal = 0
     for row in meta_rows:
         sid = int(row["sweep_id"])
-        out = local_path(motion_proposals_path(bag_id, chunk_id, sid))
         if sid not in sweep_bits:
-            if os.path.exists(out):  # stale from a run where this sweep was valid
-                os.remove(out)
+            # Stale from a run where this sweep was valid.
+            proposals_artifact.remove_sweep(bag_id, chunk_id, sid)
             continue
         bits = sweep_bits[sid]
         cluster_id = np.full(bits.shape[0], -1, dtype=np.int32)
@@ -688,7 +673,7 @@ def process_chunk(cfg: ComponentConfig, bag_id: str, chunk_id: str) -> ProposalR
                 bits[inside] |= BOX_FILL
                 cluster_id[inside & (cluster_id < 0)] = c.cluster_id
         n_points_proposal += int((bits != 0).sum())
-        np.savez_compressed(out, source_bits=bits, cluster_id=cluster_id)
+        proposals_artifact.write_sweep(bag_id, chunk_id, sid, bits, cluster_id)
 
     n_moving = sum(1 for c in clusters if c.motion_score > MOVING_SCORE)
     _update_summary(bag_id, chunk_id, n_points_proposal, len(clusters), n_moving)
@@ -725,15 +710,14 @@ def _update_summary(bag_id, chunk_id, n_points, n_clusters, n_moving) -> None:
 
 
 def _write_clusters(bag_id: str, chunk_id: str, clusters: list[_Cluster]) -> None:
-    rows = []
-    for c in clusters:
-        rows.append(
-            MotionClusterRow(
-                bag_id=bag_id,
-                chunk_id=chunk_id,
+    proposals_artifact.write_clusters(
+        bag_id,
+        chunk_id,
+        [
+            MotionCluster(
                 frame_id=c.frame_id,
                 reference_timestamp_ns=c.t_ns,
-                sweep_ids=encode_int_list(c.sweep_ids),
+                sweep_ids=tuple(c.sweep_ids),
                 cluster_id=c.cluster_id,
                 track_hint_id=c.track_key[1] if c.track_key else -1,
                 cx=c.box.cx,
@@ -753,34 +737,19 @@ def _write_clusters(bag_id: str, chunk_id: str, clusters: list[_Cluster]) -> Non
                 net_displacement_m=c.net_displacement_m,
                 motion_score=c.motion_score,
                 box_filled=c.box_filled,
-            ).model_dump()
-        )
-    write_table(rows, MOTION_CLUSTER_SCHEMA, motion_clusters_path(bag_id, chunk_id))
-
-
-def decode_bits(bits: np.ndarray) -> dict[str, np.ndarray]:
-    """{bit name: bool mask} — convenience for scripts and viz."""
-    return {name: (bits & np.uint8(v)) != 0 for v, name in BIT_NAMES.items()}
+            )
+            for c in clusters
+        ],
+    )
 
 
 __all__ = [
-    "ATTACH_BITS",
-    "AW_AMBIGUOUS",
-    "AW_DYNAMIC",
-    "BIT_NAMES",
-    "BOX_FILL",
     "BOX_FILL_MAX_PERSISTENT",
     "BOX_FILL_MIN_TRACK_LIFE",
-    "IWU_EVICTED",
-    "MF_MOS",
     "MOVING_SCORE",
     "ProposalResult",
-    "SEED_BITS",
-    "SEG_DYNAMIC",
-    "UNMAPPED",
     "cluster_points",
     "compute_sweep_bits",
-    "decode_bits",
     "fill_box",
     "process_chunk",
     "proposals_up_to_date",

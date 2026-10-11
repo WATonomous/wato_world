@@ -108,6 +108,15 @@ Never widen one into the other: a false positive in `dynamic_mask` costs
 perception_2d a depth anchor, while a false negative in `motion_proposals` loses
 an object for good.
 
+Both are owned by `wato_common`, so consumers that don't install this package
+can read them: the world sweep and `dynamic_mask.npy` by
+`wato_common.artifacts.lidar_sweeps` (`ProcessedSweeps.load(bag, chunk)` then
+`world_and_dynamic_mask(sweep_id)`, which raises if the mask isn't the world
+sweep's length), the proposals by `wato_common.artifacts.motion_proposals`.
+Every step here that writes a world sweep or a dynamic mask (deskew; classify,
+mos, union and the motion filter) writes it through `lidar_sweeps` too, and
+deskew reads ingest's raw sweeps through it.
+
 ## Visualization
 
 The default viewer is a standalone HTML file. It shows static and dynamic
@@ -239,9 +248,12 @@ header pose (path 3 with `allow_uncompensated_motion`).
 error. `float64` reduces that to ~0.1 mm at any realistic drive length.
 
 **Calibration.** The `ego_T_lidar` extrinsic (sensor-to-ego rigid transform) is
-read from `calibration.json` written by ingest. If that entry is null (ingest
-could not resolve the `/tf_static` chain), deskew raises an error for that
-lidar rather than silently applying the wrong transform.
+read from `calibration.json` written by ingest, through
+`wato_common.artifacts.calibration`. If that entry is missing or null (ingest
+could not resolve the `/tf_static` chain — ingest's `require_complete` refuses
+such a bag, so this needs a hand-edited file), deskew and MF-MOS log an error
+and skip that lidar's sweeps rather than apply the wrong transform; they get no
+`lidar_proc_index` row.
 
 **Outputs per sweep** (`lidar_proc/<sweep_id:06d>_world.npz`):
 
@@ -252,6 +264,10 @@ lidar rather than silently applying the wrong transform.
 | `ground_mask` | bool (N,) | Per-point ground flag from Patchwork++ (sensor frame) |
 | `intensity` | float32 | If present in raw sweep |
 | `ring` | uint16 | If present in raw sweep |
+
+Written by `wato_common.artifacts.lidar_sweeps.write_world`, which checks every
+per-point array has the same N; consumers read it with `read_world` /
+`ProcessedSweeps` rather than `np.load`.
 
 **Metadata per sweep** (`lidar_proc_index.parquet`, ProcessedSweepMeta):
 
@@ -738,6 +754,14 @@ bit alone.
 | `motion_clusters.parquet` | One `MotionClusterRow` per cluster. Written last — it is the completion marker. |
 | `lidar_proc_summary.parquet` | Row updated in place: `n_points_proposal`, `n_clusters`, `n_clusters_moving`. |
 
+The two proposal artifacts and the bit layout belong to
+`wato_common.artifacts.motion_proposals`: Step F writes through its
+`write_sweep` / `write_clusters`, and consumers read through `read_sweep`
+(checks the alignment when given the world sweep's point count) and
+`read_clusters` (typed `MotionCluster`, `sweep_ids` decoded). The bit constants
+and `decode_bits` live there too, so a component that doesn't install
+lidar_preprocessing can still decode `source_bits`.
+
 A chunk is re-run when `motion_clusters.parquet` is older than its summary,
 index, static map or the bag's `global_iwu.npz` (or with `--force`).
 
@@ -1110,7 +1134,7 @@ src/lidar_preprocessing/
 │   │   └── _core.py                   # hybrid reinforce/decay, windowed seen-through test
 │   │
 │   └── motion_proposals/              # Step F — recall-oriented moving-object proposals
-│       ├── __init__.py                # public: process_chunk, bit constants, decode_bits
+│       ├── __init__.py                # public: process_chunk (bits: wato_common.artifacts.motion_proposals)
 │       └── _core.py                   # source bits, HDBSCAN, tracking features, box fill
 │
 └── tests/

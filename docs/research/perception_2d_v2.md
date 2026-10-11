@@ -189,12 +189,18 @@ perception_2d; that has been removed.)
 ## Output artifacts
 
 ```
-data/artifacts/raw/<bag_id>/perception_2d/<version>/<chunk_id>/
+data/artifacts/raw/<bag_id>/chunks/<chunk_id>/
 ├── detections_2d.parquet                         (MASKLET_SCHEMA, one row / masklet)
 ├── tracklets_2d.parquet                          (MASKLET_SCHEMA, same rows)
-├── masks_2d/<cam_id>/<masklet_id>/<frame_seq>.png (per-frame binary mask PNGs)
-│                                  └ dino_feature.npy (DINOv2 embedding for the masklet)
-└── depth_2d/<cam_id>/<frame_seq>.npz             (metric depth + fit metadata)
+├── masks_2d/<masklet_id>/<camera_seq:06d>.png    (per-frame binary mask PNGs)
+│                     └ dino_feature.npy          (DINOv2 embedding for the masklet)
+└── depth_2d/<cam_id>/<camera_seq:06d>.npz        (metric depth + fit metadata)
+```
+
+Written and read through `wato_common.artifacts.masklets` and
+`wato_common.artifacts.depth`, which own these formats.
+
+```
 ```
 
 `detections_2d.parquet` and `tracklets_2d.parquet` carry the same masklet rows —

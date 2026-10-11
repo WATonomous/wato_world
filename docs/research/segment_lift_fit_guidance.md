@@ -93,9 +93,12 @@ per-LiDAR-point instance labels from `semantic_lifting`, not raw 2D masks.
 The contract is:
 
 ```
-lifted_labels/<sweep_id>.npz    (point_indices, instance_ids, classes, confidences)
-lifted_stats.parquet            (per-sweep coverage statistics)
+lifted_labels/<sweep_id:06d>.npz  (point_indices, instance_ids, classes, confidences)
+lifted_stats.parquet              (per-sweep coverage statistics)
 ```
+
+Read both through `wato_common.artifacts.lifted_labels` (`read_sweep`,
+`read_stats`), which owns the format.
 
 `semantic_lifting` consumes `perception_2d`'s `masks_2d/` and `depth_2d/`
 artifacts, runs the UniLiPs Eq.1 occlusion test, and outputs per-LiDAR-point

@@ -15,6 +15,12 @@ from wato_perception_2d.models.detector import Detection
 from wato_perception_2d.models.sam2_tracker import track_camera
 
 
+@pytest.fixture(autouse=True)
+def artifact_root(tmp_path, monkeypatch):
+    """Masks are written under the artifact root (wato_common.artifacts.masklets)."""
+    monkeypatch.setenv("ARTIFACT_ROOT_URI", f"file://{tmp_path}")
+
+
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
@@ -147,7 +153,6 @@ def test_redetection_adds_new_object_and_dedups_existing(tmp_path):
         detector,
         frames,
         images,
-        masks_2d_base_dir=str(tmp_path),
         redetect_every_k=2,
         iou_match_threshold=0.5,
     )
@@ -177,7 +182,6 @@ def test_mask_saved_at_frame_resolution(tmp_path):
         _PerCallDetector([[car]]),
         frames,
         images,
-        masks_2d_base_dir=str(tmp_path),
         redetect_every_k=1000,  # detect once
     )
     assert len(masklets) == 1
@@ -192,7 +196,6 @@ def test_empty_inputs_return_empty(tmp_path):
             _ConstDetector([]),
             [],
             [],
-            masks_2d_base_dir=str(tmp_path),
         )
         == []
     )
@@ -230,7 +233,6 @@ def test_oom_falls_back_to_sub_clips(tmp_path):
         _ConstDetector(_two_cars()),
         frames,
         images,
-        masks_2d_base_dir=str(tmp_path),
         redetect_every_k=1000,  # one keyframe per window
         sub_clip_frames=4,  # 10 frames → windows [0:4], [4:8], [8:10]
     )
@@ -253,7 +255,6 @@ def test_oom_window_recursively_halves(tmp_path):
         _ConstDetector(_two_cars()),
         frames,
         images,
-        masks_2d_base_dir=str(tmp_path),
         redetect_every_k=1000,
         sub_clip_frames=8,  # one window, then halved 8→4→2
         min_sub_clip_frames=2,
@@ -275,7 +276,6 @@ def test_oom_at_floor_skips_window_without_raising(tmp_path):
         _ConstDetector(_two_cars()),
         frames,
         images,
-        masks_2d_base_dir=str(tmp_path),
         redetect_every_k=1000,
         sub_clip_frames=4,
         min_sub_clip_frames=1,

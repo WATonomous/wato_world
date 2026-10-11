@@ -16,10 +16,9 @@ import numpy as np
 from wato_common.artifact_store import (
     ensure_local_dir,
     lidar_dir,
-    lidar_sweep_path,
     lidar_sweeps_path,
-    local_path,
 )
+from wato_common.artifacts.lidar_sweeps import RawSweep, write_raw
 from wato_common.io.parquet_io import write_table
 from wato_common.io.pointcloud2 import decode_pointcloud2, fields_to_specs
 from wato_common.io.rosbag_reader import messages
@@ -136,24 +135,17 @@ def _write_sweep(
     if n == 0:
         return None
 
-    save_kwargs: dict[str, np.ndarray] = {
-        "x": decoded["x"].astype(np.float32),
-        "y": decoded["y"].astype(np.float32),
-        "z": decoded["z"].astype(np.float32),
-    }
-    if has_intensity:
-        save_kwargs["intensity"] = decoded["intensity"].astype(np.float32)
-    if has_ring:
-        save_kwargs["ring"] = decoded["ring"].astype(np.uint16)
-    if has_point_time:
-        save_kwargs["t_offset_us"] = decoded[point_time_field].astype(np.float64)
-
-    out_uri = lidar_sweep_path(bag_id, chunk_id, lidar_id, sweep_id)
-    np.savez_compressed(local_path(out_uri), **save_kwargs)
-
-    ranges = np.linalg.norm(
-        np.stack([save_kwargs["x"], save_kwargs["y"], save_kwargs["z"]], axis=1), axis=1
+    sweep = RawSweep(
+        x=decoded["x"].astype(np.float32),
+        y=decoded["y"].astype(np.float32),
+        z=decoded["z"].astype(np.float32),
+        intensity=decoded["intensity"] if has_intensity else None,
+        ring=decoded["ring"] if has_ring else None,
+        t_offset_us=decoded[point_time_field] if has_point_time else None,
     )
+    out_uri = write_raw(bag_id, chunk_id, lidar_id, sweep_id, sweep)
+
+    ranges = np.linalg.norm(np.stack([sweep.x, sweep.y, sweep.z], axis=1), axis=1)
     valid_ranges = ranges[np.isfinite(ranges)]
 
     row = LidarSweepRow(

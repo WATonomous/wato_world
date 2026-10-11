@@ -29,6 +29,7 @@ from dataclasses import dataclass
 import numpy as np
 from tqdm import tqdm
 
+from wato_common.artifacts.lidar_sweeps import read_raw, read_world, write_dynamic_mask
 from wato_common.artifact_store import (
     dynamic_map_path,
     dynamic_mask_path,
@@ -149,14 +150,14 @@ def _align_raw_to_world(
         int(row.get("sweep_id", 0)),
     )
     try:
-        raw = np.load(local_path(raw_uri))
+        raw = read_raw(raw_uri)
     except Exception as exc:  # noqa: BLE001
         log.warning("could not load raw sweep for mf_mos alignment: %s", exc)
         return None
 
-    x_r = raw["x"].astype(np.float64)
-    y_r = raw["y"].astype(np.float64)
-    z_r = raw["z"].astype(np.float64)
+    x_r = raw.x.astype(np.float64)
+    y_r = raw.y.astype(np.float64)
+    z_r = raw.z.astype(np.float64)
     if filter_nonfinite:
         finite = np.isfinite(x_r) & np.isfinite(y_r) & np.isfinite(z_r)
     else:
@@ -233,12 +234,11 @@ def _load_world(world_path_uri: str):
     `origin` is the sensor position in the world frame (written by deskew),
     needed for the near-ego dynamic gate.
     """
-    data = np.load(local_path(world_path_uri))
-    xyz = np.stack([data["x"], data["y"], data["z"]], axis=1)
-    intensity = data["intensity"].astype(np.float32) if "intensity" in data else None
-    ground_mask = data["ground_mask"] if "ground_mask" in data else None
-    origin = np.asarray(data["origin"], dtype=np.float64) if "origin" in data else None
-    return xyz, intensity, ground_mask, origin
+    sweep = read_world(world_path_uri)
+    intensity = (
+        sweep.intensity.astype(np.float32) if sweep.intensity is not None else None
+    )
+    return sweep.xyz, intensity, sweep.ground_mask, sweep.origin
 
 
 def near_ego_mask(
@@ -351,7 +351,7 @@ def classify_chunk(
         has_intensity = bool(row.get("has_intensity", False))
 
         if n == 0:
-            np.save(local_path(dyn_uri), np.zeros(0, dtype=bool))
+            write_dynamic_mask(bag_id, chunk_id, sweep_id, np.zeros(0, dtype=bool))
             updated_meta.append(
                 _meta_row(row, sweep_id, 0, 0, 0, dyn_uri, has_intensity)
             )
@@ -384,7 +384,7 @@ def classify_chunk(
         ):
             dyn_mask &= ~near_ego_mask(xyz, sweep_origin, cfg.dynamic_min_range_m)
         static_mask = (~moving) & not_ground
-        np.save(local_path(dyn_uri), dyn_mask)
+        write_dynamic_mask(bag_id, chunk_id, sweep_id, dyn_mask)
 
         n_static = int(static_mask.sum())
         n_dyn = int(dyn_mask.sum())

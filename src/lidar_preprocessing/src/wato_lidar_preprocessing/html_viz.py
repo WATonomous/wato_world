@@ -194,7 +194,7 @@ def _load_proposals_payload(bag_id: str, chunk_id: str) -> dict:
     (AMBIGUOUS/UNMAPPED), yellow = a seed source, magenta = IWU_EVICTED,
     orange = BOX_FILL, red = member of a cluster passing Chen's criterion.
     """
-    from wato_lidar_preprocessing.motion_proposals import (
+    from wato_common.artifacts.motion_proposals import (
         BOX_FILL,
         IWU_EVICTED,
         SEED_BITS,

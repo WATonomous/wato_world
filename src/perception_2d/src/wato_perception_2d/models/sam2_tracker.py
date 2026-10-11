@@ -40,6 +40,7 @@ from typing import Optional
 
 import numpy as np
 
+from wato_common.artifacts import masklets
 from wato_perception_2d.fusion.masklet import Masklet
 from wato_perception_2d.io import CameraFrameInfo
 from wato_perception_2d.models.detector import Concept, Detection
@@ -172,18 +173,6 @@ def _logit_to_mask(logit, hw: tuple[int, int]) -> Optional[np.ndarray]:
     return m if m.any() else None
 
 
-def _save_mask(
-    base_dir: str, masklet_id: str, camera_seq: int, mask: np.ndarray
-) -> str:
-    from PIL import Image as PILImage
-
-    d = os.path.join(base_dir, masklet_id)
-    os.makedirs(d, exist_ok=True)
-    path = os.path.join(d, f"{camera_seq:06d}.png")
-    PILImage.fromarray(mask.astype(np.uint8) * 255).save(path)
-    return path
-
-
 def _write_frames_jpeg(images: list[np.ndarray]) -> str:
     """Write frames to a temp dir as sequential JPEGs for SAM2's video loader.
 
@@ -210,7 +199,6 @@ def track_camera(
     bag_id: str,
     chunk_id: str,
     cam_id: str,
-    masks_2d_base_dir: str,
     dino_model: str = "dinov2_vitl14",
     dino_every_k: int = 5,
     device: str = "cuda",
@@ -236,7 +224,6 @@ def track_camera(
         bag_id=bag_id,
         chunk_id=chunk_id,
         cam_id=cam_id,
-        masks_2d_base_dir=masks_2d_base_dir,
         dino_model=dino_model,
         dino_every_k=dino_every_k,
         device=device,
@@ -329,7 +316,6 @@ def _track_window(
     bag_id: str,
     chunk_id: str,
     cam_id: str,
-    masks_2d_base_dir: str,
     dino_model: str,
     dino_every_k: int,
     device: str,
@@ -407,7 +393,8 @@ def _track_window(
                             seq_by_index[int(f_idx)],
                             mask,
                             images[int(f_idx)],
-                            masks_2d_base_dir,
+                            bag_id,
+                            chunk_id,
                             dino_model,
                             dino_every_k,
                             device,
@@ -481,7 +468,8 @@ def _record_frame(
     camera_seq: int,
     mask: np.ndarray,
     image_rgb: np.ndarray,
-    masks_2d_base_dir: str,
+    bag_id: str,
+    chunk_id: str,
     dino_model: str,
     dino_every_k: int,
     device: str,
@@ -491,7 +479,9 @@ def _record_frame(
         cls, score = obj_meta.get(obj_id, ("object", 0.0))
         track = _Track(masklet_id=str(uuid.uuid4())[:12], cls=cls, score=score)
         tracks[obj_id] = track
-    mask_path = _save_mask(masks_2d_base_dir, track.masklet_id, camera_seq, mask)
+    mask_path = masklets.write_mask(
+        bag_id, chunk_id, track.masklet_id, camera_seq, mask
+    )
     track.frames_present.append(camera_seq)
     track.mask_paths.append(mask_path)
     if dino_every_k > 0 and frame_index_abs % dino_every_k == 0:

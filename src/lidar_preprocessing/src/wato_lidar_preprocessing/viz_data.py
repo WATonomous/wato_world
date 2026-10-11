@@ -172,8 +172,8 @@ def load_sweep_viz_data(bag_id: str, chunk_id: str, sweep_id: int) -> SweepVizDa
     from wato_lidar_preprocessing.io import load_dynamic_mask, load_world_sweep
 
     world = load_world_sweep(bag_id, chunk_id, sweep_id)
-    xyz = np.column_stack([world["x"], world["y"], world["z"]])
-    dynamic = load_dynamic_mask(bag_id, chunk_id, sweep_id).astype(bool)
+    xyz = world.xyz
+    dynamic = load_dynamic_mask(bag_id, chunk_id, sweep_id)
     diag_stats = _voxel_diag_per_point(xyz, _load_optional_voxel_diag(bag_id, chunk_id))
     return SweepVizData(
         bag_id=bag_id,
@@ -181,9 +181,9 @@ def load_sweep_viz_data(bag_id: str, chunk_id: str, sweep_id: int) -> SweepVizDa
         sweep_id=sweep_id,
         xyz=xyz,
         dynamic=dynamic,
-        intensity=world.get("intensity"),
-        ground_mask=world.get("ground_mask"),
-        origin=world.get("origin"),
+        intensity=world.intensity,
+        ground_mask=world.ground_mask,
+        origin=world.origin,
         p_occ=None if diag_stats is None else diag_stats["p_occ"],
         n_obs=None if diag_stats is None else diag_stats["n_obs"],
         n_hits=None if diag_stats is None else diag_stats["n_hits"],
@@ -206,12 +206,8 @@ def load_chunk_proposal_viz_data(bag_id: str, chunk_id: str) -> ProposalVizData:
     """Gather Step F proposal points across a chunk's sweeps."""
     from wato_common.artifact_store import lidar_proc_index_path
     from wato_common.io.parquet_io import read_rows
-    from wato_lidar_preprocessing.io import (
-        load_motion_clusters,
-        load_motion_proposals,
-        load_static_map,
-        load_world_sweep,
-    )
+    from wato_common.artifacts import motion_proposals
+    from wato_lidar_preprocessing.io import load_static_map, load_world_sweep
     from wato_lidar_preprocessing.motion_proposals import MOVING_SCORE
 
     try:
@@ -220,9 +216,9 @@ def load_chunk_proposal_viz_data(bag_id: str, chunk_id: str) -> ProposalVizData:
         static_xyz = np.empty((0, 3))
     moving_ids = np.array(
         [
-            int(r["cluster_id"])
-            for r in load_motion_clusters(bag_id, chunk_id)
-            if r["motion_score"] > MOVING_SCORE
+            c.cluster_id
+            for c in motion_proposals.read_clusters(bag_id, chunk_id)
+            if c.motion_score > MOVING_SCORE
         ],
         dtype=np.int64,
     )
@@ -232,19 +228,18 @@ def load_chunk_proposal_viz_data(bag_id: str, chunk_id: str) -> ProposalVizData:
             continue
         sid = int(row["sweep_id"])
         try:
-            prop = load_motion_proposals(bag_id, chunk_id, sid)
+            prop = motion_proposals.read_sweep(bag_id, chunk_id, sid)
         except FileNotFoundError:
             continue
-        bits = prop["source_bits"]
+        bits = prop.source_bits
         keep = bits != 0
         if not keep.any():
             continue
-        w = load_world_sweep(bag_id, chunk_id, sid)
-        xyz = np.column_stack([w["x"], w["y"], w["z"]])[keep]
+        xyz = load_world_sweep(bag_id, chunk_id, sid).xyz[keep]
         xyz_parts.append(xyz)
         sid_parts.append(np.full(xyz.shape[0], sid, dtype=np.int32))
         bit_parts.append(bits[keep])
-        mov_parts.append(np.isin(prop["cluster_id"][keep], moving_ids))
+        mov_parts.append(np.isin(prop.cluster_id[keep], moving_ids))
     if xyz_parts:
         xyz = np.concatenate(xyz_parts)
         sweep_id = np.concatenate(sid_parts)

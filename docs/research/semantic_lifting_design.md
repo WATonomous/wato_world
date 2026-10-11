@@ -378,8 +378,6 @@ visibility:
 voting:
   min_supporting_cameras: 1
   innermost_wins: true         # for nested masks, innermost wins
-depth:
-  skip_on_fit_failure: true    # skip a camera whose depth fit_status == 2
 upstream_versions: {}
 ```
 
@@ -423,10 +421,13 @@ implementation. Single source of truth for the projection math.
 - **Mask covering > 50% of image** (e.g., a building wall mistakenly tagged
   as "vehicle"): the visibility test still works, but the mask becomes
   essentially uninformative. Drop masks above an area threshold pre-lifting.
-- **Depth fit failed** (`fit_status = 2` in `depth_2d` artifact): can't run
-  the visibility test reliably. Either skip this camera entirely or fall
-  back to LiDAR-only sparse-depth visibility (project sparse LiDAR back,
-  use as a sparse occluder mask). Default: skip the camera, log it.
+- **Depth fit failed** (`FitStatus.FAILED`): can't run the visibility test
+  reliably. Either skip this camera entirely or fall back to LiDAR-only
+  sparse-depth visibility (project sparse LiDAR back, use as a sparse occluder
+  mask). Implemented: skip the camera. perception_2d writes no `depth_2d`
+  frame for a failed fit (`wato_common.artifacts.depth`), so the camera has no
+  depth and is skipped; the planned `skip_on_fit_failure` switch was dropped
+  because there is nothing on disk for it to act on.
 - **All cameras disagree on a point's label**: usually means the point is
   on an object boundary where masks differ. Drop the label rather than
   picking arbitrarily. Track in `lifted_stats` to monitor for systemic

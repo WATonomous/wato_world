@@ -88,8 +88,15 @@ Chunks whose output parquets already exist are skipped unless `--force`. Each
 camera's masklets are checkpointed to a per-camera resume cache, so an aborted
 run resumes per camera; `--force` discards those caches too.
 
-Outputs land at `data/artifacts/raw/<bag_id>/perception_2d/<version>/<chunk_id>/`:
+Outputs land in the chunk directory, `data/artifacts/raw/<bag_id>/chunks/<chunk_id>/`:
 `detections_2d.parquet`, `tracklets_2d.parquet`, `masks_2d/`, `depth_2d/`.
+The masklet tables and mask PNGs are written and read only through
+`wato_common.artifacts.masklets`, which owns their encoding (`frames_present`
+is a JSON string on disk, a tuple of ints once read). Consumers use its
+`MaskletIndex`, never the paths. `depth_2d/<cam_id>/<camera_seq:06d>.npz` is
+likewise owned by `wato_common.artifacts.depth` (`DepthFrame`, `FitStatus`):
+a frame whose LiDAR-anchored fit failed is not written at all, so a missing
+frame means "no usable depth".
 
 ## Visualizing depth
 

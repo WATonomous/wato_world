@@ -614,7 +614,7 @@ class LiftedStatsRow(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    sweep_id: str
+    sweep_id: int
     bag_id: str
     chunk_id: str
     n_points_total: int
@@ -628,7 +628,7 @@ class LiftedStatsRow(BaseModel):
 
 LIFTED_STATS_SCHEMA = pa.schema(
     [
-        pa.field("sweep_id", pa.string()),
+        pa.field("sweep_id", pa.int64()),
         pa.field("bag_id", pa.string()),
         pa.field("chunk_id", pa.string()),
         pa.field("n_points_total", pa.int64()),

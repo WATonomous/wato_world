@@ -1,9 +1,8 @@
-"""Artifact I/O for tracking. Reads upstream artifacts, writes own."""
+"""Artifact I/O for tracking (stub).
 
-from __future__ import annotations
-
-from wato_common.storage import artifact_uri
-
-
-def output_prefix(bag_id: str, chunk_id: str) -> str:
-    return artifact_uri("tracking", bag_id, chunk_id)
+Reads proposals, masklets (wato_common.artifacts.masklets) and world sweeps
+(wato_common.artifacts.lidar_sweeps).
+Writes tracks.parquet (artifact_store.tracks_path).
+Read another component's artifact only through its wato_common.artifacts
+module, which owns the format.
+"""

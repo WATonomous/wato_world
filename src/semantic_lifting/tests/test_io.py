@@ -1,5 +1,5 @@
-"""Tests for io.load_sweeps / io.load_frame_refs: real timestamps, and the
-ego pose looked up at each camera frame's own time."""
+"""Tests for the sweeps and camera-frame references semantic_lifting reads:
+real timestamps, and the ego pose looked up at each camera frame's own time."""
 
 from __future__ import annotations
 
@@ -21,7 +21,8 @@ from wato_common.schemas import (
     FrameIndexRow,
     ProcessedSweepMeta,
 )
-from wato_semantic_lifting.io import load_frame_refs, load_sweeps
+from wato_common.artifacts.lidar_sweeps import ProcessedSweeps
+from wato_semantic_lifting.io import load_frame_refs
 from wato_semantic_lifting.temporal_match import match_sweep_to_frames
 
 MS = 1_000_000
@@ -138,11 +139,11 @@ def test_sweeps_carry_their_timestamp_and_match_the_nearest_frame():
     rows = [_fi_row(0, 50, 1, 45), _fi_row(1, 150, 2, 160)]
     write_table(rows, FRAME_INDEX_SCHEMA, frame_index_path(BAG, CHUNK))
 
-    sweeps = load_sweeps(BAG, CHUNK)
-    assert [s.timestamp_ns for s in sweeps] == [50 * MS, 150 * MS]
+    sweeps = ProcessedSweeps.load(BAG, CHUNK).rows
+    assert [s.reference_timestamp_ns for s in sweeps] == [50 * MS, 150 * MS]
     refs = load_frame_refs(BAG, CHUNK)
     # Each sweep matches the frame taken during it, not the chunk's first frame.
     assert [
-        match_sweep_to_frames(s.timestamp_ns, refs)["cam_front"].camera_seq
+        match_sweep_to_frames(s.reference_timestamp_ns, refs)["cam_front"].camera_seq
         for s in sweeps
     ] == [1, 2]

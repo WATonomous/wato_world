@@ -11,7 +11,8 @@ from wato_common.geometry import PoseSample, invert_se3
 from wato_common.pose_lookup import PoseLookup, interval_drop_reasons
 from wato_perception_2d import pipeline
 from wato_perception_2d.config import ComponentConfig
-from wato_perception_2d.io import CalibrationInfo, CameraFrameInfo
+from wato_common.artifacts.calibration import CameraCalibration
+from wato_perception_2d.io import CameraFrameInfo
 
 MS = 1_000_000
 
@@ -67,7 +68,7 @@ def _run(monkeypatch, frame: CameraFrameInfo) -> tuple[list[np.ndarray], np.ndar
         "cam_front",
         frame,
         np.ones((4, 5), dtype=np.float32),
-        CalibrationInfo(K=np.eye(3), ego_T_cam=ego_T_cam),
+        CameraCalibration(cam_id="cam_front", K=np.eye(3), ego_T_cam=ego_T_cam),
         _poses(),
         deque(),
     )

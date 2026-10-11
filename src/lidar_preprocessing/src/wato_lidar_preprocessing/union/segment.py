@@ -70,6 +70,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tqdm import tqdm
 
+from wato_common.artifacts.lidar_sweeps import write_dynamic_mask
 from wato_common.artifact_store import (
     aw_dynamic_mask_path,
     dynamic_map_path,
@@ -341,7 +342,7 @@ def classify_chunk(
         total_static += n_static
 
         if n == 0:
-            np.save(local_path(dyn_uri), np.zeros(0, dtype=bool))
+            write_dynamic_mask(bag_id, chunk_id, sweep_id, np.zeros(0, dtype=bool))
             updated_meta.append(
                 _meta_row(row, sweep_id, 0, n_static, 0, dyn_uri, has_intensity)
             )
@@ -414,7 +415,7 @@ def classify_chunk(
             dyn_mask[cand_idx[vetoed]] = False
             total_vetoed += int(vetoed.sum())
 
-        np.save(local_path(dyn_uri), dyn_mask)
+        write_dynamic_mask(bag_id, chunk_id, sweep_id, dyn_mask)
         n_dyn = int(dyn_mask.sum())
         total_dynamic += n_dyn
 

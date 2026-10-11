@@ -8,14 +8,15 @@ Per-chunk steps:
        a. Compute cam_T_world at the matched frame time (points are already
           world-registered upstream, so no sweep-pose / ego-motion term)
        b. Project world-frame points to image
-       c. Load depth_2d artifact; skip camera if fit_status == 2
+       c. Load depth_2d artifact; skip the camera when the frame has none
+          (perception_2d writes none when the depth fit failed)
        d. Run UniLiPs Eq.1 visibility test
-       e. Load masks from tracklets_2d artifact
+       e. Look up the masklets present in that camera frame
        f. Assign masks to visible points (innermost-mask heuristic)
        g. Cast votes with score = det_score * depth_confidence (1.0 fallback)
     4. Accumulate cross-camera votes → final per-point labels
-    5. Write lifted_labels/<sweep_id>.npz
-  Write lifted_stats.parquet
+    5. Write lifted_labels/<sweep_id:06d>.npz
+  Write lifted_stats.parquet (wato_common.artifacts.lifted_labels)
 """
 
 from __future__ import annotations
@@ -25,18 +26,14 @@ from typing import Optional
 
 import numpy as np
 
+from wato_common.artifacts import depth, lifted_labels
+from wato_common.artifacts.calibration import Calibration, CameraCalibration
+from wato_common.artifacts.lidar_sweeps import ProcessedSweeps
+from wato_common.artifacts.masklets import MaskletIndex
 from wato_semantic_lifting.config import ComponentConfig
 from wato_semantic_lifting.io import (
-    CalibrationInfo,
-    load_all_lidar_points,
-    load_calibration,
     load_chunks,
-    load_depth_map,
     load_frame_refs,
-    load_masks_for_frame,
-    load_sweeps,
-    write_lifted_labels,
-    write_lifted_stats,
 )
 from wato_semantic_lifting.projection import assign_masks_to_points, project_and_clip
 from wato_semantic_lifting.stats import build_stats_row
@@ -54,28 +51,33 @@ def _process_chunk(
     cfg: ComponentConfig,
     bag_id: str,
     chunk_id: str,
-    calibration: dict[str, CalibrationInfo],
+    calibration: dict[str, CameraCalibration],
 ) -> None:
     """Run semantic lifting for all sweeps in one chunk."""
-    sweeps = load_sweeps(bag_id, chunk_id)
-    if not sweeps:
+    sweeps = ProcessedSweeps.load(bag_id, chunk_id)
+    if not sweeps.rows:
         log.warning("semantic_lifting: chunk %s has no valid sweeps", chunk_id)
-        write_lifted_stats(bag_id, chunk_id, [])
+        lifted_labels.write_stats(bag_id, chunk_id, [])
         return
 
     frame_refs = load_frame_refs(bag_id, chunk_id)
+    masklet_index = MaskletIndex.load(bag_id, chunk_id)
     stats_rows = []
 
-    for sweep in sweeps:
+    for sweep in sweeps.rows:
         log.debug("semantic_lifting: sweep %d", sweep.sweep_id)
 
         matched_cams = match_sweep_to_frames(
-            sweep.timestamp_ns,
+            sweep.reference_timestamp_ns,
             frame_refs,
             max_offset_s=cfg.temporal.max_offset_s,
         )
 
-        pts_world = load_all_lidar_points(sweep)
+        try:
+            pts_world = sweeps.world(sweep.sweep_id).xyz
+        except FileNotFoundError:
+            log.warning("semantic_lifting: sweep %d has no world NPZ", sweep.sweep_id)
+            pts_world = None
         if pts_world is None or pts_world.shape[0] == 0:
             stats_rows.append(
                 build_stats_row(
@@ -102,10 +104,10 @@ def _process_chunk(
             if calib is None:
                 continue
 
-            depth_info = load_depth_map(bag_id, chunk_id, cam_id, frame_ref.camera_seq)
-            if depth_info is None:
-                continue
-            if cfg.depth.skip_on_fit_failure and depth_info["fit_status"] == 2:
+            depth_frame = depth.read_frame(
+                bag_id, chunk_id, cam_id, frame_ref.camera_seq
+            )
+            if depth_frame is None:
                 continue
 
             cam_T_world = compute_cam_T_world(
@@ -113,7 +115,7 @@ def _process_chunk(
                 ego_T_cam=calib.ego_T_cam,
             )
 
-            H, W = depth_info["depth_m"].shape
+            H, W = depth_frame.depth_m.shape
             uv, depth_cam, valid = project_and_clip(
                 pts_world, calib.K, cam_T_world, (W, H)
             )
@@ -127,7 +129,7 @@ def _process_chunk(
 
             vis = visibility_test(
                 d_cam_valid,
-                depth_info["depth_m"],
+                depth_frame.depth_m,
                 uv_valid,
                 tolerance_m=cfg.visibility.tolerance_m,
                 neighborhood=cfg.visibility.neighborhood,
@@ -141,11 +143,12 @@ def _process_chunk(
             if uv_vis.shape[0] == 0:
                 continue
 
-            masks, instance_ids, classes, scores = load_masks_for_frame(
-                bag_id, chunk_id, cam_id, frame_ref.camera_seq
-            )
-            if not masks:
+            frame_masklets = masklet_index.at(cam_id, frame_ref.camera_seq)
+            if not frame_masklets:
                 continue
+            masks = [
+                masklet_index.mask(m, frame_ref.camera_seq) for m in frame_masklets
+            ]
 
             assignment = assign_masks_to_points(uv_vis, masks)
 
@@ -154,16 +157,17 @@ def _process_chunk(
                 if mask_idx < 0:
                     continue
                 n_in_any_mask += 1
+                masklet = frame_masklets[mask_idx]
                 # Vote weight is the detector confidence of the mask that claimed
                 # this point (design doc's ``det_score``). The depth artifact has
                 # no per-pixel confidence to fold in, so det_score is the signal;
                 # a small floor keeps a zero-scored mask able to break ties.
-                score = max(scores[mask_idx], 1e-3)
+                score = max(masklet.det_score, 1e-3)
                 all_votes.append(
                     PointVote(
                         point_idx=int(pt_idx),
-                        instance_id=instance_ids[mask_idx],
-                        cls=classes[mask_idx],
+                        instance_id=masklet.instance_id,
+                        cls=masklet.cls,
                         score=score,
                         cam_id=cam_id,
                         mask_area=int(masks[mask_idx].sum()),
@@ -188,11 +192,11 @@ def _process_chunk(
             )
         )
 
-    write_lifted_stats(bag_id, chunk_id, stats_rows)
+    lifted_labels.write_stats(bag_id, chunk_id, stats_rows)
     log.info(
         "semantic_lifting: chunk %s done — %d sweeps, %d total stats rows",
         chunk_id,
-        len(sweeps),
+        len(sweeps.rows),
         len(stats_rows),
     )
 
@@ -204,32 +208,25 @@ def _write_sweep_labels(
     labeled: list[LabeledPoint],
 ) -> None:
     if not labeled:
-        write_lifted_labels(
-            bag_id,
-            chunk_id,
-            sweep_id,
-            np.array([], dtype=np.int32),
-            [],
-            [],
-            np.array([], dtype=np.float32),
-            np.array([], dtype=np.int32),
-            np.array([], dtype=np.int32),
+        lifted_labels.write_sweep(
+            bag_id, chunk_id, sweep_id, lifted_labels.SweepLabels.empty()
         )
         return
-
-    write_lifted_labels(
+    lifted_labels.write_sweep(
         bag_id,
         chunk_id,
         sweep_id,
-        point_indices=np.array([p.point_idx for p in labeled], dtype=np.int32),
-        instance_ids=[p.instance_id for p in labeled],
-        classes=[p.cls for p in labeled],
-        confidences=np.array([p.confidence for p in labeled], dtype=np.float32),
-        n_supporting=np.array(
-            [p.n_supporting_cameras for p in labeled], dtype=np.int32
-        ),
-        n_disagreeing=np.array(
-            [p.n_disagreeing_cameras for p in labeled], dtype=np.int32
+        lifted_labels.SweepLabels(
+            point_indices=np.array([p.point_idx for p in labeled], dtype=np.int32),
+            instance_ids=np.array([p.instance_id for p in labeled], dtype=np.str_),
+            classes=np.array([p.cls for p in labeled], dtype=np.str_),
+            confidences=np.array([p.confidence for p in labeled], dtype=np.float32),
+            n_supporting_cameras=np.array(
+                [p.n_supporting_cameras for p in labeled], dtype=np.int32
+            ),
+            n_disagreeing_cameras=np.array(
+                [p.n_disagreeing_cameras for p in labeled], dtype=np.int32
+            ),
         ),
     )
 
@@ -242,9 +239,6 @@ def run(
     force: bool = False,
 ) -> None:
     """Process one bag (or one chunk) end-to-end."""
-    from wato_common.artifact_store import lifted_stats_path, local_path
-    import os
-
     chunks = load_chunks(bag_id)
     if not chunks:
         raise FileNotFoundError(
@@ -256,13 +250,13 @@ def run(
         if not chunks:
             raise ValueError(f"chunk_id {chunk_id!r} not found for bag {bag_id!r}")
 
-    calibration = load_calibration(bag_id)
+    calib = Calibration.load(bag_id)
+    calibration = {cam_id: calib.camera(cam_id) for cam_id in calib.cameras}
 
     n_ok = n_skip = 0
     for chunk in chunks:
         cid = chunk["chunk_id"]
-        stats_path = local_path(lifted_stats_path(bag_id, cid))
-        if not force and os.path.exists(stats_path):
+        if not force and lifted_labels.exists(bag_id, cid):
             log.info("chunk %s already complete — skipping", cid)
             n_skip += 1
             continue

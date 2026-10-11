@@ -38,7 +38,7 @@ from pathlib import Path
 
 import numpy as np
 
-# Mirrors wato_lidar_preprocessing.motion_proposals.BIT_NAMES; duplicated so
+# Mirrors wato_common.artifacts.motion_proposals.BIT_NAMES; duplicated so
 # this script stays runnable without the package on PYTHONPATH.
 _BITS = {
     1: "AW_DYNAMIC",

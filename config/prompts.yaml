@@ -1,5 +1,5 @@
 # Open-vocabulary prompts for perception_2d (GroundingDINO / YOLO-World).
-# Versioned alongside the perception_2d image; bump its version in component_versions.yaml
+# Versioned alongside the perception_2d image; its hash is in perception_2d's manifests.
 # whenever this file changes meaningfully.
 
 primary_taxonomy:

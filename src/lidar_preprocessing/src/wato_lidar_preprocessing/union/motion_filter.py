@@ -41,6 +41,7 @@ import numpy as np
 from scipy import ndimage
 from scipy.spatial import cKDTree
 
+from wato_common.artifacts.lidar_sweeps import read_dynamic_mask, write_dynamic_mask
 from wato_common.artifact_store import (
     dynamic_map_path,
     dynamic_mask_path,
@@ -269,7 +270,7 @@ def filter_dynamic_artifacts(
             )
             continue
         keep_s = keep[sel]
-        mask = np.load(local_path(dyn_uri)).astype(bool)
+        mask = read_dynamic_mask(dyn_uri)
         true_pos = np.flatnonzero(mask)
         if true_pos.shape[0] != keep_s.shape[0]:
             # Invariant broken (mask out of sync with dynamic_map) — leave this
@@ -289,7 +290,7 @@ def filter_dynamic_artifacts(
             )
             continue
         mask[true_pos[~keep_s]] = False
-        np.save(local_path(dyn_uri), mask)
+        write_dynamic_mask(bag_id, chunk_id, sweep, mask)
         n_dyn = int(mask.sum())
         updated_meta.append(
             _meta_row(row, sweep, n_total, n_static, n_dyn, dyn_uri, has_intensity)

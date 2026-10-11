@@ -1,23 +1,16 @@
-"""Step F — recall-oriented moving-object proposals (see _core.py)."""
+"""Step F — recall-oriented moving-object proposals (see _core.py).
+
+The bit layout (AW_DYNAMIC … UNMAPPED, SEED_BITS, ATTACH_BITS, decode_bits) and
+the artifacts' read/write halves live in wato_common.artifacts.motion_proposals.
+"""
 
 from wato_lidar_preprocessing.motion_proposals._core import (
-    ATTACH_BITS,
-    AW_AMBIGUOUS,
-    AW_DYNAMIC,
-    BIT_NAMES,
-    BOX_FILL,
     BOX_FILL_MAX_PERSISTENT,
     BOX_FILL_MIN_TRACK_LIFE,
-    IWU_EVICTED,
-    MF_MOS,
     MOVING_SCORE,
-    SEED_BITS,
-    SEG_DYNAMIC,
-    UNMAPPED,
     ProposalResult,
     cluster_points,
     compute_sweep_bits,
-    decode_bits,
     fill_box,
     process_chunk,
     proposals_up_to_date,
@@ -26,23 +19,12 @@ from wato_lidar_preprocessing.motion_proposals._core import (
 )
 
 __all__ = [
-    "ATTACH_BITS",
-    "AW_AMBIGUOUS",
-    "AW_DYNAMIC",
-    "BIT_NAMES",
-    "BOX_FILL",
     "BOX_FILL_MAX_PERSISTENT",
     "BOX_FILL_MIN_TRACK_LIFE",
-    "IWU_EVICTED",
-    "MF_MOS",
     "MOVING_SCORE",
-    "SEED_BITS",
-    "SEG_DYNAMIC",
-    "UNMAPPED",
     "ProposalResult",
     "cluster_points",
     "compute_sweep_bits",
-    "decode_bits",
     "fill_box",
     "process_chunk",
     "proposals_up_to_date",

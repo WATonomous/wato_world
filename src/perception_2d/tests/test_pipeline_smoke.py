@@ -8,7 +8,6 @@ writes valid empty parquets without touching any model.
 
 from __future__ import annotations
 
-import json
 import os
 
 import numpy as np
@@ -17,6 +16,8 @@ import pyarrow.parquet as pq
 import pytest
 from PIL import Image as PILImage
 
+from wato_common.artifacts import calibration
+from wato_common.artifacts.calibration import Calibration, CameraCalibration
 from wato_perception_2d.config import ComponentConfig
 from wato_perception_2d.pipeline import run
 
@@ -43,15 +44,19 @@ def _make_bag(tmp_path, monkeypatch, *, valid_camera: bool):
     frames_dir.mkdir(parents=True, exist_ok=True)
     (chunks_dir / "lidar").mkdir(parents=True, exist_ok=True)
 
-    calib = {
-        "cameras": {
-            "cam_front": {
-                "K": [[500, 0, 320], [0, 500, 240], [0, 0, 1]],
-                "ego_T_cam": np.eye(4).tolist(),
-            }
-        }
-    }
-    (bag_root / "calibration.json").write_text(json.dumps(calib))
+    calibration.write(
+        bag_id,
+        Calibration(
+            cameras={
+                "cam_front": CameraCalibration(
+                    cam_id="cam_front",
+                    K=np.array([[500.0, 0, 320], [0, 500, 240], [0, 0, 1]]),
+                    ego_T_cam=np.eye(4),
+                )
+            },
+            lidars={},
+        ),
+    )
 
     chunks_tbl = pa.table({"chunk_id": [chunk_id], "bag_id": [bag_id]})
     pq.write_table(chunks_tbl, str(bag_root / "chunks" / "index.parquet"))

@@ -28,6 +28,7 @@ from scipy.ndimage import distance_transform_edt
 from scipy.stats import binned_statistic_2d
 from tqdm import tqdm
 
+from wato_common.artifacts.lidar_sweeps import read_world
 from wato_common.artifact_store import (
     ground_path,
     lidar_proc_index_path,
@@ -221,19 +222,15 @@ def process_chunk(
         # skip only on explicit valid=False.
         if row.get("valid") is False:
             continue
-        world_path = local_path(row["world_path"])
-        data = np.load(world_path)
-        if "ground_mask" not in data:
+        data = read_world(row["world_path"])
+        if data.ground_mask is None:
             continue
         n_with_mask += 1
-        mask = data["ground_mask"]
+        mask = data.ground_mask
         n_classified_pts += int(mask.shape[0])
         if mask.sum() == 0:
             continue
-        xyz = np.stack(
-            [data["x"][mask], data["y"][mask], data["z"][mask]],
-            axis=1,
-        ).astype(np.float64)
+        xyz = data.xyz[mask]
         n_before = xyz.shape[0]
         xyz = _drop_dynamic_voxel_points(
             xyz,
