@@ -1,4 +1,4 @@
-# perception_2d: 2D detector (GroundingDINO) + SAM2 video tracker.
+# perception_2d: 2D detector (YOLO26 or GroundingDINO) + SAM2 video tracker.
 #
 # The detector emits class-labeled boxes per keyframe; SAM2's video predictor
 # turns each box into a mask and tracks it across the camera stream into
@@ -21,14 +21,42 @@ discovery:
                   "traffic cone", "barrier"]
 
 detection:
-  # HuggingFace zero-shot detection checkpoint (GroundingDINO). The Transformers
+  # Box source for SAM2:
+  #   "yolo"           → closed-set YOLO26 (COCO weights), mapped onto the
+  #                      taxonomy by yolo.class_map. DEFAULT. Requires
+  #                      discovery.backend: fixed.
+  #   "grounding_dino" → open-vocabulary GroundingDINO, text-prompted by the
+  #                      taxonomy (or by Florence-2 discovery).
+  backend: "yolo"
+
+  yolo:
+    # Pinned weights (model_registry: yolo26; scripts/fetch_models.py). Loaded
+    # by path — never by name, which would download whatever upstream ships.
+    checkpoint: "/data/models/yolo26x.pt"
+    conf: 0.25            # min box confidence
+    iou: 0.7              # NMS IoU
+    imgsz: 1280           # inference size; WATO frames are 1280x1024
+    # COCO class → taxonomy class; anything unmapped is dropped. COCO has no
+    # traffic cone or barrier, so this backend never detects those two classes
+    # (logged at startup). COCO labels a cyclist "person" (→ pedestrian) plus a
+    # separate "bicycle".
+    class_map:
+      person: pedestrian
+      bicycle: bicycle
+      car: car
+      motorcycle: motorcycle
+      bus: bus
+      truck: truck
+
+  # grounding_dino — HuggingFace zero-shot detection checkpoint. The Transformers
   # backend needs no CUDA custom-op compile (unlike the standalone groundingdino
   # package). Use "...-tiny" for a lighter/faster model.
   model: "IDEA-Research/grounding-dino-base"
   box_threshold: 0.35   # min box confidence
   text_threshold: 0.25  # min text-token match score
   nms_iou: 0.5          # per-class NMS IoU to drop duplicate boxes
-  # Run the detector every k frames to introduce objects entering mid-clip.
+
+  # Both backends. Run the detector every k frames to introduce objects entering mid-clip.
   # A large value → effectively detect-once at frame 0.
   redetect_every_k: 10
 
@@ -53,13 +81,22 @@ tracking:
   # `tracking` re-links via DINOv2 ReID. Clips that fit never touch this path.
   sub_clip_frames: 150
   min_sub_clip_frames: 16
-  # Drop an object from the SAM2 session after this many frames with no mask
-  # (checked at keyframes). This SAM2 build runs memory attention per object per
-  # frame and never forgets an object on its own, so without this the per-frame
-  # cost and VRAM grow with every object detected so far — cars long gone from
-  # view included. A dropped object that reappears and is re-detected starts a
-  # new masklet (re-linked downstream via DINOv2). 0 = never drop.
-  drop_lost_after_frames: 30
+  # SAM2 doesn't let go of an object it has lost (it left the image, or got
+  # covered): within 0-30 frames it tends to latch the lost object's id onto a
+  # similar object nearby — usually one that already has its own track. On WATO
+  # data every such resume was a different object. So a track ENDS (no more
+  # masks recorded; removed from the SAM2 session at the next keyframe) when:
+  #   - its object has had no mask for drop_lost_after_frames consecutive
+  #     frames (0 = never), or
+  #   - its mask and another live track's reach duplicate_mask_iou in the same
+  #     frame — a jump with no empty frame between (e.g. an oncoming car leaving
+  #     the image as it passes a parked one). The track whose mask changed most
+  #     since its previous frame ends; > 1 disables.
+  # An object that comes back and is re-detected starts a new masklet (re-linked
+  # downstream via DINOv2). Ending tracks also bounds cost: this SAM2 build runs
+  # memory attention per object per frame for every object it holds.
+  drop_lost_after_frames: 5
+  duplicate_mask_iou: 0.7
   # Precision for SAM2 calls on CUDA: bfloat16 (upstream's own setting; lets
   # attention use flash kernels), float16, or float32. The detector and DINOv2
   # always run float32.

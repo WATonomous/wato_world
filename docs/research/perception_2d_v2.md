@@ -1,4 +1,4 @@
-# perception_2d — GroundingDINO + SAM2 + Depth Anything V2 + DINOv2
+# perception_2d — YOLO26 / GroundingDINO + SAM2 + Depth Anything V2 + DINOv2
 
 **Status**: implemented (`src/perception_2d/`).
 **Supersedes**: the SAM3 + Florence-2 concept-everything plan. That design was
@@ -41,12 +41,12 @@ per camera stream        │                                                    
   class vocabulary ──────┼─► fixed taxonomy   OR   Florence-2 open-vocab discovery     │
                          │            │                                                │
                          │            ▼                                                │
-  keyframes ─────────────┼─► GroundingDINO ──► class-labeled boxes                     │
+  keyframes ─────────────┼─► YOLO26 or GroundingDINO ──► class-labeled boxes           │
                          │            │                                                │
                          │            ▼                                                │
                          │   SAM2 video predictor: box → mask, propagate across stream │
-                         │            │  (IoU merge of re-detections; lost-object drop;│
-                         │            │   OOM windowing; bf16 autocast)                │
+                         │            │  (IoU merge of re-detections; end lost/jumped  │
+                         │            │   tracks; pixel ownership; OOM windows; bf16)  │
                          │            ▼                                                │
                          │   Masklets (persistent ids) + DINOv2 embedding every k      │
                          │            │                                                │
@@ -92,31 +92,59 @@ object means one masklet per object (no synonym explosion).
    called with `offload_video_to_cpu=True` so the frame stack lives in host RAM
    and streams to the GPU per frame — essential for long panoramic clips — and
    `async_loading_frames=True` so decoding overlaps tracking.
-2. At each keyframe (every `redetect_every_k` frames), first **drop lost
-   objects**: any object SAM2 has returned an empty mask for over the last
-   `drop_lost_after_frames` frames is removed from the session
-   (`remove_object`). Then run **GroundingDINO** → class-labeled boxes. A box
-   whose mask-bbox IoU with an already-tracked object is ≥
-   `iou_match_threshold` is dropped as the existing object; genuinely new boxes
-   get a fresh `obj_id` via `add_new_points_or_box`. This is how objects
-   entering mid-clip are introduced without duplicating existing tracks. A
-   keyframe with no live objects and no detections is skipped (SAM2 refuses to
-   propagate zero objects — previously that error abandoned the whole window,
-   so an empty first frame lost every later object).
+2. At each keyframe (every `redetect_every_k` frames), first remove the tracks
+   that **ended** since the last keyframe (below) from the session
+   (`remove_object`). Then run **GroundingDINO** → class-labeled boxes,
+   highest score first. A box whose mask-bbox IoU with an already-tracked
+   object is ≥ `iou_match_threshold` is dropped as the existing object, and so
+   is one that repeats a box already accepted at this keyframe (the detector's
+   NMS is per class, so one shuttle comes back as both `truck` and `bus`);
+   genuinely new boxes get a fresh `obj_id` via `add_new_points_or_box`. This
+   is how objects entering mid-clip are introduced without duplicating existing
+   tracks. A keyframe with no live objects and no detections is skipped (SAM2
+   refuses to propagate zero objects — previously that error abandoned the
+   whole window, so an empty first frame lost every later object).
 3. `propagate_in_video` forward to the next keyframe, recording per-object masks
    into `Masklet`s (persistent ids) — per-frame mask PNGs (written on a thread
    pool) plus a DINOv2 appearance embedding extracted every
-   `embeddings.every_k_frames`, batched over the frame's objects.
+   `embeddings.every_k_frames`, batched over the frame's objects. Each frame,
+   first decide which tracks **end** (on SAM2's raw masks), then give any pixel
+   several surviving masks claim to the one with the highest logit.
 
-**Why lost objects are dropped**: the pinned SAM2 runs memory attention and the
-memory encoder once *per object* per frame, and never forgets an object on its
-own — a car that left the image 200 frames ago still costs a full inference
-every frame and keeps accumulating per-frame state in VRAM. Without the drop,
-per-frame cost grows with every object detected so far rather than with what is
-visible. The trade: an object occluded for longer than `drop_lost_after_frames`
-and then re-detected starts a new masklet instead of continuing its old one —
-the same discontinuity as an OOM window boundary, re-linked downstream via
-DINOv2. `drop_lost_after_frames: 0` restores the never-drop behaviour.
+**Why tracks end — SAM2 latches lost ids onto other objects.** SAM2 does not let
+go of an object it has lost (it left the image, or got covered): within 0–30
+frames it tends to report the lost object's id on a *different*, similar object
+nearby — usually one that already has its own track, since per-object inference
+has no notion of two objects owning the same pixels. Debugged on 181 frames of a
+WATO pano camera, every such resume was wrong: a pedestrian's masklet walked out
+of view at frame 61 and then reappeared on a car (77), on three other
+pedestrians (110–122) and on a parked car (145–162) under one id; an oncoming
+car's masklet jumped onto a parked car in the very frame it left the image, with
+no empty frame between. So a track ends — no further masks recorded, removed
+from the session at the next keyframe — when either:
+
+- its object has had no mask for `drop_lost_after_frames` consecutive frames
+  (default 5, ~0.4 s at 12 Hz; 0 = never), or
+- its mask and another live track's reach mask IoU ≥ `duplicate_mask_iou`
+  (default 0.7) in the same frame. Of the two, the one whose mask changed most
+  since its own previous mask is the one that jumped and ends; a track prompted
+  this frame counts as having jumped, so an existing track is never displaced.
+
+The trade: an object that comes back after a real occlusion longer than
+`drop_lost_after_frames` starts a new masklet when re-detected — the same
+discontinuity as an OOM window boundary, re-linked downstream via DINOv2. On the
+debug clip no track had a gap followed by a correct resume, and the masklet
+count was unchanged (26). Ending tracks also bounds cost: the pinned SAM2 runs
+memory attention and the memory encoder once *per object* per frame and keeps
+per-frame state for every object it holds, so without it per-frame cost and VRAM
+grow with every object detected so far rather than with what is visible.
+
+**Why contested pixels go to one object**: independent per-object inference
+also lets one object's mask wrap around another — the shuttle's mask swallowed a
+car half-hidden beside it — and a pixel in two masks would be lifted to 3D as
+both. Ownership is decided only after ending tracks: done first, it would split
+a jumped track's stolen object with its rightful track instead of revealing the
+jump (the two masks never overlap, so `duplicate_mask_iou` can't fire).
 
 **Precision**: SAM2 calls (`init_state`, `add_new_points_or_box`,
 `propagate_in_video`, `remove_object`) run under CUDA autocast at
@@ -132,7 +160,17 @@ the same discontinuity as between chunks, which the downstream `tracking`
 component re-links via the DINOv2 embeddings. Clips that fit never touch this
 path.
 
-**Detector backend**: GroundingDINO via HuggingFace Transformers
+**Detector backend** (`detection.backend`): **`yolo`** (default) — Ultralytics
+YOLO26-x, COCO weights, closed-set; `detection.yolo.class_map` maps COCO classes
+onto the taxonomy and drops the rest, so traffic cones and barriers (absent
+from COCO) are never detected. Frames are converted RGB → BGR (Ultralytics'
+numpy convention), the pinned `.pt` is loaded by path, and ultralytics runs with
+`YOLO_OFFLINE=1`. Chosen over GroundingDINO for the fixed taxonomy because
+GroundingDINO's class scores depend on which other phrases share its prompt
+(on WATO data the shuttle came out `truck`, dark pedestrians `motorcycle`, and
+fire hydrants `traffic cone`), and YOLO is ~7× faster per keyframe. `yolo` can't
+be paired with `discovery.backend: florence2`; open-vocabulary work uses
+**`grounding_dino`**: GroundingDINO via HuggingFace Transformers
 (`AutoModelForZeroShotObjectDetection`, default `IDEA-Research/grounding-dino-base`),
 which needs no CUDA custom-op compile (unlike the standalone `groundingdino`
 package). Use a `-tiny` checkpoint for a lighter/faster model.
@@ -298,12 +336,19 @@ discovery:
                   "pedestrian", "traffic cone", "barrier"]
 
 detection:
-  model: "IDEA-Research/grounding-dino-base"
+  backend: "yolo"                  # "yolo" | "grounding_dino"
+  yolo:
+    checkpoint: "/data/models/yolo26x.pt"   # pinned (model_registry: yolo26)
+    conf: 0.25
+    iou: 0.7
+    imgsz: 1280
+    class_map: {person: pedestrian, bicycle: bicycle, car: car,
+                motorcycle: motorcycle, bus: bus, truck: truck}
+  model: "IDEA-Research/grounding-dino-base"   # grounding_dino only
   box_threshold: 0.35
   text_threshold: 0.25
   nms_iou: 0.5
   redetect_every_k: 10             # re-detect to admit objects entering mid-clip
-
 segmentation:
   checkpoint: "/data/models/sam2.1_hiera_large.pt"
   config: "configs/sam2.1/sam2.1_hiera_l.yaml"   # bundled in the sam2 package
@@ -313,7 +358,8 @@ tracking:
   offload_video_to_cpu: true       # frame stack in host RAM (long-clip safe)
   sub_clip_frames: 150             # OOM fallback window
   min_sub_clip_frames: 16
-  drop_lost_after_frames: 30       # remove objects absent this long (0 = never)
+  drop_lost_after_frames: 5        # end a track after this many empty frames (0 = never)
+  duplicate_mask_iou: 0.7          # end the track that jumped onto another's object
   autocast_dtype: "bfloat16"       # SAM2 precision: bfloat16 | float16 | float32
 
 depth:
@@ -391,7 +437,8 @@ io.py                      frame_index / calibration / static-LiDAR loaders + ca
 viz.py                     interactive depth-vs-image viewer
 models/
   depth.py                 Depth Anything V2 wrapper (batched infer, unload)
-  detector.py              GroundingDINO wrapper (box source for SAM2)
+  detector.py              GroundingDINO wrapper (open-vocab box source for SAM2)
+  yolo_detector.py         YOLO26 wrapper (closed-set box source, default)
   _sam2_runtime.py         shared SAM2 video-predictor loader / cache
   sam2_tracker.py          detector + SAM2 per-camera tracking → Masklets
   discovery.py             Florence-2 open-vocab discovery (optional backend)

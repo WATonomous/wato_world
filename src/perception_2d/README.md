@@ -1,9 +1,10 @@
 # perception_2d
 
-2D perception pass (GroundingDINO + SAM2 + Depth Anything V2 + DINOv2
-appearance embeddings).
+2D perception pass (YOLO26 or GroundingDINO detector + SAM2 + Depth Anything V2
++ DINOv2 appearance embeddings).
 
-Per camera, the detector (GroundingDINO) emits class-labeled boxes on keyframes
+Per camera, the detector (`detection.backend`, see "Detector backends" below)
+emits class-labeled boxes on keyframes
 and SAM2's video predictor turns each box into a mask and tracks it across the
 frame stream into masklets (persistent object ids) — one box per object, so each
 physical object becomes a single masklet (no concept-everything explosion).
@@ -14,7 +15,43 @@ one of two sources, selected by `discovery.backend`:
 - `fixed` (default) — the closed-set taxonomy (`discovery.fixed_classes`,
   or prompts.yaml `primary_taxonomy` when empty).
 - `florence2` — open-vocabulary noun phrases discovered per frame by Florence-2,
-  pooled into one concept set per camera stream and fed to the detector.
+  pooled into one concept set per camera stream and fed to the detector
+  (`detection.backend: grounding_dino` only).
+
+## Detector backends
+
+`detection.backend` picks the box source; both return the same class-labeled
+boxes, so nothing downstream changes:
+
+- **`yolo`** (default) — Ultralytics YOLO26-x, COCO weights, closed-set.
+  `detection.yolo.class_map` maps COCO classes onto the taxonomy (person →
+  pedestrian, plus bicycle, car, motorcycle, bus, truck). COCO has no traffic
+  cone or barrier, so **this backend never detects those two classes** (logged
+  at startup). ~30 ms per keyframe at `imgsz: 1280` on an RTX 5070 Ti. Pure
+  PyTorch, no compiled ops. License: AGPL-3.0.
+- **`grounding_dino`** — open-vocabulary, text-prompted by the taxonomy (or by
+  Florence-2 discovery). Keep this for open-vocabulary work; its class scores
+  depend on which other words share the prompt.
+
+Three things in `models/yolo_detector.py` that would otherwise give wrong output
+without an error: Ultralytics reads numpy images as **BGR** and pipeline frames
+are RGB, so detect() converts (on a WATO frame, passing RGB lost a fire hydrant
+and a stop sign); the weights load **by path** from the pinned file — a bare name
+like `yolo26x.pt` would download whatever upstream ships today; and
+`YOLO_OFFLINE=1` / `YOLO_CONFIG_DIR` are set before ultralytics is imported, so
+it makes no network calls and writes its settings file to a temp dir. The
+pipeline also refuses to start if a `class_map` target is a near-miss of a
+taxonomy class (`pedestrain`, or `traffic cone` vs `traffic_cone`), or if
+`yolo` is paired with `discovery.backend: florence2`.
+
+Known semantics of the COCO weights (not bugs): the campus shuttle comes out
+`truck`, and a cyclist is a `person` (→ pedestrian) plus a separate `bicycle`.
+
+**Known false positive — the ego vehicle.** PANO_NN (front) sees our own hood
+along the bottom ~15 px of the frame (x ≈ 450–850 at 1280×1024); YOLO scores it
+`car` at 0.26–0.35, and SAM2 then tracks that "car" for the rest of the clip (a
+161-frame masklet on the debug clip). GroundingDINO did not fire on it. Nothing
+filters ego-vehicle regions yet.
 
 Depth Anything V2 + a LiDAR-anchored fit produces a metric depth map per
 frame. DA-V2's relative checkpoints output *disparity* (larger = closer), so the
@@ -43,7 +80,8 @@ python3 src/perception_2d/scripts/fetch_models.py --skip depth_anything_v2
 ```
 
 Pulls GroundingDINO, Depth Anything V2 and Florence-2 into the HF cache, the
-SAM2.1 checkpoint as a loose `.pt`, and DINOv2 into the torch.hub cache. The
+SAM2.1 and YOLO26-x checkpoints as loose `.pt` files, and DINOv2 into the
+torch.hub cache. The
 container points `HF_HOME` / `TORCH_HOME` at those caches and runs
 `HF_HUB_OFFLINE=1`.
 
@@ -107,43 +145,67 @@ hyperbolic), so those `depth_2d/` maps are wrong. Their files carry
 rejects them with `ArtifactFormatError` rather than serve them as metric;
 `--force` regenerates them.
 
-## Tracking speed
+## Tracking: identity and speed
 
-SAM2 (this pinned build) runs memory attention once per *object* per frame and
-never forgets an object, so cost tracks objects-ever-detected, not
-objects-visible. Two `tracking` settings bound it:
+**SAM2 latches a lost object's id onto other objects.** When an object leaves
+the image or is covered, this SAM2 build keeps its id alive and, within 0–30
+frames, usually reports it on a different, similar object nearby — typically
+one that already has its own track. On the debug clip (181 frames, one WATO
+pano camera) every such resume was wrong: one pedestrian's masklet walked out of
+view and then reappeared on a car, three other pedestrians and a parked car; an
+oncoming car's masklet jumped onto a parked car in the very frame it left the
+image. Three `tracking` settings handle it:
 
-- `drop_lost_after_frames` (default 30, ~2.5 s at 12 Hz) — an object with no
-  mask for that long is removed from the session at the next keyframe. If it
-  comes back and is re-detected it starts a new masklet (re-linked downstream
-  via DINOv2). `0` = never drop.
-- `autocast_dtype` (default `bfloat16`, upstream's own setting) — SAM2 calls
-  run under CUDA autocast; the detector and DINOv2 stay float32.
+- `drop_lost_after_frames` (default 5, ~0.4 s at 12 Hz) — a track whose object
+  has had no mask for that many consecutive frames ends: no further masks are
+  recorded, and it is removed from the SAM2 session at the next keyframe. If the
+  object returns and is re-detected it starts a new masklet (re-linked
+  downstream via DINOv2). `0` = never.
+- `duplicate_mask_iou` (default 0.7) — if two live tracks' masks reach this IoU
+  in one frame, the one whose mask changed most since its previous frame jumped,
+  and ends. Catches the jump with no empty frame in between.
+- Contested pixels: after those decisions, a pixel in several masks goes to the
+  object with the highest SAM2 logit, so a bus's mask can't swallow the car
+  half-hidden beside it (that pixel would be lifted as both).
 
-Frames ingest wrote as JPEG are symlinked into SAM2's frame dir instead of being
-re-encoded, mask PNGs are written on a thread pool, and DINOv2 embeds all of a
-frame's objects in one batch.
+Same-keyframe detections are also deduplicated across classes, highest score
+first — GroundingDINO's NMS is per class, so a shuttle comes back as both
+`truck` and `bus` (YOLO can return two classes for one object too).
 
-Measured on 181 frames (1280×1024) of one WATO pano camera, RTX 5070 Ti, full
-tracking pass (detector + SAM2 + DINOv2 + mask writes):
+The cost of ending tracks: an object that is genuinely occluded for more than
+`drop_lost_after_frames` comes back as a new masklet, and an object the detector
+never finds is no longer covered by a hijacked track (on the debug clip, 5
+frames of a dark figure in a field GroundingDINO never detected — previously
+masked under another pedestrian's id with the label `motorcycle`).
 
-| setting | time | peak VRAM | masks vs. old float32 path (per-frame IoU, mean / median) |
+**Speed.** This SAM2 build runs memory attention once per *object* per frame for
+every object it holds, so ending tracks also bounds cost. `autocast_dtype`
+(default `bfloat16`, upstream's own setting) runs SAM2 calls under CUDA
+autocast; the detector and DINOv2 stay float32. Frames ingest wrote as JPEG are
+symlinked into SAM2's frame dir instead of being re-encoded, mask PNGs are
+written on a thread pool, and DINOv2 embeds all of a frame's objects in one
+batch.
+
+Measured on the debug clip (1280×1024), RTX 5070 Ti, full tracking pass
+(detector + SAM2 + DINOv2 + mask writes):
+
+| setting | time | peak VRAM | masklets |
 |---|---|---|---|
-| float32, never drop (old path) | 283 s | 7.3 GB | — |
-| bfloat16, never drop | 63 s | 7.3 GB | 0.981 / 0.993 |
-| bfloat16, drop after 30 (default) | 38 s | 4.8 GB | 0.976 / 0.993 |
+| float32, never end tracks (old path) | 283 s | 7.3 GB | 25, four of them hopping between objects |
+| bfloat16, never end tracks | 63 s | 7.3 GB | 26 |
+| bfloat16 + current defaults | 27 s | 4.6 GB | 26, none hopping or duplicated |
 
-Runs are bit-for-bit repeatable. bfloat16 moves masks no more than merely
-feeding SAM2 the source JPEG instead of a re-encode does (0.980 / 0.996).
-SAM2's `vos_optimized=True` (torch.compile) was tried and is not usable with
-this per-object tracker: 224 s of compile, then a CUDA-graphs buffer-reuse error
-in memory attention.
+Runs are bit-for-bit repeatable. bfloat16 alone moves masks no more than merely
+feeding SAM2 the source JPEG instead of a re-encode does (per-frame IoU vs the
+old path 0.981 vs 0.980 mean). SAM2's `vos_optimized=True` (torch.compile) was
+tried and is not usable with this per-object tracker: 224 s of compile, then a
+CUDA-graphs buffer-reuse error in memory attention.
 
 ## Visualizing depth
 
 `viz` opens an interactive depth-vs-image viewer (the 2D analogue of
 lidar_preprocessing's Open3D `watod viz`) for the `depth_2d` artifacts — to
-eyeball what Depth Anything V2 + the LiDAR-anchored affine fit produced:
+eyeball what Depth Anything V2 + the LiDAR-anchored disparity fit produced:
 
 ```bash
 ./watod run perception_2d viz --bag <bag_id>
