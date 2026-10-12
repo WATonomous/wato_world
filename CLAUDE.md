@@ -48,7 +48,7 @@ each in its own Docker image, communicating only through artifacts on disk
 ```
 ingest              → frames + lidar sweeps + poses + frame_index
 lidar_preprocessing → motion comp, static/dynamic split (--seg aw|mos|union), ground, bag IWU, motion proposals
-perception_2d       → GroundingDINO + SAM2 video tracker + Depth Anything V2 + DINOv2 (optional Florence-2 discovery)
+perception_2d       → YOLO26 (default, closed-set) or GroundingDINO (open-vocab) detector + SAM2 video tracker + Depth Anything V2 + DINOv2 (optional Florence-2 discovery, GroundingDINO only)
 semantic_lifting    → occlusion-aware 2D→3D label lifting (UniLiPs Eq.1)
 proposal_generation → LiDAR detector ensemble + Segment-Lift-Fit + fusion
 tracking            → 4D tracking with masklet association + DINOv2 ReID
@@ -328,7 +328,7 @@ below exists to make that impossible to do by accident.
 | Python deps | `docker/requirements/{ingest,lidar_preprocessing,perception_2d}.txt` | exact `==` for the full transitive closure, installed `--no-deps` |
 | `sam2` | `docker/perception_2d.Dockerfile` | `ARG SAM2_COMMIT` — upstream has no PyPI release, `main` moves |
 | MF-MOS | `docker/lidar_preprocessing.Dockerfile` | `ARG MF_MOS_COMMIT` — decides the static/dynamic split |
-| Model weights | `src/perception_2d/src/wato_perception_2d/model_registry.py` | HF `revision=` / torch.hub `repo:<sha>` |
+| Model weights | `src/perception_2d/src/wato_perception_2d/model_registry.py` | HF `revision=` / torch.hub `repo:<sha>` / raw `.pt` (SAM2, YOLO26) from an HF commit, loaded by path |
 | Component bases | `docker/{ingest,lidar_preprocessing,perception_2d}.Dockerfile` | `base:<tag>@sha256:...` |
 | Upstream bases | `docker/base/inject_*.Dockerfile` | `ubuntu`/`nvcr.io` by digest, plus `ARG UV_VERSION` |
 

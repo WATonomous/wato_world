@@ -1,4 +1,4 @@
-# perception_2d: 2D detector (GroundingDINO) + SAM2 video tracker.
+# perception_2d: 2D detector (YOLO26 or GroundingDINO) + SAM2 video tracker.
 #
 # The detector emits class-labeled boxes per keyframe; SAM2's video predictor
 # turns each box into a mask and tracks it across the camera stream into
@@ -21,14 +21,42 @@ discovery:
                   "traffic cone", "barrier"]
 
 detection:
-  # HuggingFace zero-shot detection checkpoint (GroundingDINO). The Transformers
+  # Box source for SAM2:
+  #   "yolo"           → closed-set YOLO26 (COCO weights), mapped onto the
+  #                      taxonomy by yolo.class_map. DEFAULT. Requires
+  #                      discovery.backend: fixed.
+  #   "grounding_dino" → open-vocabulary GroundingDINO, text-prompted by the
+  #                      taxonomy (or by Florence-2 discovery).
+  backend: "yolo"
+
+  yolo:
+    # Pinned weights (model_registry: yolo26; scripts/fetch_models.py). Loaded
+    # by path — never by name, which would download whatever upstream ships.
+    checkpoint: "/data/models/yolo26x.pt"
+    conf: 0.25            # min box confidence
+    iou: 0.7              # NMS IoU
+    imgsz: 1280           # inference size; WATO frames are 1280x1024
+    # COCO class → taxonomy class; anything unmapped is dropped. COCO has no
+    # traffic cone or barrier, so this backend never detects those two classes
+    # (logged at startup). COCO labels a cyclist "person" (→ pedestrian) plus a
+    # separate "bicycle".
+    class_map:
+      person: pedestrian
+      bicycle: bicycle
+      car: car
+      motorcycle: motorcycle
+      bus: bus
+      truck: truck
+
+  # grounding_dino — HuggingFace zero-shot detection checkpoint. The Transformers
   # backend needs no CUDA custom-op compile (unlike the standalone groundingdino
   # package). Use "...-tiny" for a lighter/faster model.
   model: "IDEA-Research/grounding-dino-base"
   box_threshold: 0.35   # min box confidence
   text_threshold: 0.25  # min text-token match score
   nms_iou: 0.5          # per-class NMS IoU to drop duplicate boxes
-  # Run the detector every k frames to introduce objects entering mid-clip.
+
+  # Both backends. Run the detector every k frames to introduce objects entering mid-clip.
   # A large value → effectively detect-once at frame 0.
   redetect_every_k: 10
 

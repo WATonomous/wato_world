@@ -32,7 +32,7 @@ ingest             ← bags + calibration + poses + chunk index
 lidar_preprocessing← SAM4D preprocessing, static/dynamic split (AW log-odds /
                       MF-MOS / union), ground plane, UniLiPs IWU (Step E),
                       Chen et al. MOS auto-labeling proposals (Step F)
-perception_2d      ← GroundingDINO detector + SAM2 video tracker + DA-V2 depth + DINOv2 ReID
+perception_2d      ← YOLO26 / GroundingDINO detector + SAM2 video tracker + DA-V2 depth + DINOv2 ReID
 semantic_lifting   ← occlusion-aware 2D→3D label lifting (UniLiPs Eq.1)
 proposal_generation← Segment-Lift-and-Fit, Fusion4DAL LiDAR detector ensemble
 tracking           ← Fusion4DAL 4D tracking + SAM4D temporal memory
@@ -162,7 +162,7 @@ label_refinement      reads: tracks, lidar_proc/*_world.npz, motion_proposals / 
 ## Implementation priority order
 
 Done: `ingest`; `lidar_preprocessing` (Steps A–F: deskew, `--seg aw|mos|union`,
-ground, reduce, IWU, motion proposals); `perception_2d` (GroundingDINO / SAM2 /
+ground, reduce, IWU, motion proposals); `perception_2d` (YOLO26 or GroundingDINO / SAM2 /
 DA-V2 / DINOv2); `semantic_lifting` core (UniLiPs Eq. 1 lifting + cross-camera
 voting). Next:
 

@@ -6,8 +6,9 @@ by both sides so they cannot drift apart:
   - ``scripts/fetch_models.py`` (host-side) — downloads these revisions into
     ``${MODELS_ROOT}``.
   - the runtime loaders — ``hf_revision()`` for detector / discovery / depth,
-    ``torch_hub_repo()`` for embeddings — request the same revisions, so a
-    pinned fetch and an unpinned load can't disagree.
+    ``torch_hub_repo()`` for embeddings, a plain path for the raw checkpoints
+    (SAM2, YOLO26) — request the same revisions, so a pinned fetch and an
+    unpinned load can't disagree.
 
 WHY EVERY ENTRY CARRIES A REVISION
 ----------------------------------
@@ -95,6 +96,14 @@ RAW_CHECKPOINTS: dict[str, RawCheckpoint] = {
         revision="665f8e2ad61cf5f53d65644ff27c8ee525124610",
         note="sam2_tracker.py — build_sam2_video_predictor(ckpt_path); "
         "the hydra config ships inside the pinned `sam2` package",
+    ),
+    # Closed-set detector backend (detection.backend: yolo). COCO-trained; the
+    # taxonomy mapping lives in config (detection.yolo.class_map). AGPL-3.0.
+    "yolo26": RawCheckpoint(
+        repo_id="Ultralytics/YOLO26",
+        filename="yolo26x.pt",
+        revision="070ac3c51435984d992ba92eb3f234daf4e4500d",
+        note="yolo_detector.py — ultralytics.YOLO(ckpt_path)",
     ),
 }
 

@@ -1,4 +1,4 @@
-# perception_2d — GroundingDINO + SAM2 + Depth Anything V2 + DINOv2
+# perception_2d — YOLO26 / GroundingDINO + SAM2 + Depth Anything V2 + DINOv2
 
 **Status**: implemented (`src/perception_2d/`).
 **Supersedes**: the SAM3 + Florence-2 concept-everything plan. That design was
@@ -41,7 +41,7 @@ per camera stream        │                                                    
   class vocabulary ──────┼─► fixed taxonomy   OR   Florence-2 open-vocab discovery     │
                          │            │                                                │
                          │            ▼                                                │
-  keyframes ─────────────┼─► GroundingDINO ──► class-labeled boxes                     │
+  keyframes ─────────────┼─► YOLO26 or GroundingDINO ──► class-labeled boxes           │
                          │            │                                                │
                          │            ▼                                                │
                          │   SAM2 video predictor: box → mask, propagate across stream │
@@ -160,7 +160,17 @@ the same discontinuity as between chunks, which the downstream `tracking`
 component re-links via the DINOv2 embeddings. Clips that fit never touch this
 path.
 
-**Detector backend**: GroundingDINO via HuggingFace Transformers
+**Detector backend** (`detection.backend`): **`yolo`** (default) — Ultralytics
+YOLO26-x, COCO weights, closed-set; `detection.yolo.class_map` maps COCO classes
+onto the taxonomy and drops the rest, so traffic cones and barriers (absent
+from COCO) are never detected. Frames are converted RGB → BGR (Ultralytics'
+numpy convention), the pinned `.pt` is loaded by path, and ultralytics runs with
+`YOLO_OFFLINE=1`. Chosen over GroundingDINO for the fixed taxonomy because
+GroundingDINO's class scores depend on which other phrases share its prompt
+(on WATO data the shuttle came out `truck`, dark pedestrians `motorcycle`, and
+fire hydrants `traffic cone`), and YOLO is ~7× faster per keyframe. `yolo` can't
+be paired with `discovery.backend: florence2`; open-vocabulary work uses
+**`grounding_dino`**: GroundingDINO via HuggingFace Transformers
 (`AutoModelForZeroShotObjectDetection`, default `IDEA-Research/grounding-dino-base`),
 which needs no CUDA custom-op compile (unlike the standalone `groundingdino`
 package). Use a `-tiny` checkpoint for a lighter/faster model.
@@ -326,7 +336,15 @@ discovery:
                   "pedestrian", "traffic cone", "barrier"]
 
 detection:
-  model: "IDEA-Research/grounding-dino-base"
+  backend: "yolo"                  # "yolo" | "grounding_dino"
+  yolo:
+    checkpoint: "/data/models/yolo26x.pt"   # pinned (model_registry: yolo26)
+    conf: 0.25
+    iou: 0.7
+    imgsz: 1280
+    class_map: {person: pedestrian, bicycle: bicycle, car: car,
+                motorcycle: motorcycle, bus: bus, truck: truck}
+  model: "IDEA-Research/grounding-dino-base"   # grounding_dino only
   box_threshold: 0.35
   text_threshold: 0.25
   nms_iou: 0.5
@@ -419,7 +437,8 @@ io.py                      frame_index / calibration / static-LiDAR loaders + ca
 viz.py                     interactive depth-vs-image viewer
 models/
   depth.py                 Depth Anything V2 wrapper (batched infer, unload)
-  detector.py              GroundingDINO wrapper (box source for SAM2)
+  detector.py              GroundingDINO wrapper (open-vocab box source for SAM2)
+  yolo_detector.py         YOLO26 wrapper (closed-set box source, default)
   _sam2_runtime.py         shared SAM2 video-predictor loader / cache
   sam2_tracker.py          detector + SAM2 per-camera tracking → Masklets
   discovery.py             Florence-2 open-vocab discovery (optional backend)

@@ -45,17 +45,51 @@ class DiscoveryConfig(BaseModel):
     fixed_classes: list[str] = Field(default_factory=list)
 
 
+def _default_yolo_class_map() -> dict[str, str]:
+    return {
+        "person": "pedestrian",
+        "bicycle": "bicycle",
+        "car": "car",
+        "motorcycle": "motorcycle",
+        "bus": "bus",
+        "truck": "truck",
+    }
+
+
+class YoloConfig(BaseModel):
+    """Closed-set YOLO detector (detection.backend: yolo)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Pinned weights (model_registry.RAW_CHECKPOINTS["yolo26"]), loaded by path.
+    checkpoint: str = "/data/models/yolo26x.pt"
+    conf: float = 0.25  # min box confidence
+    iou: float = 0.7  # NMS IoU
+    imgsz: int = 1280  # inference size (long side); frames are 1280x1024
+    # Weights' class name → taxonomy class. Unmapped classes are dropped.
+    class_map: dict[str, str] = Field(default_factory=_default_yolo_class_map)
+
+
 class DetectionConfig(BaseModel):
-    """GroundingDINO detector — the per-keyframe box source for SAM2."""
+    """Per-keyframe box source for SAM2."""
 
     model_config = ConfigDict(extra="allow")
 
+    # "yolo": closed-set COCO weights mapped onto the taxonomy (yolo.class_map).
+    # "grounding_dino": open-vocabulary, text-prompted by the taxonomy (and by
+    # Florence-2 discovery when discovery.backend is florence2).
+    backend: Literal["yolo", "grounding_dino"] = "yolo"
+    yolo: YoloConfig = Field(default_factory=YoloConfig)
+
+    # --- grounding_dino ---------------------------------------------------
     # HuggingFace zero-shot detection checkpoint. The Transformers backend needs
     # no CUDA custom-op compile (unlike the standalone groundingdino package).
     model: str = "IDEA-Research/grounding-dino-base"
     box_threshold: float = 0.35  # min box confidence
     text_threshold: float = 0.25  # min text-token match score
     nms_iou: float = 0.5  # per-class NMS IoU to drop duplicate boxes
+
+    # --- both backends ----------------------------------------------------
     # Run the detector every k frames to introduce objects entering mid-clip.
     # Large value → effectively detect-once at frame 0.
     redetect_every_k: int = 10

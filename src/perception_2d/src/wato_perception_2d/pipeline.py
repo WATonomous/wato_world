@@ -21,8 +21,9 @@ do not all fit (e.g. ~6 GB):
       fixed     → concepts come straight from config (closed-set taxonomy).
       florence2 → Florence-2 discovers open-vocab phrases across the camera
                   stream; they're pooled + canonicalised into the concept set.
-    The detector (GroundingDINO) emits class-labeled boxes on keyframes; SAM2's
-    video predictor turns each box into a mask and tracks it across the stream →
+    The detector (detection.backend: YOLO26 or GroundingDINO) emits
+    class-labeled boxes on keyframes; SAM2's video predictor turns each box into
+    a mask and tracks it across the stream →
     Masklets with persistent IDs, with DINOv2 appearance embeddings extracted
     every k frames. Then write detections_2d.parquet + tracklets_2d.parquet.
 
@@ -46,7 +47,7 @@ import os
 import pickle
 import shutil
 from collections import defaultdict, deque
-from typing import Optional
+from typing import Optional, Union
 
 from tqdm.auto import tqdm
 
@@ -94,12 +95,19 @@ from wato_perception_2d.models.detector import (
     detector_importable,
 )
 from wato_perception_2d.models.discovery import Florence2Discovery
+from wato_perception_2d.models.yolo_detector import (
+    YoloDetector,
+    check_class_map,
+    yolo_importable,
+)
 from wato_perception_2d.models.sam2_tracker import track_camera
 
 log = logging.getLogger(__name__)
 
 # A (text_prompt, canonical_class) concept fed to the detector.
 Concept = tuple[str, str]
+# Either box source; both expose detect(image_rgb, concepts) -> list[Detection].
+Detector = Union[GroundingDinoDetector, YoloDetector]
 
 
 def _default_device() -> str:
@@ -378,7 +386,7 @@ def _process_chunk(
     bag_id: str,
     chunk_id: str,
     discovery: Optional[Florence2Discovery],
-    detector: GroundingDinoDetector,
+    detector: Detector,
     fixed_concepts: list[Concept],
     device: str,
     *,
@@ -404,11 +412,16 @@ def _process_chunk(
             f"{len(frames)} frames need tracking. Install the `sam2` package and "
             "fetch facebook/sam2.1-hiera-large into the HF cache."
         )
-    if not detector_importable():
+    backend_ok, backend_pkg = (
+        (yolo_importable, "ultralytics")
+        if cfg.detection.backend == "yolo"
+        else (detector_importable, "transformers")
+    )
+    if not backend_ok():
         raise RuntimeError(
-            f"chunk {chunk_id}: the detector backend (`transformers`) is not "
-            f"importable but {len(frames)} frames need detection. Install "
-            "transformers and fetch the GroundingDINO checkpoint "
+            f"chunk {chunk_id}: the {cfg.detection.backend} detector backend "
+            f"(`{backend_pkg}`) is not importable but {len(frames)} frames need "
+            f"detection. Install {backend_pkg} and fetch the checkpoint "
             "(scripts/fetch_models.py)."
         )
 
@@ -547,7 +560,7 @@ def _run_tracking_pass(
     frames_by_cam: dict[str, list[CameraFrameInfo]],
     calibration: dict[str, CameraCalibration],
     discovery: Optional[Florence2Discovery],
-    detector: GroundingDinoDetector,
+    detector: Detector,
     fixed_concepts: list[Concept],
     device: str,
 ) -> list[Masklet]:
@@ -681,14 +694,70 @@ def _write_empty(bag_id: str, chunk_id: str) -> None:
     masklets.write(bag_id, chunk_id, [])
 
 
+def build_detector(cfg: ComponentConfig, fixed_concepts: list[Concept]):
+    """The configured per-keyframe box source (``detection.backend``).
+
+    Both backends expose ``detect(image_rgb, concepts) -> list[Detection]``. The
+    detector is built here but loads its weights lazily on the first detect() —
+    in the tracking pass, after the depth pass — so it stays out of VRAM during
+    depth. Configuration mismatches are rejected here, before any chunk runs.
+    """
+    det = cfg.detection
+    if det.backend == "grounding_dino":
+        return GroundingDinoDetector(
+            model_id=det.model,
+            box_threshold=det.box_threshold,
+            text_threshold=det.text_threshold,
+            nms_iou=det.nms_iou,
+            device=None,
+        )
+    if cfg.discovery.backend != "fixed":
+        raise ValueError(
+            "detection.backend: yolo has a fixed (COCO) vocabulary and can't be "
+            f"prompted by discovery.backend: {cfg.discovery.backend}. Use "
+            "discovery.backend: fixed, or detection.backend: grounding_dino for "
+            "open-vocabulary detection."
+        )
+    misnamed, unused, uncovered = check_class_map(det.yolo.class_map, fixed_concepts)
+    taxonomy = sorted({c for _, c in fixed_concepts})
+    if misnamed:
+        raise ValueError(
+            f"detection.yolo.class_map maps to {sorted(misnamed)}, which nearly "
+            f"match taxonomy classes {taxonomy} but aren't one; those detections "
+            f"would be silently dropped. Fix the spelling, or check that "
+            f"{cfg.prompts_path} (synonym → canonical class) is mounted."
+        )
+    if unused:
+        log.info(
+            "detection.yolo.class_map targets %s are not in this taxonomy; "
+            "those detections are dropped",
+            sorted(unused),
+        )
+    if uncovered:
+        log.warning(
+            "detection.backend yolo: no class_map entry produces taxonomy "
+            "classes %s — they will never be detected",
+            sorted(uncovered),
+        )
+    return YoloDetector(
+        det.yolo.checkpoint,
+        class_map=det.yolo.class_map,
+        conf=det.yolo.conf,
+        iou=det.yolo.iou,
+        imgsz=det.yolo.imgsz,
+        device=None,
+    )
+
+
 def _write_chunk_manifest(
     bag_id: str, chunk_id: str, config_path: Optional[str]
 ) -> None:
     """Record which models and parameters produced this chunk's 2D labels.
 
-    This is the manifest that matters most in the pipeline: GroundingDINO,
-    SAM2, Depth-Anything-V2 and DINOv2 jointly decide every 2D label, and
-    ``model_revisions()`` names the exact pinned weights of all four. Without
+    This is the manifest that matters most in the pipeline: the detector
+    (YOLO26 or GroundingDINO, per the config hashed alongside), SAM2,
+    Depth-Anything-V2 and DINOv2 jointly decide every 2D label, and
+    ``model_revisions()`` names the exact pinned weights of each. Without
     it, two runs that disagree cannot be attributed to a model change, a config
     change, or a code change.
 
@@ -767,10 +836,10 @@ def run(
     device = _default_device()
 
     # Class-vocabulary source. The fixed list is computed once; the Florence-2
-    # model (if used) is built lazily on first propose(). The detector is built
-    # here but its model loads lazily on the first detect() — which happens in
-    # the tracking pass, after the depth pass — so it stays out of VRAM during
-    # depth. The heavy GPU models (DA-V2 and SAM2) are built *inside* each
+    # model (if used) is built lazily on first propose(). The detector
+    # (detection.backend) is built here but its model loads lazily on the first
+    # detect() — which happens in the tracking pass, after the depth pass — so it
+    # stays out of VRAM during depth. The heavy GPU models (DA-V2 and SAM2) are built *inside* each
     # chunk's passes, so the two never co-reside in VRAM.
     discovery: Optional[Florence2Discovery] = None
     fixed_concepts: list[Concept] = []
@@ -784,13 +853,7 @@ def run(
             len(fixed_concepts),
         )
 
-    detector = GroundingDinoDetector(
-        model_id=cfg.detection.model,
-        box_threshold=cfg.detection.box_threshold,
-        text_threshold=cfg.detection.text_threshold,
-        nms_iou=cfg.detection.nms_iou,
-        device=None,
-    )
+    detector = build_detector(cfg, fixed_concepts)
 
     n_ok = n_skip = 0
     try:
