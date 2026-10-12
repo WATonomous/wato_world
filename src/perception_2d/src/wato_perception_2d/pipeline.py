@@ -6,12 +6,12 @@ do not all fit (e.g. ~6 GB):
 
   PASS 1 — depth (only DA-V2 in VRAM), per camera (frames batched through the
   backbone `depth.batch_size` at a time; steps 2-6 then run per frame):
-    1. DepthAnythingV2.infer_batch() → relative_depth
+    1. DepthAnythingV2.infer_batch() → disparity (relative inverse depth)
     2. Load static LiDAR points for this sweep, and the ego pose at the
        camera frame's own timestamp (wato_common.pose_lookup)
-    3. depth_align.build_anchor_pairs() → d_lidar, d_da
-    4. depth_align.ransac_affine_fit() → affine params
-    5. depth_align.apply_affine() → metric_depth
+    3. depth_align.build_anchor_pairs() → d_lidar, disp
+    4. depth_align.ransac_disparity_fit() → 1/d = scale·disp + shift
+    5. depth_align.disparity_to_depth() → metric_depth
     6. Write depth_2d/<cam>/<frame>.npz (skipped on total fit failure)
     Then DA-V2 is unloaded and its VRAM freed before tracking starts.
 
@@ -71,9 +71,9 @@ from wato_common.pose_lookup import PoseLookup
 from wato_perception_2d.config import ComponentConfig
 from wato_perception_2d.model_registry import revisions as model_revisions
 from wato_perception_2d.fusion.depth_align import (
-    apply_affine,
     build_anchor_pairs,
-    ransac_affine_fit,
+    disparity_to_depth,
+    ransac_disparity_fit,
 )
 from wato_perception_2d.fusion.masklet import Masklet
 from wato_perception_2d.io import (
@@ -173,8 +173,8 @@ def _write_depth_artifact(
         frame_seq,
         depth.DepthFrame(
             depth_m=metric_depth,
-            affine_a=fit_params["a"],
-            affine_b=fit_params["b"],
+            disp_scale=fit_params["scale"],
+            disp_shift=fit_params["shift"],
             n_anchors=fit_params.get("n_anchors", 0),
             n_inliers=fit_params["n_inliers"],
             rmse_inliers_m=fit_params["rmse_inliers_m"],
@@ -189,12 +189,12 @@ def _align_and_write_depth(
     chunk_id: str,
     cam_id: str,
     frame: CameraFrameInfo,
-    rel_depth: np.ndarray,
+    disparity: np.ndarray,
     calib: CameraCalibration,
     poses: PoseLookup,
     fallback_window: deque,
 ) -> None:
-    """LiDAR-align one frame's relative depth to metric and write the artifact.
+    """LiDAR-align one frame's DA-V2 disparity to metric depth and write it.
 
     The DA-V2 inference is done by the caller (batched); this is the per-frame
     sequential tail. Writes nothing on total failure (FitStatus.FAILED): the
@@ -206,10 +206,10 @@ def _align_and_write_depth(
     camera_timestamp_ns, not the LiDAR sweep's pose from frame_index (the car
     moves between the two; up to ~0.9 m at 30 m on the WATO rig).
     """
-    H, W = rel_depth.shape[:2]
+    H, W = disparity.shape[:2]
     fit_params: dict = {
-        "a": 1.0,
-        "b": 0.0,
+        "scale": 1.0,
+        "shift": 0.0,
         "n_inliers": 0,
         "rmse_inliers_m": 0.0,
         "fit_status": depth.FitStatus.FAILED,
@@ -224,18 +224,18 @@ def _align_and_write_depth(
 
     if static_pts is not None and pose is not None and pose.valid:
         cam_T_world = invert_se3(calib.ego_T_cam) @ invert_se3(pose.world_T_ego)
-        d_lidar, d_da = build_anchor_pairs(
+        d_lidar, disp = build_anchor_pairs(
             static_pts,
-            rel_depth,
+            disparity,
             calib.K,
             cam_T_world,
             (W, H),
             sky_mask_top_fraction=cfg.depth.sky_mask_top_fraction,
         )
         fallback = fallback_window[-1] if fallback_window else None
-        fit_params = ransac_affine_fit(
+        fit_params = ransac_disparity_fit(
             d_lidar,
-            d_da,
+            disp,
             n_iter=cfg.depth.ransac_n_iter,
             inlier_threshold_m=cfg.depth.ransac_inlier_threshold_m,
             min_anchors=cfg.depth.min_lidar_anchors,
@@ -243,13 +243,13 @@ def _align_and_write_depth(
         )
         fit_params["n_anchors"] = int(len(d_lidar))
         if fit_params["fit_status"] == depth.FitStatus.OK:
-            fallback_window.append((fit_params["a"], fit_params["b"]))
+            fallback_window.append((fit_params["scale"], fit_params["shift"]))
 
     if fit_params["fit_status"] != depth.FitStatus.FAILED:
-        metric_depth = apply_affine(
-            rel_depth,
-            fit_params["a"],
-            fit_params["b"],
+        metric_depth = disparity_to_depth(
+            disparity,
+            fit_params["scale"],
+            fit_params["shift"],
             out_dtype=cfg.depth.output_dtype,
         )
         _write_depth_artifact(
@@ -517,17 +517,17 @@ def _run_depth_pass(
                         images.append(image)
                         kept_frames.append(frame)
                     if images:
-                        rel_depths, _ = depth_model.infer_batch(
+                        disparities, _ = depth_model.infer_batch(
                             images, batch_size=batch_size
                         )
-                        for frame, rel_depth in zip(kept_frames, rel_depths):
+                        for frame, disparity in zip(kept_frames, disparities):
                             _align_and_write_depth(
                                 cfg,
                                 bag_id,
                                 chunk_id,
                                 cam_id,
                                 frame,
-                                rel_depth,
+                                disparity,
                                 calib,
                                 poses,
                                 fallback_window,
@@ -628,6 +628,8 @@ def _run_tracking_pass(
                 offload_video_to_cpu=cfg.tracking.offload_video_to_cpu,
                 sub_clip_frames=cfg.tracking.sub_clip_frames,
                 min_sub_clip_frames=cfg.tracking.min_sub_clip_frames,
+                drop_lost_after_frames=cfg.tracking.drop_lost_after_frames,
+                autocast_dtype=cfg.tracking.autocast_dtype,
             )
             log.info(
                 "chunk %s / %s: %d masklets from %d frames",

@@ -166,8 +166,8 @@ def _stage_chunk() -> None:
         SEQ,
         depth.DepthFrame(
             depth_m=np.full((H, W), 10.0, dtype=np.float16),
-            affine_a=1.0,
-            affine_b=0.0,
+            disp_scale=1.0,
+            disp_shift=0.0,
             n_anchors=10,
             n_inliers=10,
             rmse_inliers_m=0.1,

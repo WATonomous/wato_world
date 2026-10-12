@@ -51,13 +51,13 @@ def _run(monkeypatch, frame: CameraFrameInfo) -> tuple[list[np.ndarray], np.ndar
         pipeline, "load_static_lidar_points", lambda *a: np.array([[5.0, 0.0, 0.0]])
     )
 
-    def fake_anchor_pairs(points, rel_depth, K, cam_T_world, size, **kw):
+    def fake_anchor_pairs(points, disparity, K, cam_T_world, size, **kw):
         seen.append(cam_T_world)
         return np.zeros(0), np.zeros(0)
 
     monkeypatch.setattr(pipeline, "build_anchor_pairs", fake_anchor_pairs)
     monkeypatch.setattr(
-        pipeline, "ransac_affine_fit", lambda *a, **k: {"fit_status": 2}
+        pipeline, "ransac_disparity_fit", lambda *a, **k: {"fit_status": 2}
     )
     ego_T_cam = np.eye(4)
     ego_T_cam[2, 3] = 1.5

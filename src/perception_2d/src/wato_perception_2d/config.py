@@ -20,7 +20,7 @@ Cross-camera identity merging is likewise deferred downstream.
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -91,6 +91,15 @@ class TrackingConfig(BaseModel):
     # via DINOv2). A window that itself OOMs is recursively halved to the floor.
     sub_clip_frames: int = 150
     min_sub_clip_frames: int = 16
+    # Drop an object from the SAM2 session once it has had no mask for this many
+    # frames (checked at keyframes). SAM2 otherwise keeps running memory
+    # attention for every object it was ever given — cost grows with objects
+    # detected so far, not objects visible. If it reappears and is re-detected it
+    # starts a new masklet (re-linked downstream via DINOv2). 0 = never drop.
+    drop_lost_after_frames: int = 30
+    # Precision for SAM2 calls on CUDA: "bfloat16" (upstream's setting; enables
+    # flash attention), "float16", or "float32". Detector + DINOv2 stay float32.
+    autocast_dtype: Literal["bfloat16", "float16", "float32"] = "bfloat16"
 
 
 class DepthConfig(BaseModel):
@@ -102,7 +111,7 @@ class DepthConfig(BaseModel):
     # pass (depth is VRAM-disjoint from the tracker; batching is a throughput win
     # when the card has headroom). 1 = original per-frame streaming.
     batch_size: int = 1
-    min_lidar_anchors: int = 30  # min anchor pairs to attempt an affine fit
+    min_lidar_anchors: int = 30  # min anchor pairs to attempt a disparity fit
     ransac_n_iter: int = 200
     ransac_inlier_threshold_m: float = 0.5
     # Always static: the pipeline only loads static LiDAR (dynamic points desync
@@ -110,7 +119,7 @@ class DepthConfig(BaseModel):
     use_static_anchors_only: bool = True
     fallback_window: int = 5
     sky_mask_top_fraction: float = 0.3
-    output_dtype: str = "float16"  # stored depth-map dtype (apply_affine)
+    output_dtype: str = "float16"  # stored depth-map dtype (disparity_to_depth)
 
 
 class EmbeddingConfig(BaseModel):

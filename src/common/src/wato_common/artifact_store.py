@@ -238,7 +238,7 @@ def depth_2d_dir(bag_id: str, chunk_id: str) -> str:
     """Directory containing per-camera per-frame metric depth npz files.
 
     Layout: depth_2d/<cam_id>/<frame_seq:06d>.npz
-    Arrays in each npz: depth_m (H,W float16), affine_a, affine_b, n_anchors,
+    Arrays in each npz: depth_m (H,W float16), disp_scale, disp_shift, n_anchors,
     n_inliers, rmse_inliers_m, fit_status.
     """
     return _join(chunk_root(bag_id, chunk_id), "depth_2d")

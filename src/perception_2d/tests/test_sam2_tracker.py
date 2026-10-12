@@ -5,6 +5,7 @@ fake detector so no `sam2` / `transformers` install or GPU is required.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 
 import numpy as np
@@ -30,18 +31,32 @@ class _FakePredictor:
     """Minimal SAM2VideoPredictor stand-in.
 
     Stores the box of each added object and, on propagate, yields a +1/-1 logit
-    map (positive inside the box) for every object whose add-frame ≤ the frame.
-    init_state reads the window's frame count from the temp JPEG dir the tracker
-    writes, so a per-window OOM can be simulated by frame count.
+    map (positive inside the box) for every object whose add-frame ≤ the frame —
+    or an all-negative map once the frame passes the object's ``vanish_after``
+    (keyed by box), i.e. SAM2 reporting it absent. init_state reads the window's
+    frame count from the temp JPEG dir the tracker writes, so a per-window OOM
+    can be simulated by frame count. Like real SAM2, propagating with no objects
+    raises.
     """
 
-    def __init__(self, H: int, W: int, oom_above: int | None = None) -> None:
+    def __init__(
+        self,
+        H: int,
+        W: int,
+        oom_above: int | None = None,
+        vanish_after: dict[tuple, int] | None = None,
+    ) -> None:
         self.H, self.W = H, W
         self.oom_above = oom_above
+        self.vanish_after = vanish_after or {}
         self._objs: dict[int, tuple[int, tuple]] = {}
         self._cur_n = 0
+        self.removed: list[int] = []
+        self.object_frames = 0  # (object, frame) inferences run, i.e. the cost
 
-    def init_state(self, video_path, offload_video_to_cpu=False):
+    def init_state(
+        self, video_path, offload_video_to_cpu=False, async_loading_frames=False
+    ):
         self._cur_n = len([f for f in os.listdir(video_path) if f.endswith(".jpg")])
         self._objs = {}
         return {"n": self._cur_n}
@@ -52,15 +67,22 @@ class _FakePredictor:
     def add_new_points_or_box(self, inference_state, frame_idx, obj_id, box):
         self._objs[int(obj_id)] = (int(frame_idx), tuple(float(v) for v in box))
 
-    def _box_logit(self, box) -> np.ndarray:
-        x1, y1, x2, y2 = (int(round(v)) for v in box)
+    def remove_object(self, inference_state, obj_id, strict=False, need_output=True):
+        self._objs.pop(int(obj_id), None)
+        self.removed.append(int(obj_id))
+
+    def _box_logit(self, box, frame) -> np.ndarray:
         m = np.full((self.H, self.W), -1.0, dtype=np.float32)
-        m[y1:y2, x1:x2] = 1.0
+        if frame <= self.vanish_after.get(tuple(int(v) for v in box), frame):
+            x1, y1, x2, y2 = (int(round(v)) for v in box)
+            m[y1:y2, x1:x2] = 1.0
         return m[None]  # (1, H, W)
 
     def propagate_in_video(self, state, start_frame_idx=0, max_frame_num_to_track=None):
         if self.oom_above is not None and self._cur_n > self.oom_above:
             raise _OOM("CUDA out of memory")
+        if not self._objs:
+            raise RuntimeError("No input points or masks are provided for any object")
         n = state["n"]
         stop = (
             n - 1
@@ -71,9 +93,10 @@ class _FakePredictor:
             present = [
                 (oid, box) for oid, (af, box) in sorted(self._objs.items()) if af <= f
             ]
+            self.object_frames += len(present)
             obj_ids = [oid for oid, _ in present]
             if present:
-                logits = np.stack([self._box_logit(b) for _, b in present], axis=0)
+                logits = np.stack([self._box_logit(b, f) for _, b in present], axis=0)
             else:
                 logits = np.zeros((0, 1, self.H, self.W), dtype=np.float32)
             yield f, obj_ids, logits
@@ -282,3 +305,78 @@ def test_oom_at_floor_skips_window_without_raising(tmp_path):
     )
 
     assert masklets == []  # degrades to nothing, does not raise
+
+
+# ---------------------------------------------------------------------------
+# Session housekeeping: empty keyframes, lost objects, frame dir
+# ---------------------------------------------------------------------------
+
+
+def test_empty_first_keyframe_does_not_abandon_the_window(tmp_path):
+    """Nothing detected at frame 0 (an empty road): an object detected at a
+    later keyframe is still tracked. SAM2 refuses to propagate zero objects, so
+    the tracker must skip the segment rather than let that error end the
+    window."""
+    H, W, n = 32, 32, 6
+    car = Detection(box_xyxy=(4, 4, 12, 12), cls="car", score=0.9)
+    masklets = _track(
+        _FakePredictor(H, W),
+        _PerCallDetector([[], [car], []]),  # keyframes 0, 2, 4
+        _frames(n),
+        [np.zeros((H, W, 3), dtype=np.uint8) for _ in range(n)],
+        redetect_every_k=2,
+    )
+    assert len(masklets) == 1
+    assert masklets[0].frames_present == [2, 3, 4, 5]
+
+
+def test_lost_object_is_dropped_from_the_session(tmp_path):
+    """An object SAM2 reports absent for drop_lost_after_frames is removed at
+    the next keyframe and costs nothing afterwards; the visible one stays."""
+    H, W, n = 32, 32, 12
+    gone = Detection(box_xyxy=(2, 2, 8, 8), cls="car", score=0.9)
+    stays = Detection(box_xyxy=(20, 20, 28, 28), cls="car", score=0.9)
+    images = [np.zeros((H, W, 3), dtype=np.uint8) for _ in range(n)]
+
+    def run(drop_after):
+        pred = _FakePredictor(H, W, vanish_after={(2, 2, 8, 8): 1})
+        mk = _track(
+            pred,
+            _PerCallDetector([[gone, stays]]),
+            _frames(n),
+            images,
+            redetect_every_k=4,  # keyframes 0, 4, 8
+            drop_lost_after_frames=drop_after,
+        )
+        return pred, sorted(m.frames_present for m in mk)
+
+    pred, frames_present = run(drop_after=3)
+    assert pred.removed == [0]  # dropped at keyframe 4 (last seen at frame 1)
+    # Its masks up to vanishing are kept; the visible object is untouched.
+    assert frames_present == [[0, 1], list(range(n))]
+
+    never, frames_never = run(drop_after=0)
+    assert never.removed == []
+    assert frames_never == frames_present  # same labels…
+    assert pred.object_frames < never.object_frames  # …for less SAM2 work
+
+
+def test_frame_dir_symlinks_source_jpegs_and_encodes_the_rest(tmp_path):
+    from PIL import Image as PILImage
+
+    from wato_perception_2d.models.sam2_tracker import _prepare_frame_dir
+
+    img = np.full((8, 8, 3), 127, dtype=np.uint8)
+    jpg = tmp_path / "src.jpg"
+    PILImage.fromarray(img).save(jpg)
+    frames = _frames(2)
+    frames[0] = dataclasses.replace(frames[0], image_path=str(jpg))
+    d = _prepare_frame_dir(frames, [img, img])  # frames[1] is a missing .png
+    try:
+        assert sorted(os.listdir(d)) == ["00000000.jpg", "00000001.jpg"]
+        assert os.path.realpath(os.path.join(d, "00000000.jpg")) == str(jpg)
+        assert not os.path.islink(os.path.join(d, "00000001.jpg"))
+    finally:
+        import shutil
+
+        shutil.rmtree(d)

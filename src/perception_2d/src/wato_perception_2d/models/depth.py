@@ -1,7 +1,9 @@
 """Depth Anything V2 wrapper.
 
-Produces per-frame relative depth maps from RGB images.  The relative depth
-is subsequently aligned to metric scale via LiDAR anchor pairs in depth_align.py.
+Produces per-frame relative *disparity* (inverse depth: larger = closer) maps
+from RGB images — what DA-V2's relative checkpoints output, despite the name.
+depth_align.py converts it to metric depth via LiDAR anchor pairs, fitting in
+inverse-depth space.
 
 Lazy-imports depth_anything_v2 so the module can be imported without it installed.
 Confidence is derived from depth-gradient magnitude: flat regions get high
@@ -21,10 +23,11 @@ log = logging.getLogger(__name__)
 
 
 class DepthAnythingV2:
-    """Depth Anything V2 relative-depth estimator.
+    """Depth Anything V2 relative-disparity estimator.
 
-    Returns (relative_depth, confidence) per image:
-    - relative_depth: (H, W) float32, arbitrary positive scale.
+    Returns (disparity, confidence) per image:
+    - disparity: (H, W) float32 affine-invariant inverse depth (larger =
+      closer; ~0 for sky).
     - confidence: (H, W) float32 in [0, 1], derived from gradient magnitude.
 
     Raises RuntimeError when the package/checkpoint is unavailable — no
@@ -114,7 +117,7 @@ class DepthAnythingV2:
                 defaults off to avoid the per-frame gradient computation.
 
         Returns:
-            relative_depth: (H, W) float32, arbitrary positive scale.
+            disparity: (H, W) float32 relative inverse depth (larger = closer).
             confidence: (H, W) float32 in [0, 1], or None when not requested.
         """
         self._load()
@@ -153,7 +156,7 @@ class DepthAnythingV2:
             with_confidence: also compute the gradient-magnitude confidence map.
 
         Returns:
-            relative_depth: list of (H, W) float32 maps, aligned with images_rgb.
+            disparity: list of (H, W) float32 maps, aligned with images_rgb.
             confidence: list of (H, W) float32 maps in [0, 1], or None entries
                 when with_confidence is False.
         """

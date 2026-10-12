@@ -564,14 +564,14 @@ MASKLET_SCHEMA = pa.schema(
 
 
 # ---------------------------------------------------------------------------
-# perception_2d v2 — depth branch (Depth Anything V2 + LiDAR affine align).
+# perception_2d v2 — depth branch (Depth Anything V2 disparity + LiDAR inverse-depth fit).
 # ---------------------------------------------------------------------------
 
 
 class DepthFrameRow(BaseModel):
     """Per-frame metadata for the depth_2d artifact (the actual arrays live in npz).
 
-    fit_status: 0=ok, 1=fell back to prior-frame affine, 2=fit failed entirely.
+    fit_status: 0=ok, 1=fell back to a prior frame's fit, 2=fit failed entirely.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -580,9 +580,9 @@ class DepthFrameRow(BaseModel):
     chunk_id: str
     cam_id: str
     frame_seq: int
-    affine_a: float  # scale: d_lidar = a * d_da + b
-    affine_b: float  # offset
-    n_anchors: int  # (d_lidar, d_da) pairs before RANSAC
+    disp_scale: float  # 1 / d_lidar = disp_scale * disparity + disp_shift
+    disp_shift: float
+    n_anchors: int  # (d_lidar, disparity) pairs before RANSAC
     n_inliers: int  # RANSAC inliers
     rmse_inliers_m: float
     fit_status: int
@@ -594,8 +594,8 @@ DEPTH_FRAME_SCHEMA = pa.schema(
         pa.field("chunk_id", pa.string()),
         pa.field("cam_id", pa.string()),
         pa.field("frame_seq", pa.int64()),
-        pa.field("affine_a", pa.float64()),
-        pa.field("affine_b", pa.float64()),
+        pa.field("disp_scale", pa.float64()),
+        pa.field("disp_shift", pa.float64()),
         pa.field("n_anchors", pa.int64()),
         pa.field("n_inliers", pa.int64()),
         pa.field("rmse_inliers_m", pa.float64()),

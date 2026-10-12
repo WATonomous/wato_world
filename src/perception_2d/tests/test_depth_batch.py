@@ -74,8 +74,8 @@ def _run(
     monkeypatch.setattr(
         pipeline,
         "_align_and_write_depth",
-        lambda cfg, bag, chunk, cam, frame, rel_depth, calib, poses, fb: aligned.append(
-            (frame.camera_seq, float(rel_depth[0, 0]))
+        lambda cfg, bag, chunk, cam, frame, disparity, calib, poses, fb: aligned.append(
+            (frame.camera_seq, float(disparity[0, 0]))
         ),
     )
 

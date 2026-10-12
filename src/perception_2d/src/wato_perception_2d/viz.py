@@ -2,7 +2,7 @@
 
 A matplotlib window (the 2D analogue of lidar_preprocessing's Open3D
 ``watod viz``) for eyeballing what Depth Anything V2 + the LiDAR-anchored
-affine fit actually produced, frame by frame, against the RGB image:
+disparity fit actually produced, frame by frame, against the RGB image:
 
   - frame slider   — scrub through one camera's stream
   - opacity slider — blend RGB ↔ depth heatmap (0 = pure image, 1 = pure depth)

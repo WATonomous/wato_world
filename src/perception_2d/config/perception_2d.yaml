@@ -53,6 +53,17 @@ tracking:
   # `tracking` re-links via DINOv2 ReID. Clips that fit never touch this path.
   sub_clip_frames: 150
   min_sub_clip_frames: 16
+  # Drop an object from the SAM2 session after this many frames with no mask
+  # (checked at keyframes). This SAM2 build runs memory attention per object per
+  # frame and never forgets an object on its own, so without this the per-frame
+  # cost and VRAM grow with every object detected so far — cars long gone from
+  # view included. A dropped object that reappears and is re-detected starts a
+  # new masklet (re-linked downstream via DINOv2). 0 = never drop.
+  drop_lost_after_frames: 30
+  # Precision for SAM2 calls on CUDA: bfloat16 (upstream's own setting; lets
+  # attention use flash kernels), float16, or float32. The detector and DINOv2
+  # always run float32.
+  autocast_dtype: "bfloat16"
 
 depth:
   enabled: true

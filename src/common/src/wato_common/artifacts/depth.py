@@ -1,15 +1,16 @@
 """perception_2d metric depth: depth_2d/<cam_id>/<camera_seq:06d>.npz.
 
-Written by perception_2d (Depth Anything V2 relative depth, affine-aligned to
-static LiDAR points); read by semantic_lifting's visibility test and
-perception_2d's depth viewer.
+Written by perception_2d (Depth Anything V2 relative disparity, aligned to
+static LiDAR points in inverse-depth space); read by semantic_lifting's
+visibility test and perception_2d's depth viewer.
 
 Each npz holds:
 
   depth_m         (H, W)  metric depth in metres, at the image's resolution
-                          (stored float16 by default — config depth.output_dtype)
-  affine_a        float32 d_metric = affine_a * d_relative + affine_b
-  affine_b        float32
+                          (stored float16 by default — config depth.output_dtype);
+                          0 = no measurement (non-positive fitted inverse depth)
+  disp_scale      float32 1 / depth_m = disp_scale * disparity + disp_shift
+  disp_shift      float32 (disparity = DA-V2's raw relative output)
   n_anchors       int32   LiDAR / relative-depth pairs before RANSAC
   n_inliers       int32
   rmse_inliers_m  float32
@@ -35,15 +36,15 @@ from wato_common.artifacts import ArtifactFormatError
 
 class FitStatus(IntEnum):
     OK = 0  # RANSAC fit on this frame's own LiDAR anchors
-    FALLBACK = 1  # too few anchors; a recent frame's affine reused
-    FAILED = 2  # no usable affine — never written
+    FALLBACK = 1  # too few anchors; a recent frame's fit reused
+    FAILED = 2  # no usable fit — never written
 
 
 @dataclass(frozen=True)
 class DepthFrame:
     depth_m: np.ndarray  # (H, W) metres
-    affine_a: float
-    affine_b: float
+    disp_scale: float
+    disp_shift: float
     n_anchors: int
     n_inliers: int
     rmse_inliers_m: float
@@ -51,8 +52,8 @@ class DepthFrame:
 
 
 _SCALARS = (
-    "affine_a",
-    "affine_b",
+    "disp_scale",
+    "disp_shift",
     "n_anchors",
     "n_inliers",
     "rmse_inliers_m",
@@ -76,8 +77,8 @@ def write_frame(
     np.savez_compressed(
         path,
         depth_m=frame.depth_m,
-        affine_a=np.float32(frame.affine_a),
-        affine_b=np.float32(frame.affine_b),
+        disp_scale=np.float32(frame.disp_scale),
+        disp_shift=np.float32(frame.disp_shift),
         n_anchors=np.int32(frame.n_anchors),
         n_inliers=np.int32(frame.n_inliers),
         rmse_inliers_m=np.float32(frame.rmse_inliers_m),
@@ -114,8 +115,8 @@ def read_frame(
         ) from None
     return DepthFrame(
         depth_m=depth_m,
-        affine_a=float(s["affine_a"]),
-        affine_b=float(s["affine_b"]),
+        disp_scale=float(s["disp_scale"]),
+        disp_shift=float(s["disp_shift"]),
         n_anchors=int(s["n_anchors"]),
         n_inliers=int(s["n_inliers"]),
         rmse_inliers_m=float(s["rmse_inliers_m"]),
