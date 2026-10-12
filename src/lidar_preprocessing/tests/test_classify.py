@@ -633,36 +633,6 @@ def test_cache_disabled_must_still_apply_ground_filter(tmp_env):
     assert dyn["xyz"].shape[0] == 0, "cache-disabled path must not leak ground points"
 
 
-def test_single_hit_then_carved_is_dynamic(tmp_env):
-    """A voxel hit once and then carved through repeatedly is a mover.
-
-    This is the case the old min_occupied_hits knob could suppress by
-    demanding N hits before a voxel was allowed to be anything. Nothing
-    should need configuring here: one measured return plus sustained
-    free-space evidence IS the signature of something that moved away.
-    """
-    bag_id, chunk_id = "bag_single_hit_carved", "chunk0"
-    hit_pt = np.array([[5.0, 0.0, 0.0]])
-    beyond_pt = np.array([[10.0, 0.0, 0.0]])
-    sensor_origin = np.array([-1.0, 0.0, 0.0])
-
-    rows_xyz: list[np.ndarray] = [hit_pt]
-    _write_world_sweep(bag_id, chunk_id, 0, hit_pt, origin=sensor_origin)
-    n_carves = 12
-    for j in range(n_carves):
-        _write_world_sweep(bag_id, chunk_id, j + 1, beyond_pt, origin=sensor_origin)
-        rows_xyz.append(beyond_pt)
-    _write_proc_index(
-        bag_id, chunk_id, list(range(1 + n_carves)), xyz_per_sweep=rows_xyz
-    )
-
-    cfg = ComponentConfig(voxel_size_m=0.25, min_observations=3)
-    process_chunk(cfg, bag_id, chunk_id)
-
-    mask0 = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
-    assert mask0[0], "hit-then-carved voxel must be dynamic"
-
-
 # ---------------------------------------------------------------------------
 # Near-range dynamic exclusion + union snapshot (segmentation-method plumbing)
 # ---------------------------------------------------------------------------

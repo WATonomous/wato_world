@@ -447,6 +447,6 @@ testable change — not by hand-editing a lock:
 
 ```bash
 PYTHONPATH=src/common/src:src/ingest/src python3 -m pytest -p no:anyio src/ingest/tests
-# 87 passing tests, all without ROS installed (lazy ROS imports in rosbag_reader).
+# 81 passing tests, all without ROS installed (lazy ROS imports in rosbag_reader).
 # `-p no:anyio`: the host's anyio pytest plugin doesn't load under its pytest.
 ```

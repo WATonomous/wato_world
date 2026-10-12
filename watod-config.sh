@@ -27,7 +27,7 @@
 ##   ACTIVE_MODULES="all"                             # every module in deploy mode
 ##   ACTIVE_MODULES="all:dev"                         # every module in dev mode
 
-export ACTIVE_MODULES="ingest:dev lidar_preprocessing:dev"
+export ACTIVE_MODULES="ingest:dev lidar_preprocessing:dev perception_2d:dev"
 
 ############################## ADVANCED CONFIGURATIONS ##############################
 ## Set to "true" if the host has an NVIDIA GPU + nvidia-container-toolkit.

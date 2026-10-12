@@ -6,7 +6,11 @@ from __future__ import annotations
 
 import io
 
+import pytest
+
 import wato_common.progress as progress
+
+pytest.importorskip("tqdm")  # optional in wato_common; stub images don't install it
 
 
 class _NonTTY(io.StringIO):

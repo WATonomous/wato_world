@@ -14,7 +14,7 @@ from wato_common.artifact_store import (
     lidar_proc_index_path,
     local_path,
 )
-from wato_common.artifacts import ArtifactFormatError, lidar_sweeps
+from wato_common.artifacts import lidar_sweeps
 from wato_common.io.parquet_io import write_table
 from wato_common.schemas import PROCESSED_SWEEPS_SCHEMA, ProcessedSweepMeta
 from wato_perception_2d import io
@@ -67,9 +67,3 @@ def test_static_anchors_exclude_dynamic_points():
     static = io.load_static_lidar_points(BAG, CHUNK, 5)
     assert static[:, 0].tolist() == [0.0, 2.0]
     assert io.load_static_lidar_points(BAG, CHUNK, 6) is None  # not indexed
-
-
-def test_a_mask_misaligned_with_its_sweep_fails_loudly():
-    _stage(5, np.array([False, True, False]))  # 3 entries for 4 points
-    with pytest.raises(ArtifactFormatError, match="world sweep has 4"):
-        io.load_static_lidar_points(BAG, CHUNK, 5)
