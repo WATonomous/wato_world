@@ -25,13 +25,13 @@ a second image decode (each pass loads the frames once).
 ```
                          ┌──────────────── PASS 1: depth (DA-V2 only) ─────────────────┐
 per camera, per frame    │                                                             │
-  ── undistorted image ──┼─► Depth Anything V2 ──► relative depth                      │
+  ── undistorted image ──┼─► Depth Anything V2 ──► relative disparity                  │
                          │            │                                                │
-  static LiDAR points ───┼─► project into camera ──► (d_lidar, d_da) anchor pairs      │
+  static LiDAR points ───┼─► project into camera ──► (d_lidar, disp) anchor pairs      │
                          │            │                                                │
                          │            ▼                                                │
-                         │   RANSAC affine fit  d_lidar ≈ a·d_da + b                   │
-                         │            │  (fallback to recent (a,b) on degenerate fit)  │
+                         │   RANSAC fit  1/d_lidar ≈ scale·disp + shift                │
+                         │            │  (fallback to the last good fit if degenerate) │
                          │            ▼                                                │
                          │   metric depth ──► depth_2d/<cam>/<frame>.npz               │
                          └─────────────────────────────────────────────────────────────┘
@@ -45,7 +45,8 @@ per camera stream        │                                                    
                          │            │                                                │
                          │            ▼                                                │
                          │   SAM2 video predictor: box → mask, propagate across stream │
-                         │            │  (IoU merge of re-detected boxes; OOM windowing)│
+                         │            │  (IoU merge of re-detections; lost-object drop;│
+                         │            │   OOM windowing; bf16 autocast)                │
                          │            ▼                                                │
                          │   Masklets (persistent ids) + DINOv2 embedding every k      │
                          │            │                                                │
@@ -85,18 +86,43 @@ object means one masklet per object (no synonym explosion).
 
 ## PASS 2 — detector + SAM2 tracking (per camera)
 
-1. Write the camera's frames to a temp JPEG dir and `init_state` on it (SAM2's
-   video loader takes a directory of sequentially-named JPEGs). `init_state` is
+1. Point SAM2 at a temp dir of sequentially-named JPEGs (its video loader's
+   input): symlinks to ingest's own files when they are JPEG (CompressedImage
+   bytes are written verbatim), re-encoded at q95 otherwise. `init_state` is
    called with `offload_video_to_cpu=True` so the frame stack lives in host RAM
-   and streams to the GPU per frame — essential for long panoramic clips.
-2. At each keyframe (every `redetect_every_k` frames) run **GroundingDINO** →
-   class-labeled boxes. A box whose mask-bbox IoU with an already-tracked object
-   is ≥ `iou_match_threshold` is dropped as the existing object; genuinely new
-   boxes get a fresh `obj_id` via `add_new_points_or_box`. This is how objects
-   entering mid-clip are introduced without duplicating existing tracks.
+   and streams to the GPU per frame — essential for long panoramic clips — and
+   `async_loading_frames=True` so decoding overlaps tracking.
+2. At each keyframe (every `redetect_every_k` frames), first **drop lost
+   objects**: any object SAM2 has returned an empty mask for over the last
+   `drop_lost_after_frames` frames is removed from the session
+   (`remove_object`). Then run **GroundingDINO** → class-labeled boxes. A box
+   whose mask-bbox IoU with an already-tracked object is ≥
+   `iou_match_threshold` is dropped as the existing object; genuinely new boxes
+   get a fresh `obj_id` via `add_new_points_or_box`. This is how objects
+   entering mid-clip are introduced without duplicating existing tracks. A
+   keyframe with no live objects and no detections is skipped (SAM2 refuses to
+   propagate zero objects — previously that error abandoned the whole window,
+   so an empty first frame lost every later object).
 3. `propagate_in_video` forward to the next keyframe, recording per-object masks
-   into `Masklet`s (persistent ids) — per-frame mask PNGs plus a DINOv2
-   appearance embedding extracted every `embeddings.every_k_frames`.
+   into `Masklet`s (persistent ids) — per-frame mask PNGs (written on a thread
+   pool) plus a DINOv2 appearance embedding extracted every
+   `embeddings.every_k_frames`, batched over the frame's objects.
+
+**Why lost objects are dropped**: the pinned SAM2 runs memory attention and the
+memory encoder once *per object* per frame, and never forgets an object on its
+own — a car that left the image 200 frames ago still costs a full inference
+every frame and keeps accumulating per-frame state in VRAM. Without the drop,
+per-frame cost grows with every object detected so far rather than with what is
+visible. The trade: an object occluded for longer than `drop_lost_after_frames`
+and then re-detected starts a new masklet instead of continuing its old one —
+the same discontinuity as an OOM window boundary, re-linked downstream via
+DINOv2. `drop_lost_after_frames: 0` restores the never-drop behaviour.
+
+**Precision**: SAM2 calls (`init_state`, `add_new_points_or_box`,
+`propagate_in_video`, `remove_object`) run under CUDA autocast at
+`tracking.autocast_dtype` — `bfloat16` by default, which is how upstream runs
+SAM2 and what lets its attention use flash kernels. The detector and DINOv2
+run outside it, in float32.
 
 **OOM fallback**: the whole clip is tried in one SAM2 session. On a CUDA OOM
 mid-propagation the camera is retried in windows of `sub_clip_frames` (fresh
@@ -120,24 +146,26 @@ inside the `sam2` package, so only the `.pt` is fetched. The container runs
 
 ---
 
-## PASS 1 — depth branch (DA-V2 + LiDAR affine fit)
+## PASS 1 — depth branch (DA-V2 + LiDAR inverse-depth fit)
 
 Produces a metric depth map per frame for `semantic_lifting`'s occlusion test
 and for downstream Segment-Lift-Fit.
 
 - **DA-V2 inference**: Depth Anything V2 (`depth-anything-v2-large`) on the full
-  image → *relative* depth. Frames are pushed through the backbone
+  image → relative **disparity** (affine-invariant inverse depth: larger =
+  closer, ~0 for sky — what DA-V2's relative checkpoints output, despite the
+  name). Frames are pushed through the backbone
   `depth.batch_size` at a time; the LiDAR alignment that follows each batch stays
   strictly sequential, so the fallback-window state is identical to per-frame
   processing.
 - **Why relative + LiDAR-anchored, not metric**: DA-V2's metric checkpoint has
   large absolute error on AV scenes; the relative variant has better ordinal
-  consistency and aligns cleanly to LiDAR via an affine fit. Trust LiDAR for
-  scale, DA for density.
+  consistency and aligns cleanly to LiDAR via a scale + shift fit in
+  inverse-depth space. Trust LiDAR for scale, DA for density.
 - **Static-only anchors** (`use_static_anchors_only`, non-optional): cameras
   (~12 Hz) and LiDARs (~20 Hz) are unsynchronized. A dynamic LiDAR point
   projects to where the object *was* at LiDAR time, not where it is in the
-  current image, which wrecks the affine fit. Only points outside
+  current image, which wrecks the fit. Only points outside
   `lidar_preprocessing`'s `dynamic_mask` (the precision artifact) are used as
   anchors — never the Step F `motion_proposals`, which are recall-oriented and
   false-positive tolerant. (`~dynamic_mask` also admits ambiguous,
@@ -153,12 +181,27 @@ and for downstream Segment-Lift-Fit.
   untrusted stretch of the pose stream gets no anchors.
 - **Sky filter**: DA-V2 emits enormous unreliable values for sky; the top
   `sky_mask_top_fraction` of the image is masked before fitting.
-- **RANSAC affine fit**: solve `d_lidar ≈ a·d_da + b` over the matched pairs
-  (`ransac_n_iter`, `ransac_inlier_threshold_m`, `min_lidar_anchors`). On a
-  degenerate fit, fall back to the median `(a, b)` of the last
-  `fallback_window` successful frames; if no successful fit exists yet, write
-  nothing (`fit_status == 2`) and downstream treats the missing artifact as
-  "relative-only / unavailable."
+- **RANSAC inverse-depth fit**: solve `1/d_lidar ≈ scale·disp + shift` over the
+  matched pairs (`ransac_n_iter`, `ransac_inlier_threshold_m`,
+  `min_lidar_anchors`), then `depth_m = 1/(scale·disp + shift)`, clamped to
+  250 m; pixels whose fitted inverse depth is ≤ 0 get 0 ("no measurement").
+  Hypotheses are 2-point samples in inverse-depth space, but inliers are judged
+  by the residual in **metres** after inverting, and the final least-squares
+  refit weights each inlier by `d_lidar²` so it approximately minimises the
+  metric error. `scale` must be positive (disparity rises as depth falls).
+  On a degenerate fit, fall back to the most recent successful `(scale, shift)`
+  among the last `fallback_window` frames; if none exists yet, write nothing
+  (`fit_status == 2`) and downstream treats the missing artifact as
+  "unavailable."
+- **Why not `d_lidar ≈ a·disp + b`**: that was the original model and it is
+  wrong for disparity — the true relation is hyperbolic with a *negative*
+  slope, and the fit rejected every `a ≤ 0`, so frames either failed or took
+  a positive slope fitted to noise. On real DA-V2 output for a synthetic ground
+  plane (7–77 m anchors), the unconstrained depth-affine least-squares slope
+  came out negative with 8.3 m RMSE; the inverse-depth fit kept 344/390 anchors
+  as inliers at 0.12 m RMSE. Files written by the old fit used the field names
+  `affine_a`/`affine_b`; the reader rejects them (`ArtifactFormatError`), so
+  re-run perception_2d on any chunk produced before the fix.
 
 DA-V2 is built inside this pass and **unloaded** in the pass's `finally` block,
 freeing its VRAM before PASS 2 builds the detector / SAM2.
@@ -189,12 +232,18 @@ perception_2d; that has been removed.)
 ## Output artifacts
 
 ```
-data/artifacts/raw/<bag_id>/perception_2d/<version>/<chunk_id>/
+data/artifacts/raw/<bag_id>/chunks/<chunk_id>/
 ├── detections_2d.parquet                         (MASKLET_SCHEMA, one row / masklet)
 ├── tracklets_2d.parquet                          (MASKLET_SCHEMA, same rows)
-├── masks_2d/<cam_id>/<masklet_id>/<frame_seq>.png (per-frame binary mask PNGs)
-│                                  └ dino_feature.npy (DINOv2 embedding for the masklet)
-└── depth_2d/<cam_id>/<frame_seq>.npz             (metric depth + fit metadata)
+├── masks_2d/<masklet_id>/<camera_seq:06d>.png    (per-frame binary mask PNGs)
+│                     └ dino_feature.npy          (DINOv2 embedding for the masklet)
+└── depth_2d/<cam_id>/<camera_seq:06d>.npz        (metric depth + fit metadata)
+```
+
+Written and read through `wato_common.artifacts.masklets` and
+`wato_common.artifacts.depth`, which own these formats.
+
+```
 ```
 
 `detections_2d.parquet` and `tracklets_2d.parquet` carry the same masklet rows —
@@ -223,13 +272,13 @@ the tracked detection.
 
 | Field | Dtype | Shape | Description |
 |---|---|---|---|
-| `depth_m` | `depth.output_dtype` (float16) | (H, W) | Metric depth in metres |
-| `affine_a` | float32 | scalar | DA→metric scale factor |
-| `affine_b` | float32 | scalar | DA→metric offset |
-| `n_anchors` | int32 | scalar | (d_lidar, d_da) pairs available |
+| `depth_m` | `depth.output_dtype` (float16) | (H, W) | Metric depth in metres; 0 = no measurement |
+| `disp_scale` | float32 | scalar | `1/depth_m = disp_scale·disparity + disp_shift` |
+| `disp_shift` | float32 | scalar | (disparity = DA-V2's raw output) |
+| `n_anchors` | int32 | scalar | (d_lidar, disparity) pairs available |
 | `n_inliers` | int32 | scalar | RANSAC inliers |
-| `rmse_inliers_m` | float32 | scalar | Fit quality |
-| `fit_status` | int32 | scalar | 0=ok · 1=fallback to recent (a,b) · 2=failed |
+| `rmse_inliers_m` | float32 | scalar | Metric RMSE over the inliers |
+| `fit_status` | int32 | scalar | 0=ok · 1=fallback to a recent fit · 2=failed |
 
 A `fit_status == 2` frame writes **no** npz; downstream treats a missing depth
 artifact identically to a written `fit_status == 2`.
@@ -264,6 +313,8 @@ tracking:
   offload_video_to_cpu: true       # frame stack in host RAM (long-clip safe)
   sub_clip_frames: 150             # OOM fallback window
   min_sub_clip_frames: 16
+  drop_lost_after_frames: 30       # remove objects absent this long (0 = never)
+  autocast_dtype: "bfloat16"       # SAM2 precision: bfloat16 | float16 | float32
 
 depth:
   enabled: true
@@ -346,7 +397,7 @@ models/
   discovery.py             Florence-2 open-vocab discovery (optional backend)
   embeddings.py            DINOv2 appearance embeddings
 fusion/
-  depth_align.py           build_anchor_pairs / ransac_affine_fit / apply_affine
+  depth_align.py           build_anchor_pairs / ransac_disparity_fit / disparity_to_depth
   masklet.py               Masklet dataclass
 ```
 

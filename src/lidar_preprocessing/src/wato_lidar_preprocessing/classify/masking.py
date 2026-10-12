@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from wato_common.artifacts.lidar_sweeps import write_dynamic_mask
 from wato_common.artifact_store import (
     aw_dynamic_mask_path,
     dynamic_mask_path,
@@ -76,7 +77,7 @@ def apply_classification_to_sweep(
 
     if n == 0:
         mask = np.zeros(0, dtype=bool)
-        np.save(local_path(dyn_uri), mask)
+        write_dynamic_mask(bag_id, chunk_id, sweep_id, mask)
         if write_aw_snapshot:
             np.save(local_path(aw_dynamic_mask_path(bag_id, chunk_id, sweep_id)), mask)
         return SweepMaskResult(n_static=0, n_dynamic=0, mask_uri=dyn_uri)
@@ -118,7 +119,7 @@ def apply_classification_to_sweep(
         is_static &= ~ground_mask_cache_i
         n_static = int(is_static.sum())
 
-    np.save(local_path(dyn_uri), mask)
+    write_dynamic_mask(bag_id, chunk_id, sweep_id, mask)
     if write_aw_snapshot:
         np.save(local_path(aw_dynamic_mask_path(bag_id, chunk_id, sweep_id)), mask)
 

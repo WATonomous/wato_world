@@ -1,9 +1,14 @@
-"""Path conventions for the wato_world labeling pipeline.
+"""Path conventions for the wato_world labeling pipeline — the one layout.
 
-Every component's I/O goes through here so paths live in one place. Returns
-URIs (file:///..., s3://...) suitable for fsspec; resolve to concrete
-filesystem paths via `local_path` when you must hand them to a non-fsspec
-library (e.g. PIL, pyarrow's local writer).
+Everything lives under ARTIFACT_ROOT_URI as raw/<bag_id>/... (bag level) and
+raw/<bag_id>/chunks/<chunk_id>/... (chunk level), whichever component wrote
+it. Functions return file:// URIs (what index rows and manifests record);
+`local_path` turns one into a filesystem path, and refuses remote URIs —
+the pipeline only runs against a local or bind-mounted tree.
+
+Layout only: an artifact read by another component is encoded, written and
+read by its module in wato_common.artifacts. Use these functions directly only
+for a component's own files, or to record a path (manifests, index rows).
 """
 
 from __future__ import annotations
@@ -233,7 +238,7 @@ def depth_2d_dir(bag_id: str, chunk_id: str) -> str:
     """Directory containing per-camera per-frame metric depth npz files.
 
     Layout: depth_2d/<cam_id>/<frame_seq:06d>.npz
-    Arrays in each npz: depth_m (H,W float16), affine_a, affine_b, n_anchors,
+    Arrays in each npz: depth_m (H,W float16), disp_scale, disp_shift, n_anchors,
     n_inliers, rmse_inliers_m, fit_status.
     """
     return _join(chunk_root(bag_id, chunk_id), "depth_2d")
@@ -262,10 +267,10 @@ def semantic_lifting_dir(bag_id: str, chunk_id: str) -> str:
     return _join(chunk_root(bag_id, chunk_id), "semantic_lifting")
 
 
-def lifted_labels_path(bag_id: str, chunk_id: str, sweep_id: str) -> str:
-    """Per-sweep npz: point_idx, class_id, instance_id, confidence, etc."""
+def lifted_labels_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
+    """Per-sweep labels npz (format: wato_common.artifacts.lifted_labels)."""
     return _join(
-        semantic_lifting_dir(bag_id, chunk_id), "lifted_labels", f"{sweep_id}.npz"
+        semantic_lifting_dir(bag_id, chunk_id), "lifted_labels", f"{sweep_id:06d}.npz"
     )
 
 
@@ -289,8 +294,8 @@ def refined_labels_path(bag_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# URI ↔ local path helpers. Ingest needs concrete paths because rosbag2_py,
-# PIL, and pyarrow's local writer don't speak fsspec URIs.
+# URI ↔ local path helpers. rosbag2_py, numpy, PIL and pyarrow's local writer
+# all need concrete paths.
 # ---------------------------------------------------------------------------
 def local_path(uri: str) -> str:
     """Resolve a file:// URI to a real filesystem path.  Errors on remote URIs."""

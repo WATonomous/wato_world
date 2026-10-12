@@ -16,8 +16,10 @@ one of two sources, selected by `discovery.backend`:
 - `florence2` — open-vocabulary noun phrases discovered per frame by Florence-2,
   pooled into one concept set per camera stream and fed to the detector.
 
-Depth Anything V2 + a LiDAR-anchored affine fit produces a metric depth map per
-frame. Model loading is fail-loud: a missing detector / SAM2 / Depth Anything
+Depth Anything V2 + a LiDAR-anchored fit produces a metric depth map per
+frame. DA-V2's relative checkpoints output *disparity* (larger = closer), so the
+fit is in inverse-depth space: `1/depth = scale·disparity + shift`, with RANSAC
+inliers judged in metres. Model loading is fail-loud: a missing detector / SAM2 / Depth Anything
 raises rather than emitting degraded placeholder output.
 
 Cross-camera identity merging is **not** done here — it belongs to the
@@ -88,8 +90,54 @@ Chunks whose output parquets already exist are skipped unless `--force`. Each
 camera's masklets are checkpointed to a per-camera resume cache, so an aborted
 run resumes per camera; `--force` discards those caches too.
 
-Outputs land at `data/artifacts/raw/<bag_id>/perception_2d/<version>/<chunk_id>/`:
+Outputs land in the chunk directory, `data/artifacts/raw/<bag_id>/chunks/<chunk_id>/`:
 `detections_2d.parquet`, `tracklets_2d.parquet`, `masks_2d/`, `depth_2d/`.
+The masklet tables and mask PNGs are written and read only through
+`wato_common.artifacts.masklets`, which owns their encoding (`frames_present`
+is a JSON string on disk, a tuple of ints once read). Consumers use its
+`MaskletIndex`, never the paths. `depth_2d/<cam_id>/<camera_seq:06d>.npz` is
+likewise owned by `wato_common.artifacts.depth` (`DepthFrame`, `FitStatus`):
+a frame whose LiDAR-anchored fit failed is not written at all, so a missing
+frame means "no usable depth", and a 0 pixel means no measurement there.
+
+**Re-run depth produced before 2026-10-11.** The original fit modelled depth as
+an affine of disparity, which is the wrong shape (the true slope is negative and
+hyperbolic), so those `depth_2d/` maps are wrong. Their files carry
+`affine_a`/`affine_b` instead of `disp_scale`/`disp_shift`, and the reader now
+rejects them with `ArtifactFormatError` rather than serve them as metric;
+`--force` regenerates them.
+
+## Tracking speed
+
+SAM2 (this pinned build) runs memory attention once per *object* per frame and
+never forgets an object, so cost tracks objects-ever-detected, not
+objects-visible. Two `tracking` settings bound it:
+
+- `drop_lost_after_frames` (default 30, ~2.5 s at 12 Hz) — an object with no
+  mask for that long is removed from the session at the next keyframe. If it
+  comes back and is re-detected it starts a new masklet (re-linked downstream
+  via DINOv2). `0` = never drop.
+- `autocast_dtype` (default `bfloat16`, upstream's own setting) — SAM2 calls
+  run under CUDA autocast; the detector and DINOv2 stay float32.
+
+Frames ingest wrote as JPEG are symlinked into SAM2's frame dir instead of being
+re-encoded, mask PNGs are written on a thread pool, and DINOv2 embeds all of a
+frame's objects in one batch.
+
+Measured on 181 frames (1280×1024) of one WATO pano camera, RTX 5070 Ti, full
+tracking pass (detector + SAM2 + DINOv2 + mask writes):
+
+| setting | time | peak VRAM | masks vs. old float32 path (per-frame IoU, mean / median) |
+|---|---|---|---|
+| float32, never drop (old path) | 283 s | 7.3 GB | — |
+| bfloat16, never drop | 63 s | 7.3 GB | 0.981 / 0.993 |
+| bfloat16, drop after 30 (default) | 38 s | 4.8 GB | 0.976 / 0.993 |
+
+Runs are bit-for-bit repeatable. bfloat16 moves masks no more than merely
+feeding SAM2 the source JPEG instead of a re-encode does (0.980 / 0.996).
+SAM2's `vos_optimized=True` (torch.compile) was tried and is not usable with
+this per-object tracker: 224 s of compile, then a CUDA-graphs buffer-reuse error
+in memory attention.
 
 ## Visualizing depth
 

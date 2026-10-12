@@ -85,7 +85,7 @@ wato_world/
 │   └── student_training/
 ├── docker/                      # one Dockerfile per component + base + template
 ├── modules/                     # docker-compose.{yaml,infra,dev,gpu}.yaml
-├── config/                      # prompts.yaml, pipeline.yaml, component_versions.yaml
+├── config/                      # prompts.yaml, pipeline.yaml
 ├── data/                        # bind-mounted into containers (git-ignored)
 └── notebooks/                   # ad-hoc analysis (rerun viewer scripts, etc.)
 ```
@@ -139,15 +139,23 @@ prod) — no in-process imports across component boundaries.
 
 ## Storage
 
-- **Artifact store**: `data/artifacts/` bind-mounted at `/data/artifacts`.
-  All paths flow through `wato_common.storage`, which uses fsspec so the
-  same code works against `s3://...` URIs in prod.
+- **Artifact store**: `data/artifacts/` bind-mounted at `/data/artifacts`
+  (`ARTIFACT_ROOT_URI`). One layout for every component:
+  `raw/<bag_id>/...` and `raw/<bag_id>/chunks/<chunk_id>/...`, built by
+  `wato_common.artifact_store`. Local filesystems only — `local_path` refuses
+  remote URIs.
+- **Artifact formats**: every artifact one component writes and another reads
+  has one module in `wato_common.artifacts` (calibration, lidar_sweeps,
+  motion_proposals, masklets, depth, lifted_labels) holding both its write and
+  read halves, round-trip tested in `src/common/tests`. Consumer images install
+  only `src/common` and their own package, so a reader can't live in the
+  producer's package.
 - **Metadata index**: artifact files themselves. Components write Parquet indexes,
   JSON manifests, and quality reports under `data/artifacts/`; no database
   service is required for the current pipeline.
-- **Versioning**: each component's output is namespaced by version
-  (`perception_2d/v1/...`). Bump the version in `config/component_versions.yaml`
-  whenever the model checkpoint or output schema changes.
+- **Versioning**: none in the paths — a re-run overwrites. What produced an
+  artifact (git commit, lockfile, model revisions, config, input hashes) is in
+  the chunk's manifest (`wato_common.manifest`; CLAUDE.md "Provenance").
 
 ## Configuration
 
@@ -164,7 +172,7 @@ prod) — no in-process imports across component boundaries.
 pip install pre-commit && pre-commit install
 pre-commit run --all-files
 
-# Run a component's tests inside its dev container.
+# Run src/common's tests, then a component's, inside its dev container.
 watod test ingest
 ```
 

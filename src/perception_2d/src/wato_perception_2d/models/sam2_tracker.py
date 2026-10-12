@@ -3,47 +3,63 @@
 For one camera stream, runs the 2D detector on keyframes and uses SAM2's video
 predictor to segment + propagate each detected box into a tracked masklet:
 
-  1. Write the camera's frames to a temp JPEG dir and ``init_state`` on it
-     (SAM2's video loader takes a directory of sequentially-named JPEGs).
-  2. At each keyframe (every ``redetect_every_k`` frames) run the detector →
-     class-labeled boxes. Boxes that overlap an already-tracked object (mask IoU
-     ≥ ``iou_match_threshold``) are dropped as existing; the genuinely new ones
-     get a fresh obj_id via ``add_new_points_or_box``.
+  1. Point SAM2's video loader at the camera's frames: a temp dir of
+     sequentially-named JPEGs — symlinks to ingest's own JPEGs when the source
+     already is one, re-encoded otherwise — loaded asynchronously by SAM2.
+  2. At each keyframe (every ``redetect_every_k`` frames) drop objects SAM2 has
+     reported absent for ``drop_lost_after_frames`` frames, then run the
+     detector → class-labeled boxes. Boxes that overlap an already-tracked
+     object (mask IoU ≥ ``iou_match_threshold``) are dropped as existing; the
+     genuinely new ones get a fresh obj_id via ``add_new_points_or_box``.
   3. ``propagate_in_video`` forward to the next keyframe, recording per-object
-     masks → ``_Track`` → ``Masklet`` (per-frame PNGs + DINOv2 features every k).
+     masks → ``_Track`` → ``Masklet`` (per-frame PNGs written on a thread pool,
+     DINOv2 features every k frames batched over the frame's objects).
 
 The detector emits one box per object, so each physical object becomes a single
 masklet — no synonym explosion, far fewer masks for downstream to consume.
 
-Object ids reset between OOM sub-clip windows (and between chunks) — exactly the
+Cost: this SAM2 build runs memory attention + the memory encoder once per
+*object* per frame, and keeps every object it was ever given — including ones
+that left the image long ago — so without pruning, per-frame cost and VRAM grow
+with every object ever detected rather than with what is visible. Dropping lost
+objects (step 2) bounds that. SAM2 calls run under ``autocast_dtype`` (bfloat16
+by default, as upstream runs it); the detector and DINOv2 stay float32.
+
+Object ids reset between OOM sub-clip windows (and between chunks), and an
+object dropped as lost and later re-detected starts a new masklet — exactly the
 discontinuity the downstream `tracking` component re-links via the DINOv2
 embeddings persisted here. Cross-camera identity is likewise deferred downstream.
 
 SAM2 video predictor API (sam2 package):
-    state = predictor.init_state(video_path=<jpeg_dir>, offload_video_to_cpu=True)
+    state = predictor.init_state(video_path=<jpeg_dir>, offload_video_to_cpu=True,
+                                 async_loading_frames=True)
     predictor.add_new_points_or_box(inference_state=state, frame_idx=i,
                                     obj_id=oid, box=np.array([x1,y1,x2,y2]))
     for f_idx, obj_ids, mask_logits in predictor.propagate_in_video(
             state, start_frame_idx=i, max_frame_num_to_track=n):
         ...   # mask_logits: (num_objs, 1, H, W); obj_ids parallel
+    predictor.remove_object(state, obj_id, need_output=False)
     predictor.reset_state(state)
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import shutil
 import tempfile
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Optional
 
 import numpy as np
 
+from wato_common.artifacts import masklets
 from wato_perception_2d.fusion.masklet import Masklet
 from wato_perception_2d.io import CameraFrameInfo
 from wato_perception_2d.models.detector import Concept, Detection
-from wato_perception_2d.models.embeddings import extract_dino_feature
+from wato_perception_2d.models.embeddings import extract_dino_features
 
 log = logging.getLogger(__name__)
 
@@ -56,7 +72,7 @@ class _Track:
         "cls",
         "score",
         "frames_present",
-        "mask_paths",
+        "mask_writes",
         "dino_accum",
     )
 
@@ -65,7 +81,9 @@ class _Track:
         self.cls = cls
         self.score = score
         self.frames_present: list[int] = []
-        self.mask_paths: list[str] = []
+        # Pending PNG writes, parallel to frames_present; each resolves to the
+        # mask's path.
+        self.mask_writes: list[Future] = []
         self.dino_accum: list[np.ndarray] = []
 
 
@@ -149,55 +167,95 @@ def keyframes(n_frames: int, every_k: int) -> list[int]:
     return list(range(0, n_frames, step))
 
 
-def _logit_to_mask(logit, hw: tuple[int, int]) -> Optional[np.ndarray]:
-    """SAM2 per-object logits → boolean mask at the frame's (H, W), or None.
+def _frame_masks(mask_logits, hw: tuple[int, int]) -> list[Optional[np.ndarray]]:
+    """SAM2 logits for one frame → one boolean (H, W) mask per object, or None.
 
-    Returns None for an empty mask (object absent in this frame — normal) so the
-    track simply skips the frame.
+    Thresholds on the logits' own device and moves the whole frame's masks to
+    host in one transfer (1 byte/pixel instead of 4, one sync instead of one
+    per object). None marks an empty mask (object absent in this frame —
+    normal) so the track simply skips the frame.
     """
-    arr = _to_numpy(logit)
-    if arr.ndim == 3:  # (1, H, W)
-        arr = arr[0]
-    if arr.ndim != 2:
-        return None
-    m = arr > 0.0
-    if m.shape != hw:
-        from PIL import Image as PILImage
+    m = _to_numpy(mask_logits > 0)
+    if m.ndim == 4:  # (N, 1, H, W)
+        m = m[:, 0]
+    out: list[Optional[np.ndarray]] = []
+    for mi in m:
+        if mi.shape != hw:
+            from PIL import Image as PILImage
 
-        H, W = hw
-        m = np.asarray(
-            PILImage.fromarray(m.astype(np.uint8)).resize((W, H), PILImage.NEAREST),
-            dtype=bool,
-        )
-    return m if m.any() else None
-
-
-def _save_mask(
-    base_dir: str, masklet_id: str, camera_seq: int, mask: np.ndarray
-) -> str:
-    from PIL import Image as PILImage
-
-    d = os.path.join(base_dir, masklet_id)
-    os.makedirs(d, exist_ok=True)
-    path = os.path.join(d, f"{camera_seq:06d}.png")
-    PILImage.fromarray(mask.astype(np.uint8) * 255).save(path)
-    return path
+            H, W = hw
+            mi = np.asarray(
+                PILImage.fromarray(mi.astype(np.uint8)).resize(
+                    (W, H), PILImage.NEAREST
+                ),
+                dtype=bool,
+            )
+        out.append(mi if mi.any() else None)
+    return out
 
 
-def _write_frames_jpeg(images: list[np.ndarray]) -> str:
-    """Write frames to a temp dir as sequential JPEGs for SAM2's video loader.
+_JPEG_EXTS = (".jpg", ".jpeg")
+
+
+def _prepare_frame_dir(frames: list[CameraFrameInfo], images: list[np.ndarray]) -> str:
+    """A temp dir of sequential ``00000000.jpg`` frames for SAM2's video loader.
 
     SAM2's ``init_state`` reads a directory of JPEGs whose names are integers (it
-    orders frames by ``int(filename)``), so we always re-encode to a clean
-    ``00000000.jpg`` sequence — robust to the source format (ingest may write PNG)
-    and to gaps left by frame-index filtering. Caller removes the dir afterwards.
+    orders frames by ``int(filename)``), so names are always a clean sequence —
+    robust to gaps left by frame-index filtering. A frame ingest already stored
+    as JPEG (CompressedImage bytes, written verbatim) is symlinked rather than
+    decoded and re-encoded: no CPU cost and no second lossy pass. Anything else
+    (PNG from a raw Image topic) is encoded at quality 95 on a thread pool.
+    Caller removes the dir afterwards.
     """
     from PIL import Image as PILImage
 
     tmp = tempfile.mkdtemp(prefix="sam2_frames_")
-    for i, img in enumerate(images):
+
+    def _encode(i: int, img: np.ndarray) -> None:
         PILImage.fromarray(img).save(os.path.join(tmp, f"{i:08d}.jpg"), quality=95)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        jobs = []
+        for i, (frame, img) in enumerate(zip(frames, images)):
+            src = frame.image_path
+            if src.lower().endswith(_JPEG_EXTS) and os.path.isfile(src):
+                os.symlink(os.path.abspath(src), os.path.join(tmp, f"{i:08d}.jpg"))
+            else:
+                jobs.append(pool.submit(_encode, i, img))
+        for j in jobs:
+            j.result()
     return tmp
+
+
+def _autocast(device: str, dtype_name: str):
+    """Context factory for SAM2 calls: CUDA autocast at ``dtype_name``, or a
+    no-op on CPU / when ``dtype_name`` is "float32"."""
+    if dtype_name == "float32" or not str(device).startswith("cuda"):
+        return contextlib.nullcontext
+    import torch
+
+    dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16}[dtype_name]
+    return lambda: torch.autocast("cuda", dtype=dtype)
+
+
+def _iter_in(ctx_factory, gen):
+    """Drive ``gen`` with ``ctx_factory()`` active only while it computes.
+
+    SAM2's ``propagate_in_video`` is a generator: each ``next`` does a frame's
+    work. Entering the context per step (rather than around the consumer's
+    loop) keeps the loop body — the DINOv2 forward — out of it.
+    """
+    try:
+        while True:
+            with ctx_factory():
+                try:
+                    item = next(gen)
+                except StopIteration:
+                    return
+            yield item
+    finally:
+        gen.close()
 
 
 def track_camera(
@@ -210,7 +268,6 @@ def track_camera(
     bag_id: str,
     chunk_id: str,
     cam_id: str,
-    masks_2d_base_dir: str,
     dino_model: str = "dinov2_vitl14",
     dino_every_k: int = 5,
     device: str = "cuda",
@@ -219,6 +276,8 @@ def track_camera(
     offload_video_to_cpu: bool = True,
     sub_clip_frames: int = 150,
     min_sub_clip_frames: int = 16,
+    drop_lost_after_frames: int = 30,
+    autocast_dtype: str = "bfloat16",
 ) -> list[Masklet]:
     """Detect + SAM2-track every taxonomy object across one camera's frames.
 
@@ -236,13 +295,14 @@ def track_camera(
         bag_id=bag_id,
         chunk_id=chunk_id,
         cam_id=cam_id,
-        masks_2d_base_dir=masks_2d_base_dir,
         dino_model=dino_model,
         dino_every_k=dino_every_k,
         device=device,
         redetect_every_k=redetect_every_k,
         iou_match_threshold=iou_match_threshold,
         offload_video_to_cpu=offload_video_to_cpu,
+        drop_lost_after_frames=drop_lost_after_frames,
+        autocast_dtype=autocast_dtype,
     )
 
     # Attempt 1: the whole clip in one session.
@@ -329,13 +389,14 @@ def _track_window(
     bag_id: str,
     chunk_id: str,
     cam_id: str,
-    masks_2d_base_dir: str,
     dino_model: str,
     dino_every_k: int,
     device: str,
     redetect_every_k: int,
     iou_match_threshold: float,
     offload_video_to_cpu: bool,
+    drop_lost_after_frames: int,
+    autocast_dtype: str,
 ) -> dict[int, _Track]:
     """Detect + propagate over one (windowed) frame range in a single session.
 
@@ -350,69 +411,104 @@ def _track_window(
         return {}
     seq_by_index = [f.camera_seq for f in frames]
     H, W = images[0].shape[:2]
+    amp = _autocast(device, autocast_dtype)
 
     tracks: dict[int, _Track] = {}
     obj_meta: dict[int, tuple[str, float]] = {}  # obj_id → (class, det_score)
-    masks_at_frame: dict[int, dict[int, np.ndarray]] = {}  # frame_idx → {oid: mask}
+    kfs = keyframes(n, redetect_every_k)
+    kf_set = set(kfs)
+    # Masks propagated into upcoming keyframes, for matching re-detections. Only
+    # keyframes are kept: holding every frame's masks costs GBs on long clips.
+    masks_at_kf: dict[int, dict[int, np.ndarray]] = {}
+    live: set[int] = set()  # obj_ids currently in the SAM2 session
+    last_seen: dict[int, int] = {}  # obj_id → last frame idx with a non-empty mask
     next_obj_id = 0
 
     tmpdir: Optional[str] = None
     state = None
+    writer = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mask_png")
     try:
-        tmpdir = _write_frames_jpeg(images)
-        state = predictor.init_state(
-            video_path=tmpdir, offload_video_to_cpu=offload_video_to_cpu
-        )
+        tmpdir = _prepare_frame_dir(frames, images)
+        with amp():
+            state = predictor.init_state(
+                video_path=tmpdir,
+                offload_video_to_cpu=offload_video_to_cpu,
+                async_loading_frames=True,
+            )
 
-        kfs = keyframes(n, redetect_every_k)
         for ki, kf in enumerate(kfs):
             is_last = ki == len(kfs) - 1
             stop = (n - 1) if is_last else kfs[ki + 1]  # last frame idx to reach
             record_stop = n if is_last else kfs[ki + 1]  # exclusive record bound
 
+            # Stop paying for objects SAM2 has reported absent for a while.
+            if drop_lost_after_frames > 0:
+                for oid in sorted(live):
+                    if kf - last_seen[oid] >= drop_lost_after_frames:
+                        with amp():
+                            predictor.remove_object(state, oid, need_output=False)
+                        live.discard(oid)
+
             # Introduce objects detected at this keyframe that aren't already
             # tracked (matched against masks propagated into this frame).
-            existing = masks_at_frame.get(kf, {})
+            existing = masks_at_kf.pop(kf, {})
             for det in detector.detect(images[kf], concepts):
                 if _is_existing(det, existing, iou_match_threshold):
                     continue
                 oid = next_obj_id
                 next_obj_id += 1
                 obj_meta[oid] = (det.cls, det.score)
-                if not _add_object(predictor, state, kf, oid, det, new_segment=kf > 0):
+                with amp():
+                    added = _add_object(
+                        predictor, state, kf, oid, det, new_segment=bool(live)
+                    )
+                if not added:
                     # Mid-stream add unsupported on this build → stop introducing
                     # new objects; existing ones still propagate to the clip end.
                     del obj_meta[oid]
                     break
+                live.add(oid)
+                last_seen[oid] = kf
 
-            # Propagate this segment; record [kf, record_stop), update masks for
-            # the next keyframe match (incl. the boundary frame, which the next
-            # segment records as its own keyframe).
-            for f_idx, obj_ids, mask_logits in predictor.propagate_in_video(
-                state, start_frame_idx=kf, max_frame_num_to_track=stop - kf
+            # Nothing to track in this segment (e.g. an empty road at the first
+            # keyframe): SAM2 refuses to propagate zero objects, so skip ahead to
+            # the next keyframe's detections instead of abandoning the window.
+            if not live:
+                continue
+
+            # Propagate this segment; record [kf, record_stop), keep the masks at
+            # the next keyframe (which the next segment records as its own
+            # keyframe) for its re-detection match.
+            for f_idx, obj_ids, mask_logits in _iter_in(
+                amp,
+                predictor.propagate_in_video(
+                    state, start_frame_idx=kf, max_frame_num_to_track=stop - kf
+                ),
             ):
-                fmap = masks_at_frame.setdefault(int(f_idx), {})
-                for j in range(len(obj_ids)):
-                    oid = int(obj_ids[j])
-                    mask = _logit_to_mask(mask_logits[j], (H, W))
-                    if mask is None:
-                        continue
-                    fmap[oid] = mask
-                    if int(f_idx) < record_stop:
-                        _record_frame(
-                            tracks,
-                            obj_meta,
-                            oid,
-                            frame_offset + int(f_idx),
-                            seq_by_index[int(f_idx)],
-                            mask,
-                            images[int(f_idx)],
-                            masks_2d_base_dir,
-                            dino_model,
-                            dino_every_k,
-                            device,
-                        )
-                if int(f_idx) >= stop:
+                f = int(f_idx)
+                present: list[tuple[int, np.ndarray]] = []
+                for oid, mask in zip(obj_ids, _frame_masks(mask_logits, (H, W))):
+                    if mask is not None:
+                        present.append((int(oid), mask))
+                        last_seen[int(oid)] = f
+                if f in kf_set and f > kf:
+                    masks_at_kf[f] = dict(present)
+                if f < record_stop and present:
+                    _record_frame(
+                        tracks,
+                        obj_meta,
+                        present,
+                        frame_offset + f,
+                        seq_by_index[f],
+                        images[f],
+                        writer,
+                        bag_id,
+                        chunk_id,
+                        dino_model,
+                        dino_every_k,
+                        device,
+                    )
+                if f >= stop:
                     break
     except Exception as exc:  # noqa: BLE001
         if _is_cuda_oom(exc):
@@ -426,6 +522,9 @@ def _track_window(
             exc_info=True,
         )
     finally:
+        # Let queued mask PNGs land before the tracks are handed back; a failed
+        # write surfaces from Future.result() in _track_to_masklet.
+        writer.shutdown(wait=True)
         if state is not None:
             try:
                 predictor.reset_state(state)
@@ -447,10 +546,11 @@ def _add_object(
 ) -> bool:
     """Prompt SAM2 with one detection box; return False if a mid-stream add fails.
 
-    A new object at frame 0 must succeed (the error propagates). At a later
-    keyframe, some SAM2 builds reject adding an object after propagation has
-    started; we isolate that (warn once, return False) so existing tracks still
-    finish — graceful degradation of the re-detection feature, not garbage output.
+    Adding to a session with nothing live (``new_segment=False``) must succeed
+    (the error propagates). Adding alongside live objects, some SAM2 builds
+    reject a new object after propagation has started; we isolate that (warn
+    once, return False) so existing tracks still finish — graceful degradation
+    of the re-detection feature, not garbage output.
     """
     global _warned_midstream_add
     box = np.asarray(det.box_xyxy, dtype=np.float32)
@@ -461,7 +561,7 @@ def _add_object(
         return True
     except Exception as exc:  # noqa: BLE001
         if not new_segment:
-            raise  # a frame-0 failure is a real error
+            raise  # nothing live to fall back on — a real error
         if not _warned_midstream_add:
             _warned_midstream_add = True
             log.warning(
@@ -476,39 +576,58 @@ def _add_object(
 def _record_frame(
     tracks: dict[int, _Track],
     obj_meta: dict[int, tuple[str, float]],
-    obj_id: int,
+    present: list[tuple[int, np.ndarray]],
     frame_index_abs: int,
     camera_seq: int,
-    mask: np.ndarray,
     image_rgb: np.ndarray,
-    masks_2d_base_dir: str,
+    writer: ThreadPoolExecutor,
+    bag_id: str,
+    chunk_id: str,
     dino_model: str,
     dino_every_k: int,
     device: str,
 ) -> None:
-    track = tracks.get(obj_id)
-    if track is None:
-        cls, score = obj_meta.get(obj_id, ("object", 0.0))
-        track = _Track(masklet_id=str(uuid.uuid4())[:12], cls=cls, score=score)
-        tracks[obj_id] = track
-    mask_path = _save_mask(masks_2d_base_dir, track.masklet_id, camera_seq, mask)
-    track.frames_present.append(camera_seq)
-    track.mask_paths.append(mask_path)
+    """Append one frame's non-empty masks to their tracks.
+
+    Mask PNGs are queued on ``writer`` (PIL releases the GIL while encoding, so
+    they overlap the next frame's GPU work). On DINOv2 frames every present
+    object is embedded in one batched forward.
+    """
+    for obj_id, mask in present:
+        track = tracks.get(obj_id)
+        if track is None:
+            cls, score = obj_meta.get(obj_id, ("object", 0.0))
+            track = _Track(masklet_id=str(uuid.uuid4())[:12], cls=cls, score=score)
+            tracks[obj_id] = track
+        track.frames_present.append(camera_seq)
+        track.mask_writes.append(
+            writer.submit(
+                masklets.write_mask,
+                bag_id,
+                chunk_id,
+                track.masklet_id,
+                camera_seq,
+                mask,
+            )
+        )
     if dino_every_k > 0 and frame_index_abs % dino_every_k == 0:
         # DINOv2 (torch.hub) is independent of SAM2 and only feeds the downstream
         # tracking ReID — a failure here must NOT abort the camera. Isolate it.
         try:
-            feat = extract_dino_feature(image_rgb, mask, dino_model, device)
+            feats = extract_dino_features(
+                image_rgb, [m for _, m in present], dino_model, device
+            )
         except Exception as exc:  # noqa: BLE001
-            feat = None
+            feats = [None] * len(present)
             log.warning(
-                "DINOv2 embedding failed at frame %d (%s) — keeping mask, "
-                "skipping embedding.",
+                "DINOv2 embedding failed at frame %d (%s) — keeping masks, "
+                "skipping embeddings.",
                 frame_index_abs,
                 exc,
             )
-        if feat is not None:
-            track.dino_accum.append(feat)
+        for (obj_id, _), feat in zip(present, feats):
+            if feat is not None:
+                tracks[obj_id].dino_accum.append(feat)
 
 
 def _tracks_to_masklets(
@@ -535,7 +654,7 @@ def _track_to_masklet(
         range(len(track.frames_present)), key=track.frames_present.__getitem__
     )
     frames_present = [track.frames_present[i] for i in order]
-    mask_paths = [track.mask_paths[i] for i in order]
+    mask_paths = [track.mask_writes[i].result() for i in order]
     return Masklet(
         masklet_id=track.masklet_id,
         bag_id=bag_id,

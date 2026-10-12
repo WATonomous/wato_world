@@ -1,9 +1,7 @@
-"""Artifact I/O for open_vocab_discovery. Reads upstream artifacts, writes own."""
+"""Artifact I/O for open_vocab_discovery (stub).
 
-from __future__ import annotations
-
-from wato_common.storage import artifact_uri
-
-
-def output_prefix(bag_id: str, chunk_id: str) -> str:
-    return artifact_uri("open_vocab_discovery", bag_id, chunk_id)
+Reads masklets (wato_common.artifacts.masklets).
+Writes its outputs under the chunk directory (artifact_store layout).
+Read another component's artifact only through its wato_common.artifacts
+module, which owns the format.
+"""

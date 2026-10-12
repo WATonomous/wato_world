@@ -15,7 +15,6 @@ The end-to-end scene (12 sweeps at 20 Hz, sensor at (0, 0, 1.8)):
 
 from __future__ import annotations
 
-import json
 import os
 
 import numpy as np
@@ -26,8 +25,19 @@ from wato_common.artifact_store import (
     lidar_proc_summary_path,
     local_path,
     motion_clusters_path,
-    motion_proposals_path,
     static_map_path,
+)
+from wato_common.artifacts import motion_proposals
+from wato_common.artifacts.motion_proposals import (
+    ATTACH_BITS,
+    AW_AMBIGUOUS,
+    AW_DYNAMIC,
+    BOX_FILL,
+    IWU_EVICTED,
+    MF_MOS,
+    SEED_BITS,
+    SEG_DYNAMIC,
+    UNMAPPED,
 )
 from wato_common.io.parquet_io import read_rows
 from wato_common.schemas import Box3D
@@ -37,13 +47,6 @@ from wato_lidar_preprocessing.config import (
     UnionParams,
 )
 from wato_lidar_preprocessing.motion_proposals import (
-    AW_AMBIGUOUS,
-    AW_DYNAMIC,
-    BOX_FILL,
-    IWU_EVICTED,
-    MF_MOS,
-    SEG_DYNAMIC,
-    UNMAPPED,
     cluster_points,
     compute_sweep_bits,
     fill_box,
@@ -145,17 +148,15 @@ def _stage_scene(bag: str, chunk: str = "c0", *, with_iwu: bool = True) -> dict:
 
 
 def _bits(bag, chunk, s):
-    d = np.load(local_path(motion_proposals_path(bag, chunk, s)))
-    return d["source_bits"], d["cluster_id"]
+    p = motion_proposals.read_sweep(bag, chunk, s)
+    return p.source_bits, p.cluster_id
 
 
 def _cluster_near(rows, x, y, frame_id):
     cands = [
         r
         for r in rows
-        if r["frame_id"] == frame_id
-        and abs(r["cx"] - x) < 1.5
-        and abs(r["cy"] - y) < 1.5
+        if r.frame_id == frame_id and abs(r.cx - x) < 1.5 and abs(r.cy - y) < 1.5
     ]
     assert len(cands) == 1, cands
     return cands[0]
@@ -170,7 +171,7 @@ def test_end_to_end_scene(tmp_env):
     bag, chunk = "bag_mp", "c0"
     layout = _stage_scene(bag, chunk)
     res = process_chunk(_cfg(), bag, chunk)
-    rows = read_rows(motion_clusters_path(bag, chunk))
+    rows = motion_proposals.read_clusters(bag, chunk)
     assert res.n_clusters == len(rows) > 0
 
     mid = N_SWEEPS // 2
@@ -180,20 +181,20 @@ def test_end_to_end_scene(tmp_env):
 
     # Motion: Chen's criterion separates the three, and the sliding window
     # (centroid drift, no motion) stays below it.
-    assert mover["motion_score"] > 1.0 and mover["track_life"] == N_SWEEPS
-    assert parked["motion_score"] < 0.2
-    assert slider["motion_score"] < 1.0
-    assert mover["box_filled"] and not parked["box_filled"] and not slider["box_filled"]
+    assert mover.motion_score > 1.0 and mover.track_life == N_SWEEPS
+    assert parked.motion_score < 0.2
+    assert slider.motion_score < 1.0
+    assert mover.box_filled and not parked.box_filled and not slider.box_filled
 
     # Soft features.
-    assert mover["source_bits"] & int(SEG_DYNAMIC)
-    assert parked["source_bits"] & int(IWU_EVICTED)
-    assert slider["source_bits"] & int(AW_DYNAMIC)
-    assert mover["frac_seg_dynamic"] == pytest.approx(1.0)
-    assert parked["frac_persistent"] > 0.9  # same voxels all 12 sweeps (>= 10)
-    assert mover["frac_persistent"] < 0.1
-    assert mover["track_hint_id"] != parked["track_hint_id"]
-    assert json.loads(mover["sweep_ids"]) == [mid]
+    assert mover.source_bits & int(SEG_DYNAMIC)
+    assert parked.source_bits & int(IWU_EVICTED)
+    assert slider.source_bits & int(AW_DYNAMIC)
+    assert mover.frac_seg_dynamic == pytest.approx(1.0)
+    assert parked.frac_persistent > 0.9  # same voxels all 12 sweeps (>= 10)
+    assert mover.frac_persistent < 0.1
+    assert mover.track_hint_id != parked.track_hint_id
+    assert mover.sweep_ids == (mid,)
 
     for s in range(N_SWEEPS):
         bits, cid = _bits(bag, chunk, s)
@@ -253,8 +254,8 @@ def test_box_fill_can_be_disabled(tmp_env):
     bag, chunk = "bag_mp_nofill", "c0"
     _stage_scene(bag, chunk)
     process_chunk(_cfg(box_fill=False), bag, chunk)
-    rows = read_rows(motion_clusters_path(bag, chunk))
-    assert not any(r["box_filled"] for r in rows)
+    rows = motion_proposals.read_clusters(bag, chunk)
+    assert not any(r.box_filled for r in rows)
     for s in range(N_SWEEPS):
         bits, _ = _bits(bag, chunk, s)
         assert not (bits & BOX_FILL).any()
@@ -291,8 +292,6 @@ def test_compute_sweep_bits_voxel_sources_and_height_floor():
 def test_seed_and_attach_bits_are_disjoint_roles():
     """A point with a seed bit AND an attach bit is a seed, never an attach
     candidate (regression: bitwise ~ on uint8 made it both)."""
-    from wato_lidar_preprocessing.motion_proposals import ATTACH_BITS, SEED_BITS
-
     bits = np.array([AW_DYNAMIC | AW_AMBIGUOUS, AW_AMBIGUOUS, UNMAPPED, 0], np.uint8)
     is_seed = (bits & SEED_BITS) != 0
     is_attach = ((bits & ATTACH_BITS) != 0) & ~is_seed

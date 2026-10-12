@@ -6,12 +6,12 @@ do not all fit (e.g. ~6 GB):
 
   PASS 1 — depth (only DA-V2 in VRAM), per camera (frames batched through the
   backbone `depth.batch_size` at a time; steps 2-6 then run per frame):
-    1. DepthAnythingV2.infer_batch() → relative_depth
+    1. DepthAnythingV2.infer_batch() → disparity (relative inverse depth)
     2. Load static LiDAR points for this sweep, and the ego pose at the
        camera frame's own timestamp (wato_common.pose_lookup)
-    3. depth_align.build_anchor_pairs() → d_lidar, d_da
-    4. depth_align.ransac_affine_fit() → affine params
-    5. depth_align.apply_affine() → metric_depth
+    3. depth_align.build_anchor_pairs() → d_lidar, disp
+    4. depth_align.ransac_disparity_fit() → 1/d = scale·disp + shift
+    5. depth_align.disparity_to_depth() → metric_depth
     6. Write depth_2d/<cam>/<frame>.npz (skipped on total fit failure)
     Then DA-V2 is unloaded and its VRAM freed before tracking starts.
 
@@ -54,34 +54,31 @@ import numpy as np
 
 from wato_common import manifest as common_manifest
 from wato_common.artifact_store import (
+    chunk_root,
     depth_2d_dir,
-    depth_2d_path,
     depth_stats_path,
     detections_2d_path,
-    ensure_local_dir,
     frame_index_path,
     local_path,
     masks_2d_dir,
     poses_path,
     tracklets_2d_path,
 )
+from wato_common.artifacts import depth, masklets
+from wato_common.artifacts.calibration import Calibration, CameraCalibration
 from wato_common.geometry import invert_se3
-from wato_common.io.parquet_io import write_table
 from wato_common.pose_lookup import PoseLookup
-from wato_common.schemas import MASKLET_SCHEMA, MaskletRow, encode_int_list
 from wato_perception_2d.config import ComponentConfig
 from wato_perception_2d.model_registry import revisions as model_revisions
 from wato_perception_2d.fusion.depth_align import (
-    apply_affine,
     build_anchor_pairs,
-    ransac_affine_fit,
+    disparity_to_depth,
+    ransac_disparity_fit,
 )
 from wato_perception_2d.fusion.masklet import Masklet
 from wato_perception_2d.io import (
-    CalibrationInfo,
     CameraFrameInfo,
     clear_lidar_caches,
-    load_calibration,
     load_chunks,
     load_frame_index,
     load_static_lidar_points,
@@ -130,9 +127,7 @@ def _load_image(path: str) -> Optional[np.ndarray]:
 
 def _chunk_complete(bag_id: str, chunk_id: str) -> bool:
     """True when both output parquets exist for this chunk."""
-    return os.path.exists(
-        local_path(detections_2d_path(bag_id, chunk_id))
-    ) and os.path.exists(local_path(tracklets_2d_path(bag_id, chunk_id)))
+    return masklets.exists(bag_id, chunk_id)
 
 
 def _discover_concepts_florence2(
@@ -171,17 +166,20 @@ def _write_depth_artifact(
     metric_depth: np.ndarray,
     fit_params: dict,
 ) -> None:
-    out_path = local_path(depth_2d_path(bag_id, chunk_id, cam_id, frame_seq))
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    np.savez_compressed(
-        out_path,
-        depth_m=metric_depth,
-        affine_a=np.float32(fit_params["a"]),
-        affine_b=np.float32(fit_params["b"]),
-        n_anchors=np.int32(fit_params.get("n_anchors", 0)),
-        n_inliers=np.int32(fit_params["n_inliers"]),
-        rmse_inliers_m=np.float32(fit_params["rmse_inliers_m"]),
-        fit_status=np.int32(fit_params["fit_status"]),
+    depth.write_frame(
+        bag_id,
+        chunk_id,
+        cam_id,
+        frame_seq,
+        depth.DepthFrame(
+            depth_m=metric_depth,
+            disp_scale=fit_params["scale"],
+            disp_shift=fit_params["shift"],
+            n_anchors=fit_params.get("n_anchors", 0),
+            n_inliers=fit_params["n_inliers"],
+            rmse_inliers_m=fit_params["rmse_inliers_m"],
+            fit_status=depth.FitStatus(fit_params["fit_status"]),
+        ),
     )
 
 
@@ -191,16 +189,16 @@ def _align_and_write_depth(
     chunk_id: str,
     cam_id: str,
     frame: CameraFrameInfo,
-    rel_depth: np.ndarray,
-    calib: CalibrationInfo,
+    disparity: np.ndarray,
+    calib: CameraCalibration,
     poses: PoseLookup,
     fallback_window: deque,
 ) -> None:
-    """LiDAR-align one frame's relative depth to metric and write the artifact.
+    """LiDAR-align one frame's DA-V2 disparity to metric depth and write it.
 
     The DA-V2 inference is done by the caller (batched); this is the per-frame
-    sequential tail. Writes nothing on total failure (fit_status==2): downstream
-    treats a missing depth_2d artifact identically to a written fit_status==2 one.
+    sequential tail. Writes nothing on total failure (FitStatus.FAILED): the
+    depth artifact's contract is that a missing frame means no usable depth.
 
     The static points are already in world coordinates (each deskewed at its
     own time by lidar_preprocessing), so projecting them into this image needs
@@ -208,13 +206,13 @@ def _align_and_write_depth(
     camera_timestamp_ns, not the LiDAR sweep's pose from frame_index (the car
     moves between the two; up to ~0.9 m at 30 m on the WATO rig).
     """
-    H, W = rel_depth.shape[:2]
+    H, W = disparity.shape[:2]
     fit_params: dict = {
-        "a": 1.0,
-        "b": 0.0,
+        "scale": 1.0,
+        "shift": 0.0,
         "n_inliers": 0,
         "rmse_inliers_m": 0.0,
-        "fit_status": 2,
+        "fit_status": depth.FitStatus.FAILED,
     }
 
     static_pts = load_static_lidar_points(bag_id, chunk_id, frame.sweep_id)
@@ -226,32 +224,32 @@ def _align_and_write_depth(
 
     if static_pts is not None and pose is not None and pose.valid:
         cam_T_world = invert_se3(calib.ego_T_cam) @ invert_se3(pose.world_T_ego)
-        d_lidar, d_da = build_anchor_pairs(
+        d_lidar, disp = build_anchor_pairs(
             static_pts,
-            rel_depth,
+            disparity,
             calib.K,
             cam_T_world,
             (W, H),
             sky_mask_top_fraction=cfg.depth.sky_mask_top_fraction,
         )
         fallback = fallback_window[-1] if fallback_window else None
-        fit_params = ransac_affine_fit(
+        fit_params = ransac_disparity_fit(
             d_lidar,
-            d_da,
+            disp,
             n_iter=cfg.depth.ransac_n_iter,
             inlier_threshold_m=cfg.depth.ransac_inlier_threshold_m,
             min_anchors=cfg.depth.min_lidar_anchors,
             fallback=fallback,
         )
         fit_params["n_anchors"] = int(len(d_lidar))
-        if fit_params["fit_status"] == 0:
-            fallback_window.append((fit_params["a"], fit_params["b"]))
+        if fit_params["fit_status"] == depth.FitStatus.OK:
+            fallback_window.append((fit_params["scale"], fit_params["shift"]))
 
-    if fit_params["fit_status"] != 2:
-        metric_depth = apply_affine(
-            rel_depth,
-            fit_params["a"],
-            fit_params["b"],
+    if fit_params["fit_status"] != depth.FitStatus.FAILED:
+        metric_depth = disparity_to_depth(
+            disparity,
+            fit_params["scale"],
+            fit_params["shift"],
             out_dtype=cfg.depth.output_dtype,
         )
         _write_depth_artifact(
@@ -261,8 +259,9 @@ def _align_and_write_depth(
 
 def _partial_dir(bag_id: str, chunk_id: str) -> str:
     """Directory holding per-camera resume pickles for this chunk."""
-    masks_base = local_path(masks_2d_dir(bag_id, chunk_id))
-    return os.path.join(os.path.dirname(masks_base), ".perception_2d_partial")
+    return os.path.join(
+        local_path(chunk_root(bag_id, chunk_id)), ".perception_2d_partial"
+    )
 
 
 def _cam_partial_path(bag_id: str, chunk_id: str, cam_id: str) -> str:
@@ -297,14 +296,14 @@ def _load_cam_partial(
 
 
 def _save_cam_partial(
-    bag_id: str, chunk_id: str, cam_id: str, masklets: list[Masklet]
+    bag_id: str, chunk_id: str, cam_id: str, cam_masklets: list[Masklet]
 ) -> None:
     """Persist per-camera masklets so abort doesn't lose this camera's work.
 
     Skips writing an empty result (a likely silent failure) so the next run
     re-attempts this camera rather than trusting an empty cache.
     """
-    if not masklets:
+    if not cam_masklets:
         log.info(
             "%s produced 0 masklets — skipping partial save so the next run "
             "re-attempts this camera instead of trusting an empty cache",
@@ -315,7 +314,7 @@ def _save_cam_partial(
     os.makedirs(os.path.dirname(p), exist_ok=True)
     tmp = p + ".tmp"
     with open(tmp, "wb") as f:
-        pickle.dump(masklets, f, protocol=pickle.HIGHEST_PROTOCOL)
+        pickle.dump(cam_masklets, f, protocol=pickle.HIGHEST_PROTOCOL)
     os.replace(tmp, p)
 
 
@@ -413,8 +412,8 @@ def _process_chunk(
             "(scripts/fetch_models.py)."
         )
 
-    calibration = load_calibration(bag_id)
-    masks_base = ensure_local_dir(masks_2d_dir(bag_id, chunk_id))
+    calib = Calibration.load(bag_id)
+    calibration = {cam_id: calib.camera(cam_id) for cam_id in calib.cameras}
 
     partial_dir = _partial_dir(bag_id, chunk_id)
     if force and os.path.isdir(partial_dir):
@@ -450,7 +449,6 @@ def _process_chunk(
         chunk_id,
         frames_by_cam,
         calibration,
-        masks_base,
         discovery,
         detector,
         fixed_concepts,
@@ -473,7 +471,7 @@ def _run_depth_pass(
     bag_id: str,
     chunk_id: str,
     frames_by_cam: dict[str, list[CameraFrameInfo]],
-    calibration: dict[str, CalibrationInfo],
+    calibration: dict[str, CameraCalibration],
 ) -> None:
     """PASS 1: write metric depth for every frame, then free DA-V2's VRAM.
 
@@ -519,17 +517,17 @@ def _run_depth_pass(
                         images.append(image)
                         kept_frames.append(frame)
                     if images:
-                        rel_depths, _ = depth_model.infer_batch(
+                        disparities, _ = depth_model.infer_batch(
                             images, batch_size=batch_size
                         )
-                        for frame, rel_depth in zip(kept_frames, rel_depths):
+                        for frame, disparity in zip(kept_frames, disparities):
                             _align_and_write_depth(
                                 cfg,
                                 bag_id,
                                 chunk_id,
                                 cam_id,
                                 frame,
-                                rel_depth,
+                                disparity,
                                 calib,
                                 poses,
                                 fallback_window,
@@ -547,8 +545,7 @@ def _run_tracking_pass(
     bag_id: str,
     chunk_id: str,
     frames_by_cam: dict[str, list[CameraFrameInfo]],
-    calibration: dict[str, CalibrationInfo],
-    masks_base: str,
+    calibration: dict[str, CameraCalibration],
     discovery: Optional[Florence2Discovery],
     detector: GroundingDinoDetector,
     fixed_concepts: list[Concept],
@@ -623,7 +620,6 @@ def _run_tracking_pass(
                 bag_id=bag_id,
                 chunk_id=chunk_id,
                 cam_id=cam_id,
-                masks_2d_base_dir=masks_base,
                 dino_model=cfg.embeddings.model,
                 dino_every_k=cfg.embeddings.every_k_frames,
                 device=device,
@@ -632,6 +628,8 @@ def _run_tracking_pass(
                 offload_video_to_cpu=cfg.tracking.offload_video_to_cpu,
                 sub_clip_frames=cfg.tracking.sub_clip_frames,
                 min_sub_clip_frames=cfg.tracking.min_sub_clip_frames,
+                drop_lost_after_frames=cfg.tracking.drop_lost_after_frames,
+                autocast_dtype=cfg.tracking.autocast_dtype,
             )
             log.info(
                 "chunk %s / %s: %d masklets from %d frames",
@@ -649,47 +647,37 @@ def _run_tracking_pass(
     return all_masklets
 
 
-def _masklet_to_row(mkl: Masklet, syn2cls: dict[str, str]) -> dict:
-    # mask_path is the masklet's per-frame-PNG directory (schema contract),
-    # not a single file. dino_feature.npy lands in the same directory.
-    mask_dir = os.path.dirname(mkl.mask_paths[0]) if mkl.mask_paths else ""
-
+def _masklet_record(mkl: Masklet, syn2cls: dict[str, str]) -> masklets.MaskletRecord:
     dino_path: Optional[str] = None
-    if mkl.dino_feature is not None and mask_dir:
-        dino_path = os.path.join(mask_dir, "dino_feature.npy")
-        np.save(dino_path, mkl.dino_feature)
-
-    # cls is canonicalised to the taxonomy; raw detected phrase preserved.
-    canonical = syn2cls.get(mkl.cls.lower(), mkl.cls)
-
-    return MaskletRow(
+    if mkl.dino_feature is not None:
+        dino_path = masklets.write_dino_feature(
+            mkl.bag_id, mkl.chunk_id, mkl.masklet_id, mkl.dino_feature
+        )
+    return masklets.MaskletRecord(
         masklet_id=mkl.masklet_id,
-        bag_id=mkl.bag_id,
-        chunk_id=mkl.chunk_id,
         cam_id=mkl.cam_id,
-        cls=canonical,
+        # cls is canonicalised to the taxonomy; raw detected phrase preserved.
+        cls=syn2cls.get(mkl.cls.lower(), mkl.cls),
         score=mkl.score,
-        frames_present=encode_int_list(mkl.frames_present),
-        mask_path=mask_dir,
-        dino_feature_path=dino_path,
-        global_object_id=mkl.global_object_id,
+        frames_present=tuple(mkl.frames_present),
         raw_phrase=mkl.cls,
         det_score=mkl.score,
+        global_object_id=mkl.global_object_id,
+        dino_feature_path=dino_path,
         tracker_backend=mkl.tracker_backend,
-    ).model_dump()
+    )
 
 
 def _write_masklets(
-    bag_id: str, chunk_id: str, masklets: list[Masklet], syn2cls: dict[str, str]
+    bag_id: str, chunk_id: str, all_masklets: list[Masklet], syn2cls: dict[str, str]
 ) -> None:
-    rows = [_masklet_to_row(m, syn2cls) for m in masklets]
-    write_table(rows, MASKLET_SCHEMA, detections_2d_path(bag_id, chunk_id))
-    write_table(rows, MASKLET_SCHEMA, tracklets_2d_path(bag_id, chunk_id))
+    masklets.write(
+        bag_id, chunk_id, [_masklet_record(m, syn2cls) for m in all_masklets]
+    )
 
 
 def _write_empty(bag_id: str, chunk_id: str) -> None:
-    write_table([], MASKLET_SCHEMA, detections_2d_path(bag_id, chunk_id))
-    write_table([], MASKLET_SCHEMA, tracklets_2d_path(bag_id, chunk_id))
+    masklets.write(bag_id, chunk_id, [])
 
 
 def _write_chunk_manifest(

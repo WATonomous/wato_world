@@ -100,6 +100,13 @@ changes. nuScenes and the WATO rig already run through the same code this way.
 
    `info` and `tf_static` only feed calibration; leave them out and pass
    `--calibration <file>` for a bag without them.
+
+   Set `cameras.<cam>.rectified: true` when the image topic is already
+   rectified (an `image_proc`-style `image_rect*` output, as on the WATO car):
+   such an image is described by `CameraInfo.P[:3, :3]` with no distortion,
+   while `K` and `D` describe the raw sensor image. Ingest refuses a rectified
+   camera whose `P` is unset, carries a stereo baseline, or comes with a
+   non-identity `R`. The nuScenes profile leaves it `false`.
 3. Set `ego_frame` to the frame the pose describes (an Odometry's
    `child_frame_id`). Extrinsics are resolved from it.
 4. Leave `pose_requirements` alone unless the vehicle is faster than
@@ -149,7 +156,11 @@ topics; on that 19.5 GiB bag a scan of the whole file takes about 35 s.
 Ingest auto-builds `calibration.json` from data already in the bag:
 
 - **Intrinsics + distortion + image dimensions + frame_id** come from the first
-  `sensor_msgs/CameraInfo` message on each camera's `info` topic.
+  `sensor_msgs/CameraInfo` message on each camera's `info` topic. `K` and
+  `distortion` describe the images ingest writes: `CameraInfo.K` / `D` for a
+  raw image topic, `CameraInfo.P[:3, :3]` and no distortion for a camera
+  configured `rectified: true`. The CameraInfo as recorded is kept under
+  `camera_info`.
 - **LiDAR frame_id** comes from the first `sensor_msgs/PointCloud2` per LiDAR.
 - **Extrinsics (`ego_T_cam`, `ego_T_lidar`)** are resolved by walking the
   `tf_static` topic from `ego_frame` to each sensor's `frame_id`, in either
@@ -171,6 +182,14 @@ and stops ingest with `CalibrationError` otherwise — no downstream component
 can place that sensor's data without them.  `checks.sanity` is still `warn`
 for softer problems such as an empty distortion vector.
 
+`calibration.json` is written and read only through
+`wato_common.artifacts.calibration`, which owns the format below; ingest,
+perception_2d, semantic_lifting and lidar_preprocessing all go through it. An
+authored `--calibration` file is parsed by that same reader, so a file without
+`cameras`, `lidars`, a camera's `K` / `ego_T_cam` or a LiDAR's `ego_T_lidar` is
+rejected up front, naming the field. Its other fields are metadata no
+projection uses and may be left out.
+
 `calibration.json` schema:
 
 ```json
@@ -184,7 +203,9 @@ for softer problems such as an empty distortion vector.
       "distortion": [...],
       "distortion_model": "plumb_bob",
       "width": 1920, "height": 1080,
-      "ego_T_cam": [[...]]   // 4x4 row-major
+      "ego_T_cam": [[...]],  // 4x4 row-major
+      "rectified": false,    // true: K = CameraInfo.P[:3, :3], distortion = []
+      "camera_info": { "K": [[...]], "D": [...], "P": [[...]] }  // as recorded
     }
   },
   "lidars": { "LIDAR_CC": { "frame_id": "lidar_cc", "ego_T_lidar": [[...]] } },
@@ -254,10 +275,12 @@ runs over the same data.
 | Recording | Topic | Distinct-pose spacing | Dense fraction | Checks |
 |---|---|---|---|---|
 | nuScenes mini | `/odom` | 20 ms median, 45 ms max | 1.0 | pass (`ingest.yaml`) |
-| `ring_road_corrected_part1` (ingested; bag no longer on disk) | `/world_modeling/slam/odometry` | 100 ms median, 175 ms max | 1.0 (every chunk) | pass (`ingest.wato.yaml`); its largest step, 4.45 m in 100 ms, trips `max_speed_mps` — cause not verifiable without the bag |
+| `ring_road_corrected_part1` (ingested; bag no longer on disk) | `/world_modeling/slam/odometry` | 100 ms median, 175 ms max | 1.0 (every chunk) | pass (`ingest.wato.yaml` when it read `slam/odometry`); its largest step, 4.45 m in 100 ms, trips `max_speed_mps` — cause not verifiable without the bag |
 | `ring_road_corrected_0-001` | `/world_modeling/slam/odometry` | 100 ms median | 1.0 | pass; largest step 2.46 m in 100 ms, a stamping artifact (below) |
 | `ring_road_corrected_0-001` | `/world_modeling/liso/odometry` | 50 ms median, 202 ms max | 1.0 | pass; no jumps |
 | `may_30_ring_road_test_3_3` | `/world_modeling/slam/odometry` | 908 ms median, 5.8 s max — one pose per 5 m | 0.0 | **abort** |
+| `recording_20261004_185825_1_with_eidos` (split `_1` only, 58 s; eidos run offline with `wato_monorepo` `tools/eidos_offline_to_bag.sh`) | `/world_modeling/liso/odometry` | 50 ms median, 405 ms max; 39 gaps > 250 ms, most 252 ms | 0.92 / 0.73 / 0.72 (chunks 0000–0002) | **abort** (chunk 0001). The recording dropped `lidar_cc` scans (735 of ~1,160 at 19.8 Hz) and LISO can't pose a scan that isn't there; 4 of the 7 scans LISO missed are warmup, 3 are skipped registrations. Whole bag: 0.82 at 250 ms, 0.95 at 260 ms |
+| `recording_20261004_185825_1_with_eidos` | `/world_modeling/slam/odometry` | ~710 ms (82 keyframes in 58 s) | — | **abort** (keyframe rate) |
 | `ring_road_July_1-2` | `/novatel/oem7/odom` | 20 ms median after dropping held repeats (29,755 of 67,797 messages) | 1.0 | pass |
 | `may_30_ring_road_test_3_3` | `/novatel/oem7/odom` | 2 ms median, but in bursts: fixes held up to 11.7 s, jumps up to 34 m (INS not converged) | 0.10 | **abort** |
 
@@ -442,16 +465,16 @@ Its exact time can only be recovered by finding the bit-identical
 `liso/odometry` pose, which gives back a 10 Hz subset of `liso/odometry`
 (2,029 of 2,894 poses). On `main` the stamp is already the keyframe's scan time
 (`eidos_node.cpp` `publishOdometry`); the problem there is density, not
-stamping. To use
-`liso/odometry`, set `topics.pose: /world_modeling/liso/odometry`; it must be
-recorded in the bag (`may_30` didn't record it).
+stamping. `ingest.wato.yaml` therefore reads
+`topics.pose: /world_modeling/liso/odometry`; it must be recorded in the bag
+(`may_30` didn't record it).
 
 ### Profiles
 
 | Profile | `topics.pose` | `ego_frame` | Use for |
 |---|---|---|---|
 | `ingest.yaml` | `/odom` | `base_link` | nuScenes |
-| `ingest.wato.yaml` | `/world_modeling/slam/odometry` | `base_footprint` | WATO bags with eidos topics. Aborts on eidos `main`'s keyframe-rate stream. On `ring_road_corrected` it passes, but the stream is late-stamped LISO (section 1); `liso/odometry` is better there. |
+| `ingest.wato.yaml` | `/world_modeling/liso/odometry` | `base_footprint` | WATO bags with eidos topics. One pose per matched scan, so it is only as dense as the recorded `lidar_cc` scans: a bag that dropped scans aborts ([Which pose sources pass the checks](#which-pose-sources-pass-the-checks)). Not `slam/odometry`: keyframe-rate on eidos `main` (aborts), late-stamped LISO on `ring_road_corrected` (section 1). |
 
 **There is no NovAtel profile.** For WATO bags without eidos topics, copy
 `ingest.wato.yaml` and set `topics.pose: /novatel/oem7/odom`,
@@ -470,9 +493,10 @@ voxel keys are chunk-relative, so UTM magnitudes are fine there; anything that
 casts world coordinates to float32 loses ~0.5 m at that magnitude (the HTML
 viz does).
 
-**If a bag has none of these:** replay it through eidos in `wato_monorepo` and
-record `liso/odometry`. Keyframe-rate `slam/odometry` alone will abort ingest by
-design.
+**If a bag has none of these:** replay it through eidos in `wato_monorepo` with
+`tools/eidos_offline_to_bag.sh`, which writes `<bag>_with_eidos.mcap` with
+`liso/odometry` and the other eidos topics placed at their scan stamps; ingest
+that file. Keyframe-rate `slam/odometry` alone will abort ingest by design.
 
 Ingest does **not** consume `/tf` for pose. `eidos_transform`'s TF stream is
 wall-clock-stamped, which would desync from LiDAR sweeps.

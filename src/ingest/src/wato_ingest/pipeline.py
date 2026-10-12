@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from tqdm import tqdm
 
+from wato_common.artifacts.calibration import Calibration
 from wato_ingest.artifacts import frame_index, manifest, quality
 from wato_ingest.config import IngestConfig
 from wato_ingest.decoders import cameras, lidar, poses
@@ -81,7 +82,7 @@ def run_bag(
     else:
         calib_uri = calibration.freeze_from_bag(bag_path, bag_id, cfg)
         log.info("calibration: auto-extracted from bag -> %s", calib_uri)
-    calibration.require_complete(calibration.load(bag_id), cfg)
+    calibration.require_complete(Calibration.load(bag_id), cfg)
 
     chunk_rows = chunks.compute_chunks(bag_path, bag_id, cfg)
     chunks.write_chunk_index(bag_id, chunk_rows)

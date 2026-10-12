@@ -13,4 +13,6 @@ proposals with soft features (`motion_score`, `track_life`, `n_sources`,
 names, so a row maps onto a proposal with `provenance="lidar_mos"`; false
 positives are expected, so gate on those features (see
 `docs/research/lidar_mos_guidance.md`) and take the class from
-semantic_lifting's labels.
+semantic_lifting's labels. Read both proposal artifacts, and decode
+`source_bits`, through `wato_common.artifacts.motion_proposals` —
+lidar_preprocessing's package isn't installed in this image.

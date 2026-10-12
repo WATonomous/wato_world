@@ -4,7 +4,9 @@ Two paths:
 
 1. `freeze_from_bag` — read /camera_*/camera_info + /tf_static + first
    PointCloud2 per LiDAR and synthesize calibration.json.  This is the default
-   the pipeline uses; the bag is the source of truth.
+   the pipeline uses; the bag is the source of truth.  A camera configured
+   `rectified: true` gets CameraInfo.P[:3, :3] and no distortion: its image
+   topic is already rectified, and K / D describe the raw image.
 2. `freeze_from_file` — copy an authored calibration JSON in.  Use this only
    when the bag's CameraInfo or /tf_static is missing or wrong.
 
@@ -13,44 +15,22 @@ LiDAR has what downstream projection needs (intrinsics, ego_T_cam,
 ego_T_lidar) and raises CalibrationError otherwise, so an incomplete
 calibration fails ingest instead of surfacing as nulls in a later component.
 
-The output is `raw/<bag_id>/calibration.json` with this schema:
-    {
-      "calibration_version": str,
-      "ego_frame": str,                       # parent frame for ego_T_*
-      "cameras": {
-        "<cam_id>": {
-          "frame_id": str,                    # CameraInfo.header.frame_id
-          "K": [[fx, 0, cx], [0, fy, cy], [0, 0, 1]],
-          "distortion": [...],
-          "distortion_model": str,
-          "width": int, "height": int,
-          "ego_T_cam": [[...]]                # 4x4 row-major, or null if unresolved
-        }
-      },
-      "lidars": {
-        "<lidar_id>": {
-          "frame_id": str,                    # PointCloud2.header.frame_id
-          "ego_T_lidar": [[...]]              # 4x4 row-major, or null if unresolved
-        }
-      },
-      "static_transforms": {                  # raw dump of /tf_static for debugging
-        "<parent>__<child>": [[...]]
-      },
-      "checks": {"sanity": str, "notes": str}
-    }
+The output is `raw/<bag_id>/calibration.json`, written through
+wato_common.artifacts.calibration, which owns its format.
 """
 
 from __future__ import annotations
 
 import json
-import os
+from dataclasses import replace
 
 import numpy as np
 
-from wato_common.artifact_store import (
-    calibration_path,
-    ensure_local_dir,
-    local_path,
+from wato_common.artifacts import calibration as calibration_artifact
+from wato_common.artifacts.calibration import (
+    Calibration,
+    CameraCalibration,
+    LidarCalibration,
 )
 from wato_common.geometry import make_se3
 from wato_common.io.rosbag_reader import messages
@@ -67,32 +47,28 @@ class CalibrationError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
-def build_calibration_dict(
+def build_calibration(
     *,
     camera_infos: dict[str, dict],
     lidar_frame_ids: dict[str, str],
     static_transforms: dict[tuple[str, str], np.ndarray],
     ego_frame: str,
     bag_id: str,
-) -> dict:
-    """Assemble a calibration dict from already-decoded inputs.
+    rectified_cameras: frozenset[str] = frozenset(),
+) -> Calibration:
+    """Assemble a bag's calibration from already-decoded inputs.
 
     `camera_infos` is `{cam_id: {"frame_id", "K", "D", "distortion_model",
-                                  "width", "height"}}`.
+                                  "width", "height", "P", "R"}}` ("P"/"R"
+    optional, needed only for a rectified camera).
     `lidar_frame_ids` is `{lidar_id: frame_id}`.
     `static_transforms` is `{(parent, child): SE3 4x4}`.
+    `rectified_cameras` are the cameras whose image topic is rectified: their
+    images are described by CameraInfo.P[:3, :3] with no distortion.
     """
-    calib: dict = {
-        "calibration_version": f"auto_from_{bag_id}",
-        "ego_frame": ego_frame,
-        "cameras": {},
-        "lidars": {},
-        "static_transforms": {},
-        "checks": {"sanity": "auto", "notes": ""},
-    }
-
     notes: list[str] = []
 
+    cameras: dict[str, CameraCalibration] = {}
     for cam_id, info in camera_infos.items():
         frame_id = info["frame_id"]
         ego_T_cam = _resolve_chain(static_transforms, ego_frame, frame_id)
@@ -100,43 +76,92 @@ def build_calibration_dict(
             notes.append(
                 f"camera {cam_id}: no /tf_static path {ego_frame} -> {frame_id}"
             )
-        K_3x3 = np.asarray(info["K"], dtype=np.float64).reshape(3, 3).tolist()
-        if not info["D"]:
-            notes.append(
-                f"camera {cam_id}: empty distortion — bag camera_info has no D"
-                " (pre-undistorted images or missing calibration)"
-            )
-        calib["cameras"][cam_id] = {
-            "frame_id": frame_id,
-            "K": K_3x3,
-            "distortion": list(info["D"]),
-            "distortion_model": info["distortion_model"],
-            "width": int(info["width"]),
-            "height": int(info["height"]),
-            "ego_T_cam": ego_T_cam.tolist() if ego_T_cam is not None else None,
-        }
+        K_raw = np.asarray(info["K"], dtype=np.float64).reshape(3, 3)
+        D_raw = tuple(float(x) for x in info["D"])
+        P = (
+            np.asarray(info["P"], dtype=np.float64).reshape(3, 4)
+            if info.get("P") is not None
+            else None
+        )
+        rectified = cam_id in rectified_cameras
+        if rectified:
+            K, distortion = _rectified_intrinsics(cam_id, P, info.get("R")), ()
+        else:
+            K, distortion = K_raw, D_raw
+            if not D_raw:
+                notes.append(
+                    f"camera {cam_id}: empty distortion — bag camera_info has no D"
+                    " (pre-undistorted images or missing calibration)"
+                )
+        cameras[cam_id] = CameraCalibration(
+            cam_id=cam_id,
+            K=K,
+            ego_T_cam=ego_T_cam,
+            frame_id=frame_id,
+            distortion=distortion,
+            distortion_model=info["distortion_model"],
+            width=int(info["width"]),
+            height=int(info["height"]),
+            rectified=rectified,
+            camera_info_K=K_raw,
+            camera_info_D=D_raw,
+            camera_info_P=P,
+        )
 
+    lidars: dict[str, LidarCalibration] = {}
     for lidar_id, frame_id in lidar_frame_ids.items():
         ego_T_lidar = _resolve_chain(static_transforms, ego_frame, frame_id)
         if ego_T_lidar is None:
             notes.append(
                 f"lidar {lidar_id}: no /tf_static path {ego_frame} -> {frame_id}"
             )
-        calib["lidars"][lidar_id] = {
-            "frame_id": frame_id,
-            "ego_T_lidar": ego_T_lidar.tolist() if ego_T_lidar is not None else None,
-        }
+        lidars[lidar_id] = LidarCalibration(
+            lidar_id=lidar_id, ego_T_lidar=ego_T_lidar, frame_id=frame_id
+        )
 
-    for (parent, child), T in static_transforms.items():
-        calib["static_transforms"][f"{parent}__{child}"] = T.tolist()
+    return Calibration(
+        cameras=cameras,
+        lidars=lidars,
+        version=f"auto_from_{bag_id}",
+        ego_frame=ego_frame,
+        static_transforms={
+            f"{parent}__{child}": T for (parent, child), T in static_transforms.items()
+        },
+        checks={
+            "sanity": "warn" if notes else "auto",
+            "notes": "; ".join(notes)
+            if notes
+            else "all extrinsics resolved from /tf_static",
+        },
+    )
 
-    if notes:
-        calib["checks"]["sanity"] = "warn"
-        calib["checks"]["notes"] = "; ".join(notes)
-    else:
-        calib["checks"]["notes"] = "all extrinsics resolved from /tf_static"
 
-    return calib
+def _rectified_intrinsics(cam_id: str, P, R) -> np.ndarray:
+    """Intrinsics of a rectified image: CameraInfo.P[:3, :3].
+
+    Only a monocular rectification is representable as (K, ego_T_cam): a
+    non-identity R rotates the rectified frame away from the camera's TF frame,
+    and a non-zero P[:, 3] is a stereo baseline. Both are refused rather than
+    projected wrongly.
+    """
+    if P is None or not np.any(P[:, :3]):
+        raise CalibrationError(
+            f"camera {cam_id}: rectified image but CameraInfo.P is unset; set "
+            "rectified: false if the image topic is raw, or pass --calibration"
+        )
+    if np.any(np.abs(P[:, 3]) > 1e-9):
+        raise CalibrationError(
+            f"camera {cam_id}: CameraInfo.P has a stereo baseline "
+            f"(P[:, 3] = {P[:, 3].tolist()}); only monocular rectification is supported"
+        )
+    if R is not None and not np.allclose(
+        np.asarray(R, dtype=np.float64).reshape(3, 3), np.eye(3)
+    ):
+        raise CalibrationError(
+            f"camera {cam_id}: CameraInfo.R is not identity; the rectified frame "
+            "differs from the camera's TF frame, which ingest can't represent"
+        )
+    return P[:, :3].copy()
 
 
 def _resolve_chain(
@@ -238,6 +263,8 @@ def freeze_from_bag(bag_path: str, bag_id: str, cfg: IngestConfig) -> str:
                         "distortion_model": msg.distortion_model,
                         "width": int(msg.width),
                         "height": int(msg.height),
+                        "P": list(msg.p),
+                        "R": list(msg.r),
                     }
             elif mt == "PointCloud2":
                 lidar_id = lidar_topic_to_id[topic]
@@ -266,19 +293,17 @@ def freeze_from_bag(bag_path: str, bag_id: str, cfg: IngestConfig) -> str:
                 ):
                     break
 
-    calib = build_calibration_dict(
+    calib = build_calibration(
         camera_infos=camera_infos,
         lidar_frame_ids=lidar_frame_ids,
         static_transforms=static_transforms,
         ego_frame=cfg.ego_frame,
         bag_id=bag_id,
+        rectified_cameras=frozenset(
+            cam_id for cam_id, c in cfg.topics.cameras.items() if c.rectified
+        ),
     )
-
-    out_uri = calibration_path(bag_id)
-    ensure_local_dir(os.path.dirname(local_path(out_uri)))
-    with open(local_path(out_uri), "w", encoding="utf-8") as fh:
-        json.dump(calib, fh, indent=2)
-    return out_uri
+    return calibration_artifact.write(bag_id, calib)
 
 
 def _transform_se3(transform) -> np.ndarray:
@@ -299,55 +324,46 @@ def _transform_se3(transform) -> np.ndarray:
 def freeze_from_file(
     bag_id: str, source_path: str, *, version: str | None = None
 ) -> str:
-    """Copy an authored calibration JSON to the bag's artifact root."""
+    """Copy an authored calibration JSON to the bag's artifact root.
+
+    The file is parsed with the same reader every component uses, so a file
+    missing `cameras`, `lidars`, a camera's `K`/`ego_T_cam` or a LiDAR's
+    `ego_T_lidar` is rejected here, naming the field.
+    """
     with open(source_path, "r", encoding="utf-8") as fh:
-        calib = json.load(fh)
-
-    if "cameras" not in calib or "lidars" not in calib:
-        raise ValueError(
-            f"calibration {source_path} missing required keys 'cameras'/'lidars'"
-        )
+        calib = Calibration.from_dict(json.load(fh), source=source_path)
     if version:
-        calib["calibration_version"] = version
-    calib.setdefault("checks", {"sanity": "skipped", "notes": "imported from file"})
-
-    out_uri = calibration_path(bag_id)
-    ensure_local_dir(os.path.dirname(local_path(out_uri)))
-    with open(local_path(out_uri), "w", encoding="utf-8") as fh:
-        json.dump(calib, fh, indent=2)
-    return out_uri
+        calib = replace(calib, version=version)
+    if not calib.checks:
+        calib = replace(
+            calib, checks={"sanity": "skipped", "notes": "imported from file"}
+        )
+    return calibration_artifact.write(bag_id, calib)
 
 
-def require_complete(calib: dict, cfg: IngestConfig) -> None:
+def require_complete(calib: Calibration, cfg: IngestConfig) -> None:
     """Raise CalibrationError unless every configured sensor is calibrated.
 
-    Each camera needs K, width/height and ego_T_cam; each LiDAR needs
-    ego_T_lidar.  Without them nothing downstream can place that sensor's data
-    in the ego or world frame.
+    Each camera needs ego_T_cam (K is required to read the file at all); each
+    LiDAR needs ego_T_lidar.  Without them nothing downstream can place that
+    sensor's data in the ego or world frame.
     """
     problems: list[str] = []
-    cams = calib.get("cameras") or {}
     for cam_id in cfg.topics.cameras:
-        c = cams.get(cam_id)
+        c = calib.cameras.get(cam_id)
         if c is None:
             problems.append(f"camera {cam_id}: no entry (no CameraInfo received?)")
-            continue
-        if not c.get("K"):
-            problems.append(f"camera {cam_id}: no intrinsics K")
-        if c.get("ego_T_cam") is None:
+        elif c.ego_T_cam is None:
             problems.append(
-                f"camera {cam_id}: no transform {calib.get('ego_frame')} -> "
-                f"{c.get('frame_id')}"
+                f"camera {cam_id}: no transform {calib.ego_frame} -> {c.frame_id}"
             )
-    lidars = calib.get("lidars") or {}
     for lidar_id in cfg.topics.lidars:
-        lid = lidars.get(lidar_id)
+        lid = calib.lidars.get(lidar_id)
         if lid is None:
             problems.append(f"lidar {lidar_id}: no entry (no PointCloud2 received?)")
-        elif lid.get("ego_T_lidar") is None:
+        elif lid.ego_T_lidar is None:
             problems.append(
-                f"lidar {lidar_id}: no transform {calib.get('ego_frame')} -> "
-                f"{lid.get('frame_id')}"
+                f"lidar {lidar_id}: no transform {calib.ego_frame} -> {lid.frame_id}"
             )
     if problems:
         raise CalibrationError(
@@ -356,19 +372,3 @@ def require_complete(calib: dict, cfg: IngestConfig) -> None:
             + ". Check ego_frame and the TF topic in the ingest config, or pass "
             "--calibration <file>."
         )
-
-
-def load(bag_id: str) -> dict:
-    with open(local_path(calibration_path(bag_id)), "r", encoding="utf-8") as fh:
-        return json.load(fh)
-
-
-def sanity_check(bag_id: str) -> tuple[bool, str]:
-    """Structural check.  Numeric (LiDAR-to-image projection) check is TODO."""
-    try:
-        calib = load(bag_id)
-    except FileNotFoundError:
-        return False, "calibration.json missing"
-    if "cameras" not in calib:
-        return False, "no cameras in calibration"
-    return True, "structural check only; numeric sanity not yet implemented"

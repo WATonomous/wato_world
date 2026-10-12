@@ -13,7 +13,8 @@ import numpy as np
 
 from wato_perception_2d import pipeline
 from wato_perception_2d.config import ComponentConfig
-from wato_perception_2d.io import CalibrationInfo, CameraFrameInfo
+from wato_common.artifacts.calibration import CameraCalibration
+from wato_perception_2d.io import CameraFrameInfo
 
 
 def _frame(seq: int) -> CameraFrameInfo:
@@ -73,14 +74,18 @@ def _run(
     monkeypatch.setattr(
         pipeline,
         "_align_and_write_depth",
-        lambda cfg, bag, chunk, cam, frame, rel_depth, calib, poses, fb: aligned.append(
-            (frame.camera_seq, float(rel_depth[0, 0]))
+        lambda cfg, bag, chunk, cam, frame, disparity, calib, poses, fb: aligned.append(
+            (frame.camera_seq, float(disparity[0, 0]))
         ),
     )
 
     cfg = ComponentConfig()
     cfg.depth.batch_size = batch_size
-    calib = {"cam_front": CalibrationInfo(K=np.eye(3), ego_T_cam=np.eye(4))}
+    calib = {
+        "cam_front": CameraCalibration(
+            cam_id="cam_front", K=np.eye(3), ego_T_cam=np.eye(4)
+        )
+    }
     frames_by_cam = {"cam_front": [_frame(i) for i in range(n_frames)]}
 
     pipeline._run_depth_pass(cfg, "bag", "chunk_0000", frames_by_cam, calib)

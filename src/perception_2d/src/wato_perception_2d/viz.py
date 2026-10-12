@@ -2,7 +2,7 @@
 
 A matplotlib window (the 2D analogue of lidar_preprocessing's Open3D
 ``watod viz``) for eyeballing what Depth Anything V2 + the LiDAR-anchored
-affine fit actually produced, frame by frame, against the RGB image:
+disparity fit actually produced, frame by frame, against the RGB image:
 
   - frame slider   — scrub through one camera's stream
   - opacity slider — blend RGB ↔ depth heatmap (0 = pure image, 1 = pure depth)
@@ -29,24 +29,20 @@ also just run it on the host, where matplotlib already has a GUI backend:
 from __future__ import annotations
 
 import logging
-import os
 from collections import OrderedDict, defaultdict
 from typing import Optional
 
 import numpy as np
 
-from wato_common.artifact_store import (
-    chunks_index_path,
-    depth_2d_path,
-    local_path,
-)
+from wato_common.artifact_store import chunks_index_path
+from wato_common.artifacts import depth as depth_artifact
 from wato_common.io.parquet_io import read_rows
 from wato_perception_2d.io import CameraFrameInfo, load_frame_index
 
 log = logging.getLogger(__name__)
 
-# A frame entry to display: the camera-frame record + its on-disk depth npz.
-_Entry = tuple[CameraFrameInfo, str]
+# A frame entry to display: a camera frame that has a depth artifact.
+_Entry = CameraFrameInfo
 
 _FIT_LABELS = {0: "ransac", 1: "fallback", 2: "none"}
 # turbo reversed → near (small metres) reads warm/red, far reads cool/blue.
@@ -94,9 +90,8 @@ def _entries_for_camera(
     for f in sorted(frames, key=lambda x: x.camera_seq):
         if f.cam_id != cam_id:
             continue
-        dpath = local_path(depth_2d_path(bag_id, chunk_id, cam_id, f.camera_seq))
-        if os.path.exists(dpath):
-            out.append((f, dpath))
+        if depth_artifact.exists(bag_id, chunk_id, cam_id, f.camera_seq):
+            out.append(f)
     return out
 
 
@@ -175,33 +170,38 @@ class _FrameStore:
         if idx in self._cache:
             self._cache.move_to_end(idx)
             return self._cache[idx]
-        frame, dpath = self.entries[idx]
+        frame = self.entries[idx]
         base = _load_rgb(frame.image_path, self.max_side)
         if base is None:
             return None
-        decoded = self._decode_depth(base, dpath, frame.camera_seq)
+        decoded = self._decode_depth(base, frame)
         self._cache[idx] = decoded
         if len(self._cache) > _MAX_CACHE:
             self._cache.popitem(last=False)
         return decoded
 
     @staticmethod
-    def _decode_depth(base: np.ndarray, dpath: str, seq: int) -> dict:
-        with np.load(dpath) as npz:
-            depth = np.asarray(npz["depth_m"], dtype=np.float32)
-            fit_status = int(npz["fit_status"]) if "fit_status" in npz else -1
-            n_inliers = int(npz["n_inliers"]) if "n_inliers" in npz else -1
-            rmse = (
-                float(npz["rmse_inliers_m"])
-                if "rmse_inliers_m" in npz
-                else float("nan")
+    def _decode_depth(base: np.ndarray, frame: CameraFrameInfo) -> dict:
+        d = depth_artifact.read_frame(
+            frame.bag_id, frame.chunk_id, frame.cam_id, frame.camera_seq
+        )
+        if d is None:
+            raise FileNotFoundError(
+                f"depth for {frame.cam_id} {frame.camera_seq} vanished"
             )
+        depth_m = d.depth_m
         # Depth is produced at the source image resolution; re-grid to the
         # (possibly downscaled) display base before normalising.
         bh, bw = base.shape[:2]
-        if depth.shape[:2] != (bh, bw):
-            depth = _cap_side_to(depth, bw, bh)
-        norm, valid, vmin, vmax = _depth_to_norm(depth)
+        if depth_m.shape[:2] != (bh, bw):
+            depth_m = _cap_side_to(depth_m, bw, bh)
+        norm, valid, vmin, vmax = _depth_to_norm(depth_m)
+        seq, fit_status, n_inliers, rmse = (
+            frame.camera_seq,
+            int(d.fit_status),
+            d.n_inliers,
+            d.rmse_inliers_m,
+        )
         return {
             "base": base,
             "norm": norm,

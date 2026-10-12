@@ -83,11 +83,14 @@ into `dynamic_map.npz`.
 `*_dynamic_mask.npy` / `dynamic_map.npz` is the chosen seg method's
 *precision* verdict (perception_2d's depth anchors read `~dynamic_mask` as
 trusted static; semantic_lifting carries the path for its planned
-dynamic-point handling). `*_motion_proposals.npz` /
+dynamic-point handling); it and the world NPZ it aligns to are written and
+read through `wato_common.artifacts.lidar_sweeps`, which checks the alignment. `*_motion_proposals.npz` /
 `motion_clusters.parquet` (Step F) is the *recall* artifact: every heuristic's
 per-point verdict (`source_bits`: AW dynamic/ambiguous, IWU-evicted, MF-MOS,
 seg dynamic, box fill, unmapped) plus HDBSCAN clusters with soft motion
-features (Chen et al.'s motion_score). False positives there are by design —
+features (Chen et al.'s motion_score). Both files and the bit constants are
+owned by `wato_common.artifacts.motion_proposals` (consumer images don't
+install lidar_preprocessing). False positives there are by design —
 downstream association filters them. Step E (`iwu/`, bag-level UniLiPs IWU →
 `global_iwu.npz`) evicts floaters from the bag static map and feeds Step F.
 The box / Kalman / association code Step F tracks with lives in
@@ -104,7 +107,22 @@ prior) is off by default and is NOT IWU.
 - Components live at `src/<component>/src/wato_<component>/`. Tests at
   `src/<component>/tests/`. Component-owned config at `src/<component>/config/`.
 - Shared Python lib at `src/common/src/wato_common/` (geometry, schemas,
-  artifact_store, io/{parquet,pointcloud2,rosbag_reader}).
+  artifact_store, artifacts/, io/{parquet,pointcloud2,rosbag_reader}).
+- **One module per cross-component artifact.** Anything one component writes
+  and another reads is encoded, written AND read by its module in
+  `wato_common/artifacts/` (`calibration`, `lidar_sweeps`, `motion_proposals`,
+  `masklets`, `depth`, `lifted_labels`), round-trip tested in
+  `src/common/tests/test_artifacts_*.py`. Producers call the write half,
+  consumers the read half; nobody else `np.load`s or re-derives the encoding.
+  Consumer images install only `src/common` + their own package, so a reader
+  in the producer's package is unreachable — that is why both halves live in
+  common (the monorepo's `*_msgs` packages play the same role for topics).
+  Reads raise `ArtifactFormatError` instead of defaulting a missing value.
+  Adding a new cross-component artifact = a new module + its round-trip test.
+- **One layout**: `raw/<bag_id>/...` and `raw/<bag_id>/chunks/<chunk_id>/...`
+  from `artifact_store`, for every component. There are no per-component
+  version directories; provenance lives in the manifests. Per-sweep files
+  are named `<sweep_id:06d>`; `sweep_id` is int64 everywhere.
 - Docker: per-component Dockerfile at `docker/<component>.Dockerfile`,
   base injection layers at `docker/base/inject_{cpu,cuda}_base.Dockerfile`.
 - Compose stack: `modules/docker-compose.yaml` (deploy) + `.dev.yaml` (dev) +
@@ -126,7 +144,7 @@ prior) is off by default and is NOT IWU.
 ./watod up            # docker compose up -d
 ./watod -t ingest_dev # bash shell into the running dev container
 ./watod run ingest /data/bags/<bag>.mcap
-./watod test ingest
+./watod test ingest  # src/common/tests, then src/ingest/tests, in the dev image
 ./watod down all
 ./watod build-base    # ONLY needed if ghcr lacks the bases (first-time setup)
 ```
@@ -186,8 +204,12 @@ INS to ~5 cm/s; no ground truth exists); `slam/odometry` = back-end
 newest-KEYFRAME pose — one per 5 m on eidos main (aborts); in
 ring_road_corrected it is bit-identical LISO poses stamped 244–450 ms late (median 310 ms; LISO processing latency + wait for the next SLAM tick, so no constant shift corrects it).
 Eidos main's GPS/loop-closure-corrected keyframe poses were never compared to
-LISO (no recording has both). WATO profile: `ingest.wato.yaml` (eidos
-`slam/odometry`, child `base_footprint`). No NovAtel profile ships:
+LISO. WATO profile: `ingest.wato.yaml` (eidos `liso/odometry`, child
+`base_footprint`) — only as dense as the recorded `lidar_cc` scans, so a bag
+that dropped scans still aborts (`recording_20261004_185825_1` does: 252 ms
+gaps vs `max_bracket_ms: 250`). Bags without eidos topics: run
+`wato_monorepo/tools/eidos_offline_to_bag.sh` and ingest the
+`<bag>_with_eidos.mcap` it writes. No NovAtel profile ships:
 `/novatel/oem7/odom` (UTM, child `base_link`, 50 Hz position) is NOT validated
 for labeling — ~2° attitude bias vs the LiDAR frame, mount vs INS error
 undetermined. Do NOT consume `/tf` directly — eidos
@@ -200,6 +222,15 @@ per LiDAR (frame_id), and the configured TF topic (extrinsics via BFS chain).
 `--calibration <file>` overrides with a hand-authored JSON (the bag's `info` /
 `tf_static` topics are then not required). Either way `require_complete()`
 aborts ingest if a configured sensor has no intrinsics or extrinsics.
+**Rectified cameras**: WATO records `image_rect_compressed` (the car's GPU
+rectify node), described by `CameraInfo.P[:3,:3]` with no distortion — NOT
+`K`/`D`, which describe the raw sensor image (P's focal length is ~2% below
+K's on the pano ring). `ingest.wato.yaml` marks those cameras `rectified:
+true`, and ingest then writes `K = P[:3,:3]`, `distortion = []` (raw CameraInfo
+kept under `camera_info`), so every consumer just projects with `K`. The file
+is written and read only through `wato_common.artifacts.calibration` (typed
+`Calibration` / `CameraCalibration` / `LidarCalibration`); its `camera()` and
+`ego_T_lidar()` accessors raise on a missing or null extrinsic.
 
 ## CI / ghcr — the lessons that took several iterations to learn
 
@@ -416,6 +447,6 @@ testable change — not by hand-editing a lock:
 
 ```bash
 PYTHONPATH=src/common/src:src/ingest/src python3 -m pytest -p no:anyio src/ingest/tests
-# 79 passing tests, all without ROS installed (lazy ROS imports in rosbag_reader).
+# 81 passing tests, all without ROS installed (lazy ROS imports in rosbag_reader).
 # `-p no:anyio`: the host's anyio pytest plugin doesn't load under its pytest.
 ```

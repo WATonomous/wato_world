@@ -11,7 +11,8 @@ from wato_common.geometry import PoseSample, invert_se3
 from wato_common.pose_lookup import PoseLookup, interval_drop_reasons
 from wato_perception_2d import pipeline
 from wato_perception_2d.config import ComponentConfig
-from wato_perception_2d.io import CalibrationInfo, CameraFrameInfo
+from wato_common.artifacts.calibration import CameraCalibration
+from wato_perception_2d.io import CameraFrameInfo
 
 MS = 1_000_000
 
@@ -50,13 +51,13 @@ def _run(monkeypatch, frame: CameraFrameInfo) -> tuple[list[np.ndarray], np.ndar
         pipeline, "load_static_lidar_points", lambda *a: np.array([[5.0, 0.0, 0.0]])
     )
 
-    def fake_anchor_pairs(points, rel_depth, K, cam_T_world, size, **kw):
+    def fake_anchor_pairs(points, disparity, K, cam_T_world, size, **kw):
         seen.append(cam_T_world)
         return np.zeros(0), np.zeros(0)
 
     monkeypatch.setattr(pipeline, "build_anchor_pairs", fake_anchor_pairs)
     monkeypatch.setattr(
-        pipeline, "ransac_affine_fit", lambda *a, **k: {"fit_status": 2}
+        pipeline, "ransac_disparity_fit", lambda *a, **k: {"fit_status": 2}
     )
     ego_T_cam = np.eye(4)
     ego_T_cam[2, 3] = 1.5
@@ -67,7 +68,7 @@ def _run(monkeypatch, frame: CameraFrameInfo) -> tuple[list[np.ndarray], np.ndar
         "cam_front",
         frame,
         np.ones((4, 5), dtype=np.float32),
-        CalibrationInfo(K=np.eye(3), ego_T_cam=ego_T_cam),
+        CameraCalibration(cam_id="cam_front", K=np.eye(3), ego_T_cam=ego_T_cam),
         _poses(),
         deque(),
     )

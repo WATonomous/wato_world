@@ -77,10 +77,21 @@ run_module_tests() {
         --pre-profiles "${target}_pre" \
         --all-profiles "${target}_dev"
 
+    # src/common's tests run in every component image: each image pins its own
+    # numpy/pyarrow, and the artifact read/write halves in wato_common must work
+    # against all of them. Separate pytest invocations because both test dirs
+    # are a package named `tests`; pytest args apply to the component's run.
+    #
+    # The ROS launch_testing plugins (ingest image) are blocked: importing
+    # `launch` installs a logger class with propagate=False, so every logger
+    # created afterwards bypasses caplog. wato_world has no launch tests.
     echo "[watod test] Running pytest for ${target}"
     run_docker_compose \
         --profile "${target}_dev" \
-        run --rm "${target}_dev" pytest "/ws/src/${target}/tests" "$@"
+        run --rm "${target}_dev" \
+        bash -c 'p="-p no:launch_testing -p no:launch_ros";
+                 pytest $p /ws/src/common/tests && pytest $p "/ws/src/$0/tests" "$@"' \
+        "${target}" "$@"
 }
 
 for target in "${targets[@]}"; do

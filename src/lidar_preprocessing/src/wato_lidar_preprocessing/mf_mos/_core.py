@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from wato_common.artifacts.lidar_sweeps import read_raw
 from wato_common.artifact_store import (
     chunks_index_path,
     ensure_local_dir,
@@ -311,14 +312,14 @@ def process_chunk(
             cur_ts = int(row["header_timestamp_ns"])
 
             try:
-                raw_data = np.load(local_path(raw_path))
-                x_r = raw_data["x"].astype(np.float32)
-                y_r = raw_data["y"].astype(np.float32)
-                z_r = raw_data["z"].astype(np.float32)
+                raw_data = read_raw(raw_path)
+                x_r = raw_data.x.astype(np.float32)
+                y_r = raw_data.y.astype(np.float32)
+                z_r = raw_data.z.astype(np.float32)
                 n_raw = x_r.shape[0]
                 intensity_r = (
-                    raw_data["intensity"].astype(np.float32)
-                    if "intensity" in raw_data.files
+                    raw_data.intensity.astype(np.float32)
+                    if raw_data.intensity is not None
                     else None
                 )
             except Exception as exc:  # noqa: BLE001
@@ -600,10 +601,10 @@ def _load_prefix_window(
     window: list[tuple[int, np.ndarray]] = []
     for r in cand:
         try:
-            raw = np.load(local_path(r["lidar_path"]))
-            x = raw["x"].astype(np.float32)
-            y = raw["y"].astype(np.float32)
-            z = raw["z"].astype(np.float32)
+            raw = read_raw(r["lidar_path"])
+            x = raw.x.astype(np.float32)
+            y = raw.y.astype(np.float32)
+            z = raw.z.astype(np.float32)
         except Exception as exc:  # noqa: BLE001
             log.warning(
                 "prime window: failed to load %s (%s); skipping",

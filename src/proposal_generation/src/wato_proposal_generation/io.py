@@ -1,9 +1,10 @@
-"""Artifact I/O for proposal_generation. Reads upstream artifacts, writes own."""
+"""Artifact I/O for proposal_generation (stub).
 
-from __future__ import annotations
-
-from wato_common.storage import artifact_uri
-
-
-def output_prefix(bag_id: str, chunk_id: str) -> str:
-    return artifact_uri("proposal_generation", bag_id, chunk_id)
+Reads world sweeps (wato_common.artifacts.lidar_sweeps), lifted labels
+(wato_common.artifacts.lifted_labels), motion clusters
+(wato_common.artifacts.motion_proposals) and calibration
+(wato_common.artifacts.calibration).
+Writes proposals.parquet (artifact_store.proposals_path).
+Read another component's artifact only through its wato_common.artifacts
+module, which owns the format.
+"""

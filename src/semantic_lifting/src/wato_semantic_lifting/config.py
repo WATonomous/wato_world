@@ -28,19 +28,12 @@ class VotingConfig(BaseModel):
     innermost_wins: bool = True
 
 
-class DepthConfig(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    skip_on_fit_failure: bool = True
-
-
 class ComponentConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     temporal: TemporalConfig = Field(default_factory=TemporalConfig)
     visibility: VisibilityConfig = Field(default_factory=VisibilityConfig)
     voting: VotingConfig = Field(default_factory=VotingConfig)
-    depth: DepthConfig = Field(default_factory=DepthConfig)
     upstream_versions: dict[str, str] = Field(default_factory=dict)
 
 

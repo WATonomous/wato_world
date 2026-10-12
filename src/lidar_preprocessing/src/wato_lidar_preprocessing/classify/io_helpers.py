@@ -7,7 +7,7 @@ import os
 
 import numpy as np
 
-from wato_common.artifact_store import local_path
+from wato_common.artifacts.lidar_sweeps import read_world
 
 log = logging.getLogger(__name__)
 
@@ -56,10 +56,11 @@ def load_world_xyz_intensity(
     world_path_uri: str,
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """Single load of a world NPZ → (xyz, intensity-or-None)."""
-    data = np.load(local_path(world_path_uri))
-    xyz = np.stack([data["x"], data["y"], data["z"]], axis=1)
-    intensity = data["intensity"].astype(np.float32) if "intensity" in data else None
-    return xyz, intensity
+    sweep = read_world(world_path_uri)
+    intensity = (
+        sweep.intensity.astype(np.float32) if sweep.intensity is not None else None
+    )
+    return sweep.xyz, intensity
 
 
 def load_world_full(
@@ -70,12 +71,11 @@ def load_world_full(
     Returns None for any optional field not present in the file.  Used by
     the log-odds path so all arrays are loaded in a single np.load call.
     """
-    data = np.load(local_path(world_path_uri))
-    xyz = np.stack([data["x"], data["y"], data["z"]], axis=1)
-    intensity = data["intensity"].astype(np.float32) if "intensity" in data else None
-    origin = data["origin"] if "origin" in data else None
-    ground_mask = data["ground_mask"] if "ground_mask" in data else None
-    return xyz, intensity, origin, ground_mask
+    sweep = read_world(world_path_uri)
+    intensity = (
+        sweep.intensity.astype(np.float32) if sweep.intensity is not None else None
+    )
+    return sweep.xyz, intensity, sweep.origin, sweep.ground_mask
 
 
 def sigmoid(x: np.ndarray) -> np.ndarray:

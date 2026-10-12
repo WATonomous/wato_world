@@ -4,10 +4,10 @@ Extracts a per-mask DINOv2 embedding and persists it on each masklet.  This
 stage only *produces* embeddings — the actual re-identification happens
 downstream in the `tracking` component, which consumes them.
 
-Used by the SAM2 tracker (sam2_tracker.py), which calls extract_dino_feature
-every k frames per masklet.  Lazy-imports torch so the
-module can be *imported* without it installed; extracting a feature without
-torch/DINOv2 raises loudly.
+Used by the SAM2 tracker (sam2_tracker.py), which calls extract_dino_features
+every k frames with all of that frame's tracked masks, batched into one
+forward.  Lazy-imports torch so the module can be *imported* without it
+installed; extracting a feature without torch/DINOv2 raises loudly.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 
 # Cache loaded DINOv2 models so torch.hub.load (model reconstruction + weight
 # load + device transfer) runs ONCE per (model, device) rather than on every
-# extract_dino_feature call (which happens every k frames per track).
+# extract_dino_features call (which happens every k frames).
 _MODEL_CACHE: dict[tuple[str, str], object] = {}
 
 
@@ -47,37 +47,47 @@ def _get_model(model_name: str, device: str):
     return model
 
 
-def extract_dino_feature(
-    image_rgb: np.ndarray,
-    mask: np.ndarray,
-    model_name: str = "dinov2_vitl14",
-    device: str = "cpu",
-) -> Optional[np.ndarray]:
-    """Extract a DINOv2 embedding for the masked region in image_rgb.
-
-    Crops the mask bounding box, resizes to 224×224, normalizes, and runs
-    the DINOv2 CLS token through the model.
-
-    Args:
-        image_rgb: (H, W, 3) uint8 RGB image.
-        mask: (H, W) bool mask selecting the foreground region.
-        model_name: torch.hub DINOv2 model name.
-        device: "cuda" or "cpu".
-
-    Returns:
-        (D,) float32 embedding, or None when the mask is empty (no region to
-        embed).
-
-    Raises:
-        RuntimeError: if torch / torchvision / DINOv2 cannot be loaded.
-    """
+def _mask_crop(image_rgb: np.ndarray, mask: np.ndarray) -> Optional[np.ndarray]:
+    """The image cropped to the mask's bounding box, or None for an empty mask."""
     rows = np.any(mask, axis=1)
     cols = np.any(mask, axis=0)
     if not rows.any():
         return None
     r0, r1 = int(np.where(rows)[0][0]), int(np.where(rows)[0][-1])
     c0, c1 = int(np.where(cols)[0][0]), int(np.where(cols)[0][-1])
-    crop = image_rgb[r0 : r1 + 1, c0 : c1 + 1]
+    return image_rgb[r0 : r1 + 1, c0 : c1 + 1]
+
+
+def extract_dino_features(
+    image_rgb: np.ndarray,
+    masks: list[np.ndarray],
+    model_name: str = "dinov2_vitl14",
+    device: str = "cpu",
+) -> list[Optional[np.ndarray]]:
+    """DINOv2 embeddings for several masked regions of one image, in one forward.
+
+    Each mask's bounding-box crop is resized to 224 (short side), centre-cropped
+    to 224×224, normalized, and the batch goes through the model together; the
+    CLS output is the embedding.
+
+    Args:
+        image_rgb: (H, W, 3) uint8 RGB image.
+        masks: (H, W) bool masks selecting each foreground region.
+        model_name: torch.hub DINOv2 model name.
+        device: "cuda" or "cpu".
+
+    Returns:
+        One (D,) float32 embedding per mask, aligned with ``masks``; None for an
+        empty mask (no region to embed).
+
+    Raises:
+        RuntimeError: if torch / torchvision / DINOv2 cannot be loaded.
+    """
+    crops = [_mask_crop(image_rgb, m) for m in masks]
+    keep = [i for i, c in enumerate(crops) if c is not None]
+    out: list[Optional[np.ndarray]] = [None] * len(masks)
+    if not keep:
+        return out
 
     try:
         import torch
@@ -98,7 +108,21 @@ def extract_dino_feature(
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
     )
-    tensor = transform(PILImage.fromarray(crop)).unsqueeze(0).to(device)
+    batch = torch.stack([transform(PILImage.fromarray(crops[i])) for i in keep]).to(
+        device
+    )
     with torch.no_grad():
-        feat = model(tensor)[0].cpu().numpy().astype(np.float32)
-    return feat
+        feats = model(batch).float().cpu().numpy().astype(np.float32)
+    for i, feat in zip(keep, feats):
+        out[i] = feat
+    return out
+
+
+def extract_dino_feature(
+    image_rgb: np.ndarray,
+    mask: np.ndarray,
+    model_name: str = "dinov2_vitl14",
+    device: str = "cpu",
+) -> Optional[np.ndarray]:
+    """DINOv2 embedding for one masked region; see extract_dino_features."""
+    return extract_dino_features(image_rgb, [mask], model_name, device)[0]

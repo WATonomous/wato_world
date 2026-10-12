@@ -24,14 +24,13 @@ from wato_common.artifact_store import (
     lidar_proc_dir,
     lidar_proc_index_path,
     lidar_sweeps_path,
-    lidar_world_path,
-    local_path,
 )
+from wato_common.artifacts.lidar_sweeps import WorldSweep, read_raw, write_world
 from wato_common.geometry import PoseSample, batch_interpolate_poses
 from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.schemas import PROCESSED_SWEEPS_SCHEMA, ProcessedSweepMeta
 from wato_lidar_preprocessing._inputs import (
-    load_ego_T_lidar,
+    load_ego_T_lidar_dict,
     load_pose_samples,
     load_pose_valid_sweep_ids,
 )
@@ -256,19 +255,19 @@ def _deskew_sweep(
 ) -> tuple[dict[str, np.ndarray], str]:
     """Transform one sweep from sensor frame to world frame (float64 xyz).
 
-    Returns (arrays, time_source).  ``arrays`` is ready for
-    np.savez_compressed and includes a `ground_mask` bool array when
-    Patchwork++ is available.  ``time_source`` says where the per-point times
+    Returns (arrays, time_source).  ``arrays`` holds WorldSweep's fields
+    (x, y, z, origin, and intensity / ring / ground_mask when available —
+    ground_mask needs Patchwork++).  ``time_source`` says where the per-point times
     came from: "point_time" (the sweep's own field), "azimuth" (synthesized)
     or "none" (every point at the header pose — not deskewed).
     """
-    data = np.load(local_path(raw_path))
-    x = data["x"].astype(np.float64)
-    y = data["y"].astype(np.float64)
-    z = data["z"].astype(np.float64)
-    intensity = data["intensity"] if "intensity" in data else None
-    ring = data["ring"] if "ring" in data else None
-    t_offset = data["t_offset_us"] if "t_offset_us" in data else None
+    raw = read_raw(raw_path)
+    x = raw.x.astype(np.float64)
+    y = raw.y.astype(np.float64)
+    z = raw.z.astype(np.float64)
+    intensity = raw.intensity
+    ring = raw.ring
+    t_offset = raw.t_offset_us
 
     if filter_nonfinite:
         finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
@@ -395,12 +394,7 @@ def process_chunk(
     sweep_rows = read_rows(lidar_sweeps_path(bag_id, chunk_id))
 
     lidar_ids = {r["lidar_id"] for r in sweep_rows if r.get("valid", True)}
-    ego_T_lidar_by_id: dict[str, np.ndarray] = {}
-    for lid in lidar_ids:
-        try:
-            ego_T_lidar_by_id[lid] = load_ego_T_lidar(bag_id, lid)
-        except (KeyError, ValueError) as exc:
-            log.error("lidar %s: %s", lid, exc)
+    ego_T_lidar_by_id = load_ego_T_lidar_dict(bag_id, lidar_ids)
 
     pw = _make_patchwork(cfg.patchwork, required=cfg.require_patchwork)
 
@@ -503,8 +497,7 @@ def process_chunk(
             n_zero_time_field += 1
         deskewed = time_source != "none"
 
-        out_uri = lidar_world_path(bag_id, chunk_id, sweep_id)
-        np.savez_compressed(local_path(out_uri), **arrays)
+        out_uri = write_world(bag_id, chunk_id, sweep_id, WorldSweep(**arrays))
 
         n = arrays["x"].shape[0]
 
