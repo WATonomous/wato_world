@@ -629,6 +629,7 @@ def _run_tracking_pass(
                 sub_clip_frames=cfg.tracking.sub_clip_frames,
                 min_sub_clip_frames=cfg.tracking.min_sub_clip_frames,
                 drop_lost_after_frames=cfg.tracking.drop_lost_after_frames,
+                duplicate_mask_iou=cfg.tracking.duplicate_mask_iou,
                 autocast_dtype=cfg.tracking.autocast_dtype,
             )
             log.info(

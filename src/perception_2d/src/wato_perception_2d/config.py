@@ -91,12 +91,15 @@ class TrackingConfig(BaseModel):
     # via DINOv2). A window that itself OOMs is recursively halved to the floor.
     sub_clip_frames: int = 150
     min_sub_clip_frames: int = 16
-    # Drop an object from the SAM2 session once it has had no mask for this many
-    # frames (checked at keyframes). SAM2 otherwise keeps running memory
-    # attention for every object it was ever given — cost grows with objects
-    # detected so far, not objects visible. If it reappears and is re-detected it
-    # starts a new masklet (re-linked downstream via DINOv2). 0 = never drop.
-    drop_lost_after_frames: int = 30
+    # SAM2 doesn't let go of an object it has lost: within 0-30 frames it tends
+    # to latch the lost object's id onto a similar object nearby. A track ends
+    # (no more masks recorded; removed from the session at the next keyframe)
+    # once its object has had no mask for this many consecutive frames. 0 = never.
+    drop_lost_after_frames: int = 5
+    # ...or once its mask and another live track's reach this IoU in the same
+    # frame (a jump with no empty frame); the track whose mask changed most
+    # since its previous frame is the one that ends. > 1 disables.
+    duplicate_mask_iou: float = 0.7
     # Precision for SAM2 calls on CUDA: "bfloat16" (upstream's setting; enables
     # flash attention), "float16", or "float32". Detector + DINOv2 stay float32.
     autocast_dtype: Literal["bfloat16", "float16", "float32"] = "bfloat16"

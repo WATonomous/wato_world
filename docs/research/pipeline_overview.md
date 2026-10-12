@@ -134,7 +134,7 @@ perception_2d         reads: frames, poses, lidar_proc_index, lidar_proc/*_world
        ├─ detections_2d.parquet      (per-masklet class + detector score)
        ├─ tracklets_2d.parquet       (SAM2 temporal associations across frames)
        ├─ masks_2d/<masklet>/<seq>.png (per-masklet per-frame SAM2 masks)
-       └─ depth_2d/<cam>/<frame>.npz (Depth Anything V2 + LiDAR affine-scaled metric depth;
+       └─ depth_2d/<cam>/<frame>.npz (Depth Anything V2 disparity + LiDAR-fit metric depth;
                                       anchors exclude dynamic_mask points; projected with
                                       the pose at each image's own timestamp)
 
