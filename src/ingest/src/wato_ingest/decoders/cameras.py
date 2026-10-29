@@ -11,8 +11,7 @@ Strategy:
 Anything else (a video codec, Bayer, 16-bit, YUV) raises UnsupportedImageError
 rather than writing files no downstream component can read.
 
-Writes one row per emitted image to `camera_frames.parquet` so perception_2d can
-read directly from disk without touching the bag.
+Writes one row per image to `camera_frames.parquet`.
 """
 
 from __future__ import annotations
@@ -116,7 +115,6 @@ def decode_chunk(
     if not topic_to_cam:
         return []
 
-    # Pre-create output directories.
     for cam_id in cam_topics:
         ensure_local_dir(camera_dir(bag_id, chunk_id, cam_id))
 

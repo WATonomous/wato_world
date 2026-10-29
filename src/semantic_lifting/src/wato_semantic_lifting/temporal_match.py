@@ -4,13 +4,10 @@ Associates each sweep to the nearest camera frame per camera within a
 configurable time tolerance, and computes the ``cam_T_world`` transform that
 projects a sweep's (already world-registered) points into that camera.
 
-Note on ego motion: ``lidar_preprocessing`` deskews every sweep and expresses
-its points in the SLAM world frame at each point's own sensor timestamp (see
-``deskew/_core.py``). The sweep→frame ego motion is therefore *already* baked
-into the point coordinates, so lifting only needs the camera's world pose at
-the matched frame time.  ``io.load_frame_refs`` looks that pose up at the
-frame's ``camera_timestamp_ns`` (wato_common.pose_lookup); frame_index's
-``world_T_ego`` is the sweep's pose and must not be used here.
+lidar_preprocessing already placed every point in the world at its own time,
+so lifting only needs the camera's world pose at the frame's
+``camera_timestamp_ns`` (``io.load_frame_refs``), never frame_index's sweep
+``world_T_ego``.
 """
 
 from __future__ import annotations
@@ -83,11 +80,8 @@ def compute_cam_T_world(
 
         cam_T_world = inv(ego_T_cam) @ inv(world_T_ego_frame)
 
-    Ego motion between sweep and frame is accounted for by the upstream world
-    registration plus a pose looked up at the frame's own time; there is no
-    LiDAR-frame or sweep-pose term here. Residual
-    error on *dynamic* objects (scene motion over the sweep↔frame offset) is not
-    addressed by this transform — see "Dynamic-point handling" in the design doc.
+    Scene motion of *dynamic* objects over the sweep↔frame offset is not
+    addressed here — see "Dynamic-point handling" in the design doc.
 
     Args:
         world_T_ego_frame: ego pose at camera frame timestamp, (4, 4) float64.

@@ -13,8 +13,8 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-# Voxel index bit-width: supports ±(2^20 * voxel_size) m from origin per axis.
-# At 0.15 m that's ≈157 km; anything beyond is corrupt input and we raise.
+# Per-axis voxel index range [0, 2^20) from the chunk origin: 157 km at
+# 0.15 m. Anything beyond is corrupt input and raises.
 AXIS_BITS = 20
 AXIS_RANGE = 1 << AXIS_BITS  # 1 048 576
 

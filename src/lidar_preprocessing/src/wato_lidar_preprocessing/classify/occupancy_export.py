@@ -42,8 +42,7 @@ def write_chunk_voxel_occupancy(
 ) -> None:
     """Write voxel_occupancy.npz aggregating all occupied voxels in the chunk.
 
-    In log_odds mode unique_keys also includes free-space-only voxels;
-    filter to log_odds >= 0 (net-occupied evidence) before saving.
+    unique_keys includes free-only voxels; only log_odds >= 0 is kept.
     """
     if log_odds is not None and log_odds.size > 0:
         occ_mask = log_odds >= 0

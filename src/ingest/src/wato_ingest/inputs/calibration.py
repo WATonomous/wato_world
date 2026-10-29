@@ -2,21 +2,16 @@
 
 Two paths:
 
-1. `freeze_from_bag` — read /camera_*/camera_info + /tf_static + first
-   PointCloud2 per LiDAR and synthesize calibration.json.  This is the default
-   the pipeline uses; the bag is the source of truth.  A camera configured
-   `rectified: true` gets CameraInfo.P[:3, :3] and no distortion: its image
-   topic is already rectified, and K / D describe the raw image.
-2. `freeze_from_file` — copy an authored calibration JSON in.  Use this only
-   when the bag's CameraInfo or /tf_static is missing or wrong.
+1. `freeze_from_bag` (default) — each camera's CameraInfo topic, the TF topic,
+   and the first PointCloud2 per LiDAR.  A camera configured `rectified: true`
+   gets CameraInfo.P[:3, :3] and no distortion (K / D describe the raw image).
+2. `freeze_from_file` — copy an authored calibration JSON in, for a bag whose
+   CameraInfo or TF is missing or wrong.
 
-Either way `require_complete` then checks that every configured camera and
-LiDAR has what downstream projection needs (intrinsics, ego_T_cam,
-ego_T_lidar) and raises CalibrationError otherwise, so an incomplete
-calibration fails ingest instead of surfacing as nulls in a later component.
-
-The output is `raw/<bag_id>/calibration.json`, written through
-wato_common.artifacts.calibration, which owns its format.
+Either way `require_complete` then raises CalibrationError unless every
+configured sensor has intrinsics and an extrinsic.  The output,
+`raw/<bag_id>/calibration.json`, is written through
+wato_common.artifacts.calibration.
 """
 
 from __future__ import annotations
@@ -276,10 +271,8 @@ def freeze_from_bag(bag_path: str, bag_id: str, cfg: IngestConfig) -> str:
                     if key not in static_transforms:
                         static_transforms[key] = _transform_se3(ts_msg.transform)
 
-            # Early exit: once we have all sensor infos AND can resolve every
-            # needed ego→sensor transform, there's nothing more to collect.
-            # We must check both conditions together because /tf may publish
-            # transforms incrementally, and we need all of them before exiting.
+            # Stop once every sensor's info is in AND every ego→sensor chain
+            # resolves (TF links can arrive spread over several messages).
             if (
                 set(camera_infos.keys()) >= needed_camera_ids
                 and set(lidar_frame_ids.keys()) >= needed_lidar_ids
@@ -316,8 +309,7 @@ def _transform_se3(transform) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# File-based override (used when the bag's intrinsics/extrinsics are missing
-# or wrong and you want to substitute an authored calibration).
+# File-based override.
 # ---------------------------------------------------------------------------
 
 

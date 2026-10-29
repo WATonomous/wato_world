@@ -5,10 +5,7 @@ with rough bounding boxes.  When discovery.backend == "florence2", these phrases
 are pooled into the detector's text query — the open-vocab alternative to the
 fixed taxonomy.
 
-Lazy-imports Florence-2 (via transformers) so the module can be *imported*
-without it installed; calling propose() without it raises loudly.  There is no
-degraded fallback — use discovery.backend: "fixed" to run with the closed-set
-taxonomy instead.
+Lazy-imports Florence-2 (via transformers); propose() without it raises.
 """
 
 from __future__ import annotations
@@ -131,14 +128,9 @@ class Florence2Discovery:
 
 
 class FixedClassDiscovery:
-    """Closed-vocabulary 'discovery' that bypasses Florence-2.
-
-    Emits one RegionProposal per configured class name, each spanning the whole
-    image.  Exposes the same ``propose(image)`` interface as Florence2Discovery.
-    (The default fixed-vocab path now prompts the detector directly from the
-    taxonomy via ComponentConfig.concept_prompts(); this helper is retained for
-    callers that want full-image class proposals.)
-    """
+    """One full-image RegionProposal per configured class (Florence2Discovery's
+    interface). Unused by the pipeline: the fixed path prompts the detector from
+    ComponentConfig.concept_prompts()."""
 
     def __init__(self, classes: list[str]) -> None:
         self._classes = [c.strip() for c in classes if c and c.strip()]

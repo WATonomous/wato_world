@@ -1,10 +1,6 @@
-"""Pydantic schema for the ingest YAML config.
+"""Pydantic schema for the ingest YAML config (values live in src/ingest/config/).
 
-The actual parameter values live in `src/ingest/config/ingest.yaml` (or
-whatever path you pass via --config).  This file only defines the *shape* of
-the config — the YAML is the source of truth for values.  Ingest has no
-per-dataset code: a new recording needs only a new YAML (README "Ingesting a
-new bag").
+Ingest has no per-dataset code: a new recording needs only a new YAML.
 """
 
 from __future__ import annotations
@@ -40,11 +36,10 @@ class TopicMap(BaseModel):
     cameras: dict[str, CameraTopics]
     # sensor_msgs/PointCloud2, one topic per physical LiDAR.
     lidars: dict[str, str]
-    # Pose: one topic of nav_msgs/Odometry, geometry_msgs/PoseStamped or
-    # geometry_msgs/PoseWithCovarianceStamped giving the world pose of
-    # `ego_frame` (an Odometry's child_frame_id must equal it).  It must be
-    # DENSE and SMOOTH — see PoseRequirements and the README's "Pose
-    # requirements" section for which topics qualify.
+    # Pose: one nav_msgs/Odometry, geometry_msgs/PoseStamped or
+    # geometry_msgs/PoseWithCovarianceStamped topic giving the world pose of
+    # `ego_frame` (an Odometry's child_frame_id must equal it). Must be dense
+    # and smooth — see PoseRequirements.
     pose: str
     # tf2_msgs/TFMessage topic carrying the rigid sensor extrinsics (usually
     # /tf_static); read once at bag scope.  Like `info`, only needed when
@@ -55,14 +50,10 @@ class TopicMap(BaseModel):
 class PoseRequirements(BaseModel):
     """What ingest demands of the `topics.pose` stream.
 
-    Every pose downstream (a sweep's, a LiDAR point's, a camera frame's) is
-    interpolated between the two pose samples around it, which assumes
-    constant velocity in between.  That only holds when the samples are close
-    together, so ingest enforces it instead of silently interpolating across
-    seconds.  The two stretch-level rules are written into poses.parquet
-    (`interval_drop_reason`) and applied by wato_common.pose_lookup wherever a
-    pose is looked up.  See the README's "Pose requirements" section for the
-    measured rationale.
+    Every pose downstream is interpolated between the two samples around it,
+    assuming constant velocity, so the samples must be close together. The two
+    stretch-level rules are written into poses.parquet (`interval_drop_reason`)
+    and applied by wato_common.pose_lookup. README: "Poses".
     """
 
     model_config = ConfigDict(extra="forbid")

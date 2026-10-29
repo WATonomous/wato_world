@@ -1,8 +1,4 @@
-"""Step B — voxel static/dynamic classification.
-
-Public surface mirrors the old monolithic classify.py: external callers
-(component pipeline.py, __main__.py, tests) keep their imports unchanged.
-"""
+"""Step B (seg=aw) — Amanatides-Woo voxel static/dynamic classification."""
 
 from wato_lidar_preprocessing.voxel import VoxelOverflowError
 

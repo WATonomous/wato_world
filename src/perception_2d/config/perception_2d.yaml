@@ -1,14 +1,9 @@
-# perception_2d: 2D detector (YOLO26 or GroundingDINO) + SAM2 video tracker.
-#
-# The detector emits class-labeled boxes per keyframe; SAM2's video predictor
-# turns each box into a mask and tracks it across the camera stream into
-# masklets.  One box per object → one masklet per object (no concept-everything
-# explosion).  The class vocabulary comes from one of two sources, selected by
-# `discovery.backend`.
+# perception_2d: 2D detector (YOLO26 or GroundingDINO) boxes keyframes; SAM2's
+# video predictor tracks each box into a masklet. Schema: config.py.
 
 discovery:
   # Source of the class vocabulary fed to the detector:
-  #   "fixed"     → closed-set taxonomy (`fixed_classes` / prompts.yaml). DEFAULT.
+  #   "fixed"     → closed-set taxonomy (`fixed_classes` / prompts.yaml).
   #   "florence2" → open-vocabulary noun phrases discovered per frame by
   #                 Florence-2, pooled into one concept set per camera.
   backend: "fixed"
@@ -23,7 +18,7 @@ discovery:
 detection:
   # Box source for SAM2:
   #   "yolo"           → closed-set YOLO26 (COCO weights), mapped onto the
-  #                      taxonomy by yolo.class_map. DEFAULT. Requires
+  #                      taxonomy by yolo.class_map. Requires
   #                      discovery.backend: fixed.
   #   "grounding_dino" → open-vocabulary GroundingDINO, text-prompted by the
   #                      taxonomy (or by Florence-2 discovery).
@@ -48,22 +43,17 @@ detection:
       bus: bus
       truck: truck
 
-  # grounding_dino — HuggingFace zero-shot detection checkpoint. The Transformers
-  # backend needs no CUDA custom-op compile (unlike the standalone groundingdino
-  # package). Use "...-tiny" for a lighter/faster model.
+  # grounding_dino — HuggingFace checkpoint ("...-tiny" is lighter/faster).
   model: "IDEA-Research/grounding-dino-base"
   box_threshold: 0.35   # min box confidence
   text_threshold: 0.25  # min text-token match score
   nms_iou: 0.5          # per-class NMS IoU to drop duplicate boxes
 
-  # Both backends. Run the detector every k frames to introduce objects entering mid-clip.
-  # A large value → effectively detect-once at frame 0.
-  redetect_every_k: 10
+  # Both backends: detect every k images to pick up objects entering mid-clip.
+  redetect_every_k: 2
 
 segmentation:
-  # Local SAM2.1 checkpoint (data/models is mounted read-only at /data/models).
-  # Loaded via build_sam2_video_predictor — the container runs HF_HUB_OFFLINE=1,
-  # so this is a loose .pt path, not an HF model id.
+  # Local SAM2.1 checkpoint path (the container runs HF_HUB_OFFLINE=1).
   checkpoint: "/data/models/sam2.1_hiera_large.pt"
   config: "configs/sam2.1/sam2.1_hiera_l.yaml"  # bundled in the sam2 package
 
@@ -74,60 +64,40 @@ tracking:
   # Keep the SAM2 frame stack in host RAM and stream per frame to the GPU —
   # essential for long panoramic clips that would otherwise OOM at init_state.
   offload_video_to_cpu: true
-  # OOM fallback: if the whole clip OOMs mid-propagation, retry the camera in
-  # frame windows (fresh session each). A window that itself OOMs is recursively
-  # halved down to min_sub_clip_frames before being skipped. Object ids reset
-  # between windows — the same gap as between chunks — which downstream
-  # `tracking` re-links via DINOv2 ReID. Clips that fit never touch this path.
+  # OOM fallback: retry the camera in windows of this many frames (fresh
+  # session each), halving a window that OOMs down to min_sub_clip_frames.
+  # Object ids reset between windows; `tracking` re-links them via DINOv2.
   sub_clip_frames: 150
   min_sub_clip_frames: 16
-  # SAM2 doesn't let go of an object it has lost (it left the image, or got
-  # covered): within 0-30 frames it tends to latch the lost object's id onto a
-  # similar object nearby — usually one that already has its own track. On WATO
-  # data every such resume was a different object. So a track ENDS (no more
-  # masks recorded; removed from the SAM2 session at the next keyframe) when:
-  #   - its object has had no mask for drop_lost_after_frames consecutive
-  #     frames (0 = never), or
-  #   - its mask and another live track's reach duplicate_mask_iou in the same
-  #     frame — a jump with no empty frame between (e.g. an oncoming car leaving
-  #     the image as it passes a parked one). The track whose mask changed most
-  #     since its previous frame ends; > 1 disables.
-  # An object that comes back and is re-detected starts a new masklet (re-linked
-  # downstream via DINOv2). Ending tracks also bounds cost: this SAM2 build runs
-  # memory attention per object per frame for every object it holds.
-  drop_lost_after_frames: 5
+  # SAM2 latches a lost object's id onto a similar nearby object within a few
+  # images (on WATO, every such resume was a different object), so a track
+  # ENDS when its object has had no mask for drop_lost_after_frames images
+  # (0 = never), or its mask reaches duplicate_mask_iou with another live
+  # track's (the track whose mask changed most ends; > 1 disables). A
+  # re-detected object starts a new masklet.
+  drop_lost_after_frames: 1
   duplicate_mask_iou: 0.7
-  # Precision for SAM2 calls on CUDA: bfloat16 (upstream's own setting; lets
-  # attention use flash kernels), float16, or float32. The detector and DINOv2
-  # always run float32.
+  # SAM2 precision on CUDA: bfloat16 (upstream's; flash attention), float16 or
+  # float32. The detector and DINOv2 always run float32.
   autocast_dtype: "bfloat16"
 
 depth:
   enabled: true
   model: "depth-anything-v2-large"
-  # Frames pushed through the DA-V2 backbone per GPU batch. The depth pass is
-  # VRAM-disjoint from the tracker (DA-V2 is the only heavy model resident) and
-  # DA-V2-Large at 518px is light, so raising this is a cheap throughput win when
-  # the card has headroom. 1 = original per-frame streaming. Only the GPU
-  # inference batches; LiDAR alignment stays sequential (fallback window
-  # unchanged).
+  # Frames per DA-V2 GPU batch (the depth pass has the GPU to itself). LiDAR
+  # alignment stays sequential.
   batch_size: 4
   min_lidar_anchors: 30
   ransac_n_iter: 200
   ransac_inlier_threshold_m: 0.5
-  use_static_anchors_only: true
+  use_static_anchors_only: true   # unused: anchors are always static
   fallback_window: 5
   sky_mask_top_fraction: 0.3
   output_dtype: "float16"
 
-# DINOv2 appearance-embedding extraction (persisted per masklet for the
-# downstream `tracking` component; perception_2d does not re-identify here).
+# DINOv2 embeddings per masklet, for the `tracking` component's ReID.
 embeddings:
   model: "dinov2_vitl14"
-  every_k_frames: 5
-
-# Cross-camera identity merging is handled downstream in the `tracking`
-# component (3D/4D association gated by the DINOv2 features written here).
-# global_object_id is left null by perception_2d.
+  every_k_frames: 1
 
 prompts_path: "/config/prompts.yaml"

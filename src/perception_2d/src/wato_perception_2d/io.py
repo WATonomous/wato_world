@@ -40,6 +40,11 @@ class CameraFrameInfo:
     # frame_index's world_T_ego, which is the LiDAR sweep's pose.
     camera_timestamp_ns: Optional[int]
     valid_camera: bool
+    # Every sweep this image is nearest to. frame_index has one row per
+    # (sweep, camera), so an image repeats once per such sweep; the pipeline
+    # collapses those rows into one entry (pipeline._one_frame_per_image) and
+    # keeps their sweeps here for depth anchoring. Empty = just `sweep_id`.
+    sweep_ids: tuple[int, ...] = ()
 
 
 def load_chunks(bag_id: str) -> list[dict]:

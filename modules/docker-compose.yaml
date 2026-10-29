@@ -64,6 +64,8 @@ services:
       - BAG_ROOT=${BAG_ROOT}
     volumes:
       - ${WATO_WORLD_DIR}/data/bags:/data/bags:ro
+      # trim-bag's output; the rest of /data/bags stays read-only.
+      - ${WATO_WORLD_DIR}/data/bags/trimmed:/data/bags/trimmed
       - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
       - ${WATO_WORLD_DIR}/config:/config:ro
 

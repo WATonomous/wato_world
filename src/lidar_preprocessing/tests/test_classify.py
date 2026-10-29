@@ -449,12 +449,9 @@ def test_skip_endpoint_isolated_ground_voxel_not_dynamic(tmp_env):
 def test_far_returns_beyond_carve_guard_become_static(tmp_env):
     """Returns beyond the profile's max range still register endpoint hits.
 
-    Regression: the kernel used to skip over-length rays ENTIRELY (no carve,
-    no endpoint hit), leaving far voxels unobserved — and unobserved voxels
-    defaulted to dynamic, dumping all far static structure into
-    dynamic_map.npz. Now the carve is skipped (compute guard) but the hit is
-    registered, so a repeatedly-seen far wall accumulates occupancy evidence
-    and classifies static.
+    Over-length rays skip the carve (compute guard) but still register their
+    hit, so a repeatedly seen far wall accumulates occupancy evidence and
+    classifies static instead of staying unobserved.
     """
     bag_id, chunk_id = "bag_far_static", "chunk0"
     n_sweeps = 10
@@ -568,9 +565,7 @@ def test_well_observed_static_survives_far_noisy_carves(tmp_env):
     A wall at moderate range is hit every sweep. A few sweeps cast very long
     rays whose endpoints are far beyond the wall; those through-rays would
     carve the wall voxel, but at >> d_star the carve is down-weighted ∝ 1/d,
-    so the wall stays static. This replaces the old clamp=50 "headroom"
-    band-aid: the physics (credibility weight), not a giant clamp, keeps the
-    wall static.
+    so the wall stays static.
     """
     bag_id, chunk_id = "bag_far_carve", "chunk0"
     wall_pt = np.array([[5.0, 0.0, 1.0]])

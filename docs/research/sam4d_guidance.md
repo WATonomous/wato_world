@@ -64,7 +64,7 @@ produces temporally consistent 3D masks without human annotation.
 | Ground plane removal | `ground/` (Patchwork++ + height grid) | ✓ Done |
 | Camera intrinsics + extrinsics | `calibration.json` (from TF + camera_info) | ✓ Done |
 | Multi-LiDAR coverage | 3 Velodynes vs. Waymo's 1 top LiDAR | ✓ Richer |
-| Multi-camera coverage | 12 cameras vs. Waymo's 5 | ✓ Richer |
+| Multi-camera coverage | 12 cameras recorded (8 ingested by `ingest.wato.yaml`) vs. Waymo's 5 | ✓ Richer |
 
 ---
 
@@ -82,7 +82,8 @@ is translation-invariant and intensity-agnostic.
 (`save_voxel_occupancy`, default on) and, with
 `save_per_frame_voxel_occupancy`, one `voxel_occupancy_frame_NNNN.npz` per
 `frame_id` — sparse int voxel coords, the (coords, features=1.0) pairs
-MinkUNet consumes. Written by `classify/occupancy_export.py`.
+MinkUNet consumes. Written by Step B (`classify/occupancy_export.py`,
+`mf_mos/segment.py`); nothing consumes them yet.
 
 ### 2. Camera-LiDAR projection (depth lifting)
 
@@ -165,7 +166,7 @@ positions.  To exploit this:
 1. ~~`lidar_preprocessing`: optional `voxel_occupancy.npz` export~~ — done.
 2. ~~Shared projection~~ — done as `wato_common.geometry.projection`
    (`project_lidar_to_image`, `lift_pixel_to_world`).
-3. `perception_2d`: GroundingDINO → SAM2 video-tracker pipeline (done);
+3. `perception_2d`: detector (YOLO26 / GroundingDINO) → SAM2 video tracker (done);
    add LiDAR cross-modal prompting from Step F's moving clusters.
 4. `perception_2d`: handle cross-chunk consistency via chunk overlap windows.
 5. Multi-LiDAR: treat merged world-frame points (all three LiDARs) as the

@@ -8,16 +8,9 @@ per-sweep dynamic mask comes straight from the MF-MOS moving masks written by
     dynamic = mf_mos_moving & ~ground & ~near_ego
     static  = ~mf_mos_moving & ~ground
 
-Patchwork++ ground stays authoritative — ground points belong to ground.npz,
-never static_map/dynamic_map — mirroring classify/masking.py so Step C
-behaves identically regardless of which segmentation method ran. The same
-near-ego gate classify pass 2 applies (cfg.dynamic_min_range_m) suppresses
-moving verdicts on ego self-returns; gated points drop from both clouds
-rather than being promoted to static.
-
-Outputs are byte-compatible with classify/ (same static_map.npz /
-dynamic_map.npz / dynamic_mask.npy / lidar_proc_index columns) so ground,
-reduce, and downstream consumers don't care which method produced them.
+Ground points go to ground.npz only, as in classify/masking.py; near-ego
+points (cfg.dynamic_min_range_m) drop from both clouds. Outputs have the same
+format as classify/'s, so later steps don't care which method ran.
 """
 
 from __future__ import annotations
@@ -373,10 +366,8 @@ def classify_chunk(
             not_ground = np.ones(n, dtype=bool)
 
         dyn_mask = moving & not_ground
-        # Near-ego dynamic gate, mirroring classify pass 2: within
-        # dynamic_min_range_m the returns are ego self-returns / near clutter,
-        # so a moving verdict is unreliable. Gated points drop from the
-        # dynamic cloud without being promoted to static.
+        # Near-ego gate, as in classify pass 2; gated points are not promoted
+        # to static.
         if (
             cfg.dynamic_min_range_m > 0.0
             and sweep_origin is not None

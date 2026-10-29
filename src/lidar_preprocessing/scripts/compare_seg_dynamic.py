@@ -9,26 +9,17 @@ density, so the gap above the floor is the real static leakage.
 
 Run it after each method to A/B them on the SAME chunk:
 
-    # inside the lidar_preprocessing_dev container
     ./watod run lidar_preprocessing --bag <bag> --chunk 0000 --seg aw
-    python -m wato_lidar_preprocessing.scripts.compare_seg_dynamic <bag> 0000
-    ./watod run lidar_preprocessing --bag <bag> --chunk 0000 --seg union
-    python -m wato_lidar_preprocessing.scripts.compare_seg_dynamic <bag> 0000
+    # in the lidar_preprocessing_dev container:
+    python /ws/src/lidar_preprocessing/scripts/compare_seg_dynamic.py <bag> 0000
 
 Lower on-static % (closer to the shift floor) = cleaner dynamic cloud.
-Needs scipy (cKDTree); falls back to a slower brute-force check without it.
 
-`--proposals` scores Step F's recall-oriented motion proposals the same way,
-one row per source bit, for the union of all bits, and for the points of
-clusters passing Chen's motion criterion (motion_score > 1). Proposals are
-false-positive tolerant by design, so expect the union's on-static % to sit
-well above the seg dynamic_map's; the per-bit rows show which heuristic the
-leakage comes from. When the bag has global_iwu.npz the reference is the
-IWU-refined static map (evicted floaters removed): IWU_EVICTED points come
-from static_map.npz by construction, so against it they would read ~100%
-"on static" whatever their quality.
-
-    python -m wato_lidar_preprocessing.scripts.compare_seg_dynamic <bag> 0000 --proposals
+`--proposals` scores Step F's proposals the same way: one row per source bit,
+the union of all bits, and members of clusters with motion_score > 1. Expect
+the union well above the seg dynamic_map (false positives are by design). With
+global_iwu.npz the reference is the IWU-refined map, since IWU_EVICTED points
+come from static_map.npz and would read ~100% "on static" against it.
 """
 
 from __future__ import annotations

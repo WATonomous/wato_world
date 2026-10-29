@@ -41,9 +41,9 @@ ignores the height floor, so the wheels and feet it removed come back on
 moving clusters.
 
 Motion scoring uses wato_common.tracking (Chen's cost, Hungarian assignment,
-constant-velocity Kalman filter). `main` measured that a raw centroid-velocity
-gate fakes motion on static structure (per-sweep visibility drifts a
-cluster's centroid), so the score is deliberately conservative:
+constant-velocity Kalman filter). A raw centroid-velocity gate fakes motion
+on static structure (per-sweep visibility drifts a cluster's centroid), so
+the score is deliberately conservative:
 motion_score = BEV distance between the median Kalman-filtered centre of the
 first and of the last few frames of the track (net, not path length — jitter
 does not accumulate), divided by the largest box side the track ever showed.
@@ -110,7 +110,7 @@ MOVING_SCORE = 1.0
 # has no motion evidence worth painting whole boxes with.
 BOX_FILL_MIN_TRACK_LIFE = 3
 # ...and a cluster whose points mostly do NOT dwell in the same voxels
-# (frac_persistent, main's measured persistence statistic). Displacement over
+# (frac_persistent, the motion filter's persistence statistic). Displacement over
 # size alone is fooled by a thin wall fragment whose visible window slides
 # further than the fragment is long (seen on nuScenes scene-0061: a
 # 1.6×0.1 m fragment drifting 3 m, frac_persistent 1.0); the clear movers

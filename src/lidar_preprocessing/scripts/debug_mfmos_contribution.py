@@ -9,8 +9,7 @@ For each sweep, partition the points by what made them dynamic:
   - Both agree: AW says dynamic, MF-MOS raw mask = True
   - Neither (sanity): both say static — should be 0 in the dynamic_mask
 
-Note: voxels absent from voxel_diag (not-in-keys) are NOT AW-dynamic — the
-classifier defaults never-observed voxels to not-dynamic.
+Voxels absent from voxel_diag (not-in-keys) are NOT AW-dynamic.
 
 Then bucket each MF-MOS rescue by what AW thought the voxel was:
   STATIC          -> likely MF-MOS false positive (overruling confident static)
@@ -19,9 +18,8 @@ Then bucket each MF-MOS rescue by what AW thought the voxel was:
   FREE_ONLY       -> voxel had no hits; MF-MOS flagging it is suspicious
   not-in-keys     -> voxel never traversed; MF-MOS flagging is uninformed
 
-Note: the per-point _mf_mos_mask.npy IS the MF-MOS verdict used in fusion —
-it is spatially denoised at generation time (3D cluster-size filter) and
-consumed per-sweep, with no chunk-wide vote aggregation.
+The per-point _mf_mos_mask.npy (already spatially denoised) is exactly the
+verdict fusion uses.
 """
 
 from __future__ import annotations

@@ -311,10 +311,8 @@ def _deskew_sweep(
         t_ns = header_timestamp_ns + offset_ns
         time_source = "point_time"
     elif synthesize_per_point_times and n > 0 and sweep_duration_ns > 0:
-        # No usable per-point timestamps — synthesize from azimuth.
-        # Without compensation, all points share the header pose, producing
-        # ~ego_speed × sweep_duration / 2 of intra-sweep smear that spreads
-        # statics across voxels (the "buildings-as-dynamic" failure mode).
+        # No usable per-point times: synthesize from azimuth. Otherwise every
+        # point gets the header pose and statics smear across voxels.
         offset_ns = _synthesize_t_offset_ns_from_azimuth(
             xyz_lidar, sweep_duration_ns, rotation_dir
         )
@@ -383,10 +381,7 @@ def process_chunk(
         write_table([], PROCESSED_SWEEPS_SCHEMA, index_uri)
         return []
 
-    # Sweeps ingest flagged as pose-invalid (outside the pose span, e.g. before
-    # SLAM converges; bracketing poses too far apart; or a pose jump — see
-    # ingest's pose_requirements) are skipped rather than deskewed with an
-    # untrustworthy pose. None = no frame_index → process all.
+    # None = no frame_index → process all.
     pose_valid_sweep_ids = load_pose_valid_sweep_ids(bag_id, chunk_id)
 
     unit_scale = cfg.point_time_scale_to_ns()
@@ -398,9 +393,8 @@ def process_chunk(
 
     pw = _make_patchwork(cfg.patchwork, required=cfg.require_patchwork)
 
-    # Rotation direction and period are fixed hardware properties — read them
-    # from each lidar's datasheet profile rather than probing azimuth signs
-    # per sweep. On a mixed rig the corner scanners may differ from the centre.
+    # Rotation direction and period come from each lidar's profile (a mixed rig
+    # may differ per scanner).
     sensor_by_lidar = {lid: cfg.build_sensor_model(lid) for lid in lidar_ids}
 
     results: list[DeskewResult] = []
@@ -422,9 +416,8 @@ def process_chunk(
         sweep_id = int(row["sweep_id"])
         header_ts = int(row["header_timestamp_ns"])
 
-        # Honor ingest's per-sweep valid_pose: skip sweeps with no interpolatable
-        # pose instead of clamping them to a stale one. Record an explicit
-        # valid=False row so downstream distinguishes this from a missing sweep.
+        # Skip pose-invalid sweeps rather than clamp them to a stale pose; the
+        # valid=False row tells downstream it existed.
         if pose_valid_sweep_ids is not None and sweep_id not in pose_valid_sweep_ids:
             meta_rows.append(
                 ProcessedSweepMeta(

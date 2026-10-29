@@ -1,7 +1,7 @@
 """Bucket near-ego static→dynamic leakage points by voxel classification.
 
 Usage (inside lidar_preprocessing_dev container):
-    python -m wato_lidar_preprocessing.scripts.debug_near_ego_leakage \
+    python /ws/src/lidar_preprocessing/scripts/debug_near_ego_leakage.py \
         <bag_id> <chunk_id> [--radius-m 15] [--sample-sweeps 20]
 """
 

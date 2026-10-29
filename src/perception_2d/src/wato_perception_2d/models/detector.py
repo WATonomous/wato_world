@@ -1,17 +1,10 @@
-"""Open-vocabulary 2D detector — the box source for SAM2.
+"""Open-vocabulary GroundingDINO detector (``detection.backend: grounding_dino``).
 
-Emits a *bounded, deduplicated, class-labeled* set of boxes per frame. Those
-boxes prompt SAM2 (sam2_tracker.py), so downstream gets one masklet per detected
-object rather than one per region matching a text concept.
-
-Default backend is GroundingDINO via HuggingFace Transformers
-(``AutoModelForZeroShotObjectDetection``, e.g. ``IDEA-Research/grounding-dino-base``),
-which needs no CUDA custom-op compile. The model is text-prompted with the
-taxonomy class names (one prompt phrase per class), so it stays open-vocab
-capable but constrained to our classes.
-
-Lazy-imports transformers so this module can be *imported* without it installed;
-calling detect() without it raises loudly (no degraded fallback).
+Emits a deduplicated, class-labeled set of boxes per frame to prompt SAM2, so
+each object becomes one masklet. Runs through HuggingFace Transformers
+(``AutoModelForZeroShotObjectDetection``; no CUDA custom-op compile),
+text-prompted with the taxonomy's phrases. Lazy-imports transformers;
+detect() without it raises.
 """
 
 from __future__ import annotations
@@ -243,11 +236,7 @@ class GroundingDinoDetector:
 
 
 def detector_importable() -> bool:
-    """Cheap check that the detector backend (transformers) imports.
-
-    Mirrors sam2_importable(): the pipeline calls this before the depth pass so a
-    missing detector install fails fast rather than after the whole depth pass.
-    """
+    """Cheap check that transformers imports (called before the depth pass)."""
     import importlib
 
     try:

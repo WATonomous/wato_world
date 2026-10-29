@@ -19,10 +19,8 @@ def project_and_clip(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Project world-frame points and return pixel coords, depths, valid mask.
 
-    The sweep's points are already registered in the SLAM world frame upstream,
-    so ``cam_T_world`` (not a LiDAR-frame transform) carries them into the camera.
-    ``project_lidar_to_image`` is frame-agnostic — it applies whatever ``cam_T_*``
-    it is given — so it is reused here unchanged.
+    The points are world-frame, so ``cam_T_world`` carries them into the
+    camera (``project_lidar_to_image`` applies whatever ``cam_T_*`` it gets).
 
     Args:
         points_world: (N, 3) float64 points in the SLAM world frame.

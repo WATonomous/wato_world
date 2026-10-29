@@ -330,9 +330,8 @@ def _write_world_sweep_with_ground(
 def test_prior_boost_excludes_ground_points(tmp_env):
     """Ground points are filtered from the prior boost query.
 
-    Regression: the boost previously used the full sweep xyz, so a ground
-    voxel matching the global static map got a phantom log_odds entry that no
-    measurement backed.
+    Boosting from the full sweep xyz would give a ground voxel matching the
+    global static map a phantom log_odds entry that no measurement backed.
 
     Geometry: non-ground endpoint sits on the +x axis at (10, 0, 0); ground
     endpoint is at (0, 5, 0).  The ground ray is traversed for its free-space

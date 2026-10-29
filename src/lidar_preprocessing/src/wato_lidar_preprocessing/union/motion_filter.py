@@ -1,35 +1,14 @@
-"""Post-fusion temporal motion filter for the union dynamic cloud.
+"""Post-veto temporal motion filter for the union dynamic cloud.
 
-Runs AFTER union.classify_chunk's AW-static / ground vetoes, on the accumulated
-per-chunk dynamic cloud. The voxel vetoes only reach MF-MOS false positives
-that land on the AW static map; structure the static map covers sparsely (far
-walls, foliage, below-grade returns) slips through. Two temporal gates catch
-it, both exploiting the offline batch setting and targeting *currently-moving*
-semantics:
+Catches what the voxel vetoes miss: MF-MOS false positives on structure the AW
+static map covers sparsely (far walls, foliage). Gates and tuning:
+config.MotionFilterParams, docs/lidar_preprocessing_measurements.md.
 
-  persistence gate — drop a point whose voxel (persistence_voxel_m) is occupied
-                     across >= persistence_max_sweeps DISTINCT sweeps. A moving
-                     object sweeps through a 0.5 m voxel in 1-2 sweeps; static
-                     structure dwells in the same voxel the whole time it's in
-                     view.
-  coherence  gate  — drop a point whose per-sweep cluster does not link into a
-                     track spanning >= coherence_min_life sweeps. Removes the
-                     temporally-incoherent specks that survive persistence.
-
-Both were chosen by measurement (scripts/compare_seg_dynamic): on real Velodyne
-data the pair cuts on-static leakage 58% -> ~4%. A velocity gate and an
-MF-MOS-AND-AW-dynamic intersection both tested WORSE — per-sweep visibility
-drifts a connected-component centroid, faking velocity on static structure — so
-neither is implemented. The coherence gate is membership-only for that reason;
-the per-sweep size cap (coherence_max_object_m) is the discriminator the
-velocity gate lacked.
-
-This module operates on the artifacts union.classify_chunk just wrote — the
-accumulated dynamic_map.npz plus each sweep's dynamic_mask.npy — and rewrites
-both, plus each index row's n_points_dynamic. It relies on union's write order:
-within one sweep the dynamic_map block is in world-point order, identical to the
-True positions of that sweep's dynamic_mask, so the keep mask maps back
-position-for-position without re-reading the world NPZs.
+Rewrites the dynamic_map.npz and per-sweep dynamic_mask.npy that
+union.classify_chunk just wrote, plus each index row's n_points_dynamic. It
+relies on union's write order: within a sweep, the dynamic_map block is in
+world-point order, matching the True positions of its dynamic_mask, so the keep
+mask maps back without re-reading the world NPZs.
 """
 
 from __future__ import annotations

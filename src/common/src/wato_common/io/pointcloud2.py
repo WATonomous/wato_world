@@ -1,8 +1,7 @@
 """Pure-Python PointCloud2 → structured numpy decoder.
 
-Avoids depending on `sensor_msgs_py` so tests and downstream components can read
-the decoded sweeps without ROS installed.  Only the wire-decode (during ingest
-ingest) needs ROS, and that path uses the rosbag reader's deserializer.
+Avoids depending on `sensor_msgs_py`, so it runs without ROS installed; only
+reading the bag itself (wato_common.io.rosbag_reader) needs ROS.
 """
 
 from __future__ import annotations

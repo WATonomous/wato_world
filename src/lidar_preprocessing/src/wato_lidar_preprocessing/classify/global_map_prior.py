@@ -1,15 +1,10 @@
 """Global static map prior for two-pass classification.
 
 A one-time, credibility-weighted log-odds boost for voxels matched in the
-bag-level static map. Not UniLiPs IWU — that is the per-map-point static
-probability EMA in wato_lidar_preprocessing.iwu, which this module predates
-and was previously (mis)labelled as.
-
-cKDTree over the bag-level global_static_map.npz: query_sweep returns, per
-point, whether it matches a known static surface and its range to the sensor.
-The caller turns range into a credibility weight (SensorModel.range_weight)
-and applies a one-time prior shift (l_map_prior) to matched voxels — touching
-log_odds only, so the has_hits gate stays backed by real returns.
+bag-level static map (not UniLiPs IWU, which is wato_lidar_preprocessing.iwu).
+query_sweep returns, per point, whether it matches the map and its range; the
+caller weights by SensorModel.range_weight and shifts log_odds only, so the
+has_hits gate stays backed by real returns.
 """
 
 from __future__ import annotations

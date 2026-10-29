@@ -1,8 +1,7 @@
 """Fusion segmentation (`--seg union`): AW static map vetoes MF-MOS dynamics.
 
-The third Step-B method. Unlike `aw` (classify/) and `mos` (mf_mos/) — which
-are mutually exclusive and never import each other — `union` is the fusion
-layer, so importing from both is expected and intentional.
+`aw` (classify/) and `mos` (mf_mos/) never import each other; union, the
+fusion layer, imports both.
 """
 
 from .motion_filter import MotionFilterResult, filter_dynamic_artifacts

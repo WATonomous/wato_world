@@ -5,8 +5,10 @@ visibility:
   tolerance_m: 0.5
   neighborhood: 3
 
+# Not read yet: votes always go to the highest cumulative score, and the
+# innermost mask always wins.
 voting:
   min_supporting_cameras: 1
   innermost_wins: true
 
-upstream_versions: {}
+upstream_versions: {}  # not read

@@ -1,7 +1,7 @@
 """Pose interpolation: linear for translation, SLERP for orientation.
 
-Used by the frame-index builder to estimate world_T_ego at LiDAR sweep
-timestamps that fall between actual pose samples.
+Callers go through wato_common.pose_lookup (which also decides which stretches
+are trusted); batch_interpolate_poses is the per-point path deskew uses.
 """
 
 from __future__ import annotations
@@ -49,9 +49,7 @@ def interpolate_pose(
     """Estimate world_T_ego at `target_timestamp_ns`.
 
     `samples` must be sorted by timestamp.  Returns (4x4, interp_error_ns)
-    where interp_error_ns is the gap to the nearest sample (a sanity metric:
-    if it's huge, the pose stream had a hole and you should not trust the
-    interpolation).
+    where interp_error_ns is the gap to the nearest sample.
     """
     if not samples:
         raise ValueError("interpolate_pose: empty pose samples")
@@ -143,10 +141,9 @@ def batch_interpolate_poses(
 ) -> np.ndarray:
     """Vectorized pose interpolation for N timestamps.
 
-    Returns shape (N, 4, 4) float64.  One np.searchsorted call instead of N
-    and one quat→matrix conversion across the whole batch, so it's efficient
-    for per-point deskewing of large sweeps.  Clamps to nearest sample for
-    timestamps outside the sample range.
+    Returns shape (N, 4, 4) float64.  One np.searchsorted call and one
+    quat→matrix conversion for the whole batch.  Clamps to the nearest sample
+    for timestamps outside the sample range.
     """
     n = len(timestamps_ns)
     if not samples:

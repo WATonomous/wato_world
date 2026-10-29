@@ -1,21 +1,11 @@
 """Shared SAM2 video predictor loader (cache).
 
-SAM2.1 is loaded through Meta's official `sam2` package (facebookresearch/sam2)
-via ``build_sam2_video_predictor(config_file, ckpt_path)`` — pointed at a *local*
-checkpoint file (e.g. ``/data/models/sam2.1_hiera_large.pt``, bind-mounted from
-``data/models``).  The hydra ``config_file`` ships inside the `sam2` package, so
-only the checkpoint is fetched (scripts/fetch_models.py).  We deliberately do NOT
-use ``SAM2VideoPredictor.from_pretrained`` because the container runs with
-``HF_HUB_OFFLINE=1`` and the checkpoint is a loose .pt, not an HF-cache snapshot.
-
-The SAM2 video predictor needs no upstream monkeypatches: it offloads to CPU
-through documented ``init_state`` kwargs and bounds its own memory.  The
-predictor is GPU-resident, so this module caches one instance shared across
-cameras and chunks.
-
-Lazy-imports `sam2` so this module can be imported without it installed; callers
-treat a None return as "SAM2 unavailable" (the pipeline turns that into a hard
-error for the chunk — there is no hand-rolled tracking fallback).
+SAM2.1 is built with the `sam2` package's ``build_sam2_video_predictor`` from
+a local checkpoint (fetched by scripts/fetch_models.py; the hydra config ships
+in the package) — not ``from_pretrained``, since the container runs
+``HF_HUB_OFFLINE=1``. One GPU-resident predictor is cached across cameras and
+chunks. Lazy-imports `sam2`; a None return means unavailable, which the
+pipeline turns into a hard error.
 """
 
 from __future__ import annotations
@@ -56,8 +46,6 @@ def get_sam2_predictor(
         device: "cuda"/"cpu"; defaults to cuda when available.
 
     None means the `sam2` package isn't installed or the checkpoint is missing.
-    The pipeline treats None as a hard error for the chunk (fail loud); there is
-    no hand-rolled tracking fallback.
     """
     dev = device or _default_device()
     key = (config_file, checkpoint, dev)
@@ -95,10 +83,8 @@ def get_sam2_predictor(
 def sam2_importable() -> bool:
     """Cheap check that `sam2` imports, WITHOUT building the heavy predictor.
 
-    The pipeline calls this before the (expensive) depth pass so a missing
-    `sam2` install / dependency fails fast instead of after the whole depth pass.
-    Actually executes the import (not importlib.util.find_spec) so a broken
-    transitive dep is caught, not just an absent top-level package.
+    Called before the depth pass. Executes the import (not find_spec), so a
+    broken transitive dependency is caught too.
     """
     import importlib
 

@@ -1,25 +1,14 @@
-"""Step B — Voxel-based static/dynamic classification (orchestration).
+"""Step B (seg=aw) — voxel static/dynamic classification; union's static basis.
 
-Two-pass algorithm:
-  Pass 1: For every sweep, discretize world-frame points to voxel keys and
-          accumulate occupancy log-odds via ray traversal. All log-odds
-          constants come from the datasheet SensorModel (see sensor_model.py);
-          the carve margin additionally uses a per-bag pose-drift σ estimated
-          from poses.parquet.
-  Pass 2: For every sweep, apply the static/dynamic label as a boolean mask
-          and write {sweep_id:06d}_dynamic_mask.npy. A point is dynamic IFF
-          its voxel is in the explicit carved-dynamic set (never-observed
-          voxels default to not-dynamic) and it lies outside
-          cfg.dynamic_min_range_m of its sensor.
+  Pass 1: ray-trace every sweep into a log-odds voxel grid (constants from
+          the SensorModel; the carve margin also uses the bag's pose σ).
+  Pass 2: per sweep, write {sweep_id:06d}_dynamic_mask.npy — dynamic IFF the
+          voxel is in the carved-dynamic set and the point lies beyond
+          cfg.dynamic_min_range_m. Never filters keys: the mask must match the
+          world NPZ's length.
 
-Pure Amanatides-Woo — this is the `--seg aw` method and the static basis of
-`--seg union`. No MF-MOS involvement; that lives in mf_mos/ and union/.
-
-The static cloud is written to static_map.npz (which also carries the
-static + dynamic voxel-key sets consumed by Step C's ground intersection)
-and the dynamic cloud to dynamic_map.npz; downstream consumers depend on the
-dynamic_mask.npy length matching the world NPZ point count, so Pass 2 never
-filters keys.
+static_map.npz also carries the static / dynamic / ambiguous voxel-key sets
+that Step C, union and Step F read.
 """
 
 from __future__ import annotations

@@ -303,7 +303,7 @@ the tracked detection.
 | `raw_phrase` | str | Raw detector label before canonicalisation |
 | `det_score` | float | Detector (× SAM2 mask) confidence |
 | `discovery_score` | float | Detector / Florence-2 discovery confidence |
-| `centroid_depth_m` | float | Metric depth at the mask centroid |
+| `centroid_depth_m` | float | Not populated yet (always 0.0) |
 | `tracker_backend` | str | `"sam2"` |
 
 ### `depth_2d/<cam>/<frame>.npz`
@@ -323,130 +323,10 @@ artifact identically to a written `fit_status == 2`.
 
 ---
 
-## Configuration (`src/perception_2d/config/perception_2d.yaml`)
+## Configuration, running, file layout
 
-```yaml
-discovery:
-  backend: "fixed"                 # "fixed" | "florence2"
-  model: "microsoft/Florence-2-large-ft"
-  task: "<DENSE_REGION_CAPTION>"
-  min_confidence: 0.3
-  sample_every_k: 10               # florence2 only: discover on every k-th frame
-  fixed_classes: ["car", "truck", "bus", "motorcycle", "bicycle",
-                  "pedestrian", "traffic cone", "barrier"]
-
-detection:
-  backend: "yolo"                  # "yolo" | "grounding_dino"
-  yolo:
-    checkpoint: "/data/models/yolo26x.pt"   # pinned (model_registry: yolo26)
-    conf: 0.25
-    iou: 0.7
-    imgsz: 1280
-    class_map: {person: pedestrian, bicycle: bicycle, car: car,
-                motorcycle: motorcycle, bus: bus, truck: truck}
-  model: "IDEA-Research/grounding-dino-base"   # grounding_dino only
-  box_threshold: 0.35
-  text_threshold: 0.25
-  nms_iou: 0.5
-  redetect_every_k: 10             # re-detect to admit objects entering mid-clip
-segmentation:
-  checkpoint: "/data/models/sam2.1_hiera_large.pt"
-  config: "configs/sam2.1/sam2.1_hiera_l.yaml"   # bundled in the sam2 package
-
-tracking:
-  iou_match_threshold: 0.5         # re-detected box ≥ this IoU = existing object
-  offload_video_to_cpu: true       # frame stack in host RAM (long-clip safe)
-  sub_clip_frames: 150             # OOM fallback window
-  min_sub_clip_frames: 16
-  drop_lost_after_frames: 5        # end a track after this many empty frames (0 = never)
-  duplicate_mask_iou: 0.7          # end the track that jumped onto another's object
-  autocast_dtype: "bfloat16"       # SAM2 precision: bfloat16 | float16 | float32
-
-depth:
-  enabled: true
-  model: "depth-anything-v2-large"
-  batch_size: 4                    # frames through DA-V2 backbone per GPU batch
-  min_lidar_anchors: 30
-  ransac_n_iter: 200
-  ransac_inlier_threshold_m: 0.5
-  use_static_anchors_only: true    # NON-OPTIONAL — see depth branch
-  fallback_window: 5
-  sky_mask_top_fraction: 0.3
-  output_dtype: "float16"
-
-embeddings:
-  model: "dinov2_vitl14"
-  every_k_frames: 5
-
-prompts_path: "/config/prompts.yaml"
-```
-
----
-
-## Running it
-
-**1. Fetch the model weights on the host** (before launching the container), into
-`${MODELS_ROOT}` (bind-mounted read-only at `/data/models`):
-
-```bash
-python3 src/perception_2d/scripts/fetch_models.py        # → ./data/models
-# or a custom location:
-MODELS_ROOT=/srv/wato_models python3 src/perception_2d/scripts/fetch_models.py
-# skip a model (e.g. when depth.enabled: false):
-python3 src/perception_2d/scripts/fetch_models.py --skip depth_anything_v2
-```
-
-This downloads: GroundingDINO + DA-V2 into the HF cache (`/data/models/hf`),
-the SAM2.1 checkpoint as a loose `.pt` (`/data/models/sam2.1_hiera_large.pt`),
-and DINOv2 into the torch.hub cache (`/data/models/torch_hub`). The container is
-configured with `HF_HOME` / `TORCH_HOME` pointed at those caches and runs
-`HF_HUB_OFFLINE=1`.
-
-**2. Run the component on a bag** (ingest + lidar_preprocessing must have run
-first — perception_2d reads `frame_index`, calibration, and static LiDAR):
-
-```bash
-./watod run perception_2d run --bag <bag_id>            # all chunks
-./watod run perception_2d run --bag <bag_id> --chunk <chunk_id>
-./watod run perception_2d run --bag <bag_id> --force    # ignore existing outputs
-```
-
-Chunks whose `detections_2d.parquet` + `tracklets_2d.parquet` already exist are
-skipped unless `--force`. Within a chunk, each camera's masklets are checkpointed
-to a per-camera resume pickle, so an aborted run resumes per camera rather than
-restarting the chunk; `--force` also discards those caches.
-
-**3. Inspect the depth output** with the interactive viewer (needs a forwarded
-`DISPLAY`, or run on the host):
-
-```bash
-./watod run perception_2d viz --bag <bag_id> [--chunk <chunk_id>] [--cam <cam_id>]
-```
-
-See `src/perception_2d/README.md` for the viewer controls.
-
----
-
-## File layout (`src/perception_2d/src/wato_perception_2d/`)
-
-```
-cli.py                     click entrypoint: `run` + `viz`
-config.py                  pydantic config schemas + prompts.yaml synonym map
-pipeline.py                two-pass orchestrator (depth pass, then tracking pass)
-io.py                      frame_index / calibration / static-LiDAR loaders + caches
-viz.py                     interactive depth-vs-image viewer
-models/
-  depth.py                 Depth Anything V2 wrapper (batched infer, unload)
-  detector.py              GroundingDINO wrapper (open-vocab box source for SAM2)
-  yolo_detector.py         YOLO26 wrapper (closed-set box source, default)
-  _sam2_runtime.py         shared SAM2 video-predictor loader / cache
-  sam2_tracker.py          detector + SAM2 per-camera tracking → Masklets
-  discovery.py             Florence-2 open-vocab discovery (optional backend)
-  embeddings.py            DINOv2 appearance embeddings
-fusion/
-  depth_align.py           build_anchor_pairs / ransac_disparity_fit / disparity_to_depth
-  masklet.py               Masklet dataclass
-```
+See `src/perception_2d/README.md` and `src/perception_2d/config/perception_2d.yaml`
+(schema and field docs: `config.py`).
 
 ---
 

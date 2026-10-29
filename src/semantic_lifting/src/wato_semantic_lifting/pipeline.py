@@ -13,7 +13,7 @@ Per-chunk steps:
        d. Run UniLiPs Eq.1 visibility test
        e. Look up the masklets present in that camera frame
        f. Assign masks to visible points (innermost-mask heuristic)
-       g. Cast votes with score = det_score * depth_confidence (1.0 fallback)
+       g. Cast votes weighted by the claiming mask's det_score
     4. Accumulate cross-camera votes → final per-point labels
     5. Write lifted_labels/<sweep_id:06d>.npz
   Write lifted_stats.parquet (wato_common.artifacts.lifted_labels)
@@ -158,10 +158,8 @@ def _process_chunk(
                     continue
                 n_in_any_mask += 1
                 masklet = frame_masklets[mask_idx]
-                # Vote weight is the detector confidence of the mask that claimed
-                # this point (design doc's ``det_score``). The depth artifact has
-                # no per-pixel confidence to fold in, so det_score is the signal;
-                # a small floor keeps a zero-scored mask able to break ties.
+                # The depth artifact has no per-pixel confidence, so the weight is
+                # det_score alone; the floor lets a zero-scored mask break ties.
                 score = max(masklet.det_score, 1e-3)
                 all_votes.append(
                     PointVote(

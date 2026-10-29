@@ -14,9 +14,9 @@ class PointVote:
     """A single camera's label vote for one LiDAR point."""
 
     point_idx: int
-    instance_id: str  # global_object_id from masklet
+    instance_id: str  # MaskletRecord.instance_id (global_object_id, else masklet_id)
     cls: str
-    score: float  # det_score * depth_confidence
+    score: float  # the claiming mask's det_score
     cam_id: str
     mask_area: int  # pixel count of the source mask
 

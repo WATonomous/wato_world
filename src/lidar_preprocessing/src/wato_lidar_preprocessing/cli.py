@@ -27,8 +27,6 @@ def _resolve_bag_id(value: str) -> str:
         --bag data/bags/NuScenes-v1.0-mini-scene-1100/
     """
     p = Path(value)
-    # Path-shaped input → derive bag_id from the directory name the same way
-    # ingest does (slugify non-identifier chars).
     if "/" in value or not _SLUG.sub("", p.name) == p.name:
         raw = _SLUG.sub("_", p.name).strip("_") or "bag"
         return raw

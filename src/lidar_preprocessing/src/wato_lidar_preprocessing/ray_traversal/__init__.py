@@ -1,8 +1,4 @@
-"""Amanatides-Woo 3D-DDA ray traversal for voxel log-odds updates.
-
-Public surface mirrors what the old monolithic ray_traversal.py exported,
-so callers (classify, tests) can keep their imports unchanged.
-"""
+"""Amanatides-Woo 3D-DDA ray traversal for voxel log-odds updates."""
 
 from .dispatch import (
     _MISSING_NUMBA_MSG,

@@ -1,4 +1,4 @@
-"""3D <-> 2D projection used by proposal generation, label refinement, and ingest checks."""
+"""LiDAR → image projection (perception_2d depth anchors, semantic_lifting)."""
 
 from __future__ import annotations
 

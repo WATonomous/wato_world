@@ -1,0 +1,47 @@
+# wato_ingest configuration — WATO recordings with the 6-camera pano ring.
+#
+# ingest.wato.yaml without PANO_EE / PANO_WW, for recordings that lack those
+# two cameras (May 30 ring-road tests 2 and 3; ring_road_corrected is test 3
+# with eidos). Every other value, and its rationale, is ingest.wato.yaml's;
+# change both files together (test_pose_requirements checks they match).
+#
+#   ./watod run ingest /data/bags/<wato_bag>.mcap \
+#       --config /ws/src/ingest/config/ingest.wato_6cam.yaml
+
+chunk_seconds: 30.0
+chunk_overlap_seconds: 2.0
+reference_clock: lidar
+
+max_cam_offset_ms: 60.0
+
+pose_requirements:
+  min_dense_fraction: 0.9
+  max_bracket_ms: 250.0
+  max_speed_mps: 30.0
+
+topics:
+  # nn/ne/se/ss/sw/nw, rectified JPEG (see ingest.wato.yaml for `rectified`
+  # and for recordings that carry raw image_rect instead).
+  cameras:
+    PANO_NN: { image: /camera_pano_nn/image_rect_compressed, info: /camera_pano_nn/camera_info, rectified: true }
+    PANO_NE: { image: /camera_pano_ne/image_rect_compressed, info: /camera_pano_ne/camera_info, rectified: true }
+    PANO_SE: { image: /camera_pano_se/image_rect_compressed, info: /camera_pano_se/camera_info, rectified: true }
+    PANO_SS: { image: /camera_pano_ss/image_rect_compressed, info: /camera_pano_ss/camera_info, rectified: true }
+    PANO_SW: { image: /camera_pano_sw/image_rect_compressed, info: /camera_pano_sw/camera_info, rectified: true }
+    PANO_NW: { image: /camera_pano_nw/image_rect_compressed, info: /camera_pano_nw/camera_info, rectified: true }
+  lidars:
+    # Per-sensor sweeps, NOT the merged /lidar/all/points_merged cloud.
+    lidar_cc: /lidar_cc/velodyne_points   # centre VLP-32C (canonical)
+    lidar_ne: /lidar_ne/velodyne_points   # corner VLP-16
+    lidar_nw: /lidar_nw/velodyne_points   # corner VLP-16
+  pose: /world_modeling/liso/odometry
+  tf_static: /tf_static
+
+ego_frame: base_footprint
+
+quality_thresholds:
+  low_light_v_max:           50.0
+  stationary_speed_mps:       0.5
+  min_pose_availability:      0.95
+  max_camera_drop_fraction:   0.10
+  min_lidar_points:       10000

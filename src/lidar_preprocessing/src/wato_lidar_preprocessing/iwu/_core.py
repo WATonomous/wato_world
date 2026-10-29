@@ -33,12 +33,7 @@ Our variant ("hybrid", chosen over the paper-literal rule):
     keep one mid-sweep origin, so a ray's true start is that uncertain).
     Occluded points, points with no nearby return, points too close to the
     sensor for the window to resolve, and points out of view are not updated.
-    Measured on nuScenes scene-0061 (one 19 s chunk, AW static map, 191k
-    map points): a single-pixel test with nearest-only reinforcement evicted
-    54% of the map — ring gaps and origin error read as "seen through". The
-    windowed test with every-supported reinforcement evicts 7.0%, and
-    eviction is 2.0× more likely within 0.5 m of the union dynamic cloud than
-    elsewhere (the only precision proxy available without labels).
+    (Eviction rates of both variants: docs/lidar_preprocessing_measurements.md.)
 
 Other deviations, each deliberate:
   * r* = SensorModel.range_weight(r, global_map_voxel_size_m) — the same
@@ -250,11 +245,8 @@ def update_with_sweep(
     if cand.size == 0:
         return 0, 0
 
-    # --- Reinforce (Eq. 3): map points with a non-ground return within the
-    # match radius. The paper reinforces each return's single nearest map
-    # point; the map here is voxel-snapped at the same pitch as the radius,
-    # so "nearest" is an artefact of the snap and starves the map points a
-    # 32-beam scan lands between. Every map point a return supports counts.
+    # --- Reinforce (Eq. 3): every map point with a non-ground return within
+    # the match radius (not just the nearest; see module docstring).
     ng = scan_xyz if scan_ground is None else scan_xyz[~scan_ground.astype(bool)]
     supported = np.zeros(cand.size, dtype=bool)
     if ng.shape[0] > 0:

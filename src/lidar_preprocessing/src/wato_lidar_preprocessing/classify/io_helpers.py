@@ -11,18 +11,16 @@ from wato_common.artifacts.lidar_sweeps import read_world
 
 log = logging.getLogger(__name__)
 
-# Auto-disable the in-memory xyz/intensity cache when the estimated total size
-# exceeds this many bytes.  At 4 GB we cap roughly 250 M float64-xyz points
-# (~25 sweeps of 10 M each); the explicit cfg flag still acts as a force-on
-# override.  Set the env var WATO_LIDAR_CACHE_BYTES to override per-host.
+# The in-memory xyz/intensity cache is disabled for a chunk estimated above
+# this (~250 M float64 points), even with cache_world_xyz_in_memory set.
+# WATO_LIDAR_CACHE_BYTES overrides it per host.
 _DEFAULT_CACHE_BYTES = 4 * 1024**3
 
 
 def cache_byte_budget() -> int:
-    """Resolve the cache size cap, honouring WATO_LIDAR_CACHE_BYTES if set.
-    1
-        Invalid values (non-int, <=0) are ignored with a warning so a typo in
-        the env doesn't silently disable the safety net.
+    """The cache size cap, from WATO_LIDAR_CACHE_BYTES if set.
+
+    Invalid values (non-int, <=0) are ignored with a warning.
     """
     raw = os.environ.get("WATO_LIDAR_CACHE_BYTES")
     if raw is None:

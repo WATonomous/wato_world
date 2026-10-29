@@ -726,8 +726,7 @@ def test_deskew_raises_when_no_per_point_time_and_synthesis_disabled(tmp_env):
     sweep records a deskew_failed row instead of producing motion-uncomp
     output that smears statics across voxels.
 
-    This is the safety net for the "buildings as dynamic" bug: a silent
-    fallback was exactly what hid it.  We refuse the case explicitly.
+    A silent fallback would hide the smear, so the case is refused.
     """
     bag_id, chunk_id = "bag_strict", "chunk0"
     _write_calibration(bag_id)
@@ -955,23 +954,22 @@ def test_synthesize_t_offset_from_azimuth_cw_reverses():
 
 
 def test_synthesis_eliminates_intra_sweep_smear_for_static_wall(tmp_env):
-    """End-to-end: missing per-point times + moving ego = smeared statics; fix removes the smear.
+    """End-to-end: missing per-point times + moving ego smear statics; synthesis removes it.
 
-    Bug: when raw NPZ lacks t_offset_us, deskew uses one pose for the whole
-    sweep.  For a rotating LiDAR with moving ego, this places points fired
-    at different intra-sweep times at the wrong world positions — the
-    "static wall smear" that leaks buildings into dynamic_map.npz.
+    With one pose for the whole sweep, points fired at different intra-sweep
+    times land at the wrong world positions, leaking buildings into
+    dynamic_map.npz.
 
     Setup: ego moves +10 m/s on X over a 1-second sweep (extreme to make the
     effect crisp).  Two LiDAR-frame points at azimuth 0 (front) and azimuth
     π (back) hit a static wall.  Because they're observed half a sweep
     apart, ego has moved 5 m between them in reality.
 
-    Without the fix (synthesize_per_point_times=False): both points get the
+    Without synthesis (synthesize_per_point_times=False): both points get the
     header pose at t=0, so the deskewed world X differs by exactly the
     lidar-frame offsets — the smear is visible.
 
-    With the fix: the azimuth-π point gets the mid-sweep pose, which puts
+    With synthesis: the azimuth-π point gets the mid-sweep pose, which puts
     the ego 5 m ahead, exactly compensating the lidar-frame offset.  Both
     deskewed world positions converge.
     """
@@ -1030,8 +1028,8 @@ def test_synthesis_eliminates_intra_sweep_smear_for_static_wall(tmp_env):
     # Instead, place wall_back at sensor (-5, 0, 0) at mid-sweep:
     #   world = ego(5,0,0) + sensor(-5,0,0) = (0,0,0).
     # So front-wall world = (5,0,0); back-wall world = (0,0,0).  Both
-    # static; with the fix they should land at these distinct positions.
-    # Without the fix (single t=0 pose), back-wall world = ego(0,0,0) +
+    # static; with synthesis they should land at these distinct positions.
+    # Without it (single t=0 pose), back-wall world = ego(0,0,0) +
     # sensor(-5,0,0) = (-5,0,0) — wrong by 5 m on x.
     x = np.array([5.0, -5.0], dtype=np.float32)
     y = np.zeros(2, dtype=np.float32)
@@ -1066,7 +1064,7 @@ def test_synthesis_eliminates_intra_sweep_smear_for_static_wall(tmp_env):
         ],
     )
 
-    # WITH the fix: synthesize_per_point_times=True. Both the sweep period and
+    # synthesize_per_point_times=True. Both the sweep period and
     # the rotation direction come from the sensor_model profile; for this
     # symmetric phi∈{0,π} pair cw and ccw both place the back point mid-sweep.
     cfg = ComponentConfig(synthesize_per_point_times=True)
@@ -1078,7 +1076,7 @@ def test_synthesis_eliminates_intra_sweep_smear_for_static_wall(tmp_env):
     # Point 1 at azimuth π, mid-sweep: ego at (5,0,0) + sensor (-5,0,0) = (0,0,0).
     np.testing.assert_allclose(world["x"], [5.0, 0.0], atol=1e-3)
 
-    # SANITY: without the fix, point 1 lands at world (-5,0,0) because both
+    # SANITY: without synthesis, point 1 lands at world (-5,0,0) because both
     # points share the t=0 pose at world origin.  Re-run with the flag off.
     bag2, chunk2 = "bag_synth_off", "chunk0"
     _write_calibration(bag2)
@@ -1196,7 +1194,7 @@ def test_point_time_unit_mismatch_records_failure(tmp_env):
 
 
 # ---------------------------------------------------------------------------
-# Frame-id assignment (Issue E) — multi-lidar canonical-frame grouping.
+# Frame-id assignment — multi-lidar canonical-frame grouping.
 # Tested as a pure function so we don't need to fabricate real sweeps.
 # ---------------------------------------------------------------------------
 

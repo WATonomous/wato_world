@@ -3,6 +3,11 @@
 Primary path:
   python -m wato_ingest run --bag <bag_path>
 
+Bag preparation:
+  validate-bag        Report what each topic is missing (coverage, gaps,
+                      header skew, camera_info pairing, extrinsics, profile).
+  trim-bag            Cut an MCAP bag to the window every topic records in.
+
 Debug and rerun commands:
   inspect-bag         Read topics and duration without writing artifacts.
   register            Write bag-level metadata.
@@ -16,8 +21,10 @@ Debug and rerun commands:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
+import os
 import sys
 
 import click
@@ -64,6 +71,130 @@ def inspect_bag(bag_path: str, storage_id: str) -> None:
         ],
     }
     click.echo(json.dumps(out, indent=2))
+
+
+# ---------------------------------------------------------------------------
+_STATIC_TOPIC_HELP = (
+    "Topic that can't span a time window (/tf_static, one-shot topics). "
+    "Excluded from the window and gap checks; trim-bag copies all of its "
+    "messages. Repeatable."
+)
+
+
+@main.command("validate-bag")
+@click.option("--bag", "bag_path", required=True, type=click.Path(exists=True))
+@click.option("--config", "config_path", default="/ws/src/ingest/config/ingest.yaml")
+@click.option("--static-topic", "static_topics", multiple=True, help=_STATIC_TOPIC_HELP)
+@click.option(
+    "--gap-factor",
+    default=1.5,
+    show_default=True,
+    type=click.FloatRange(min=1.0, min_open=True),
+    help="A gap is consecutive messages more than this x the topic's median "
+    "period apart. 1.5 flags every single dropped message.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Print the report as JSON.")
+def validate_bag_cmd(
+    bag_path: str,
+    config_path: str,
+    static_topics: tuple[str, ...],
+    gap_factor: float,
+    as_json: bool,
+) -> None:
+    """Report what each topic of the bag is missing. Exit 1 on a failure."""
+    from wato_ingest.inputs import bag_check
+
+    cfg = load_config(config_path)
+    scan = bag_check.scan(
+        bag_path, storage_id=cfg.storage_id, tf_static_topic=cfg.topics.tf_static
+    )
+    try:
+        report = bag_check.build_report(
+            scan, cfg, static_topics=set(static_topics), gap_factor=gap_factor
+        )
+    except ValueError as e:
+        raise click.UsageError(str(e)) from e
+    if as_json:
+        out = dataclasses.asdict(report)
+        out["failures"] = report.failures
+        click.echo(json.dumps(out, indent=2))
+    else:
+        click.echo(bag_check.render(report))
+    sys.exit(1 if report.failures else 0)
+
+
+@main.command("trim-bag")
+@click.option("--bag", "bag_path", required=True, type=click.Path(exists=True))
+@click.option("--static-topic", "static_topics", multiple=True, help=_STATIC_TOPIC_HELP)
+@click.option(
+    "--out",
+    "out_path",
+    default=None,
+    help="Output .mcap (default: $BAG_ROOT/trimmed/<bag>_trimmed.mcap).",
+)
+@click.option(
+    "--compression",
+    default="none",
+    show_default=True,
+    type=click.Choice(["none", "zstd", "lz4"]),
+    help="Output chunk compression.",
+)
+@click.option("--overwrite", is_flag=True, help="Replace an existing output.")
+@click.option(
+    "--storage-id", default="", help="rosbag2 storage plugin; detected when omitted."
+)
+def trim_bag_cmd(
+    bag_path: str,
+    static_topics: tuple[str, ...],
+    out_path: str | None,
+    compression: str,
+    overwrite: bool,
+    storage_id: str,
+) -> None:
+    """Cut an MCAP bag to the window in which every non-static topic records."""
+    from wato_ingest.inputs import trim
+
+    try:
+        src = trim.resolve_mcap_file(bag_path)
+        if out_path is None:
+            out_dir = os.path.join(os.environ.get("BAG_ROOT", "/data/bags"), "trimmed")
+            out_path = str(trim.default_output(src, out_dir))
+        result = trim.trim(
+            bag_path,
+            out_path,
+            static_topics=list(static_topics),
+            storage_id=storage_id,
+            compression=compression,
+            overwrite=overwrite,
+        )
+    except trim.TrimError as e:
+        click.echo(f"trim-bag: {e}", err=True)
+        sys.exit(1)
+    w = result.window
+    o = result.input_start_ns
+    click.echo(
+        json.dumps(
+            {
+                "output": result.output,
+                "window_s_from_input_start": [
+                    (w.start_ns - o) / 1e9,
+                    (w.end_ns - o) / 1e9,
+                ],
+                "window_ns": [w.start_ns, w.end_ns],
+                "cut_s": {
+                    "start": (w.start_ns - o) / 1e9,
+                    "end": (result.input_end_ns - w.end_ns) / 1e9,
+                },
+                "start_set_by": w.started_last,
+                "end_set_by": w.ended_first,
+                "static_topics": result.static_topics,
+                "messages": {
+                    t: {"input": a, "output": b} for t, (a, b) in result.counts.items()
+                },
+            },
+            indent=2,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------

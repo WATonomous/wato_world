@@ -1,22 +1,12 @@
 lidar_preprocessing:
   # ====================================================================
-  # WATO 3-Velodyne rig profile (VLP-32C centre + 2× VLP-16 corners).
-  # ====================================================================
-  # Companion to lidar_preprocessing.yaml (the nuScenes profile).  Same
-  # schema; only rig-dependent values differ.  Use together with ingest's
-  # ingest.wato.yaml, which ingests the three per-corner topics as separate
-  # lidars (lidar_cc / lidar_ne / lidar_nw) — classify's ray traversal needs
-  # each sweep's true sensor origin, which the merged cloud destroys.
-  #
-  # Switch per run via --config:
+  # WATO 3-Velodyne rig (VLP-32C centre + 2× VLP-16 corners). Ingest with
+  # ingest.wato.yaml / ingest.wato_6cam.yaml (per-corner LiDAR topics).
   #   ./watod run lidar_preprocessing --bag <wato_bag> \
   #       --config /ws/src/lidar_preprocessing/config/lidar_preprocessing.wato.yaml
+  # ====================================================================
 
-  # Each scanner gets its own datasheet profile: the corners are VLP-16s with
-  # a different channel count, field of view and usable range than the centre
-  # VLP-32C, and deskew, classify and MF-MOS all read the right one per sweep.
-  # Everything physical follows from this block — there is nothing else to set
-  # when the rig changes.
+  # One datasheet profile per scanner; everything physical follows from it.
   sensor_model:
     profile: vlp32c
     per_lidar:
@@ -26,7 +16,6 @@ lidar_preprocessing:
 
   filter_nonfinite_points: true
 
-  # Rotation period comes from each scanner's profile (VLP @ 20 Hz → 50 ms).
   synthesize_per_point_times: true
 
   require_patchwork: true
@@ -39,16 +28,13 @@ lidar_preprocessing:
 
   global_map_voxel_size_m: 0.30
 
-  # Velodyne per-point "time" field is in seconds.  In every WATO bag measured
-  # so far it is all zeros; deskew treats an all-zero field as missing and
-  # synthesizes the times from azimuth instead (README Step A).
+  # Velodyne `time` is in seconds, but all zero on every WATO bag measured, so
+  # deskew synthesizes times from azimuth.
   point_time_unit: "seconds"
 
   # The car's Velodyne driver stamps each sweep with its LAST packet
   # (`timestamp_first_packet: false` in wato_monorepo
-  # src/interfacing/sensor_interfacing/config/velodyne_lidar_config.yaml, all
-  # three scanners).  Synthesized per-point times therefore count back from
-  # the stamp.
+  # src/interfacing/sensor_interfacing/config/velodyne_lidar_config.yaml).
   header_stamp_at: sweep_end
 
   patchwork:
@@ -72,13 +58,9 @@ lidar_preprocessing:
     canonical_lidar: lidar_cc
     tolerance_ms: 25.0
 
-  # MF-MOS on this rig: the released checkpoint is KITTI-trained (64-beam,
-  # single scanner).  The two corner VLP-16s are skipped automatically — 16
-  # channels is below what the projection can represent, and the per_lidar
-  # profiles above are what tells MF-MOS so.  MF-MOS only runs under
-  # `--seg mos` / `--seg union`; the default `aw` keeps the voxel classifier
-  # authoritative for dynamic_map.npz.  Do not switch this rig to union until
-  # mask quality has been audited on it (scripts/debug_mfmos_contribution.py).
+  # MF-MOS (seg=mos / union only) runs on lidar_cc alone: the VLP-16 corners
+  # are below MIN_BEAMS. Unaudited on this rig — keep `aw` until
+  # scripts/debug_mfmos_contribution.py says otherwise.
   mf_mos:
     checkpoint_path: /data/models/mf_mos/mf_mos_semantic_kitti.pt
     arch_config:   /data/models/mf_mos/arch_cfg.yaml
@@ -95,9 +77,8 @@ lidar_preprocessing:
     moving_cluster_voxel_m: 0.5
     moving_min_cluster_pts: 8
 
-  # Steps E/F: same as the nuScenes profile.  The IWU stride is per lidar
-  # from each scanner's datasheet rate, and proposals cluster per
-  # frame_sync frame, so the three per-corner sweeps form one object.
+  # Steps E/F: as the nuScenes profile. Proposals cluster per frame_sync
+  # frame, so one tick's three sweeps form one object.
   iwu:
     enabled: true
     update_rate_hz: 4.0

@@ -1,20 +1,10 @@
 """Pydantic config for perception_2d, sourced from perception_2d.yaml.
 
-The tracker is a 2D detector (GroundingDINO) + SAM2 video predictor
-(detector.py + sam2_tracker.py): the detector emits class-labeled boxes, SAM2
-turns each into a mask and tracks it across the camera stream into masklets.
-
-The *class vocabulary* fed to the detector comes from one of two sources,
-selected by ``discovery.backend``:
-
-- ``fixed``     (default) — the closed-set taxonomy (``discovery.fixed_classes``
-  or prompts.yaml ``primary_taxonomy``). Cleanest output, no synonym dupes.
-- ``florence2`` — open-vocabulary noun phrases discovered per frame by Florence-2,
-  pooled into a concept set per camera stream.
-
-DINOv2 appearance embeddings are extracted per masklet (``embeddings``) for the
-downstream ``tracking`` component; perception_2d does not re-identify here.
-Cross-camera identity merging is likewise deferred downstream.
+A per-keyframe box detector (``detection.backend``: YOLO26 or GroundingDINO)
+feeds SAM2's video predictor, which tracks each box into a masklet. The class
+vocabulary comes from ``discovery.backend``: ``fixed`` (the closed-set
+taxonomy) or ``florence2`` (open-vocab phrases, GroundingDINO only). DINOv2
+embeddings are extracted per masklet for the downstream ``tracking`` component.
 """
 
 from __future__ import annotations
@@ -31,7 +21,7 @@ class DiscoveryConfig(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    # "fixed"     → prompt the detector with the closed-set taxonomy. DEFAULT.
+    # "fixed"     → prompt the detector with the closed-set taxonomy (default).
     # "florence2" → open-vocabulary noun phrases from Florence-2, deduped into a
     #               concept set per camera stream, then fed to the detector.
     backend: str = "fixed"
@@ -92,7 +82,7 @@ class DetectionConfig(BaseModel):
     # --- both backends ----------------------------------------------------
     # Run the detector every k frames to introduce objects entering mid-clip.
     # Large value → effectively detect-once at frame 0.
-    redetect_every_k: int = 10
+    redetect_every_k: int = 2  # images; see config/perception_2d.yaml
 
 
 class SegmentationConfig(BaseModel):
@@ -129,7 +119,7 @@ class TrackingConfig(BaseModel):
     # to latch the lost object's id onto a similar object nearby. A track ends
     # (no more masks recorded; removed from the session at the next keyframe)
     # once its object has had no mask for this many consecutive frames. 0 = never.
-    drop_lost_after_frames: int = 5
+    drop_lost_after_frames: int = 1  # images
     # ...or once its mask and another live track's reach this IoU in the same
     # frame (a jump with no empty frame); the track whose mask changed most
     # since its previous frame is the one that ends. > 1 disables.
@@ -144,15 +134,13 @@ class DepthConfig(BaseModel):
 
     enabled: bool = True
     model: str = "depth-anything-v2-large"
-    # Frames pushed through the DA-V2 backbone in one GPU batch during the depth
-    # pass (depth is VRAM-disjoint from the tracker; batching is a throughput win
-    # when the card has headroom). 1 = original per-frame streaming.
+    # Frames per DA-V2 GPU batch in the depth pass. 1 = one frame at a time.
     batch_size: int = 1
     min_lidar_anchors: int = 30  # min anchor pairs to attempt a disparity fit
     ransac_n_iter: int = 200
     ransac_inlier_threshold_m: float = 0.5
-    # Always static: the pipeline only loads static LiDAR (dynamic points desync
-    # ~75cm at 25ms; see depth_align). Flag retained as explicit intent.
+    # Unused: anchors are always static LiDAR (a mover's points are ~75 cm off
+    # at 25 ms of desync).
     use_static_anchors_only: bool = True
     fallback_window: int = 5
     sky_mask_top_fraction: float = 0.3
@@ -160,17 +148,12 @@ class DepthConfig(BaseModel):
 
 
 class EmbeddingConfig(BaseModel):
-    """DINOv2 appearance-embedding extraction.
-
-    This stage only *extracts and persists* embeddings (for the downstream
-    `tracking` component to use for re-identification); it does not itself
-    re-identify anything.
-    """
+    """DINOv2 appearance embeddings, persisted for the `tracking` component's ReID."""
 
     model_config = ConfigDict(extra="allow")
 
     model: str = "dinov2_vitl14"
-    every_k_frames: int = 5
+    every_k_frames: int = 1  # images
 
 
 # Cache of {synonym(lowercased): canonical class}, keyed by prompts_path, so
@@ -253,11 +236,7 @@ class ComponentConfig(BaseModel):
         return list(_FALLBACK_CONCEPTS)
 
     def synonym_to_class_map(self) -> dict[str, str]:
-        """Cached {synonym(lowercased): canonical class} from prompts.yaml.
-
-        Built once per prompts_path so canonicalisation is a dict lookup rather
-        than a YAML re-parse per masklet.
-        """
+        """Cached {synonym(lowercased): canonical class} from prompts.yaml."""
         cached = _synonym_map_cache.get(self.prompts_path)
         if cached is None:
             cached = _build_synonym_map(self.prompts_path)

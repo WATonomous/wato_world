@@ -189,3 +189,30 @@ def test_pipeline_skips_complete_chunk(empty_bag):
     mtime2 = os.path.getmtime(local_path(detections_2d_path(bag_id, chunk_id)))
 
     assert mtime2 == mtime1
+
+
+def test_force_clears_previous_masks_and_depth(empty_bag):
+    """A forced rerun doesn't leave the previous run's masks / depth behind.
+
+    Mask dirs are named by masklet_id, new each run, so stale ones would sit
+    beside the new run's; a non-forced rerun (resume) must keep them.
+    """
+    from wato_common.artifact_store import depth_2d_dir, local_path, masks_2d_dir
+
+    bag_id, chunk_id, _ = empty_bag
+    stale_mask = os.path.join(
+        local_path(masks_2d_dir(bag_id, chunk_id)), "old", "000001.png"
+    )
+    stale_depth = os.path.join(
+        local_path(depth_2d_dir(bag_id, chunk_id)), "CAM", "000001.npz"
+    )
+    for p in (stale_mask, stale_depth):
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        open(p, "wb").close()
+
+    run(ComponentConfig(), bag_id=bag_id)
+    assert os.path.exists(stale_mask) and os.path.exists(stale_depth)
+
+    run(ComponentConfig(), bag_id=bag_id, force=True)
+    assert not os.path.exists(stale_mask)
+    assert not os.path.exists(stale_depth)

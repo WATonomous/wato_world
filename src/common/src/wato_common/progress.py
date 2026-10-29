@@ -1,26 +1,14 @@
-"""One place to make tqdm behave in batch / non-interactive runs.
+"""Keep tqdm bars from spamming non-interactive output.
 
-The problem: tqdm draws its bar by rewriting the current line with a carriage
-return (``\\r``). On a real terminal that overwrites in place — one tidy line.
-But when stdout/stderr is NOT a TTY (piped through ``watod`` / ``docker compose``,
-tee'd to a file, captured by CI), the ``\\r`` updates are recorded as separate
-lines and the bar "spams" hundreds of lines.
+tqdm redraws with ``\\r``; when stderr isn't a TTY (``watod``, ``docker
+compose``, CI logs) every redraw becomes a new line. That includes bars we
+don't own (SAM2's ``propagate_in_video``), some of which pass an explicit
+``disable=False``, so ``configure_tqdm()`` patches ``tqdm.std.tqdm.__init__``
+process-wide. Call it once at CLI startup. ``WATO_PROGRESS`` selects:
 
-This bites every bar in a run, including ones we don't own — SAM2's internal
-``propagate_in_video`` / frame-loading bars use the same ``tqdm.std.tqdm`` class
-we do. We can't fix those at the call site; worse, a third-party bar may pass an
-explicit ``disable=False``, so a mere default wouldn't help. So we wrap
-``tqdm.std.tqdm.__init__`` process-wide and,
-in the default "auto" mode, *force* ``disable=True`` whenever the bar's output
-stream isn't a TTY — overriding even an explicit ``disable=False``. Result: a
-live single-line bar on a terminal, silence when the output is being captured.
-
-Call ``configure_tqdm()`` once at CLI startup (before any bar is created). It is
-idempotent. Override with the ``WATO_PROGRESS`` env var:
-
-    WATO_PROGRESS=auto   (default) live bar on a TTY, silent when captured
-    WATO_PROGRESS=on     leave bars as-is (the old, possibly spammy, behaviour)
-    WATO_PROGRESS=off    never show bars
+    auto   (default) live bar on a TTY, silent when captured
+    on     leave bars as-is
+    off    never show bars
 """
 
 from __future__ import annotations
@@ -42,16 +30,7 @@ def _stream_is_tty(stream) -> bool:
 
 
 def configure_tqdm() -> None:
-    """Patch tqdm so progress bars don't spam non-TTY output.
-
-    Wraps ``tqdm.std.tqdm.__init__`` to set ``disable`` per WATO_PROGRESS:
-      - "auto" (default): force-disable on non-TTY output (overrides an explicit
-        ``disable=False``, which is what some third-party bars pass); leave TTY
-        bars alone so they still render live.
-      - "off": always disable.
-      - "on": leave the caller's value untouched.
-    Idempotent; a no-op if tqdm isn't installed.
-    """
+    """Patch tqdm per WATO_PROGRESS (see module docstring). Idempotent."""
     global _configured
     if _configured:
         return
@@ -59,7 +38,7 @@ def configure_tqdm() -> None:
 
     mode = os.environ.get("WATO_PROGRESS", "auto").strip().lower()
     if mode in ("on", "1", "true", "yes"):
-        return  # nothing to do — keep upstream behaviour
+        return
 
     force_off = mode in ("off", "0", "false", "no")
 
@@ -75,11 +54,8 @@ def configure_tqdm() -> None:
     _orig_init = _tqdm.__init__
 
     def _patched_init(self, *args, **kwargs):
-        # Adapt the bar width to the live terminal size. Without this tqdm
-        # measures the width once at creation; inside a docker pty that width
-        # is often mis-detected (or the line grows past it via set_postfix), so
-        # each `\r` redraw leaves the wrapped remainder behind — the bar "spams"
-        # a new line on every update instead of overwriting in place.
+        # tqdm measures the width once; in a docker pty it is often wrong, and
+        # each redraw then leaves a wrapped remainder behind.
         kwargs.setdefault("dynamic_ncols", True)
         if force_off:
             kwargs["disable"] = True

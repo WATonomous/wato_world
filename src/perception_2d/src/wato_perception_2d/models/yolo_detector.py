@@ -1,4 +1,4 @@
-"""Closed-set 2D detector (Ultralytics YOLO26) — the alternative box source for SAM2.
+"""Closed-set 2D detector (Ultralytics YOLO26), the default box source for SAM2.
 
 Selected with ``detection.backend: yolo``. Same contract as
 ``GroundingDinoDetector.detect``: class-labeled boxes for one frame, which
@@ -25,8 +25,7 @@ rather than an error:
   telemetry, and ``YOLO_CONFIG_DIR`` points its settings file at a writable
   temp dir; both must be set before ultralytics is first imported.
 
-Lazy-imports ultralytics so this module can be imported without it installed;
-detect() without it raises loudly (no degraded fallback).
+Lazy-imports ultralytics; detect() without it raises.
 """
 
 from __future__ import annotations

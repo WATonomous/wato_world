@@ -1,24 +1,10 @@
-"""Per-chunk artifact manifests — the traceability record for every component.
+"""Per-chunk artifact manifests: what produced, read and wrote a chunk's outputs.
 
-Each component writes one manifest per (bag, chunk) it processes, next to the
-artifacts it produced. A manifest answers three questions after the fact:
-
-  what produced this?   -> ``provenance`` (git commit, dependency lock hash,
-                           base image, pinned model revisions, config hash)
-  what did it read?     -> ``inputs``, each with a content hash
-  what did it write?    -> ``outputs``
-
-The input hashes are what make staleness detectable. If perception_2d's
-manifest records the frame_index.parquet it consumed, and that file's hash no
-longer matches, its outputs are stale — a re-ingest happened underneath it.
-Without this, the artifact tree cannot distinguish "already done" from "done
-against inputs that have since changed", and a stage runner has no safe basis
-for skipping work.
-
-Usage from a component:
-
-    from wato_common import manifest
-    from wato_common.artifact_store import frame_index_path, proposals_path
+One manifest per (bag, chunk) per component, next to its artifacts:
+``provenance`` (git commit, lock hash, base image, model revisions, config
+hash), ``inputs`` (each content-hashed) and ``outputs``. The input hashes make
+staleness detectable: if an input's hash no longer matches, the outputs were
+produced against data that has since changed.
 
     manifest.write(
         component="proposal_generation",
@@ -44,21 +30,16 @@ from wato_common.artifact_store import (
 )
 from wato_common.provenance import collect, file_sha256
 
-#: Files above this size are recorded by (size, mtime) instead of by content
-#: hash. Hashing every lidar sweep NPZ in a chunk would add minutes per chunk to
-#: a pipeline that already costs GPU-hours, for a staleness signal that
-#: (size, mtime) already provides well enough.
+#: Files above this size are recorded by (size, mtime) instead of a content
+#: hash: hashing every lidar sweep NPZ would add minutes per chunk.
 HASH_SIZE_LIMIT_BYTES = 64 * 1024 * 1024
 
 
 def _describe_input(uri: str) -> dict[str, Any]:
     """Identify an input file well enough to detect that it changed.
 
-    Small files get a content hash (exact). Large ones get size + mtime — a
-    weaker signal, but one that costs nothing and still catches a re-run
-    upstream. Missing files are recorded as such rather than raising: a
-    manifest describing a partially-satisfied run is more useful than no
-    manifest.
+    Small files get a content hash, large ones size + mtime. A missing file
+    is recorded as missing rather than raising.
     """
     entry: dict[str, Any] = {"uri": uri}
     try:

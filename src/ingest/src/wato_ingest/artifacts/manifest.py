@@ -1,10 +1,4 @@
-"""Write an ingest manifest per chunk for traceability.
-
-Thin adapter over ``wato_common.manifest``, which all components share. This
-module only knows ingest's own input (the rosbag) and output set; the
-provenance capture, input hashing and manifest schema live in wato_common so
-that nine components cannot drift into nine manifest formats.
-"""
+"""Ingest's per-chunk manifest: its inputs (the rosbag) and outputs, via wato_common.manifest."""
 
 from __future__ import annotations
 
@@ -34,10 +28,8 @@ def write(
 ) -> str:
     """Write ``manifest.json`` for one ingested chunk and return its URI.
 
-    The rosbag is declared as an input so the manifest carries its hash (for a
-    bag under the 64 MB threshold) or its size+mtime. That is what lets a
-    downstream stage tell "ingest already ran for this chunk" apart from
-    "ingest ran, but against a bag that has since been replaced".
+    The rosbag is an input, so a replaced bag shows up as a changed hash (or
+    size+mtime, over 64 MB).
     """
     return common_manifest.write(
         component="ingest",

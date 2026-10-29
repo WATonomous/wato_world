@@ -21,20 +21,15 @@ predictor to segment + propagate each detected box into a tracked masklet:
      track's object (``_EndedTracks``): SAM2 otherwise latches the lost
      object's id onto a different, similar object.
 
-The detector emits one box per object, so each physical object becomes a single
-masklet — no synonym explosion, far fewer masks for downstream to consume.
+Cost: SAM2 runs memory attention per *object* per frame and keeps every object
+it was given, so without pruning cost and VRAM grow with every object ever
+detected. Removing ended tracks at the next keyframe bounds that. SAM2 runs
+under ``autocast_dtype`` (bfloat16 by default); the detector and DINOv2 stay
+float32.
 
-Cost: this SAM2 build runs memory attention + the memory encoder once per
-*object* per frame, and keeps every object it was ever given — including ones
-that left the image long ago — so without pruning, per-frame cost and VRAM grow
-with every object ever detected rather than with what is visible. Ending lost
-tracks and removing them at the next keyframe (steps 2-3) bounds that. SAM2 calls run under ``autocast_dtype`` (bfloat16
-by default, as upstream runs it); the detector and DINOv2 stay float32.
-
-Object ids reset between OOM sub-clip windows (and between chunks), and an
-object whose track ended and is later re-detected starts a new masklet — exactly the
-discontinuity the downstream `tracking` component re-links via the DINOv2
-embeddings persisted here. Cross-camera identity is likewise deferred downstream.
+Object ids reset between OOM windows and chunks, and a re-detected object whose
+track ended starts a new masklet; the `tracking` component re-links them (and
+across cameras) via the DINOv2 embeddings.
 
 SAM2 video predictor API (sam2 package):
     state = predictor.init_state(video_path=<jpeg_dir>, offload_video_to_cpu=True,
@@ -742,8 +737,7 @@ def _record_frame(
             )
         )
     if dino_every_k > 0 and frame_index_abs % dino_every_k == 0:
-        # DINOv2 (torch.hub) is independent of SAM2 and only feeds the downstream
-        # tracking ReID — a failure here must NOT abort the camera. Isolate it.
+        # DINOv2 only feeds downstream ReID: a failure must not abort the camera.
         try:
             feats = extract_dino_features(
                 image_rgb, [m for _, m in present], dino_model, device

@@ -8,7 +8,7 @@ Raw sweep — written by ingest, read by lidar_preprocessing (deskew, MF-MOS):
     ring          uint16  (N,)   optional
     t_offset_us   float64 (N,)   optional; the PointCloud2's per-point time
                                  field in its own units (lidar_preprocessing's
-                                 point_time_scale converts them)
+                                 point_time_unit converts them)
 
   Its URI is recorded in lidar_sweeps.parquet (`lidar_path`); readers open it
   from there.

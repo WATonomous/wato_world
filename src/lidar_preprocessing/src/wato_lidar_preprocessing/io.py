@@ -1,7 +1,6 @@
-"""Artifact I/O helpers for lidar_preprocessing.
+"""Readers for this component's own chunk/bag artifacts (used by the viz).
 
-Thin wrappers over artifact_store path functions so callers don't need to
-import from wato_common directly.
+Artifacts other components read go through wato_common.artifacts instead.
 """
 
 from __future__ import annotations

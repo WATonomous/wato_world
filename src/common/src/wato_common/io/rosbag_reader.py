@@ -16,12 +16,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator
 
-# rosbag2 hands messages back in record-time order: by index for an indexed
-# bag, in write (= arrival) order for an unindexed MCAP.  Every bag measured
-# (nuScenes mini, may_30, the unfinalized ring_road_corrected_0-001) came back
-# with no message older than one already read.  So `messages` stops reading
-# once a message is past the window instead of scanning to the end of the bag
-# on every call; this margin guards against a writer that reorders slightly.
+# rosbag2 returns messages in record-time order (by index, or in write order
+# for an unindexed MCAP; no measured bag had one out of order), so `messages`
+# stops once a message is this far past the window instead of scanning to the
+# end of the bag. The margin covers a writer that reorders slightly.
 _READ_PAST_END_NS = 1_000_000_000
 
 

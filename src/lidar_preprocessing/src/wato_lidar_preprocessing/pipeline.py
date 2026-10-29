@@ -11,23 +11,14 @@ methods, selected by cfg.segmentation (`--seg aw|mos|union`):
                     keep AW's static map, take MF-MOS dynamics vetoed by it.
   C.  ground        — per-sweep ground aggregation + height grid
 
-The two base methods (aw, mos) never import each other; each writes the same
-artifacts (static_map / dynamic_map / dynamic_mask / index) so C and D are
-method-agnostic. `union` is the fusion layer — it runs both halves and reads
-their outputs, then rewrites only the dynamic side. On the union path Step C
-runs BEFORE the fusion (union's ground-height veto reads ground.npz's height
-grid; ground itself only needs static_map.npz, so the swap is safe).
+Every method writes the same artifacts (static_map / dynamic_map /
+dynamic_mask / index), so later steps are method-agnostic. Step D (reduce)
+follows run(); in two_pass mode (aw/union) run() also does reduce + a
+classify-only pass 2. Steps E (IWU) and F (motion proposals) run via
+run_proposals().
 
-Step D (reduce) runs separately via the `reduce` CLI subcommand. In
-two_pass mode (aw/union), run() invokes reduce + a classify-only pass 2.
-
-Steps E (iwu, bag-level UniLiPs IWU) and F (motion_proposals, per-chunk
-recall-oriented moving-object proposals) run after reduce via
-run_proposals(). Both are seg-agnostic consumers of Steps B–D.
-
-Idempotency: chunks whose summary parquet exists (written last, after every
-step) for the same segmentation method are skipped unless force=True.
-Failures in one chunk don't stop the others.
+A chunk whose summary (written last) exists for the same method is skipped
+unless force=True. One chunk failing doesn't stop the others.
 """
 
 from __future__ import annotations
@@ -81,14 +72,10 @@ def _write_chunk_summary(
     ground_result: ground.GroundResult,
     mf_mos_result: mf_mos_step.MFMosResult | None = None,
 ) -> None:
-    """Aggregate per-sweep parquet + segmentation/ground results into one row.
+    """One summary row from lidar_proc_index plus the step results.
 
-    Per-sweep counts come from lidar_proc_index (after Step B updated it).
-    Runtime stats come from the step result objects. `seg_result` is the AW
-    ClassifyResult, the MF-MOS MosSegmentResult, or the UnionSegmentResult;
-    all three expose the cache fields the summary reads, and the mos/union
-    extras (n_sweeps_no_mask, n_vetoed) are read with getattr so the others
-    record None.
+    `seg_result` is a ClassifyResult, MosSegmentResult or UnionSegmentResult;
+    method-specific fields are read with getattr, so the others record None.
     """
     sweep_rows = read_rows(lidar_proc_index_path(bag_id, chunk_id))
     n_total = len(sweep_rows)
@@ -138,18 +125,12 @@ def _write_chunk_summary(
 
 
 def _chunk_complete(bag_id: str, chunk_id: str, segmentation: str) -> bool:
-    """Chunk done for THIS run's segmentation method; re-running won't help.
+    """Chunk finished for THIS run's segmentation method.
 
-    The chunk summary is the completeness marker — it is written last in
-    _process_one_chunk, after every step, so its presence means the chunk
-    finished. ground.npz alone is NOT enough: on the union path Step C runs
-    before the fusion, so ground.npz can exist for a chunk whose dynamic
-    side was never written.
-
-    Artifacts are also only reusable if the same Step-B method produced them
-    — comparing `--seg` runs against each other must not silently serve
-    stale outputs. Summaries written before segmentation_method existed
-    can't be verified and are trusted (legacy behavior).
+    The summary is written last, so it marks completion (ground.npz doesn't:
+    on union, Step C runs before the fusion). It must also name the same
+    method, so `--seg` A/B runs never reuse each other's outputs; summaries
+    older than the column are trusted.
     """
     if not os.path.exists(local_path(ground_path(bag_id, chunk_id))):
         return False
@@ -198,11 +179,9 @@ def _write_chunk_manifest(
 ) -> None:
     """Record what this chunk was produced from, and by what.
 
-    Best-effort: a manifest failure must never fail a chunk that otherwise
-    succeeded — losing traceability for one chunk is better than discarding
-    the compute that produced it. Step F rewrites it with with_proposals=True
-    so the manifest also covers motion_clusters.parquet and the bag-level
-    global_iwu.npz it read (hashed like every other input).
+    Best-effort: a manifest failure never fails a chunk that succeeded. Step F
+    rewrites it with with_proposals=True to add motion_clusters.parquet and
+    the global_iwu.npz it read.
     """
     inputs = {
         "lidar_sweeps": lidar_sweeps_path(bag_id, chunk_id),
@@ -242,12 +221,9 @@ def _process_one_chunk(
 ) -> tuple[str, bool, str]:
     """Run A → A.5 → B → C for a single chunk.
 
-    Returns (chunk_id, ok, error_msg). error_msg carries the full traceback
-    so it survives the ProcessPoolExecutor worker boundary.
-
-    On success, writes manifest_lidar_preprocessing.json recording the ingest
-    artifacts consumed (hashed, so a later re-ingest is detectable) and the
-    image provenance that produced the outputs.
+    Returns (chunk_id, ok, error_msg); error_msg carries the full traceback
+    across the ProcessPoolExecutor boundary. Writes the chunk manifest on
+    success.
     """
     try:
         _validate_chunk_inputs(bag_id, chunk_id)
@@ -255,8 +231,6 @@ def _process_one_chunk(
         log.info("=== chunk %s: step A — deskew ===", chunk_id)
         deskew.process_chunk(cfg, bag_id, chunk_id)
 
-        # Step B: one of two fully independent segmentation methods. They do
-        # not coexist — aw never runs MF-MOS, mos never runs ray traversal.
         if cfg.segmentation == "mos":
             log.info("=== chunk %s: step B — mf_mos inference ===", chunk_id)
             mf_mos_result = mf_mos_step.process_chunk(cfg, bag_id, chunk_id)
@@ -265,11 +239,8 @@ def _process_one_chunk(
             log.info("=== chunk %s: step C — ground ===", chunk_id)
             ground_result = ground.process_chunk(cfg, bag_id, chunk_id)
         elif cfg.segmentation == "union":
-            # Fusion: AW builds the static basis, MF-MOS proposes motion, the
-            # union step keeps AW's static map and vetoes MF-MOS dynamics that
-            # land on it. Step C runs BEFORE the fusion here — union's
-            # ground-height veto reads ground.npz's height grid (ground only
-            # needs static_map.npz, so the swap is safe).
+            # Step C runs before the fusion: union's ground-height veto reads
+            # ground.npz (ground itself only needs static_map.npz).
             log.info(
                 "=== chunk %s: step B — classify (Amanatides-Woo static basis) ===",
                 chunk_id,
@@ -435,24 +406,16 @@ def run(
         cfg: parsed ComponentConfig.
         bag_id: bag identifier (must have been ingested).
         chunk_id: optional single-chunk filter.
-        force: re-process chunks whose ground.npz already exists.
+        force: re-process chunks already complete for this method.
         workers: concurrent worker processes (>=1).
-        two_pass: when True (default False), after pass 1 builds the
-            bag-level global_static_map.npz via reduce_static_map and re-runs
-            classify on every chunk using that map as a global-map prior (a
-            one-time log-odds boost for map-matched voxels — not UniLiPs IWU,
-            which is the bag-level `iwu` step). Roughly doubles classify wall
-            time; improves static recall on long-range structure sparsely
-            observed in any one chunk.
-        config_path: path to the config file that produced ``cfg``. Recorded
-            (as a hash) in each chunk's manifest so a label can be traced back
-            to the exact parameters that produced it. Optional only so the
-            existing tests can call run() without one.
+        two_pass: after pass 1, reduce to global_static_map.npz and re-run
+            classify with it as a one-time log-odds prior (not IWU). Roughly
+            doubles classify time; helps sparsely observed far structure.
+        config_path: the config file behind ``cfg``, hashed into each
+            chunk's manifest.
     """
-    # The global-map prior is an Amanatides-Woo log-odds boost.
-    # `mos` has no log-odds to boost, so it runs single-pass. `union` does have
-    # an AW half, and a better static map sharpens the dynamic veto, so it
-    # keeps two-pass (pass 2 re-classifies + re-fuses; MF-MOS is not re-run).
+    # The prior boosts AW log-odds: `mos` has none; `union` re-classifies and
+    # re-fuses (MF-MOS is not re-run).
     if two_pass and cfg.segmentation == "mos":
         log.info("seg=mos: two-pass global-map prior is aw-only — running single-pass")
         two_pass = False
