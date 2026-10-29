@@ -1,8 +1,7 @@
 """Interactive depth-vs-image viewer for perception_2d ``depth_2d`` artifacts.
 
-A matplotlib window (the 2D analogue of lidar_preprocessing's Open3D
-``watod viz``) for eyeballing what Depth Anything V2 + the LiDAR-anchored
-disparity fit actually produced, frame by frame, against the RGB image:
+A matplotlib window for eyeballing what Depth Anything V2 + the LiDAR-anchored
+disparity fit produced, frame by frame, against the RGB image:
 
   - frame slider   — scrub through one camera's stream
   - opacity slider — blend RGB ↔ depth heatmap (0 = pure image, 1 = pure depth)
@@ -19,8 +18,7 @@ frame over its finite, positive pixels (2nd–98th percentile) so each frame use
 its full colour range; the colourbar reads true metres.  Pixels with no valid
 depth (sky, fit holes) fall through to the underlying image.
 
-Needs DISPLAY (or WSLg) — same as lidar_preprocessing viz.  On WSL2 you can
-also just run it on the host, where matplotlib already has a GUI backend:
+Needs DISPLAY (or WSLg) forwarded into the container, or run it on the host:
 
     PYTHONPATH=src/common/src:src/perception_2d/src \\
         python -m wato_perception_2d viz --bag <bag_id>
@@ -49,7 +47,7 @@ _FIT_LABELS = {0: "ransac", 1: "fallback", 2: "none"}
 _COLORMAPS = ["turbo_r", "turbo", "magma", "viridis", "inferno", "Spectral"]
 _MAX_CACHE = 12  # decoded frames kept resident (LRU); bounds memory on long chunks.
 
-# Dark theme to match the Open3D viewer's charcoal background.
+# Dark theme.
 _BG = "#101014"
 _PANEL = "#1c1c22"
 _FG = "#d8d8e0"
@@ -500,7 +498,7 @@ class DepthViewer:
 
 
 # ---------------------------------------------------------------------------
-# matplotlib import shim (mirrors viz._o3d in lidar_preprocessing).
+# matplotlib import shim.
 # ---------------------------------------------------------------------------
 def _mpl():
     try:

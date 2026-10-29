@@ -1,42 +1,20 @@
 """perception_2d pipeline orchestrator.
 
-Each chunk is processed in two passes so the two heavy GPU models are never
-co-resident — critical on small-VRAM GPUs, where DA-V2-Large + SAM2 + DINOv2
-do not all fit (e.g. ~6 GB):
+Each chunk runs as two passes so the heavy GPU models never share VRAM (DA-V2
+Large + SAM2 + DINOv2 don't fit together on ~6 GB):
 
-  PASS 1 — depth (only DA-V2 in VRAM), per camera (frames batched through the
-  backbone `depth.batch_size` at a time; steps 2-6 then run per frame):
-    1. DepthAnythingV2.infer_batch() → disparity (relative inverse depth)
-    2. Load static LiDAR points for this sweep, and the ego pose at the
-       camera frame's own timestamp (wato_common.pose_lookup)
-    3. depth_align.build_anchor_pairs() → d_lidar, disp
-    4. depth_align.ransac_disparity_fit() → 1/d = scale·disp + shift
-    5. depth_align.disparity_to_depth() → metric_depth
-    6. Write depth_2d/<cam>/<frame>.npz (skipped on total fit failure)
-    Then DA-V2 is unloaded and its VRAM freed before tracking starts.
+  PASS 1 — depth, per camera: DA-V2 disparity (batched), fitted per frame to
+    static LiDAR points projected with the pose at the frame's own time
+    (1/d = scale·disp + shift, RANSAC) → depth_2d/<cam>/<frame>.npz. DA-V2 is
+    then unloaded.
+  PASS 2 — tracking, per camera stream: the detector (detection.backend:
+    YOLO26 or GroundingDINO; vocabulary from discovery.backend) boxes
+    keyframes, SAM2's video predictor masks and tracks each box, DINOv2 embeds
+    each masklet → tracklets_2d.parquet + detections_2d.parquet + mask PNGs.
 
-  PASS 2 — tracking (only the detector + SAM2 + DINOv2 in VRAM), per camera
-  stream:
-    Class vocabulary (selected by discovery.backend):
-      fixed     → concepts come straight from config (closed-set taxonomy).
-      florence2 → Florence-2 discovers open-vocab phrases across the camera
-                  stream; they're pooled + canonicalised into the concept set.
-    The detector (GroundingDINO) emits class-labeled boxes on keyframes; SAM2's
-    video predictor turns each box into a mask and tracks it across the stream →
-    Masklets with persistent IDs, with DINOv2 appearance embeddings extracted
-    every k frames. Then write detections_2d.parquet + tracklets_2d.parquet.
-
-The split costs a second image decode (each pass loads the frames once) in
-exchange for halving peak VRAM. Model loading is fail-loud — a missing detector /
-SAM2 / depth model raises rather than emitting degraded output, and the SAM2 +
-detector imports are checked before the depth pass so a missing install fails
-fast instead of after the whole depth pass.
-
-Cross-camera identity merging is intentionally NOT done here.  perception_2d's
-deliverable is per-camera masklets + masks + metric depth + DINOv2 appearance
-embeddings.  Resolving the same physical object across cameras belongs in the
-downstream `tracking` component (3D/4D, gated by the DINOv2 features persisted
-here).  `global_object_id` is left null for `tracking` to populate.
+Model loading is fail-loud, and SAM2 + the detector are import-checked before
+the depth pass. Cross-camera identity is left to the `tracking` component
+(global_object_id stays null).
 """
 
 from __future__ import annotations
@@ -46,7 +24,8 @@ import os
 import pickle
 import shutil
 from collections import defaultdict, deque
-from typing import Optional
+from dataclasses import replace
+from typing import Optional, Union
 
 from tqdm.auto import tqdm
 
@@ -94,12 +73,19 @@ from wato_perception_2d.models.detector import (
     detector_importable,
 )
 from wato_perception_2d.models.discovery import Florence2Discovery
+from wato_perception_2d.models.yolo_detector import (
+    YoloDetector,
+    check_class_map,
+    yolo_importable,
+)
 from wato_perception_2d.models.sam2_tracker import track_camera
 
 log = logging.getLogger(__name__)
 
 # A (text_prompt, canonical_class) concept fed to the detector.
 Concept = tuple[str, str]
+# Either box source; both expose detect(image_rgb, concepts) -> list[Detection].
+Detector = Union[GroundingDinoDetector, YoloDetector]
 
 
 def _default_device() -> str:
@@ -196,15 +182,11 @@ def _align_and_write_depth(
 ) -> None:
     """LiDAR-align one frame's DA-V2 disparity to metric depth and write it.
 
-    The DA-V2 inference is done by the caller (batched); this is the per-frame
-    sequential tail. Writes nothing on total failure (FitStatus.FAILED): the
-    depth artifact's contract is that a missing frame means no usable depth.
-
-    The static points are already in world coordinates (each deskewed at its
-    own time by lidar_preprocessing), so projecting them into this image needs
-    the ego pose when the image was taken — looked up at the frame's
-    camera_timestamp_ns, not the LiDAR sweep's pose from frame_index (the car
-    moves between the two; up to ~0.9 m at 30 m on the WATO rig).
+    The caller runs DA-V2 (batched); this is the per-frame sequential tail.
+    Writes nothing on FitStatus.FAILED (a missing frame means no usable depth).
+    The world-frame static points are projected with the ego pose at the
+    frame's camera_timestamp_ns, not frame_index's sweep pose (up to ~0.9 m
+    apart at 30 m on the WATO rig).
     """
     H, W = disparity.shape[:2]
     fit_params: dict = {
@@ -215,7 +197,15 @@ def _align_and_write_depth(
         "fit_status": depth.FitStatus.FAILED,
     }
 
-    static_pts = load_static_lidar_points(bag_id, chunk_id, frame.sweep_id)
+    # Every sweep this image is nearest to (3 LiDARs on the WATO rig). Their
+    # static points are world-frame, so they combine directly; the corner
+    # scanners add anchors where the centre one doesn't reach.
+    per_sweep = [
+        load_static_lidar_points(bag_id, chunk_id, sid)
+        for sid in (frame.sweep_ids or (frame.sweep_id,))
+    ]
+    per_sweep = [p for p in per_sweep if p is not None and len(p)]
+    static_pts = np.concatenate(per_sweep) if per_sweep else None
     pose = (
         poses.at(frame.camera_timestamp_ns)
         if frame.camera_timestamp_ns is not None
@@ -273,9 +263,8 @@ def _load_cam_partial(
 ) -> Optional[list[Masklet]]:
     """Return cached per-camera masklets if a usable partial exists.
 
-    A zero-length cached list is treated as "no usable cache" rather than "done":
-    producing zero masklets is almost always a silent failure (model unavailable),
-    and trusting it would let one bad run permanently skip a camera on resume.
+    An empty cached list counts as no cache: zero masklets is almost always a
+    silent failure, and trusting it would skip the camera on every resume.
     """
     p = _cam_partial_path(bag_id, chunk_id, cam_id)
     if not os.path.exists(p):
@@ -338,12 +327,8 @@ def _free_cuda() -> None:
 
 
 def _log_vram(tag: str) -> None:
-    """Log current reserved/allocated VRAM (best-effort, no-op on CPU).
-
-    Called after each camera's tracking so drift (memory not returned between
-    cameras) is visible in the logs *before* it turns into an OOM, instead of
-    only finding out by dying mid-propagation.
-    """
+    """Log reserved/allocated VRAM (best-effort, no-op on CPU), so drift between
+    cameras shows in the logs before it becomes an OOM."""
     try:
         import torch
 
@@ -359,10 +344,7 @@ def _log_vram(tag: str) -> None:
 
 
 def _inference_ctx():
-    """torch.inference_mode() when torch is present, else a no-op context.
-
-    Wrapping the tracking loop is cheap insurance against any accidental autograd
-    bookkeeping on inference tensors; it does not itself reduce VRAM."""
+    """torch.inference_mode() when torch is present, else a no-op context."""
     try:
         import torch
 
@@ -378,7 +360,7 @@ def _process_chunk(
     bag_id: str,
     chunk_id: str,
     discovery: Optional[Florence2Discovery],
-    detector: GroundingDinoDetector,
+    detector: Detector,
     fixed_concepts: list[Concept],
     device: str,
     *,
@@ -389,26 +371,44 @@ def _process_chunk(
     DA-V2 (depth) and the detector + SAM2 (tracking) are never built at the same
     time, so only one heavy model set occupies the GPU at once.
     """
+    if force:
+        # Start the chunk clean. Mask dirs are named by masklet_id, which is new
+        # each run, so without this a rerun leaves the previous run's masks
+        # beside the new ones (unreferenced by tracklets_2d, but there when
+        # browsing masks_2d); a depth frame whose fit now fails would keep its
+        # old file, breaking "missing file = no usable depth".
+        for d in (
+            _partial_dir(bag_id, chunk_id),
+            local_path(masks_2d_dir(bag_id, chunk_id)),
+            local_path(depth_2d_dir(bag_id, chunk_id)),
+        ):
+            if os.path.isdir(d):
+                shutil.rmtree(d)
+
     frames = load_frame_index(bag_id, chunk_id)
     if not frames:
         log.warning("chunk %s: empty frame index — skipping", chunk_id)
         _write_empty(bag_id, chunk_id)
         return
 
-    # Fail FAST: there are frames to track, so SAM2 + the detector are required.
-    # Confirm they import before the (expensive) depth pass, rather than
-    # discovering a missing install only after depth has already run.
+    # There are frames to track: confirm SAM2 + the detector import before the
+    # expensive depth pass.
     if not sam2_importable():
         raise RuntimeError(
             f"chunk {chunk_id}: SAM2 (`sam2`) is not importable but "
             f"{len(frames)} frames need tracking. Install the `sam2` package and "
             "fetch facebook/sam2.1-hiera-large into the HF cache."
         )
-    if not detector_importable():
+    backend_ok, backend_pkg = (
+        (yolo_importable, "ultralytics")
+        if cfg.detection.backend == "yolo"
+        else (detector_importable, "transformers")
+    )
+    if not backend_ok():
         raise RuntimeError(
-            f"chunk {chunk_id}: the detector backend (`transformers`) is not "
-            f"importable but {len(frames)} frames need detection. Install "
-            "transformers and fetch the GroundingDINO checkpoint "
+            f"chunk {chunk_id}: the {cfg.detection.backend} detector backend "
+            f"(`{backend_pkg}`) is not importable but {len(frames)} frames need "
+            f"detection. Install {backend_pkg} and fetch the checkpoint "
             "(scripts/fetch_models.py)."
         )
 
@@ -416,18 +416,20 @@ def _process_chunk(
     calibration = {cam_id: calib.camera(cam_id) for cam_id in calib.cameras}
 
     partial_dir = _partial_dir(bag_id, chunk_id)
-    if force and os.path.isdir(partial_dir):
-        shutil.rmtree(partial_dir)
 
     frames_by_cam: dict[str, list[CameraFrameInfo]] = defaultdict(list)
     for f in frames:
         frames_by_cam[f.cam_id].append(f)
     for cam_id in frames_by_cam:
-        frames_by_cam[cam_id].sort(key=lambda f: f.camera_seq)
+        frames_by_cam[cam_id] = _one_frame_per_image(
+            sorted(frames_by_cam[cam_id], key=lambda f: f.camera_seq)
+        )
 
     log.info(
-        "chunk %s: %d frames across %d cameras; discovery=%s; depth=%s",
+        "chunk %s: %d images (%d frame_index rows) across %d cameras; "
+        "discovery=%s; depth=%s",
         chunk_id,
+        sum(len(v) for v in frames_by_cam.values()),
         len(frames),
         len(frames_by_cam),
         cfg.discovery.backend,
@@ -455,9 +457,6 @@ def _process_chunk(
         device,
     )
 
-    # NOTE: cross-camera identity merging is deliberately deferred to the
-    # downstream `tracking` component (see module docstring). global_object_id
-    # is left null here.
     _write_masklets(bag_id, chunk_id, all_masklets, cfg.synonym_to_class_map())
     log.info("chunk %s: wrote %d masklets", chunk_id, len(all_masklets))
 
@@ -540,6 +539,29 @@ def _run_depth_pass(
         _free_cuda()
 
 
+def _one_frame_per_image(frames: list[CameraFrameInfo]) -> list[CameraFrameInfo]:
+    """One entry per camera image, from a camera's frames sorted by camera_seq.
+
+    frame_index has one row per (sweep, camera), so an image repeats for every
+    sweep it is nearest to — ~4.9x on the 3-LiDAR WATO rig (3 x 19.8 Hz sweeps
+    against 12 Hz cameras). Both passes must see each image once: repeats
+    re-run depth on the same image (last row's sweep wins the file), multiply
+    SAM2's frame stack in host RAM, write each camera_seq into frames_present
+    once per row, and make the frame-counted settings (redetect_every_k,
+    drop_lost_after_frames, embeddings.every_k_frames) count rows instead of
+    images. Keeps the first row of each camera_seq, with every row's sweep in
+    `sweep_ids` so depth can anchor on all of them.
+    """
+    out: list[CameraFrameInfo] = []
+    sweeps: list[list[int]] = []
+    for f in frames:
+        if not out or out[-1].camera_seq != f.camera_seq:
+            out.append(f)
+            sweeps.append([])
+        sweeps[-1].extend(f.sweep_ids or (f.sweep_id,))
+    return [replace(f, sweep_ids=tuple(dict.fromkeys(s))) for f, s in zip(out, sweeps)]
+
+
 def _run_tracking_pass(
     cfg: ComponentConfig,
     bag_id: str,
@@ -547,7 +569,7 @@ def _run_tracking_pass(
     frames_by_cam: dict[str, list[CameraFrameInfo]],
     calibration: dict[str, CameraCalibration],
     discovery: Optional[Florence2Discovery],
-    detector: GroundingDinoDetector,
+    detector: Detector,
     fixed_concepts: list[Concept],
     device: str,
 ) -> list[Masklet]:
@@ -570,8 +592,6 @@ def _run_tracking_pass(
         )
 
     all_masklets: list[Masklet] = []
-    # inference_mode over the whole per-camera loop: cheap insurance against
-    # stray autograd bookkeeping on inference tensors (no-op when torch absent).
     with _inference_ctx():
         for cam_id, cam_frames in frames_by_cam.items():
             calib = calibration.get(cam_id)
@@ -629,6 +649,7 @@ def _run_tracking_pass(
                 sub_clip_frames=cfg.tracking.sub_clip_frames,
                 min_sub_clip_frames=cfg.tracking.min_sub_clip_frames,
                 drop_lost_after_frames=cfg.tracking.drop_lost_after_frames,
+                duplicate_mask_iou=cfg.tracking.duplicate_mask_iou,
                 autocast_dtype=cfg.tracking.autocast_dtype,
             )
             log.info(
@@ -680,19 +701,66 @@ def _write_empty(bag_id: str, chunk_id: str) -> None:
     masklets.write(bag_id, chunk_id, [])
 
 
+def build_detector(cfg: ComponentConfig, fixed_concepts: list[Concept]):
+    """The configured per-keyframe box source (``detection.backend``).
+
+    Both backends expose ``detect(image_rgb, concepts) -> list[Detection]``. The
+    detector is built here but loads its weights lazily on the first detect() —
+    in the tracking pass, after the depth pass — so it stays out of VRAM during
+    depth. Configuration mismatches are rejected here, before any chunk runs.
+    """
+    det = cfg.detection
+    if det.backend == "grounding_dino":
+        return GroundingDinoDetector(
+            model_id=det.model,
+            box_threshold=det.box_threshold,
+            text_threshold=det.text_threshold,
+            nms_iou=det.nms_iou,
+            device=None,
+        )
+    if cfg.discovery.backend != "fixed":
+        raise ValueError(
+            "detection.backend: yolo has a fixed (COCO) vocabulary and can't be "
+            f"prompted by discovery.backend: {cfg.discovery.backend}. Use "
+            "discovery.backend: fixed, or detection.backend: grounding_dino for "
+            "open-vocabulary detection."
+        )
+    misnamed, unused, uncovered = check_class_map(det.yolo.class_map, fixed_concepts)
+    taxonomy = sorted({c for _, c in fixed_concepts})
+    if misnamed:
+        raise ValueError(
+            f"detection.yolo.class_map maps to {sorted(misnamed)}, which nearly "
+            f"match taxonomy classes {taxonomy} but aren't one; those detections "
+            f"would be silently dropped. Fix the spelling, or check that "
+            f"{cfg.prompts_path} (synonym → canonical class) is mounted."
+        )
+    if unused:
+        log.info(
+            "detection.yolo.class_map targets %s are not in this taxonomy; "
+            "those detections are dropped",
+            sorted(unused),
+        )
+    if uncovered:
+        log.warning(
+            "detection.backend yolo: no class_map entry produces taxonomy "
+            "classes %s — they will never be detected",
+            sorted(uncovered),
+        )
+    return YoloDetector(
+        det.yolo.checkpoint,
+        class_map=det.yolo.class_map,
+        conf=det.yolo.conf,
+        iou=det.yolo.iou,
+        imgsz=det.yolo.imgsz,
+        device=None,
+    )
+
+
 def _write_chunk_manifest(
     bag_id: str, chunk_id: str, config_path: Optional[str]
 ) -> None:
-    """Record which models and parameters produced this chunk's 2D labels.
-
-    This is the manifest that matters most in the pipeline: GroundingDINO,
-    SAM2, Depth-Anything-V2 and DINOv2 jointly decide every 2D label, and
-    ``model_revisions()`` names the exact pinned weights of all four. Without
-    it, two runs that disagree cannot be attributed to a model change, a config
-    change, or a code change.
-
-    Best-effort: never fails a chunk that otherwise succeeded.
-    """
+    """Record the models (``model_revisions()``), config and inputs behind this
+    chunk's 2D labels. Best-effort: never fails a chunk that succeeded."""
     try:
         common_manifest.write(
             component="perception_2d",
@@ -732,9 +800,7 @@ def run(
     provide raises rather than emitting empty placeholder output.
 
     Args:
-        config_path: path to the config that produced ``cfg``. Hashed into each
-            chunk's manifest alongside the pinned model revisions, so a label
-            can be traced to the exact parameters and weights behind it.
+        config_path: the config behind ``cfg``, hashed into each manifest.
     """
     if cfg.discovery.backend == "fixed" and not os.path.exists(cfg.prompts_path):
         log.info(
@@ -765,12 +831,8 @@ def run(
 
     device = _default_device()
 
-    # Class-vocabulary source. The fixed list is computed once; the Florence-2
-    # model (if used) is built lazily on first propose(). The detector is built
-    # here but its model loads lazily on the first detect() — which happens in
-    # the tracking pass, after the depth pass — so it stays out of VRAM during
-    # depth. The heavy GPU models (DA-V2 and SAM2) are built *inside* each
-    # chunk's passes, so the two never co-reside in VRAM.
+    # Florence-2 and the detector load their weights lazily (in the tracking
+    # pass); DA-V2 and SAM2 are built inside each chunk's passes.
     discovery: Optional[Florence2Discovery] = None
     fixed_concepts: list[Concept] = []
     if cfg.discovery.backend == "florence2":
@@ -783,13 +845,7 @@ def run(
             len(fixed_concepts),
         )
 
-    detector = GroundingDinoDetector(
-        model_id=cfg.detection.model,
-        box_threshold=cfg.detection.box_threshold,
-        text_threshold=cfg.detection.text_threshold,
-        nms_iou=cfg.detection.nms_iou,
-        device=None,
-    )
+    detector = build_detector(cfg, fixed_concepts)
 
     n_ok = n_skip = 0
     try:

@@ -1,11 +1,7 @@
-"""Log-odds ray-casting classifier.
+"""Log-odds ray-casting classifier (Amanatides-Woo).
 
-All log-odds increments, thresholds, range weighting and carve margin come
-from the datasheet SensorModel (see sensor_model.py) — no hand-tuned knobs.
-
-Pure Amanatides-Woo: no MF-MOS here. The MF-MOS method is a separate,
-self-contained module (mf_mos/), selected with `--seg mos`; `--seg union`
-fuses the two in union/.
+All increments, thresholds, range weighting and the carve margin come from the
+datasheet SensorModel (sensor_model.py).
 """
 
 from __future__ import annotations
@@ -267,8 +263,6 @@ def classify_from_log_odds(
     A point is dynamic IFF its voxel is in dynamic_arr. Everything else —
     static, ambiguous, under-evidenced, free-only, and voxels never observed
     at all — is not dynamic: absence of evidence is not motion evidence.
-    (The old formulation defaulted never-observed voxels to dynamic, which
-    dumped every return outside the observed grid into dynamic_map.npz.)
 
     Both returned key arrays are sorted (unique_keys is sorted; boolean
     masking preserves order), so callers may use np.searchsorted directly.

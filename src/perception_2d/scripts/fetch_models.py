@@ -7,18 +7,17 @@ Run on the host BEFORE launching the container so that ${MODELS_ROOT}
 Layout produced:
 
     ${MODELS_ROOT}/
-      sam2.1_hiera_large.pt        # raw SAM2.1 checkpoint (loaded by path)
-      hf/                          # HuggingFace cache (HF_HOME)
+      sam2.1_hiera_large.pt, yolo26x.pt   # raw checkpoints (loaded by path)
+      hf/                                 # HuggingFace cache (HF_HOME)
         hub/models--IDEA-Research--grounding-dino-base/...
         hub/models--depth-anything--Depth-Anything-V2-Large/...
-      torch_hub/                   # torch.hub cache (TORCH_HOME)
+        hub/models--microsoft--Florence-2-large-ft/...
+      torch_hub/                          # torch.hub cache (TORCH_HOME)
         hub/checkpoints/dinov2_vitl14_pretrain.pth
-        hub/facebookresearch_dinov2_main/...
+        hub/facebookresearch_dinov2_<ref>/...
 
-The perception_2d container expects HF_HOME=/data/models/hf and
-TORCH_HOME=/data/models/torch_hub.  Set these in the compose service
-environment (or in watod-config.sh) so the runtime loaders find the
-pre-downloaded weights.
+What is fetched, at which revision, is model_registry.py. The container reads
+them with HF_HOME=/data/models/hf and TORCH_HOME=/data/models/torch_hub.
 
 Usage:
     # Default: write to ./data/models relative to the repo root.

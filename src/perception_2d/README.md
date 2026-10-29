@@ -1,173 +1,120 @@
 # perception_2d
 
-2D perception pass (GroundingDINO + SAM2 + Depth Anything V2 + DINOv2
-appearance embeddings).
+Per camera: a detector boxes keyframes, SAM2's video predictor tracks each box
+into a masklet (one per physical object), DINOv2 embeds each masklet, and Depth
+Anything V2 gives a metric depth map per image, fitted to static LiDAR.
+Cross-camera identity is left to the `tracking` component (`global_object_id`
+stays null).
 
-Per camera, the detector (GroundingDINO) emits class-labeled boxes on keyframes
-and SAM2's video predictor turns each box into a mask and tracks it across the
-frame stream into masklets (persistent object ids) — one box per object, so each
-physical object becomes a single masklet (no concept-everything explosion).
-DINOv2 appearance embeddings are extracted every k frames (for downstream
-re-identification — not used for tracking here). The class vocabulary comes from
-one of two sources, selected by `discovery.backend`:
+## Running
 
-- `fixed` (default) — the closed-set taxonomy (`discovery.fixed_classes`,
-  or prompts.yaml `primary_taxonomy` when empty).
-- `florence2` — open-vocabulary noun phrases discovered per frame by Florence-2,
-  pooled into one concept set per camera stream and fed to the detector.
-
-Depth Anything V2 + a LiDAR-anchored fit produces a metric depth map per
-frame. DA-V2's relative checkpoints output *disparity* (larger = closer), so the
-fit is in inverse-depth space: `1/depth = scale·disparity + shift`, with RANSAC
-inliers judged in metres. Model loading is fail-loud: a missing detector / SAM2 / Depth Anything
-raises rather than emitting degraded placeholder output.
-
-Cross-camera identity merging is **not** done here — it belongs to the
-downstream `tracking` component (3D/4D association gated by the DINOv2 features
-persisted on each masklet). `global_object_id` is left null for `tracking`.
-
-For the full design (two-pass VRAM split, output schemas, config reference) see
-[`docs/research/perception_2d_v2.md`](../../docs/research/perception_2d_v2.md).
-
-## Running it
-
-**1. Fetch model weights on the host** (before launching the container) into
-`${MODELS_ROOT}`, bind-mounted read-only at `/data/models`:
+Fetch the weights on the host first, into `${MODELS_ROOT}` (default
+`./data/models`, mounted read-only at `/data/models`):
 
 ```bash
-python3 src/perception_2d/scripts/fetch_models.py        # → ./data/models
-# custom location:
-MODELS_ROOT=/srv/wato_models python3 src/perception_2d/scripts/fetch_models.py
-# skip a model (e.g. when depth.enabled: false):
-python3 src/perception_2d/scripts/fetch_models.py --skip depth_anything_v2
+python3 src/perception_2d/scripts/fetch_models.py [--skip depth_anything_v2]
 ```
 
-Pulls GroundingDINO, Depth Anything V2 and Florence-2 into the HF cache, the
-SAM2.1 checkpoint as a loose `.pt`, and DINOv2 into the torch.hub cache. The
-container points `HF_HOME` / `TORCH_HOME` at those caches and runs
-`HF_HUB_OFFLINE=1`.
-
-**Every model is pinned to an exact revision.** The registry lives at
-[`model_registry.py`](src/wato_perception_2d/model_registry.py) and is the
-single source of truth for both this fetcher and the in-container runtime
-loaders, so a pinned fetch and an unpinned load cannot disagree. These four
-models jointly decide every 2D label the pipeline emits; an unpinned HF `main`
-or torch.hub default branch would silently change the labeler between runs.
-
-Two consequences worth knowing:
-
-- `torch.hub` caches by ref, so `embeddings.py` loads
-  `facebookresearch/dinov2:<sha>`, not the bare repo. A bare reference looks
-  for a differently-named cache directory, misses the pre-fetched weights, and
-  tries to reach the network from a container whose `/data/models` is
-  read-only.
-- HF loaders (GroundingDINO, Florence-2, Depth Anything V2) pass
-  `revision=hf_revision(repo_id)`. `fetch_models.py` downloads by SHA, and
-  huggingface_hub writes no `refs/main` for a SHA fetch, so a loader asking for
-  the default `main` can't resolve offline on a clean host. A model ID in the
-  config that isn't in the registry now fails at load time on purpose; register
-  it with a SHA first.
-- Florence-2 is referenced by `discovery.model` in the config but was missing
-  from the registry until 2026-09-21, so it was never pre-fetched — enabling
-  discovery on a clean host failed at load time. It is registered now.
-
-To upgrade a model: change its revision in `model_registry.py`, re-run
-`fetch_models.py`, re-run the affected stages. The new revision is recorded in
-every manifest written afterwards, so old and new labels stay distinguishable.
-
-**2. Run on a bag** — `ingest` and `lidar_preprocessing` must have run first
-(perception_2d reads `frame_index`, `poses.parquet`, calibration, and static
-LiDAR points; each image's LiDAR anchors are projected with the ego pose at
-that image's own timestamp, not the LiDAR sweep's):
+Then, after ingest and lidar_preprocessing:
 
 ```bash
-./watod run perception_2d run --bag <bag_id>            # all chunks
-./watod run perception_2d run --bag <bag_id> --chunk <chunk_id>
-./watod run perception_2d run --bag <bag_id> --force    # ignore existing outputs
+./watod run perception_2d --bag <bag_id> [--chunk <chunk_id>] [--force]
+./watod run perception_2d viz --bag <bag_id> [--chunk <chunk_id> --cam <cam_id>]
+./watod test perception_2d
 ```
 
-Chunks whose output parquets already exist are skipped unless `--force`. Each
-camera's masklets are checkpointed to a per-camera resume cache, so an aborted
-run resumes per camera; `--force` discards those caches too.
+A chunk whose output parquets exist is skipped. Each camera's masklets are
+checkpointed, so an aborted run resumes per camera. `--force` discards those
+caches and clears the chunk's `masks_2d/` and `depth_2d/` first (mask
+directories are named by masklet id, which is new every run).
 
-Outputs land in the chunk directory, `data/artifacts/raw/<bag_id>/chunks/<chunk_id>/`:
-`detections_2d.parquet`, `tracklets_2d.parquet`, `masks_2d/`, `depth_2d/`.
-The masklet tables and mask PNGs are written and read only through
-`wato_common.artifacts.masklets`, which owns their encoding (`frames_present`
-is a JSON string on disk, a tuple of ints once read). Consumers use its
-`MaskletIndex`, never the paths. `depth_2d/<cam_id>/<camera_seq:06d>.npz` is
-likewise owned by `wato_common.artifacts.depth` (`DepthFrame`, `FitStatus`):
-a frame whose LiDAR-anchored fit failed is not written at all, so a missing
-frame means "no usable depth", and a 0 pixel means no measurement there.
+## How a chunk runs
 
-**Re-run depth produced before 2026-10-11.** The original fit modelled depth as
-an affine of disparity, which is the wrong shape (the true slope is negative and
-hyperbolic), so those `depth_2d/` maps are wrong. Their files carry
-`affine_a`/`affine_b` instead of `disp_scale`/`disp_shift`, and the reader now
-rejects them with `ArtifactFormatError` rather than serve them as metric;
-`--force` regenerates them.
+Two passes, so the heavy models never share VRAM:
 
-## Tracking speed
+1. **Depth.** DA-V2 outputs relative *disparity*, so the fit is in inverse-depth
+   space, `1/depth = scale·disparity + shift`, by RANSAC with inliers judged in
+   metres. The anchors are the static (`~dynamic_mask`) world-frame points of
+   every sweep the image matched, projected with the ego pose at the image's
+   own `camera_timestamp_ns`. With too few anchors, a recent frame's fit is
+   reused; a frame with no usable fit is not written.
+2. **Tracking.** The detector runs every `redetect_every_k` images; boxes that
+   match an existing track (mask IoU ≥ `iou_match_threshold`) or a better box
+   at the same keyframe are dropped, and the rest prompt SAM2. SAM2 latches a
+   lost object's id onto a similar nearby object within a few images, so a
+   track **ends** when its object has had no mask for `drop_lost_after_frames`
+   images, or its mask reaches `duplicate_mask_iou` with another live track's
+   (the one whose mask changed most ends). A pixel claimed by several masks goes
+   to the highest logit. On CUDA OOM the camera is retried in windows of
+   `sub_clip_frames`. SAM2 runs under `autocast_dtype` (bfloat16); the detector
+   and DINOv2 stay float32.
 
-SAM2 (this pinned build) runs memory attention once per *object* per frame and
-never forgets an object, so cost tracks objects-ever-detected, not
-objects-visible. Two `tracking` settings bound it:
+**One entry per image.** `frame_index` repeats an image once per sweep it is
+nearest to (~4.9× on WATO, ~1.7× on nuScenes), so both passes collapse rows by
+`camera_seq` first (`pipeline._one_frame_per_image`). Every frame-counted
+setting counts images.
 
-- `drop_lost_after_frames` (default 30, ~2.5 s at 12 Hz) — an object with no
-  mask for that long is removed from the session at the next keyframe. If it
-  comes back and is re-detected it starts a new masklet (re-linked downstream
-  via DINOv2). `0` = never drop.
-- `autocast_dtype` (default `bfloat16`, upstream's own setting) — SAM2 calls
-  run under CUDA autocast; the detector and DINOv2 stay float32.
+Model loading is fail-loud: a missing detector, SAM2 or DA-V2 raises, and SAM2
+and the detector are import-checked before the depth pass.
 
-Frames ingest wrote as JPEG are symlinked into SAM2's frame dir instead of being
-re-encoded, mask PNGs are written on a thread pool, and DINOv2 embeds all of a
-frame's objects in one batch.
+## Detector backends
 
-Measured on 181 frames (1280×1024) of one WATO pano camera, RTX 5070 Ti, full
-tracking pass (detector + SAM2 + DINOv2 + mask writes):
+`detection.backend` picks the box source; both return the same boxes:
 
-| setting | time | peak VRAM | masks vs. old float32 path (per-frame IoU, mean / median) |
-|---|---|---|---|
-| float32, never drop (old path) | 283 s | 7.3 GB | — |
-| bfloat16, never drop | 63 s | 7.3 GB | 0.981 / 0.993 |
-| bfloat16, drop after 30 (default) | 38 s | 4.8 GB | 0.976 / 0.993 |
+- **`yolo`** (default): Ultralytics YOLO26-x, COCO weights, closed-set.
+  `detection.yolo.class_map` maps COCO onto the taxonomy. COCO has no traffic
+  cone or barrier, so **this backend never detects those** (logged at startup).
+  It needs `discovery.backend: fixed`. AGPL-3.0.
+- **`grounding_dino`**: open-vocabulary, text-prompted by the taxonomy or by
+  Florence-2 discovery (`discovery.backend: florence2`). Its scores depend on
+  which other words share the prompt.
 
-Runs are bit-for-bit repeatable. bfloat16 moves masks no more than merely
-feeding SAM2 the source JPEG instead of a re-encode does (0.980 / 0.996).
-SAM2's `vos_optimized=True` (torch.compile) was tried and is not usable with
-this per-object tracker: 224 s of compile, then a CUDA-graphs buffer-reuse error
-in memory attention.
+`models/yolo_detector.py` guards three silent failures: Ultralytics reads numpy
+as BGR (frames are RGB), weights load by pinned path (a bare name downloads
+whatever upstream ships), and `YOLO_OFFLINE` / `YOLO_CONFIG_DIR` are set before
+import. The pipeline refuses a `class_map` target that nearly matches a
+taxonomy class (`pedestrain`, `traffic cone` vs `traffic_cone`).
 
-## Visualizing depth
+## Outputs
 
-`viz` opens an interactive depth-vs-image viewer (the 2D analogue of
-lidar_preprocessing's Open3D `watod viz`) for the `depth_2d` artifacts — to
-eyeball what Depth Anything V2 + the LiDAR-anchored affine fit produced:
+In `data/artifacts/raw/<bag_id>/chunks/<chunk_id>/`:
 
-```bash
-./watod run perception_2d viz --bag <bag_id>
-./watod run perception_2d viz --bag <bag_id> --chunk <chunk_id> --cam <cam_id>
-```
+| Artifact | Owner |
+|---|---|
+| `tracklets_2d.parquet`, `detections_2d.parquet`, `masks_2d/<masklet_id>/<camera_seq:06d>.png`, `masks_2d/<masklet_id>/dino_feature.npy` | `wato_common.artifacts.masklets` (consumers use `MaskletIndex`) |
+| `depth_2d/<cam_id>/<camera_seq:06d>.npz` | `wato_common.artifacts.depth`: a missing file means no usable depth; a 0 pixel means no measurement |
+| `manifest_perception_2d.json` | Provenance incl. pinned model revisions, hashed inputs |
 
-- **frame slider** — scrub through one camera's stream
-- **opacity slider** — blend RGB ↔ depth heatmap (0 = image, 1 = depth)
-- **SPLIT toggle** — a draggable curtain: RGB on the left, depth on the right
-- **◄ cam / cam ►** — switch camera when a chunk has more than one
-- keyboard: `←/→` frame · `↑/↓` opacity · `space` split · `c` colormap · `q` quit
+Outputs from before 2026-10-15 (per-row processing) aren't comparable, and
+depth from before 2026-10-11 is rejected by the reader; rerun with `--force`.
 
-Depth is normalized per frame over its finite, positive pixels (2nd–98th
-percentile); the colorbar reads true metres and the title shows the fit
-status / inlier count / RMSE. Pixels with no valid depth (sky, fit holes)
-fall through to the photo.
+## Models
 
-Needs DISPLAY (or WSLg) forwarded into the container — see the
-`perception_2d_dev` service in `modules/docker-compose.dev.yaml`. On WSL2 you
-can also just run it on the host, where matplotlib already has a GUI backend:
+Every model is pinned in
+[`model_registry.py`](src/wato_perception_2d/model_registry.py), which both
+`fetch_models.py` and the runtime loaders read. HF loaders pass
+`revision=hf_revision(repo_id)` (a SHA fetch writes no `refs/main`, so `main`
+can't resolve offline), and DINOv2 loads `facebookresearch/dinov2:<sha>`
+(torch.hub caches by ref). A model ID not in the registry fails at load time:
+register it with a SHA first. To upgrade one, change its revision, re-run
+`fetch_models.py` and the affected stages; manifests record the revision.
 
-```bash
-PYTHONPATH=src/common/src:src/perception_2d/src \
-    python -m wato_perception_2d viz --bag <bag_id>
-```
+## Depth viewer
 
-See `wato_world/README.md` and the architecture doc for context.
+`viz` opens a matplotlib window per chunk: a frame slider, an RGB ↔ depth
+opacity slider, a draggable split curtain, camera switching; keys `←/→` frame,
+`↑/↓` opacity, `space` split, `c` colormap, `q` quit. Depth is normalised per
+frame (2nd–98th percentile); the colorbar reads metres and the title shows fit
+status, inliers and RMSE. Needs DISPLAY / WSLg in the container, or run it on
+the host:
+`PYTHONPATH=src/common/src:src/perception_2d/src python -m wato_perception_2d viz --bag <bag_id>`.
+
+## Known limitations
+
+- **Ego vehicle.** PANO_NN sees the car's hood; YOLO scores it `car` and SAM2
+  tracks it. Nothing filters ego regions yet.
+- An object occluded for longer than `drop_lost_after_frames` comes back as a
+  new masklet; `tracking` must re-link it.
+
+Measurements behind these defaults:
+[docs/perception_2d_measurements.md](../../docs/perception_2d_measurements.md).

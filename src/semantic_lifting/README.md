@@ -10,8 +10,7 @@ Design and rationale: `docs/research/semantic_lifting_design.md`.
 `ingest`, `lidar_preprocessing` and `perception_2d` must have run first.
 
 ```bash
-./watod run semantic_lifting run --bag <bag_id>
-./watod run semantic_lifting run --bag <bag_id> --chunk <chunk_id>
+./watod run semantic_lifting --bag <bag_id> [--chunk <chunk_id>]
 ```
 
 Chunks whose `lifted_stats.parquet` exists are skipped (the CLI has no
@@ -26,7 +25,7 @@ owns its format:
 |---|---|---|
 | `calibration.json` (`K`, `ego_T_cam`) | ingest | `wato_common.artifacts.calibration` |
 | `frame_index.parquet`, `poses.parquet` | ingest | `io.load_frame_refs` + `wato_common.pose_lookup` (camera pose at the camera's own timestamp) |
-| `lidar_proc_index.parquet`, `lidar_proc/<sweep_id:06d>_world.npz` | lidar_preprocessing | `io.load_sweeps`, `io.load_all_lidar_points` |
+| `lidar_proc_index.parquet`, `lidar_proc/<sweep_id:06d>_world.npz` | lidar_preprocessing | `wato_common.artifacts.lidar_sweeps.ProcessedSweeps` |
 | `tracklets_2d.parquet`, `masks_2d/` | perception_2d | `wato_common.artifacts.masklets.MaskletIndex` |
 | `depth_2d/<cam>/<camera_seq:06d>.npz` | perception_2d | `wato_common.artifacts.depth` |
 
@@ -43,16 +42,15 @@ Under `chunks/<chunk_id>/semantic_lifting/`, written through
 | `lifted_labels/<sweep_id:06d>.npz` | Per labeled point: `point_indices` (int32, into the sweep's world NPZ), `instance_ids` and `classes` (unicode string arrays — load without pickle), `confidences` (float32), `n_supporting_cameras`, `n_disagreeing_cameras` (int32). |
 | `lifted_stats.parquet` | One `LiftedStatsRow` per sweep (`sweep_id` int64). Written last: it is the chunk's completion marker. |
 
-Labels written before 2026-10-11 used unpadded `<sweep_id>.npz` names, a string
-`sweep_id`, and pickled object arrays. Those files were also empty:
-`frames_present` was misread, so no masks were found. The reader rejects them,
-so re-run semantic_lifting.
+Labels written before 2026-10-11 (pickled object arrays, and empty) are rejected
+by the reader; re-run semantic_lifting.
 
 ## Config
 
 `config/semantic_lifting.yaml`: `temporal.max_offset_s` (camera ↔ sweep
 matching window), `visibility.tolerance_m` / `neighborhood` (Eq. 1 τ and the
-depth patch), `voting.*`.
+depth patch). `voting.*` and `upstream_versions` are not read yet (cross-camera
+votes always go to the highest cumulative score; innermost mask wins).
 
 ## Not done yet
 

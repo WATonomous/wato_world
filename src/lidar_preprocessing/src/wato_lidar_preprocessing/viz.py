@@ -1,25 +1,21 @@
-"""Visualization for lidar_preprocessing point-cloud artifacts.
+"""Native-window viewers (open3d / plotly / matplotlib) for lidar_preprocessing
+artifacts, loaded by ``(bag_id, chunk_id)``. The CLI's default ``html``
+backend is html_viz.py.
 
-A small multi-backend viewer modelled on a standalone ``dynamic_map.npz``
-viewer, but loading clouds from the artifact store by ``(bag_id, chunk_id)``
-rather than a raw filesystem path.
-
-Layers (what to look at):
+Layers:
   - ``dynamic`` — per-chunk dynamic cloud (``dynamic_map.npz``): xyz, sweep_id,
     intensity
   - ``static``  — per-chunk static cloud (``static_map.npz``): xyz, intensity
   - ``global``  — bag-level global static map (``global_static_map.npz``): xyz
-  - ``ground``  — Stage C height/normal grids (matplotlib, 2D)
+  - ``ground``  — Step C height/normal grids (matplotlib, 2D)
 
-Color modes mirror the source script: ``height`` (RdYlBu), ``sweep_id``
-(turbo), ``intensity`` (turbo, 2–98 percentile normalised). Only the modes a
-layer actually has data for are offered.
+Color modes: ``height`` (RdYlBu), ``sweep_id`` (turbo), ``intensity`` (turbo,
+2–98 percentile normalised), offered only where the layer has the data.
 
-Backends:
-  - ``open3d``      interactive window; press ``c`` to cycle color, ``+``/``-``
-                    to grow/shrink points. Default on Linux.
-  - ``plotly``      browser-based 3D scatter; default on macOS where Open3D's
-                    GLFW/Cocoa window segfaults.
+Backends (``auto`` picks open3d on Linux, plotly on macOS, where Open3D's
+GLFW/Cocoa window segfaults):
+  - ``open3d``      interactive window; ``c`` cycles color, ``+``/``-`` resize.
+  - ``plotly``      browser-based 3D scatter.
   - ``matplotlib``  software 3D scatter fallback.
 
 All point-cloud backends need a display (or WSLg). In Docker that means DISPLAY
@@ -62,7 +58,7 @@ def _cmap(name: str):
 
 
 def _value_colors(values: np.ndarray, cmap_name: str = "turbo") -> np.ndarray:
-    """Per-point scalar -> RGB, percentile-normalised (2–98) like the repo viz."""
+    """Per-point scalar -> RGB, percentile-normalised (2–98)."""
     if values.size == 0:
         return np.zeros((0, 3), dtype=np.float64)
     lo, hi = np.percentile(values, 2), np.percentile(values, 98)
@@ -71,7 +67,7 @@ def _value_colors(values: np.ndarray, cmap_name: str = "turbo") -> np.ndarray:
 
 
 def _height_colors(z: np.ndarray) -> np.ndarray:
-    """Z -> RdYlBu (low=red, mid=yellow, high=blue), matching lidar_preprocessing."""
+    """Z -> RdYlBu (low=red, mid=yellow, high=blue)."""
     if z.size == 0:
         return np.zeros((0, 3), dtype=np.float64)
     lo, hi = np.percentile(z, 2), np.percentile(z, 98)
@@ -395,7 +391,7 @@ viz_stage_D = viz_global_static_map
 
 
 def viz_ground_grid(bag_id: str, chunk_id: str) -> None:
-    """Stage C: height grid heatmap + HSV-encoded surface normals (matplotlib)."""
+    """Step C: height grid heatmap + HSV-encoded surface normals (matplotlib)."""
     import matplotlib.colors as mcolors
     import matplotlib.pyplot as plt
 

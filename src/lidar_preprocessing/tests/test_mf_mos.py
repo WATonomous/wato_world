@@ -1,4 +1,4 @@
-"""Tests for mf_mos.py (Step A.5 — MF-MOS learned MOS).
+"""Tests for mf_mos/ (MF-MOS inference and the `--seg mos` split).
 
 All tests are CPU-runnable.  torch is never imported; MFMosModel is
 monkeypatched with _StubModel that treats residual energy as the moving signal.
@@ -267,7 +267,7 @@ def _make_in_fov_points(n: int) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Group 1: _range_project unit tests
+# _range_project
 # ---------------------------------------------------------------------------
 
 
@@ -304,7 +304,7 @@ def test_range_projection_closest_point_wins():
 
 
 # ---------------------------------------------------------------------------
-# Group 2: _compute_residual unit tests
+# _compute_residual
 # ---------------------------------------------------------------------------
 
 
@@ -338,7 +338,7 @@ def test_residual_nonzero_for_moving_object():
 
 
 # ---------------------------------------------------------------------------
-# Group 3: _unproject_mask / _unproject_scores unit tests
+# _unproject_mask / _unproject_scores
 # ---------------------------------------------------------------------------
 
 
@@ -386,7 +386,7 @@ def test_unproject_mask_occlusion_gate_excludes_background():
     assert bool(out[1]) is False, "occluded background must not inherit moving label"
     assert bool(out[2]) is False, "out-of-FOV point stays False"
 
-    # Without the gate (legacy), the background point bleeds dynamic.
+    # Without the gate, the background point bleeds dynamic.
     out_legacy = _unproject_mask(pixel_mask, p2px, n_points=3)
     assert bool(out_legacy[1]) is True
 
@@ -415,18 +415,16 @@ def test_unproject_mask_occlusion_gate_keeps_thick_object():
 
 
 # ---------------------------------------------------------------------------
-# Group 4: process_chunk integration tests
+# process_chunk
 # ---------------------------------------------------------------------------
 
 
 def test_process_chunk_skips_lidar_with_too_few_beams(tmp_env, monkeypatch):
     """A scanner with fewer channels than MIN_BEAMS is skipped wholesale.
 
-    This replaced the old lidar_id_allowlist knob. The reason a LiDAR gets
-    skipped is a property of the LiDAR, not a list someone maintained: the
+    The skip follows from the scanner's profile, not a config list: the
     checkpoint is KITTI-64 trained, and a 16-row range image leaves most of
-    its input blank. Naming the scanner's profile is now the only thing the
-    config does, and the skip follows from it.
+    its input blank.
 
     Setup: single sweep on LIDAR_TOP, mapped to the 16-channel vlp16 profile.
     Expected: no mask file written, and the rejection counts as
@@ -680,7 +678,7 @@ def test_residual_baseline_decoupled_from_pose_gap(tmp_env, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Group 5: MF-MOS segmentation (classify_chunk) — the `--seg mos` static/dynamic split
+# classify_chunk — the `--seg mos` static/dynamic split
 # ---------------------------------------------------------------------------
 
 
@@ -867,7 +865,7 @@ def test_mos_static_map_carries_voxel_keys_for_ground(tmp_env):
 
 
 # ---------------------------------------------------------------------------
-# Group 6: pipeline regression test
+# pipeline
 # ---------------------------------------------------------------------------
 
 
@@ -924,7 +922,7 @@ def test_pipeline_seg_aw_produces_no_mf_mos_artifacts(tmp_env):
 
 
 # ---------------------------------------------------------------------------
-# Group 8: per-sweep 3D cluster denoise (replaces the old chunk-wide vote tier)
+# per-sweep 3D cluster denoise
 # ---------------------------------------------------------------------------
 
 
@@ -956,7 +954,7 @@ def test_denoise_moving_mask_min_cluster_one_is_noop():
 
 
 # ---------------------------------------------------------------------------
-# Group 9: residual-window priming from the prior chunk (cold-start fix)
+# residual-window priming from the prior chunk
 # ---------------------------------------------------------------------------
 
 

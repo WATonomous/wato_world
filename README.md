@@ -1,6 +1,7 @@
 # wato_world
 
-Dockerized 3D auto-labeling pipeline for the WATonomous self driving car (dubbed EVE). Encompasses an offline batch system that turns rosbags (12 cameras + LiDAR + ego-pose) into 3D box tracks with class labels.
+Dockerized offline 3D auto-labeling pipeline for the WATonomous car (EVE):
+rosbags (cameras + LiDAR + ego pose) in, 3D box tracks with class labels out.
 
 ## Architecture
 
@@ -8,18 +9,18 @@ Nine components communicate only through artifacts on disk (`data/artifacts/`). 
 
 ```mermaid
 flowchart TD
-    BAG[/"rosbags\n12 cameras · LiDAR · ego-pose"/]
+    BAG[/"rosbags\ncameras · LiDAR · ego pose"/]
 
     subgraph ingest["ingest  ·  CPU"]
         I["decode sensor streams\nbag_meta · calibration · chunks\ncamera_frames · lidar_sweeps\nposes · frame_index"]
     end
 
     subgraph lidar_prep["lidar_preprocessing  ·  CPU (GPU for --seg mos/union)"]
-        LP["motion compensation\nstatic / dynamic split (aw · mos · union)\nground mesh extraction\nUniLiPs IWU · motion proposals"]
+        LP["motion compensation\nstatic / dynamic split (aw · mos · union)\nground height grid\nUniLiPs IWU · motion proposals"]
     end
 
     subgraph perception_2d["perception_2d  ·  GPU"]
-        P2["GroundingDINO detector\nSAM2 video tracker\nDepth Anything V2\nDINOv2 embeddings\n(optional Florence-2 discovery)"]
+        P2["YOLO26 / GroundingDINO detector\nSAM2 video tracker\nDepth Anything V2\nDINOv2 embeddings\n(optional Florence-2 discovery)"]
     end
 
     subgraph semantic_lifting["semantic_lifting  ·  CPU"]
@@ -47,13 +48,13 @@ flowchart TD
     end
 
     BAG --> ingest
-    ingest -- "frame_index · camera_frames\ncalibration" --> perception_2d
+    ingest -- "frame_index · images · poses\ncalibration" --> perception_2d
     ingest -- "frame_index · lidar_sweeps · poses" --> lidar_prep
-    lidar_prep -- "preprocessed sweeps · ground mesh" --> perception_2d
-    lidar_prep -- "preprocessed sweeps · ground mesh" --> semantic_lifting
+    lidar_prep -- "world sweeps · dynamic masks" --> perception_2d
+    lidar_prep -- "world sweeps" --> semantic_lifting
     perception_2d -- "masks_2d · depth_2d · tracklets_2d" --> semantic_lifting
-    semantic_lifting -- "lifted_labels · DINOv2 embeddings" --> proposal_gen
-    lidar_prep -- "preprocessed sweeps · ground mesh\nmotion proposals" --> proposal_gen
+    semantic_lifting -- "lifted_labels" --> proposal_gen
+    lidar_prep -- "world sweeps · ground grid\nmotion proposals" --> proposal_gen
     proposal_gen -- "3D proposals" --> tracking
     tracking -- "3D tracks" --> label_ref
     tracking -- "rare-class track candidates" --> ovd
@@ -61,7 +62,12 @@ flowchart TD
     ovd -- "rare-class labels" --> student
 ```
 
-`frame_index.parquet` (written by **ingest**) is the cross-component contract: downstream stages read interpolated ego pose (`world_T_ego_flat`) and per-sweep validity (`valid_pose`) from it rather than consuming raw bag topics. Most stages read `world_T_ego_flat` directly; **lidar_preprocessing** re-interpolates from `poses.parquet` for per-point deskewing but honors `frame_index`'s `valid_pose` flag to skip sweeps with no usable pose (e.g. the start-of-bag window before SLAM converges), and that skip propagates to MF-MOS and classify.
+`frame_index.parquet` (written by **ingest**) aligns every LiDAR sweep with the
+nearest image per camera. Every pose is looked up from `poses.parquet` through
+`wato_common.pose_lookup` at the timestamp of the data being placed — a point,
+a sweep, a camera frame — and honours ingest's verdict on which stretches of
+the pose stream are trustworthy. `frame_index.world_T_ego` is the sweep's pose
+only.
 
 **ingest**, **lidar_preprocessing** and **perception_2d** are implemented end-to-end (and
 **semantic_lifting**'s core lifting algorithm). The remaining components are stubs.
@@ -74,20 +80,21 @@ wato_world/
 ├── watod-config.sh          # user-editable defaults
 ├── watod_scripts/           # helpers invoked by watod
 ├── src/                         # one Python package per pipeline component
-│   ├── common/                  # shared lib: storage, schemas, geometry, calib, tracking
+│   ├── common/                  # shared lib: artifact formats, schemas, geometry, poses, tracking
 │   ├── ingest/
-│   ├── perception_2d/
 │   ├── lidar_preprocessing/
+│   ├── perception_2d/
+│   ├── semantic_lifting/
 │   ├── proposal_generation/
 │   ├── tracking/
 │   ├── label_refinement/
 │   ├── open_vocab_discovery/
 │   └── student_training/
 ├── docker/                      # one Dockerfile per component + base + template
-├── modules/                     # docker-compose.{yaml,infra,dev,gpu}.yaml
-├── config/                      # prompts.yaml, pipeline.yaml
-├── data/                        # bind-mounted into containers (git-ignored)
-└── notebooks/                   # ad-hoc analysis (rerun viewer scripts, etc.)
+├── modules/                     # docker-compose.{yaml,dev,gpu}.yaml
+├── config/                      # prompts.yaml; pipeline.yaml (stub components)
+├── docs/                        # measurements, bag survey, research notes
+└── data/                        # bind-mounted into containers (git-ignored)
 ```
 
 ## Quickstart
@@ -123,9 +130,9 @@ watod down all
 | Component | Purpose | Image base | GPU |
 |---|---|---|---|
 | `ingest` | Decode rosbag → frames + lidar + poses + frame_index | CPU | no |
-| `perception_2d` | GroundingDINO + SAM2 video tracker + Depth Anything V2 + DINOv2 (optional Florence-2 discovery) | CUDA | yes |
+| `perception_2d` | YOLO26 or GroundingDINO detector + SAM2 video tracker + Depth Anything V2 + DINOv2 (optional Florence-2 discovery) | CUDA | yes |
 | `semantic_lifting` | Occlusion-aware 2D→3D label lifting (UniLiPs Eq.1) | CPU | no |
-| `lidar_preprocessing` | Motion comp, static/dynamic split (`--seg aw\|mos\|union`), ground mesh, UniLiPs IWU, recall-oriented motion proposals | CUDA | only for `--seg mos\|union` |
+| `lidar_preprocessing` | Motion comp, static/dynamic split (`--seg aw\|mos\|union`), ground grid, UniLiPs IWU, recall-oriented motion proposals | CUDA | only for `--seg mos\|union` |
 | `proposal_generation` | LiDAR detector + Segment-Lift-Fit + fusion | CUDA | yes |
 | `tracking` | 3D Kalman + masklet association + DINOv2 ReID | CUDA | yes (light) |
 | `label_refinement` | Multimodal LabelFormer (bootstrap → learned) | CUDA | yes |
@@ -133,9 +140,7 @@ watod down all
 | `student_training` | BEVFusion / TransFusion student training | CUDA | yes |
 
 Each component's Python package lives at `src/<component>/src/wato_<component>/`
-and is pip-installed editable inside the container. Components communicate
-**only through artifacts** in `data/artifacts/` (or `s3://wato-world/...` in
-prod) — no in-process imports across component boundaries.
+and is pip-installed editable inside the container.
 
 ## Storage
 
@@ -176,14 +181,8 @@ pre-commit run --all-files
 watod test ingest
 ```
 
-## Build order (recommended)
+## Roadmap
 
-1. Skeleton + infra (this repo as-is): set `ACTIVE_MODULES="all"` in `watod-config.local.sh`, then run `watod build`.
-2. Ingest end-to-end on one bag.
-3. Host-side rerun viewer (notebooks/).
-4. LiDAR preprocessing (CPU).
-5. 2D perception (heavy GPU pass).
-6. Proposal generation, LiDAR-only first; add SLF lift second.
-7. Tracking.
-8. Bootstrap label refinement (geometric only) → first auto-labels.
-9. Learned label refinement, open-vocabulary discovery, student training.
+Proposal generation (LiDAR-only first, then Segment-Lift-Fit) → tracking →
+bootstrap label refinement (geometric) for the first auto-labels → learned
+label refinement, open-vocabulary discovery, student training.

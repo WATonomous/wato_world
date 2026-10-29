@@ -56,20 +56,13 @@ def apply_classification_to_sweep(
     `keys` is always full-length (matches xyz from the world NPZ) so the
     saved mask is length-aligned with the downstream xyz array.
 
-    Pure Amanatides-Woo: a point is dynamic IFF its voxel key is in
-    `dynamic_arr` (the explicit carved-dynamic voxel set) and it is not
-    flagged ground by Patchwork++. Voxels that were never observed default to
-    NOT dynamic — absence of evidence is not motion evidence. Then, when
-    dynamic_min_range_m > 0, points within that horizontal range of the
-    sensor (`sweep_origin`) are forced non-dynamic — near the ego the return
-    is ego self-returns / near clutter and carving is maximal, so AW can't
-    reliably call motion there. No MF-MOS involvement — that lives entirely
-    in the mf_mos/ module (`--seg mos`).
+    A point is dynamic IFF its voxel key is in `dynamic_arr`, it is not
+    Patchwork++ ground, and it lies beyond dynamic_min_range_m of
+    `sweep_origin`. Never-observed voxels are not dynamic.
 
-    write_aw_snapshot additionally saves the mask to aw_dynamic_mask.npy.
-    Set on the union path only: union overwrites dynamic_mask.npy with the
-    fused verdict, so keep_aw_dynamic needs AW's own verdict preserved
-    separately to stay re-fusable.
+    write_aw_snapshot (union only) also saves aw_dynamic_mask.npy: union
+    overwrites dynamic_mask.npy, and keep_aw_dynamic needs AW's own verdict to
+    re-fuse.
     """
     n = keys.shape[0]
     has_intensity = bool(row.get("has_intensity", False))

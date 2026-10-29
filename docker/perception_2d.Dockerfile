@@ -1,4 +1,4 @@
-# Perception 2D — GroundingDINO detector + SAM2 video tracker (segment+track)
+# Perception 2D — GroundingDINO or YOLO26 detector + SAM2 video tracker (segment+track)
 # + Depth Anything V2 + DINOv2 ReID.
 # Heaviest GPU component — budget several hundred GPU-hours per hour of bag.
 #
@@ -53,6 +53,8 @@ ENV UV_HTTP_TIMEOUT=900
 #               (GroundingDINO via AutoModelForZeroShotObjectDetection, plus
 #               Florence-2 discovery; no CUDA custom-op compile, unlike the
 #               standalone groundingdino package)
+#               ultralytics==8.4.175  (YOLO26, the closed-set detector backend
+#               — pure PyTorch, no custom ops; AGPL-3.0)
 #   depth       depth-anything-v2 opencv-python-headless matplotlib
 #   tracker     hydra-core iopath  (+ the `sam2` git install below)
 #   reid        xformers==0.0.31   (memory-efficient attention for DINOv2

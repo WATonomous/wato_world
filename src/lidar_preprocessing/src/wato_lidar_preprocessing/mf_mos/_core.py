@@ -1,29 +1,15 @@
-"""Step A.5 — MF-MOS learned moving-object segmentation.
+"""MF-MOS inference: per-sweep moving masks (`--seg mos` / `--seg union`).
 
-Range-image-based deep MOS. The inference half of the `--seg mos` method;
-the segmentation half (masks → static/dynamic clouds) lives in segment.py.
-Runs after deskew on the mos path only — never on `--seg aw`.
+The segmentation half (masks → static/dynamic clouds) is segment.py.
 
-Outputs per sweep:
+Outputs per sweep, aligned to the RAW sweep (before deskew's nonfinite filter):
   <sweep_id:06d>_mf_mos_mask.npy   (n_raw,) bool   True == moving
   <sweep_id:06d>_mf_mos_score.npy  (n_raw,) float32 [optional]
 
-Mask length matches the RAW sweep (before deskew's nonfinite filter) so
-consumers loading raw NPZs get index-aligned arrays.
-
-Skipped sweeps leave mf_mos_mask_path=None in the index. A sweep is skipped
-when deskew already flagged it invalid (valid=False — e.g. the start-of-bag
-window with no usable ego pose; MF-MOS defers to deskew rather than re-checking
-the pose gap itself), for an empty sweep or inference error, or because its
-scanner has too few channels to project (see MIN_BEAMS). The step only runs
-on `--seg mos` / `--seg union`.
-
-The spherical projection is geometry, not preference: rows = the scanner's
-channel count, vertical bounds = its datasheet FoV, intensity divisor = its
-raw intensity range. All of it comes from the lidar's sensor profile. The
-remaining numbers below are properties of the released checkpoint — the
-resolution and range window it was trained at — and belong to the model, not
-to any rig.
+A sweep is skipped (mf_mos_mask_path=None) when deskew marked it invalid, when
+it is empty or inference fails, or when its scanner has fewer than MIN_BEAMS
+channels. The projection geometry comes from each lidar's sensor profile; the
+constants below belong to the released checkpoint, not to any rig.
 """
 
 from __future__ import annotations
@@ -153,12 +139,7 @@ def process_chunk(
     bag_id: str,
     chunk_id: str,
 ) -> MFMosResult:
-    """Run MF-MOS inference for every valid sweep in a chunk.
-
-    Called only on the `mos` segmentation path (`--seg mos`); the orchestrator
-    never invokes it under `--seg aw`. Writes per-sweep moving masks consumed
-    by mf_mos.segment.classify_chunk.
-    """
+    """Run MF-MOS inference for every valid sweep in a chunk (mos / union)."""
     params = cfg.mf_mos
 
     sweep_rows = read_rows(lidar_sweeps_path(bag_id, chunk_id))
@@ -172,11 +153,8 @@ def process_chunk(
         )
         return MFMosResult()
 
-    # Cold-start fix: the residual sliding window resets per chunk, so the
-    # first sweeps of the window would otherwise get zero-padded
-    # residual channels and degraded inference. Seed the window from the
-    # temporally-preceding chunk (chunks overlap, so it covers the window) and
-    # extend the pose samples backward to interpolate those primed sweeps.
+    # Seed the residual window from the preceding chunk (and extend the poses
+    # back to match) so a chunk's first sweeps don't get zero residuals.
     prev_chunk_id = (
         _previous_chunk_id(bag_id, chunk_id)
         if params.prime_window_from_prior_chunk
@@ -194,18 +172,11 @@ def process_chunk(
 
     model = _load_model(params)
     max_gap_ns = int(params.max_pose_gap_ms * 1_000_000)
-    # Separate cap for the residual time baseline. A residual at step k spans
-    # k * sweep_dt and legitimately exceeds the pose-gap cap for the longer
-    # steps; gating it on max_gap_ns (the old bug) zeroed most channels.
+    # A residual at step k spans k * sweep_dt, which can exceed max_gap_ns.
     max_residual_gap_ns = int(params.max_residual_gap_ms * 1_000_000)
 
-    # Group by lidar_id + sort by timestamp to build the residual sliding window.
-    # Skip sweeps deskew already flagged invalid (valid=False in the proc index)
-    # — most commonly the transient start-of-bag window before SLAM emits poses.
-    # deskew is the single source of truth for per-sweep pose validity (it honors
-    # ingest's frame_index valid_pose); deferring to it here keeps the stages
-    # consistent and avoids a per-sweep pose-gap WARNING flood over the very same
-    # sweeps. deskew-invalid sweeps get no mask; classify skips them regardless.
+    # Group by lidar_id, sorted by time, for the residual window. Sweeps deskew
+    # marked invalid get no mask: deskew owns per-sweep pose validity.
     result = MFMosResult()
     rows_by_lidar: dict[str, list[dict]] = {}
     skipped_invalid: list[int] = []
@@ -236,11 +207,8 @@ def process_chunk(
     n_scans = _n_residual_scans(params)
 
     for lid, lid_rows in rows_by_lidar.items():
-        # Projection geometry is this scanner's, not the rig's. A scanner with
-        # too few channels cannot be projected into an image the checkpoint
-        # recognises at all — skip it rather than feed the model a mostly
-        # blank input and trust whatever comes back. This check comes BEFORE
-        # the calibration check so it counts as "deliberately skipped".
+        # Too few channels to project: skip (counted as unsupported, so this
+        # check precedes the calibration check).
         sensor = cfg.build_sensor_model(lid)
         if sensor.beams < MIN_BEAMS:
             log.info(
@@ -788,7 +756,7 @@ def _unproject_mask(
     ``pixel_range`` (the (H, W) winning-range channel), and
     ``occlusion_range_tol_m`` are all supplied, a point keeps the moving label
     only if ``range <= winner_range + tol``. With the args omitted the gate is
-    off and every in-FOV point inherits its pixel's label (legacy behaviour).
+    off and every in-FOV point inherits its pixel's label.
     """
     out = np.zeros(n_points, dtype=bool)
     in_image = (point_to_pixel[:, 0] >= 0) & (point_to_pixel[:, 1] >= 0)

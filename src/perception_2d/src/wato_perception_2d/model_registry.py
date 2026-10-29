@@ -6,27 +6,15 @@ by both sides so they cannot drift apart:
   - ``scripts/fetch_models.py`` (host-side) — downloads these revisions into
     ``${MODELS_ROOT}``.
   - the runtime loaders — ``hf_revision()`` for detector / discovery / depth,
-    ``torch_hub_repo()`` for embeddings — request the same revisions, so a
-    pinned fetch and an unpinned load can't disagree.
+    ``torch_hub_repo()`` for embeddings, a plain path for the raw checkpoints
+    (SAM2, YOLO26) — request the same revisions, so a pinned fetch and an
+    unpinned load can't disagree.
 
-WHY EVERY ENTRY CARRIES A REVISION
-----------------------------------
-This pipeline's output is training data. A HuggingFace repo's ``main`` branch
-and a GitHub repo's default branch both move: ``IDEA-Research/grounding-dino-base``
-can be re-uploaded, ``facebookresearch/dinov2`` can be force-pushed. Without a
-revision, re-running ``fetch_models.py`` months apart populates ``MODELS_ROOT``
-with different weights, the pipeline emits different labels, and nothing in the
-artifact tree records that anything changed.
-
-The revisions below are the ones present in ``data/models`` as of 2026-09-21 —
-i.e. the weights that produced the labels in the tree today, not merely whatever
-was current upstream.
-
-TO UPGRADE A MODEL
-------------------
-Change the revision here, re-run ``fetch_models.py``, re-run the affected
-stages. The new revision is recorded in every manifest written afterwards (see
-``wato_common.provenance``), so old and new labels stay distinguishable.
+Every entry carries a revision: HF ``main`` and GitHub default branches move,
+and unpinned weights would silently change the labels. The revisions are the
+ones in ``data/models`` as of 2026-09-21. To upgrade a model, change its
+revision here, re-run ``fetch_models.py`` and the affected stages; manifests
+record the new revision.
 """
 
 from __future__ import annotations
@@ -73,12 +61,7 @@ HF_MODELS: dict[str, HFModel] = {
         revision="cbbb86a30ce19b5684b7a05155dc7e6cbc7685b9",
         note="depth.py — metric depth via the DPT head",
     ),
-    # Optional open-vocabulary discovery backend. Referenced by
-    # config/perception_2d.yaml (discovery.model) and models/discovery.py, but
-    # it was missing from this registry until 2026-09-21 — so it was never
-    # pre-fetched. With HF_HUB_OFFLINE=1 and /data/models mounted read-only,
-    # enabling discovery on a clean host would fail at load time. Listed here
-    # so `fetch_models.py` pulls it like everything else.
+    # Optional open-vocabulary discovery backend (discovery.backend: florence2).
     "florence_2": HFModel(
         repo_id="microsoft/Florence-2-large-ft",
         revision="4a12a2b54b7016a48a22037fbd62da90cd566f2a",
@@ -95,6 +78,14 @@ RAW_CHECKPOINTS: dict[str, RawCheckpoint] = {
         revision="665f8e2ad61cf5f53d65644ff27c8ee525124610",
         note="sam2_tracker.py — build_sam2_video_predictor(ckpt_path); "
         "the hydra config ships inside the pinned `sam2` package",
+    ),
+    # Closed-set detector backend (detection.backend: yolo). COCO-trained; the
+    # taxonomy mapping lives in config (detection.yolo.class_map). AGPL-3.0.
+    "yolo26": RawCheckpoint(
+        repo_id="Ultralytics/YOLO26",
+        filename="yolo26x.pt",
+        revision="070ac3c51435984d992ba92eb3f234daf4e4500d",
+        note="yolo_detector.py — ultralytics.YOLO(ckpt_path)",
     ),
 }
 

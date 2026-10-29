@@ -56,9 +56,9 @@ def _compute_chunks(
     while t < end_ns:
         t_start = t
         t_end = min(t + chunk_ns, end_ns)
-        # Overlap with previous: 2 s before t_start (clamped to bag start).
+        # Overlap into the previous chunk (clamped to bag start).
         ov_start = max(starting_time_ns, t_start - overlap_ns)
-        # Overlap with next: 2 s after t_end (clamped to bag end).
+        # Overlap into the next chunk (clamped to bag end).
         ov_end = min(end_ns, t_end + overlap_ns)
         chunks.append(
             ChunkRow(

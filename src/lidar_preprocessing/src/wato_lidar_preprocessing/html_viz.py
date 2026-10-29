@@ -1,13 +1,9 @@
 """Self-contained browser viewer for lidar_preprocessing point clouds.
 
-This backend intentionally avoids Open3D. It writes a standalone HTML file with
-embedded WebGL code and downsampled point buffers, so the common debug loop is:
+The default `viz` backend: a standalone HTML file with embedded WebGL and
+downsampled point buffers, for static vs dynamic clouds with sweep scrubbing.
 
-    wato_lidar_preprocessing viz --bag BAG --chunk 0000 --backend html
-
-Then open the emitted file in any browser. The viewer is focused on the most
-important inspection path for this stage: static vs dynamic point clouds, with
-sweep scrubbing for dynamic points.
+    python -m wato_lidar_preprocessing viz --bag BAG --chunk 0000 --open
 """
 
 from __future__ import annotations

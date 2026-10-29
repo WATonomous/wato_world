@@ -1,20 +1,13 @@
 """Extract ego pose over time from the configured pose topic.
 
-The pose source is set by `topics.pose`: a nav_msgs/Odometry,
-geometry_msgs/PoseStamped or geometry_msgs/PoseWithCovarianceStamped topic
-giving the world pose of `ego_frame`.  Whatever the topic, ingest REQUIRES a
-dense, smooth pose stream (README "Pose requirements"): every sweep pose and
-every deskewed LiDAR point is interpolated between two samples, which is only
-correct when those samples are close together.  The README's "How good are
-the poses" section lists the sources measured so far; passing these checks is
-necessary, not sufficient (they can't see a mis-stamped or attitude-biased
-stream).
-
-`extract` enforces the chunk-level part (dense coverage) and raises
-PoseRequirementError on a sparse stream.  It also marks every stretch between
-two consecutive samples as trusted or not (`interval_drop_reason`: too long,
-or a jump); wato_common.pose_lookup reads those marks, so ingest's frame_index
-and every downstream component that looks a pose up apply the same rules.
+`topics.pose` is a nav_msgs/Odometry, geometry_msgs/PoseStamped or
+geometry_msgs/PoseWithCovarianceStamped topic giving the world pose of
+`ego_frame`, and must be dense and smooth (README "Poses").
+`extract` raises PoseRequirementError on a sparse stream and marks every
+stretch between consecutive samples as trusted or not
+(`interval_drop_reason`), which wato_common.pose_lookup applies everywhere a
+pose is looked up.  Passing these checks is necessary, not sufficient: they
+can't see a mis-stamped or attitude-biased stream.
 
 Only an Odometry names the body frame it describes (child_frame_id), so only
 an Odometry is checked against `ego_frame`; for the two Pose types the config

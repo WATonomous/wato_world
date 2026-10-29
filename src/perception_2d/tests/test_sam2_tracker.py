@@ -33,7 +33,10 @@ class _FakePredictor:
     Stores the box of each added object and, on propagate, yields a +1/-1 logit
     map (positive inside the box) for every object whose add-frame ≤ the frame —
     or an all-negative map once the frame passes the object's ``vanish_after``
-    (keyed by box), i.e. SAM2 reporting it absent. init_state reads the window's
+    (keyed by box), i.e. SAM2 reporting it absent. ``trajectories`` (keyed by
+    the prompt box) scripts where SAM2 puts an object's mask per frame — a box,
+    or None for absent — to reproduce SAM2 losing an object and latching onto
+    another. init_state reads the window's
     frame count from the temp JPEG dir the tracker writes, so a per-window OOM
     can be simulated by frame count. Like real SAM2, propagating with no objects
     raises.
@@ -45,10 +48,14 @@ class _FakePredictor:
         W: int,
         oom_above: int | None = None,
         vanish_after: dict[tuple, int] | None = None,
+        trajectories: dict[tuple, object] | None = None,
+        strength: dict[tuple, float] | None = None,
     ) -> None:
         self.H, self.W = H, W
         self.oom_above = oom_above
         self.vanish_after = vanish_after or {}
+        self.trajectories = trajectories or {}
+        self.strength = strength or {}  # logit inside the mask, per prompt box
         self._objs: dict[int, tuple[int, tuple]] = {}
         self._cur_n = 0
         self.removed: list[int] = []
@@ -73,9 +80,15 @@ class _FakePredictor:
 
     def _box_logit(self, box, frame) -> np.ndarray:
         m = np.full((self.H, self.W), -1.0, dtype=np.float32)
-        if frame <= self.vanish_after.get(tuple(int(v) for v in box), frame):
+        key = tuple(int(v) for v in box)
+        value = self.strength.get(key, 1.0)
+        if key in self.trajectories:
+            box = self.trajectories[key](frame)
+            if box is None:
+                return m[None]
+        if frame <= self.vanish_after.get(key, frame):
             x1, y1, x2, y2 = (int(round(v)) for v in box)
-            m[y1:y2, x1:x2] = 1.0
+            m[y1:y2, x1:x2] = value
         return m[None]  # (1, H, W)
 
     def propagate_in_video(self, state, start_frame_idx=0, max_frame_num_to_track=None):
@@ -380,3 +393,113 @@ def test_frame_dir_symlinks_source_jpegs_and_encodes_the_rest(tmp_path):
         import shutil
 
         shutil.rmtree(d)
+
+
+# ---------------------------------------------------------------------------
+# Identity: SAM2 latching onto another object after losing its own
+# ---------------------------------------------------------------------------
+
+
+def test_lost_object_is_not_resumed_on_another_object(tmp_path):
+    """SAM2 loses a pedestrian (it walks out of view) and, 5 frames later —
+    before the next keyframe, as on real data — reports a mask on a car
+    elsewhere. Every such resume seen on real WATO data
+    was a different object, so the masklet must end when the object is lost —
+    not pick up the car's pixels under the pedestrian's id."""
+    H, W, n = 32, 32, 20
+    walker = Detection(box_xyxy=(2, 2, 6, 10), cls="pedestrian", score=0.9)
+    pred = _FakePredictor(
+        H,
+        W,
+        trajectories={
+            (2, 2, 6, 10): lambda f: (
+                (2, 2, 6, 10) if f <= 3 else None if f < 9 else (20, 20, 30, 28)
+            )
+        },
+    )
+    masklets = _track(
+        pred,
+        _PerCallDetector([[walker]]),
+        _frames(n),
+        [np.zeros((H, W, 3), dtype=np.uint8) for _ in range(n)],
+        redetect_every_k=10,
+        drop_lost_after_frames=5,
+    )
+    assert [m.frames_present for m in masklets] == [[0, 1, 2, 3]]
+    assert pred.removed == [0]  # and SAM2 stops paying for it
+
+
+def test_track_that_jumps_onto_another_tracked_object_ends(tmp_path):
+    """An oncoming car passes a parked car and leaves the image; in the same
+    frame SAM2 moves the oncoming car's mask onto the parked car (no empty
+    frame in between). Two tracks now hold one object: the one whose mask
+    jumped ends there, the parked car's track carries on."""
+    H, W, n = 40, 40, 12
+    parked = Detection(box_xyxy=(2, 20, 10, 28), cls="car", score=0.9)
+    oncoming = Detection(box_xyxy=(30, 20, 38, 30), cls="car", score=0.8)
+    pred = _FakePredictor(
+        H,
+        W,
+        trajectories={
+            (2, 20, 10, 28): lambda f: (2, 20, 10, 28),
+            # moves left 3 px/frame, then at frame 7 snaps onto the parked car
+            (30, 20, 38, 30): lambda f: (
+                (30 - 3 * f, 20, 38 - 3 * f, 30) if f < 7 else (2, 20, 10, 28)
+            ),
+        },
+    )
+    masklets = _track(
+        pred,
+        _PerCallDetector([[parked, oncoming]]),
+        _frames(n),
+        [np.zeros((H, W, 3), dtype=np.uint8) for _ in range(n)],
+        redetect_every_k=100,
+    )
+    by_score = {m.score: m.frames_present for m in masklets}
+    assert by_score[0.9] == list(range(n))  # parked car: whole clip
+    assert by_score[0.8] == list(range(7))  # oncoming: ends where it jumped
+
+
+def test_same_keyframe_cross_class_duplicates_make_one_track(tmp_path):
+    """GroundingDINO's NMS is per class, so one shuttle comes back as both
+    'truck' and 'bus'. Only the higher-scoring box may start a track."""
+    H, W, n = 32, 32, 3
+    truck = Detection(box_xyxy=(4, 4, 20, 16), cls="truck", score=0.60)
+    bus = Detection(box_xyxy=(4, 4, 20, 17), cls="bus", score=0.43)
+    masklets = _track(
+        _FakePredictor(H, W),
+        _PerCallDetector([[bus, truck]]),  # lower score first: order must not matter
+        _frames(n),
+        [np.zeros((H, W, 3), dtype=np.uint8) for _ in range(n)],
+        redetect_every_k=100,
+    )
+    assert [m.cls for m in masklets] == ["truck"]
+
+
+def test_overlapping_masks_give_each_pixel_to_one_object(tmp_path):
+    """SAM2 infers each object independently, so a bus's mask can wrap around
+    a car half-hidden beside it. A pixel is recorded for one object only — the
+    one SAM2 is most confident about there — or the car's LiDAR points would be
+    lifted as both car and bus."""
+    from PIL import Image as PILImage
+
+    H, W, n = 32, 32, 2
+    bus = Detection(box_xyxy=(2, 2, 20, 20), cls="bus", score=0.9)
+    car = Detection(box_xyxy=(16, 10, 24, 18), cls="car", score=0.8)
+    pred = _FakePredictor(
+        H,
+        W,
+        trajectories={(2, 2, 20, 20): lambda f: (2, 2, 20, 20)},
+        strength={(2, 2, 20, 20): 1.0, (16, 10, 24, 18): 3.0},
+    )
+    masklets = _track(
+        pred,
+        _PerCallDetector([[bus, car]]),
+        _frames(n),
+        [np.zeros((H, W, 3), dtype=np.uint8) for _ in range(n)],
+        redetect_every_k=100,
+    )
+    m = {mk.cls: np.array(PILImage.open(mk.mask_paths[0])) > 0 for mk in masklets}
+    assert not (m["bus"] & m["car"]).any()
+    assert m["car"].sum() == 8 * 8  # the car keeps all of its pixels
+    assert m["bus"].sum() == 18 * 18 - 4 * 8  # the bus loses the contested ones

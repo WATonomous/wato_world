@@ -268,11 +268,21 @@ def test_other_message_types_are_not_poses():
 # ---------------------------------------------------------------------------
 # Shipped configs
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("name", ["ingest.yaml", "ingest.wato.yaml"])
+@pytest.mark.parametrize(
+    "name", ["ingest.yaml", "ingest.wato.yaml", "ingest.wato_6cam.yaml"]
+)
 def test_shipped_profiles_load(name):
     cfg = load_config(str(CONFIG_DIR / name))
     assert 0 < cfg.pose_requirements.min_dense_fraction <= 1
     assert cfg.storage_id == ""  # detected from the bag, never per dataset
+
+
+def test_wato_6cam_profile_is_the_wato_profile_without_ee_ww():
+    full = load_config(str(CONFIG_DIR / "ingest.wato.yaml")).model_dump()
+    six = load_config(str(CONFIG_DIR / "ingest.wato_6cam.yaml")).model_dump()
+    del full["topics"]["cameras"]["PANO_EE"]
+    del full["topics"]["cameras"]["PANO_WW"]
+    assert six == full
 
 
 def test_old_max_pose_gap_key_is_rejected():

@@ -50,7 +50,7 @@ def run_bag(
       4. Compute virtual chunks and write `chunks/index.parquet`.
       5. For each selected chunk, extract poses (raising PoseRequirementError
          on a sparse stream or a child-frame mismatch — see the README's
-         "Pose requirements"), decode cameras + LiDAR, build the frame index,
+         "Poses"), decode cameras + LiDAR, build the frame index,
          compute quality metrics, and write the manifest.
     """
     meta = bags.register(bag_path, bag_id=bag_id, storage_id=cfg.storage_id)
@@ -73,9 +73,7 @@ def run_bag(
             "`python -m wato_ingest inspect-bag --bag <bag>` lists its topics and types."
         )
 
-    # Calibration: prefer auto-extraction from the bag's own CameraInfo +
-    # /tf_static.  Allow a hand-authored JSON to override when the bag is
-    # missing one of those (or when the extracted values are known wrong).
+    # From the bag's CameraInfo + TF, unless an authored JSON overrides it.
     if calibration_source is not None:
         calib_uri = calibration.freeze_from_file(bag_id, calibration_source)
         log.info("calibration: froze from authored file -> %s", calib_uri)

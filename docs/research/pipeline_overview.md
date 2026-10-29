@@ -15,7 +15,7 @@ Per-paper detail lives in the `*_guidance.md` / `*_design.md` files alongside.
 | LiDAR NW | `/lidar_nw/velodyne_points` | ~20 Hz |
 | Camera lower (×4) | `/camera_lower_{ne,nw,se,sw}/image_rect_compressed` | ~12 Hz |
 | Camera panoramic (×8) | `/camera_pano_{ee,ne,nn,nw,se,ss,sw,ww}/image_rect_compressed` | ~12 Hz |
-| Pose | eidos `map` frame: `/world_modeling/liso/odometry` (per scan, scan-stamped; agrees with the INS to ~5 cm/s) or `/world_modeling/slam/odometry` (newest keyframe; 1 per 5 m on eidos main); `/novatel/oem7/odom` (INS, UTM, ~2° attitude bias vs LiDAR on ring_road_corrected) for bags without eidos. Ingest requires a dense, smooth stream (ingest README "Pose requirements", "How good are the poses") | ~13 Hz LISO (matched scans) / keyframe-rate SLAM / 50 Hz INS position |
+| Pose | eidos `map` frame: `/world_modeling/liso/odometry` (per scan, scan-stamped; agrees with the INS to ~5 cm/s) or `/world_modeling/slam/odometry` (newest keyframe; 1 per 5 m on eidos main); `/novatel/oem7/odom` (INS, UTM, ~2° attitude bias vs LiDAR on ring_road_corrected) for bags without eidos. Ingest requires a dense, smooth stream (ingest README "Poses"; `docs/ingest_measurements.md`) | ~13 Hz LISO (matched scans) / keyframe-rate SLAM / 50 Hz INS position |
 | Extrinsics | `/tf_static` | static |
 
 Three LiDARs and twelve cameras give us considerably denser sensor coverage
@@ -32,7 +32,7 @@ ingest             ← bags + calibration + poses + chunk index
 lidar_preprocessing← SAM4D preprocessing, static/dynamic split (AW log-odds /
                       MF-MOS / union), ground plane, UniLiPs IWU (Step E),
                       Chen et al. MOS auto-labeling proposals (Step F)
-perception_2d      ← GroundingDINO detector + SAM2 video tracker + DA-V2 depth + DINOv2 ReID
+perception_2d      ← YOLO26 / GroundingDINO detector + SAM2 video tracker + DA-V2 depth + DINOv2 ReID
 semantic_lifting   ← occlusion-aware 2D→3D label lifting (UniLiPs Eq.1)
 proposal_generation← Segment-Lift-and-Fit, Fusion4DAL LiDAR detector ensemble
 tracking           ← Fusion4DAL 4D tracking + SAM4D temporal memory
@@ -123,7 +123,7 @@ lidar_preprocessing   reads: sweeps, poses, calibration
        ├─ static_map.npz             (chunk static cloud + static/dynamic/ambiguous voxel keys)
        ├─ dynamic_map.npz            (chunk dynamic cloud + per-point sweep_id)
        ├─ motion_clusters.parquet    (Step F clusters: box + motion_score, track_life, ...)
-       ├─ voxel_occupancy.npz        (sparse int32 voxel coords for MinkUNet encoder; all sweeps)
+       ├─ voxel_occupancy.npz        (sparse int32 voxel coords, all sweeps; no consumer yet)
        └─ ground.npz                 (height grid + surface normals + raw ground points)
   └─ global_static_map.npz          (bag-level downsampled static cloud)
   └─ global_ground.npz              (bag-level height grid spanning all chunks)
@@ -134,7 +134,7 @@ perception_2d         reads: frames, poses, lidar_proc_index, lidar_proc/*_world
        ├─ detections_2d.parquet      (per-masklet class + detector score)
        ├─ tracklets_2d.parquet       (SAM2 temporal associations across frames)
        ├─ masks_2d/<masklet>/<seq>.png (per-masklet per-frame SAM2 masks)
-       └─ depth_2d/<cam>/<frame>.npz (Depth Anything V2 + LiDAR affine-scaled metric depth;
+       └─ depth_2d/<cam>/<frame>.npz (Depth Anything V2 disparity + LiDAR-fit metric depth;
                                       anchors exclude dynamic_mask points; projected with
                                       the pose at each image's own timestamp)
 
@@ -162,7 +162,7 @@ label_refinement      reads: tracks, lidar_proc/*_world.npz, motion_proposals / 
 ## Implementation priority order
 
 Done: `ingest`; `lidar_preprocessing` (Steps A–F: deskew, `--seg aw|mos|union`,
-ground, reduce, IWU, motion proposals); `perception_2d` (GroundingDINO / SAM2 /
+ground, reduce, IWU, motion proposals); `perception_2d` (YOLO26 or GroundingDINO / SAM2 /
 DA-V2 / DINOv2); `semantic_lifting` core (UniLiPs Eq. 1 lifting + cross-camera
 voting). Next:
 

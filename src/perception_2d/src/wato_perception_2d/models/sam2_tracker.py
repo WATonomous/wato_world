@@ -6,29 +6,30 @@ predictor to segment + propagate each detected box into a tracked masklet:
   1. Point SAM2's video loader at the camera's frames: a temp dir of
      sequentially-named JPEGs — symlinks to ingest's own JPEGs when the source
      already is one, re-encoded otherwise — loaded asynchronously by SAM2.
-  2. At each keyframe (every ``redetect_every_k`` frames) drop objects SAM2 has
-     reported absent for ``drop_lost_after_frames`` frames, then run the
-     detector → class-labeled boxes. Boxes that overlap an already-tracked
-     object (mask IoU ≥ ``iou_match_threshold``) are dropped as existing; the
-     genuinely new ones get a fresh obj_id via ``add_new_points_or_box``.
+  2. At each keyframe (every ``redetect_every_k`` frames) remove ended tracks
+     (below) from the session, then run the detector → class-labeled boxes.
+     Boxes that overlap an already-tracked object (mask IoU ≥
+     ``iou_match_threshold``) or a higher-scoring box accepted at the same
+     keyframe are dropped; the genuinely new ones get a fresh obj_id via
+     ``add_new_points_or_box``.
   3. ``propagate_in_video`` forward to the next keyframe, recording per-object
      masks → ``_Track`` → ``Masklet`` (per-frame PNGs written on a thread pool,
-     DINOv2 features every k frames batched over the frame's objects).
+     DINOv2 features every k frames batched over the frame's objects; a pixel
+     several masks claim goes to the highest logit). A track
+     ends — and is never recorded again — when SAM2 loses its object for
+     ``drop_lost_after_frames`` frames or its mask jumps onto another live
+     track's object (``_EndedTracks``): SAM2 otherwise latches the lost
+     object's id onto a different, similar object.
 
-The detector emits one box per object, so each physical object becomes a single
-masklet — no synonym explosion, far fewer masks for downstream to consume.
+Cost: SAM2 runs memory attention per *object* per frame and keeps every object
+it was given, so without pruning cost and VRAM grow with every object ever
+detected. Removing ended tracks at the next keyframe bounds that. SAM2 runs
+under ``autocast_dtype`` (bfloat16 by default); the detector and DINOv2 stay
+float32.
 
-Cost: this SAM2 build runs memory attention + the memory encoder once per
-*object* per frame, and keeps every object it was ever given — including ones
-that left the image long ago — so without pruning, per-frame cost and VRAM grow
-with every object ever detected rather than with what is visible. Dropping lost
-objects (step 2) bounds that. SAM2 calls run under ``autocast_dtype`` (bfloat16
-by default, as upstream runs it); the detector and DINOv2 stay float32.
-
-Object ids reset between OOM sub-clip windows (and between chunks), and an
-object dropped as lost and later re-detected starts a new masklet — exactly the
-discontinuity the downstream `tracking` component re-links via the DINOv2
-embeddings persisted here. Cross-camera identity is likewise deferred downstream.
+Object ids reset between OOM windows and chunks, and a re-detected object whose
+track ended starts a new masklet; the `tracking` component re-links them (and
+across cameras) via the DINOv2 embeddings.
 
 SAM2 video predictor API (sam2 package):
     state = predictor.init_state(video_path=<jpeg_dir>, offload_video_to_cpu=True,
@@ -167,15 +168,15 @@ def keyframes(n_frames: int, every_k: int) -> list[int]:
     return list(range(0, n_frames, step))
 
 
-def _frame_masks(mask_logits, hw: tuple[int, int]) -> list[Optional[np.ndarray]]:
-    """SAM2 logits for one frame → one boolean (H, W) mask per object, or None.
+def _frame_masks(foreground, hw: tuple[int, int]) -> list[Optional[np.ndarray]]:
+    """Per-object foreground for one frame → one boolean (H, W) mask, or None.
 
-    Thresholds on the logits' own device and moves the whole frame's masks to
-    host in one transfer (1 byte/pixel instead of 4, one sync instead of one
-    per object). None marks an empty mask (object absent in this frame —
-    normal) so the track simply skips the frame.
+    ``foreground`` is computed on the logits' own device (e.g. ``logits > 0``)
+    and moved to host here in one transfer (1 byte/pixel instead of 4, one sync
+    instead of one per object). None marks an empty mask (object absent in this
+    frame — normal) so the track simply skips the frame.
     """
-    m = _to_numpy(mask_logits > 0)
+    m = _to_numpy(foreground)
     if m.ndim == 4:  # (N, 1, H, W)
         m = m[:, 0]
     out: list[Optional[np.ndarray]] = []
@@ -192,6 +193,34 @@ def _frame_masks(mask_logits, hw: tuple[int, int]) -> list[Optional[np.ndarray]]
             )
         out.append(mi if mi.any() else None)
     return out
+
+
+def _owned_masks(
+    mask_logits,
+    obj_ids: list[int],
+    present: list[tuple[int, np.ndarray]],
+    hw: tuple[int, int],
+) -> list[tuple[int, np.ndarray]]:
+    """Give each pixel claimed by several tracks to the one SAM2 is surest of.
+
+    SAM2 infers each object independently, so masks overlap — a bus's mask can
+    wrap around a car half-hidden beside it — and an overlapping pixel would be
+    lifted to 3D as both objects. Among the tracks still recorded this frame
+    (ended ones are already out, so they can't take pixels), a contested pixel
+    goes to the highest logit; a track left with no pixels skips the frame.
+    """
+    if len(present) < 2:
+        return present
+    stack = np.stack([m for _, m in present])
+    if not (stack.sum(axis=0) > 1).any():
+        return present
+    sub = mask_logits[[obj_ids.index(oid) for oid, _ in present]]
+    if hasattr(sub, "dim"):  # torch
+        top = sub.max(dim=0, keepdim=True).values
+    else:
+        top = sub.max(axis=0, keepdims=True)
+    owned = _frame_masks((sub > 0) & (sub >= top), hw)
+    return [(oid, m) for (oid, _), m in zip(present, owned) if m is not None]
 
 
 _JPEG_EXTS = (".jpg", ".jpeg")
@@ -258,6 +287,86 @@ def _iter_in(ctx_factory, gen):
         gen.close()
 
 
+def _mask_iou(a: np.ndarray, b: np.ndarray) -> float:
+    inter = np.count_nonzero(a & b)
+    return inter / np.count_nonzero(a | b) if inter else 0.0
+
+
+class _EndedTracks:
+    """Decides, frame by frame, which SAM2 masks still belong to their track.
+
+    SAM2 does not let go of an object it has lost — it left the image, or was
+    covered — and within 0–30 frames tends to latch onto a similar object
+    nearby, usually one that already has its own track (per-object inference
+    has no notion of two objects owning the same pixels). On WATO data every
+    such resume was a different object. So a track ends, permanently:
+
+    * when its object has had no mask for ``drop_lost_after_frames``
+      consecutive frames (the resume after a gap); or
+    * when its mask and another live track's reach mask IoU >=
+      ``duplicate_mask_iou`` in the same frame (the jump with no gap, e.g. an
+      oncoming car leaving the image as it passes a parked one). Of the two,
+      the track whose mask changed most since its previous mask is the one
+      that jumped and ends; a track with no previous mask (just prompted)
+      counts as having jumped, so an existing track is never displaced.
+
+    An ended track's masks are never recorded again; the caller removes it
+    from the SAM2 session at the next keyframe.
+    """
+
+    def __init__(self) -> None:
+        self.ids: set[int] = set()
+        self._empty_run: dict[int, int] = {}
+        self._prev: dict[int, np.ndarray] = {}
+
+    def claim(
+        self,
+        obj_ids: list[int],
+        masks: list[Optional[np.ndarray]],
+        *,
+        drop_lost_after_frames: int,
+        duplicate_mask_iou: float,
+    ) -> list[tuple[int, np.ndarray]]:
+        """This frame's (obj_id, mask) pairs that still belong to their track."""
+        present: list[tuple[int, np.ndarray]] = []
+        for oid, mask in zip(obj_ids, masks):
+            if oid in self.ids:
+                continue
+            if mask is None:
+                run = self._empty_run[oid] = self._empty_run.get(oid, 0) + 1
+                if 0 < drop_lost_after_frames <= run:
+                    self._end(oid)
+                continue
+            self._empty_run[oid] = 0
+            present.append((oid, mask))
+
+        if 0.0 < duplicate_mask_iou <= 1.0:
+            for i in range(len(present)):
+                for j in range(i + 1, len(present)):
+                    (a, ma), (b, mb) = present[i], present[j]
+                    if a in self.ids or b in self.ids:
+                        continue
+                    if _mask_iou(ma, mb) >= duplicate_mask_iou:
+                        self._end(
+                            a
+                            if self._steadiness(a, ma) < self._steadiness(b, mb)
+                            else b
+                        )
+
+        present = [(oid, m) for oid, m in present if oid not in self.ids]
+        for oid, m in present:
+            self._prev[oid] = m
+        return present
+
+    def _steadiness(self, oid: int, mask: np.ndarray) -> float:
+        prev = self._prev.get(oid)
+        return -1.0 if prev is None else _mask_iou(mask, prev)
+
+    def _end(self, oid: int) -> None:
+        self.ids.add(oid)
+        self._prev.pop(oid, None)
+
+
 def track_camera(
     predictor,
     detector,
@@ -276,7 +385,8 @@ def track_camera(
     offload_video_to_cpu: bool = True,
     sub_clip_frames: int = 150,
     min_sub_clip_frames: int = 16,
-    drop_lost_after_frames: int = 30,
+    drop_lost_after_frames: int = 5,
+    duplicate_mask_iou: float = 0.7,
     autocast_dtype: str = "bfloat16",
 ) -> list[Masklet]:
     """Detect + SAM2-track every taxonomy object across one camera's frames.
@@ -302,6 +412,7 @@ def track_camera(
         iou_match_threshold=iou_match_threshold,
         offload_video_to_cpu=offload_video_to_cpu,
         drop_lost_after_frames=drop_lost_after_frames,
+        duplicate_mask_iou=duplicate_mask_iou,
         autocast_dtype=autocast_dtype,
     )
 
@@ -396,6 +507,7 @@ def _track_window(
     iou_match_threshold: float,
     offload_video_to_cpu: bool,
     drop_lost_after_frames: int,
+    duplicate_mask_iou: float,
     autocast_dtype: str,
 ) -> dict[int, _Track]:
     """Detect + propagate over one (windowed) frame range in a single session.
@@ -421,7 +533,7 @@ def _track_window(
     # keyframes are kept: holding every frame's masks costs GBs on long clips.
     masks_at_kf: dict[int, dict[int, np.ndarray]] = {}
     live: set[int] = set()  # obj_ids currently in the SAM2 session
-    last_seen: dict[int, int] = {}  # obj_id → last frame idx with a non-empty mask
+    ended = _EndedTracks()  # lost / jumped objects: never recorded again
     next_obj_id = 0
 
     tmpdir: Optional[str] = None
@@ -441,20 +553,29 @@ def _track_window(
             stop = (n - 1) if is_last else kfs[ki + 1]  # last frame idx to reach
             record_stop = n if is_last else kfs[ki + 1]  # exclusive record bound
 
-            # Stop paying for objects SAM2 has reported absent for a while.
-            if drop_lost_after_frames > 0:
-                for oid in sorted(live):
-                    if kf - last_seen[oid] >= drop_lost_after_frames:
-                        with amp():
-                            predictor.remove_object(state, oid, need_output=False)
-                        live.discard(oid)
+            # Tracks that ended since the last keyframe stopped recording at
+            # once; remove them from the session here (between propagations) so
+            # SAM2 stops paying for them.
+            for oid in sorted(ended.ids & live):
+                with amp():
+                    predictor.remove_object(state, oid, need_output=False)
+                live.discard(oid)
 
             # Introduce objects detected at this keyframe that aren't already
-            # tracked (matched against masks propagated into this frame).
+            # tracked (matched against masks propagated into this frame) and
+            # don't repeat a box accepted earlier at this keyframe — the
+            # detector's NMS is per class, so one shuttle can come back as both
+            # "truck" and "bus". Highest score first, so the better label wins.
             existing = masks_at_kf.pop(kf, {})
-            for det in detector.detect(images[kf], concepts):
-                if _is_existing(det, existing, iou_match_threshold):
+            accepted: list[tuple[float, float, float, float]] = []
+            for det in sorted(
+                detector.detect(images[kf], concepts), key=lambda d: -d.score
+            ):
+                if _is_existing(det, existing, iou_match_threshold) or any(
+                    _box_iou(det.box_xyxy, b) >= iou_match_threshold for b in accepted
+                ):
                     continue
+                accepted.append(det.box_xyxy)
                 oid = next_obj_id
                 next_obj_id += 1
                 obj_meta[oid] = (det.cls, det.score)
@@ -468,7 +589,6 @@ def _track_window(
                     del obj_meta[oid]
                     break
                 live.add(oid)
-                last_seen[oid] = kf
 
             # Nothing to track in this segment (e.g. an empty road at the first
             # keyframe): SAM2 refuses to propagate zero objects, so skip ahead to
@@ -486,11 +606,17 @@ def _track_window(
                 ),
             ):
                 f = int(f_idx)
-                present: list[tuple[int, np.ndarray]] = []
-                for oid, mask in zip(obj_ids, _frame_masks(mask_logits, (H, W))):
-                    if mask is not None:
-                        present.append((int(oid), mask))
-                        last_seen[int(oid)] = f
+                ids = [int(o) for o in obj_ids]
+                # Decide which tracks end on SAM2's raw masks (a jump shows as
+                # two tracks on one object), then split contested pixels among
+                # the survivors only.
+                present = ended.claim(
+                    ids,
+                    _frame_masks(mask_logits > 0, (H, W)),
+                    drop_lost_after_frames=drop_lost_after_frames,
+                    duplicate_mask_iou=duplicate_mask_iou,
+                )
+                present = _owned_masks(mask_logits, ids, present, (H, W))
                 if f in kf_set and f > kf:
                     masks_at_kf[f] = dict(present)
                 if f < record_stop and present:
@@ -611,8 +737,7 @@ def _record_frame(
             )
         )
     if dino_every_k > 0 and frame_index_abs % dino_every_k == 0:
-        # DINOv2 (torch.hub) is independent of SAM2 and only feeds the downstream
-        # tracking ReID — a failure here must NOT abort the camera. Isolate it.
+        # DINOv2 only feeds downstream ReID: a failure must not abort the camera.
         try:
             feats = extract_dino_features(
                 image_rgb, [m for _, m in present], dino_model, device

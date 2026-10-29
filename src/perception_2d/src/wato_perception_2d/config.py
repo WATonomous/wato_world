@@ -1,20 +1,10 @@
 """Pydantic config for perception_2d, sourced from perception_2d.yaml.
 
-The tracker is a 2D detector (GroundingDINO) + SAM2 video predictor
-(detector.py + sam2_tracker.py): the detector emits class-labeled boxes, SAM2
-turns each into a mask and tracks it across the camera stream into masklets.
-
-The *class vocabulary* fed to the detector comes from one of two sources,
-selected by ``discovery.backend``:
-
-- ``fixed``     (default) — the closed-set taxonomy (``discovery.fixed_classes``
-  or prompts.yaml ``primary_taxonomy``). Cleanest output, no synonym dupes.
-- ``florence2`` — open-vocabulary noun phrases discovered per frame by Florence-2,
-  pooled into a concept set per camera stream.
-
-DINOv2 appearance embeddings are extracted per masklet (``embeddings``) for the
-downstream ``tracking`` component; perception_2d does not re-identify here.
-Cross-camera identity merging is likewise deferred downstream.
+A per-keyframe box detector (``detection.backend``: YOLO26 or GroundingDINO)
+feeds SAM2's video predictor, which tracks each box into a masklet. The class
+vocabulary comes from ``discovery.backend``: ``fixed`` (the closed-set
+taxonomy) or ``florence2`` (open-vocab phrases, GroundingDINO only). DINOv2
+embeddings are extracted per masklet for the downstream ``tracking`` component.
 """
 
 from __future__ import annotations
@@ -31,7 +21,7 @@ class DiscoveryConfig(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    # "fixed"     → prompt the detector with the closed-set taxonomy. DEFAULT.
+    # "fixed"     → prompt the detector with the closed-set taxonomy (default).
     # "florence2" → open-vocabulary noun phrases from Florence-2, deduped into a
     #               concept set per camera stream, then fed to the detector.
     backend: str = "fixed"
@@ -45,20 +35,54 @@ class DiscoveryConfig(BaseModel):
     fixed_classes: list[str] = Field(default_factory=list)
 
 
+def _default_yolo_class_map() -> dict[str, str]:
+    return {
+        "person": "pedestrian",
+        "bicycle": "bicycle",
+        "car": "car",
+        "motorcycle": "motorcycle",
+        "bus": "bus",
+        "truck": "truck",
+    }
+
+
+class YoloConfig(BaseModel):
+    """Closed-set YOLO detector (detection.backend: yolo)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Pinned weights (model_registry.RAW_CHECKPOINTS["yolo26"]), loaded by path.
+    checkpoint: str = "/data/models/yolo26x.pt"
+    conf: float = 0.25  # min box confidence
+    iou: float = 0.7  # NMS IoU
+    imgsz: int = 1280  # inference size (long side); frames are 1280x1024
+    # Weights' class name → taxonomy class. Unmapped classes are dropped.
+    class_map: dict[str, str] = Field(default_factory=_default_yolo_class_map)
+
+
 class DetectionConfig(BaseModel):
-    """GroundingDINO detector — the per-keyframe box source for SAM2."""
+    """Per-keyframe box source for SAM2."""
 
     model_config = ConfigDict(extra="allow")
 
+    # "yolo": closed-set COCO weights mapped onto the taxonomy (yolo.class_map).
+    # "grounding_dino": open-vocabulary, text-prompted by the taxonomy (and by
+    # Florence-2 discovery when discovery.backend is florence2).
+    backend: Literal["yolo", "grounding_dino"] = "yolo"
+    yolo: YoloConfig = Field(default_factory=YoloConfig)
+
+    # --- grounding_dino ---------------------------------------------------
     # HuggingFace zero-shot detection checkpoint. The Transformers backend needs
     # no CUDA custom-op compile (unlike the standalone groundingdino package).
     model: str = "IDEA-Research/grounding-dino-base"
     box_threshold: float = 0.35  # min box confidence
     text_threshold: float = 0.25  # min text-token match score
     nms_iou: float = 0.5  # per-class NMS IoU to drop duplicate boxes
+
+    # --- both backends ----------------------------------------------------
     # Run the detector every k frames to introduce objects entering mid-clip.
     # Large value → effectively detect-once at frame 0.
-    redetect_every_k: int = 10
+    redetect_every_k: int = 2  # images; see config/perception_2d.yaml
 
 
 class SegmentationConfig(BaseModel):
@@ -91,12 +115,15 @@ class TrackingConfig(BaseModel):
     # via DINOv2). A window that itself OOMs is recursively halved to the floor.
     sub_clip_frames: int = 150
     min_sub_clip_frames: int = 16
-    # Drop an object from the SAM2 session once it has had no mask for this many
-    # frames (checked at keyframes). SAM2 otherwise keeps running memory
-    # attention for every object it was ever given — cost grows with objects
-    # detected so far, not objects visible. If it reappears and is re-detected it
-    # starts a new masklet (re-linked downstream via DINOv2). 0 = never drop.
-    drop_lost_after_frames: int = 30
+    # SAM2 doesn't let go of an object it has lost: within 0-30 frames it tends
+    # to latch the lost object's id onto a similar object nearby. A track ends
+    # (no more masks recorded; removed from the session at the next keyframe)
+    # once its object has had no mask for this many consecutive frames. 0 = never.
+    drop_lost_after_frames: int = 1  # images
+    # ...or once its mask and another live track's reach this IoU in the same
+    # frame (a jump with no empty frame); the track whose mask changed most
+    # since its previous frame is the one that ends. > 1 disables.
+    duplicate_mask_iou: float = 0.7
     # Precision for SAM2 calls on CUDA: "bfloat16" (upstream's setting; enables
     # flash attention), "float16", or "float32". Detector + DINOv2 stay float32.
     autocast_dtype: Literal["bfloat16", "float16", "float32"] = "bfloat16"
@@ -107,15 +134,13 @@ class DepthConfig(BaseModel):
 
     enabled: bool = True
     model: str = "depth-anything-v2-large"
-    # Frames pushed through the DA-V2 backbone in one GPU batch during the depth
-    # pass (depth is VRAM-disjoint from the tracker; batching is a throughput win
-    # when the card has headroom). 1 = original per-frame streaming.
+    # Frames per DA-V2 GPU batch in the depth pass. 1 = one frame at a time.
     batch_size: int = 1
     min_lidar_anchors: int = 30  # min anchor pairs to attempt a disparity fit
     ransac_n_iter: int = 200
     ransac_inlier_threshold_m: float = 0.5
-    # Always static: the pipeline only loads static LiDAR (dynamic points desync
-    # ~75cm at 25ms; see depth_align). Flag retained as explicit intent.
+    # Unused: anchors are always static LiDAR (a mover's points are ~75 cm off
+    # at 25 ms of desync).
     use_static_anchors_only: bool = True
     fallback_window: int = 5
     sky_mask_top_fraction: float = 0.3
@@ -123,17 +148,12 @@ class DepthConfig(BaseModel):
 
 
 class EmbeddingConfig(BaseModel):
-    """DINOv2 appearance-embedding extraction.
-
-    This stage only *extracts and persists* embeddings (for the downstream
-    `tracking` component to use for re-identification); it does not itself
-    re-identify anything.
-    """
+    """DINOv2 appearance embeddings, persisted for the `tracking` component's ReID."""
 
     model_config = ConfigDict(extra="allow")
 
     model: str = "dinov2_vitl14"
-    every_k_frames: int = 5
+    every_k_frames: int = 1  # images
 
 
 # Cache of {synonym(lowercased): canonical class}, keyed by prompts_path, so
@@ -216,11 +236,7 @@ class ComponentConfig(BaseModel):
         return list(_FALLBACK_CONCEPTS)
 
     def synonym_to_class_map(self) -> dict[str, str]:
-        """Cached {synonym(lowercased): canonical class} from prompts.yaml.
-
-        Built once per prompts_path so canonicalisation is a dict lookup rather
-        than a YAML re-parse per masklet.
-        """
+        """Cached {synonym(lowercased): canonical class} from prompts.yaml."""
         cached = _synonym_map_cache.get(self.prompts_path)
         if cached is None:
             cached = _build_synonym_map(self.prompts_path)

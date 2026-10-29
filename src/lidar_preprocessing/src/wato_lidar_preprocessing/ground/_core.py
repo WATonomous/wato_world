@@ -4,13 +4,10 @@ Reads each world-frame sweep NPZ. Sweeps carrying a `ground_mask` contribute
 their ground points to the chunk-level ground cloud, which is then binned
 into a 2D height grid + surface-normal grid.
 
-Each candidate ground point is checked against the carved-dynamic voxel set
-from Step B (classify) — points whose voxel classify marked DYNAMIC are
-dropped, which removes vehicle-underside contamination (low-riding movers
-that fooled Patchwork++). Points in any other voxel class pass through:
-classify credits no endpoint hit to a ground return, so ground voxels can
-never be static — intersecting with the STATIC set (the old behaviour)
-silently discarded ~all ground points.
+Ground points in a voxel Step B called DYNAMIC are dropped (low-riding movers
+that fooled Patchwork++); every other voxel class passes. Not "keep only
+static": ground returns earn no endpoint hits, so ground voxels are never
+static.
 
 When no sweep carries a ground mask (Patchwork++ unavailable upstream),
 writes a sentinel ground.npz with status="skipped_no_ground_mask" so

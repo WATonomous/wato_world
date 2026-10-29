@@ -136,6 +136,12 @@ contributed each label — was designed but is not written.)
 
 ### `lifted_labels/<sweep_id>.npz` schema
 
+**As implemented**, the file is `lifted_labels/<sweep_id:06d>.npz` with
+`point_indices`, `instance_ids` and `classes` (unicode strings; the instance id
+is the masklet's `global_object_id`, else its `masklet_id`), `confidences`,
+`n_supporting_cameras`, `n_disagreeing_cameras` — see
+`wato_common.artifacts.lifted_labels`. The table below is the original design.
+
 | Field | Dtype | Shape | Description |
 |---|---|---|---|
 | `point_idx` | int32 | (N,) | Index into the sweep's point array |
@@ -260,6 +266,9 @@ Record a vote:
 vote = (instance_id, class_id, score = det_score × depth_confidence[u,v])
 ```
 
+**As implemented**, `score = max(det_score, 1e-3)`: the depth artifact carries
+no per-pixel confidence.
+
 ### Step 6: cross-camera vote reduction
 
 For each LiDAR point that received votes from one or more cameras, reduce:
@@ -375,10 +384,10 @@ temporal:
 visibility:
   tolerance_m: 0.5             # UniLiPs Eq. 1 τ
   neighborhood: 3              # min over the NxN patch in depth_2d
-voting:
+voting:                        # not read yet
   min_supporting_cameras: 1
-  innermost_wins: true         # for nested masks, innermost wins
-upstream_versions: {}
+  innermost_wins: true
+upstream_versions: {}          # not read
 ```
 
 The design's `projection.*`, `voting.confidence_min` /

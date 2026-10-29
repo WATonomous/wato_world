@@ -1,22 +1,12 @@
-# wato_ingest configuration — nuScenes rosbag profile (the default).
-#
-# Loaded by `wato_ingest.config.load_config()` (called from cli.py) whenever
-# --config is omitted.  Its companion, ingest.wato.yaml, is the same schema
-# tuned for WATO panoramic-rig recordings.
-#
-# Switch datasets per run via --config, e.g. for a WATO bag:
-#   ./watod run ingest /data/bags/<wato_bag>.mcap \
-#       --config /ws/src/ingest/config/ingest.wato.yaml
-#
-# Edit these values per recording — especially the `topics` map, which depends
-# on how the bag was recorded.  Override per host/run with --config path/to/other.yaml.
+# wato_ingest configuration — nuScenes rosbag profile (the default when
+# --config is omitted). Schema: wato_ingest.config.IngestConfig.
 
 # ---------------------------------------------------------------------------
 # Chunking — virtual time windows over the bag.  No physical splitting.
 # ---------------------------------------------------------------------------
 chunk_seconds: 30.0          # window length
 chunk_overlap_seconds: 2.0   # overlap with neighbors so tracks can be stitched
-reference_clock: lidar       # which sensor stream defines a "frame"
+reference_clock: lidar       # unused: frame_index pairs every LiDAR sweep with each camera
 
 # ---------------------------------------------------------------------------
 # Time alignment — used by artifacts/frame_index.py.
@@ -25,13 +15,10 @@ max_cam_offset_ms: 50.0      # drop a (sweep, cam) row if the camera frame is
                              # more than this far from the LiDAR sweep timestamp
 
 # ---------------------------------------------------------------------------
-# Pose requirements — the pose topic must be DENSE and SMOOTH.  Every sweep
-# pose and every deskewed LiDAR point is linearly interpolated between the two
-# pose samples around it (constant-velocity assumption), so ingest refuses a
-# sparse stream instead of interpolating across seconds.  Physics, not
-# dataset tuning: both profiles use the same values.  README "Pose
-# requirements" has the measured rationale.  nuScenes /odom: 50 Hz, 20 ms
-# median / 45 ms max spacing, <= 9 m/s, dense fraction 1.0 — passes.
+# Pose requirements — the pose topic must be dense and smooth (README "Poses";
+# measurements in docs/ingest_measurements.md). Physics, not dataset tuning:
+# every profile uses the same values. nuScenes /odom: 20 ms median spacing,
+# dense fraction 1.0.
 # ---------------------------------------------------------------------------
 pose_requirements:
   min_dense_fraction: 0.9      # chunk: share of the pose span whose samples are
@@ -41,10 +28,7 @@ pose_requirements:
   max_bracket_ms: 250.0        # stretch: two consecutive poses further apart
                                # than this can't be interpolated between
                                # (pose_gap_*); no sweep, point or camera frame
-                               # inside the stretch gets a valid pose.  Measured
-                               # on WATO: at 200-250 ms a point 30 m out moves
-                               # ~11 cm p95 (mostly rotation); at 350-500 ms
-                               # ~23 cm p95.
+                               # inside the stretch gets a valid pose.
   max_speed_mps: 30.0          # stretch: implied ego speed between two
                                # consecutive poses above this is a jump (loop
                                # closure, INS reset), not motion (pose_jump_*).
@@ -54,12 +38,9 @@ pose_requirements:
 # `storage_id: <plugin>` only to force one.
 
 # ---------------------------------------------------------------------------
-# Topic mapping.  LEFT side is the logical name ingest uses for outputs
-# (cam_<id>/, lidar_<id>/, etc.).  RIGHT side is the actual topic in the bag.
-#
-# If your recording uses different topic names, edit this section — no Python
-# change required.  `python -m wato_ingest inspect-bag --bag <bag>` lists a
-# bag's topics and message types.  Accepted types:
+# Topic mapping: logical name (used in artifact paths) → bag topic.
+# `python -m wato_ingest inspect-bag --bag <bag>` lists a bag's topics.
+# Accepted types:
 #   cameras.*.image  sensor_msgs/CompressedImage (JPEG/PNG) or sensor_msgs/Image
 #                    (rgb8, bgr8, rgba8, bgra8, mono8)
 #   cameras.*.info   sensor_msgs/CameraInfo
@@ -71,9 +52,6 @@ pose_requirements:
 # passing --calibration <file>.
 # ---------------------------------------------------------------------------
 topics:
-  # Each camera gets two topics: the image stream + its CameraInfo (intrinsics,
-  # distortion, dimensions, frame_id).  Ingest auto-builds calibration.json
-  # from the first CameraInfo per camera + the configured TFMessage topic.
   cameras:
     CAM_FRONT:       { image: /CAM_FRONT/image_rect_compressed,       info: /CAM_FRONT/camera_info       }
     CAM_FRONT_LEFT:  { image: /CAM_FRONT_LEFT/image_rect_compressed,  info: /CAM_FRONT_LEFT/camera_info  }
@@ -83,12 +61,9 @@ topics:
     CAM_BACK_RIGHT:  { image: /CAM_BACK_RIGHT/image_rect_compressed,  info: /CAM_BACK_RIGHT/camera_info  }
   lidars:
     LIDAR_TOP: /LIDAR_TOP
-  # The nuScenes rosbag provides TFMessage data on /tf rather than /tf_static.
-  # Ingest reads the first transform per parent/child pair at bag scope to
-  # populate calibration.json automatically.
+  # nuScenes carries its static transforms on /tf.
   tf_static: /tf
-  # nuScenes provides nav_msgs/Odometry on /odom in the map frame with
-  # child_frame_id=base_link.
+  # nav_msgs/Odometry, map frame, child_frame_id=base_link.
   pose: /odom
 
 # ---------------------------------------------------------------------------

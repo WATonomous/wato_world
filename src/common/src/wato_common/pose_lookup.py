@@ -11,7 +11,7 @@ camera frame.  They all interpolate the same way and trust the same stretches.
 
 Interpolation is linear in translation and SLERP in rotation between the two
 samples around the target time, which assumes constant velocity between
-them.  There is no extrapolation.  The ingest README's "Pose requirements"
+them.  There is no extrapolation.  The ingest README's "Poses"
 section explains the rules.
 """
 

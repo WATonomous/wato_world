@@ -290,9 +290,8 @@ class ProcessedSweepMeta(BaseModel):
     # (canonical_lidar=None in config) just get frame_id = sweep ordinal.
     # Nullable: orphan sweeps outside any window are None.
     frame_id: Optional[int] = None
-    # Step A.5 — MF-MOS mask path.  Populated by mf_mos.process_chunk on the
-    # `--seg mos` / `--seg union` paths; None otherwise (and on `--seg aw`).  Points to a (n_raw,) bool
-    # NPY file aligned to the raw sweep (same length as the raw lidar NPZ).
+    # MF-MOS mask: (n_raw,) bool NPY aligned to the raw sweep. Written on
+    # `--seg mos` / `--seg union`; None on `--seg aw`.
     mf_mos_mask_path: Optional[str] = None
 
 
@@ -348,10 +347,9 @@ class ChunkSummaryRow(BaseModel):
     cache_auto_disabled: bool
     estimated_cache_bytes: int
     ground_status: str  # "ok" | "skipped_no_ground_mask" | "empty"
-    # Which Step-B method produced this chunk's artifacts ("aw"|"mos"|"union").
-    # None on summaries written before the column existed. The orchestrator's
-    # skip check compares it against the current run's cfg.segmentation so
-    # switching --seg never silently serves another method's artifacts.
+    # Which Step-B method produced this chunk ("aw"|"mos"|"union"); None on
+    # older summaries. The skip check compares it with cfg.segmentation, so
+    # switching --seg never serves another method's artifacts.
     segmentation_method: Optional[str] = None
     # Sweeps Step B had no usable MF-MOS mask for (mos/union only; None for
     # aw). Their movers are left static (mos) or dropped (union) — chunks
@@ -526,7 +524,7 @@ class MaskletRow(BaseModel):
     bag_id: str
     chunk_id: str
     cam_id: str  # camera name, e.g. "CAM_FRONT"
-    cls: str  # "vehicle" | "pedestrian" | "cyclist"
+    cls: str  # canonical taxonomy class
     score: float
     frames_present: str  # JSON list[int] — camera_seq values where mask is present
     mask_path: str  # path to directory of per-frame mask PNG files
@@ -536,9 +534,7 @@ class MaskletRow(BaseModel):
     raw_phrase: str = ""  # raw detector label before canonicalisation
     det_score: float = 0.0  # detector (× SAM2 mask) confidence
     discovery_score: float = 0.0  # detector / Florence-2 confidence
-    centroid_depth_m: float = (
-        0.0  # metric depth at mask centroid (used for cross-cam merge)
-    )
+    centroid_depth_m: float = 0.0  # not populated yet
     tracker_backend: str = "sam2"  # tracker that produced this masklet
 
 
@@ -564,7 +560,7 @@ MASKLET_SCHEMA = pa.schema(
 
 
 # ---------------------------------------------------------------------------
-# perception_2d v2 — depth branch (Depth Anything V2 disparity + LiDAR inverse-depth fit).
+# perception_2d — metric depth (Depth Anything V2 disparity fit to LiDAR).
 # ---------------------------------------------------------------------------
 
 

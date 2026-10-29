@@ -298,7 +298,7 @@ def test_ground_voxels_not_in_any_class_pass_through(tmp_env):
     """Regression: ground points must NOT be required to sit in STATIC voxels.
 
     Under skip_endpoint, ground voxels never receive endpoint hits and can
-    never be classified static — the old keep-if-static intersection dropped
+    never be classified static, so a keep-if-static intersection would drop
     ~all ground points (98% on real bags).  With an empty dynamic set, every
     ground point must survive even though none are in static voxels.
     """

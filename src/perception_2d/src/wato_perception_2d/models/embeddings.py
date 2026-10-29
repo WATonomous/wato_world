@@ -1,13 +1,9 @@
 """DINOv2 appearance-embedding extraction.
 
-Extracts a per-mask DINOv2 embedding and persists it on each masklet.  This
-stage only *produces* embeddings — the actual re-identification happens
-downstream in the `tracking` component, which consumes them.
-
-Used by the SAM2 tracker (sam2_tracker.py), which calls extract_dino_features
-every k frames with all of that frame's tracked masks, batched into one
-forward.  Lazy-imports torch so the module can be *imported* without it
-installed; extracting a feature without torch/DINOv2 raises loudly.
+Per-mask DINOv2 embeddings, persisted on each masklet for the `tracking`
+component's ReID. sam2_tracker.py calls extract_dino_features every k frames
+with that frame's masks in one forward. Lazy-imports torch; extraction without
+torch/DINOv2 raises.
 """
 
 from __future__ import annotations
@@ -21,9 +17,7 @@ from wato_perception_2d.model_registry import torch_hub_repo
 
 log = logging.getLogger(__name__)
 
-# Cache loaded DINOv2 models so torch.hub.load (model reconstruction + weight
-# load + device transfer) runs ONCE per (model, device) rather than on every
-# extract_dino_features call (which happens every k frames).
+# One torch.hub.load per (model, device), not per call.
 _MODEL_CACHE: dict[tuple[str, str], object] = {}
 
 
@@ -34,13 +28,9 @@ def _get_model(model_name: str, device: str):
     if model is None:
         import torch
 
-        # Pinned ref, not the default branch. Two reasons: upstream `main`
-        # moves (so an unpinned load is a silently changing ReID model), and
-        # the ref names the TORCH_HOME cache directory
-        # (facebookresearch_dinov2_<ref>) that fetch_models.py populated — a
-        # bare "facebookresearch/dinov2" looks for ..._main, misses the
-        # pre-fetched cache, and tries to reach the network from a container
-        # whose /data/models is mounted read-only.
+        # Pinned ref: upstream `main` moves, and the ref names the TORCH_HOME
+        # cache dir fetch_models.py populated (a bare repo looks for ..._main
+        # and tries the network from a read-only mount).
         model = torch.hub.load(torch_hub_repo(), model_name)
         model.eval().to(device)
         _MODEL_CACHE[key] = model

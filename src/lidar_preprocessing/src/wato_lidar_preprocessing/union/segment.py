@@ -1,63 +1,24 @@
 """Fusion static/dynamic decomposition (`--seg union`).
 
-The third Step-B method. `aw` (classify/) and `mos` (mf_mos/) are mutually
-exclusive and never import each other; `union` is the fusion layer, so it
-deliberately reads the outputs of both and reuses mf_mos's mask-alignment +
-meta-row helpers.
-
-Division of labour:
-  * static cloud  = Amanatides-Woo's static map (classify.process_chunk),
-    kept verbatim. High precision — a voxel is static only with a
-    preponderance of occupied evidence.
-  * dynamic cloud = MF-MOS moving points (mf_mos._core.process_chunk), with
-      - Patchwork++ ground removed (ground belongs to ground.npz),
-      - the near-ego gate applied (cfg.dynamic_min_range_m, same as classify
-        pass 2 — AW can't veto ego self-returns because near-ego voxels are
-        maximally carved and never enter the static set),
-      - the ground-height veto applied (cfg.union.ground_height_veto_m):
-        points below that height over Step C's ground.npz height grid drop.
-        The AW static set is structurally blind to the road — skip_endpoint
-        keeps road voxels at n_hits==0, so they are never static — which
-        lets MF-MOS road false positives through every voxel veto. Height
-        over the aggregated ground grid is the signal that catches them
-        (including below-grade artifacts), and
-      - every point whose voxel AW confirmed static — or, with
-        veto_dilation_voxels >= 1, within that many voxels of one — removed
-        (cfg.union.aw_static_veto). The AW static map is the "comparison"
-        that rejects MF-MOS false positives hugging static structure.
-        Surface returns straddle voxel boundaries, so the exact-voxel test
-        alone misses the shell one voxel off the structure; the dilation
-        catches it. Two exemptions keep real movers alive:
-          * candidates whose own voxel AW classed dynamic (static_map.npz
-            dynamic_voxel_keys) are exempt from the *dilated* part — AW
-            corroborates the motion, and movers brush past structure all
-            the time;
-          * points whose MF-MOS moving probability is >= veto_score_exempt
-            are exempt from the whole veto: AW's static evidence aggregates
-            the whole chunk, so an object parked for most of the chunk that
-            drives off gets voxel-static evidence — a high-confidence
-            MF-MOS verdict is more trustworthy than chunk-aggregate
-            occupancy there.
+  * static cloud  = AW's static map (classify.process_chunk), verbatim.
+  * dynamic cloud = MF-MOS moving points minus Patchwork++ ground, near-ego
+    points (cfg.dynamic_min_range_m), points below
+    cfg.union.ground_height_veto_m over Step C's ground grid (AW never calls
+    road voxels static, so road false positives pass every voxel veto), and
+    points in or (with veto_dilation_voxels) next to an AW-static voxel.
+    The dilated part spares candidates whose own voxel AW called dynamic;
+    the whole veto spares MF-MOS scores >= veto_score_exempt (an object
+    parked most of the chunk has static voxel evidence).
 
       dynamic = mf_mos_moving & ~ground & ~near_ego & ~near_ground
                 & ~aw_static_dilated                              (default)
       dynamic = (mf_mos_moving | aw_dynamic) & ...   (keep_aw_dynamic=True)
 
-Prerequisites — the orchestrator runs these first, in this order, so their
-artifacts are on disk before classify_chunk reads them:
-  1. classify.process_chunk     → static_map.npz (static_voxel_keys +
-     dynamic_voxel_keys), and the per-sweep aw_dynamic_mask.npy snapshot
-     this step reads when keep_aw_dynamic (written on the union path only).
-  2. mf_mos._core.process_chunk → per-sweep *_mf_mos_mask.npy
-     (+ *_mf_mos_score.npy when save_scores, used by veto_score_exempt).
-  3. ground.process_chunk       → ground.npz height grid for the
-     ground-height veto. The orchestrator runs Step C before union on the
-     union path only; if it's missing the veto is skipped with a warning.
-
-This step rewrites ONLY the dynamic side — dynamic_map.npz, the per-sweep
-dynamic_mask.npy, and each index row's n_points_dynamic. static_map.npz and
-the AW n_points_static counts are left untouched, so Step C ground / Step D
-reduce stay method-agnostic exactly as for aw and mos.
+Runs after, in order: classify.process_chunk (static_map.npz voxel keys, the
+aw_dynamic_mask.npy snapshot), mf_mos._core.process_chunk (masks, scores),
+ground.process_chunk (ground.npz; the height veto is skipped with a warning
+without it). Rewrites only the dynamic side — dynamic_map.npz, dynamic_mask.npy,
+n_points_dynamic — then runs the motion filter.
 """
 
 from __future__ import annotations
@@ -84,8 +45,7 @@ from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.schemas import PROCESSED_SWEEPS_SCHEMA
 from wato_lidar_preprocessing.config import ComponentConfig
 
-# union is the fusion layer: reusing mf_mos's mask-alignment + meta-row
-# helpers keeps the on-disk schema single-sourced rather than re-deriving it.
+# Reuse mf_mos's mask alignment + meta rows so the on-disk schema has one source.
 from wato_lidar_preprocessing.mf_mos.segment import (
     _invalid_meta_row,
     _load_world,
@@ -172,10 +132,8 @@ def _load_ground_grid(
 ) -> tuple[np.ndarray, np.ndarray, float] | None:
     """ground.npz → (height_grid, grid_origin, cell_size) or None.
 
-    None (with a warning) when ground.npz is absent — the orchestrator runs
-    Step C before union, but a standalone re-fuse on artifacts that predate
-    that ordering won't have it — or when it's a sentinel (Patchwork++
-    unavailable upstream), in which case there is no height to veto against.
+    None (with a warning) when ground.npz is absent (e.g. a re-fuse on older
+    artifacts) or a sentinel (Patchwork++ unavailable).
     """
     path = local_path(ground_path(bag_id, chunk_id))
     if not os.path.exists(path):
@@ -372,10 +330,8 @@ def classify_chunk(
         )
         dyn_mask = candidate & not_ground
 
-        # Near-ego dynamic gate, mirroring classify pass 2. Must happen here:
-        # the AW veto can't catch ego self-returns (near-ego voxels are
-        # maximally carved, never static), and it also shrinks the candidate
-        # set the vetoes below operate on.
+        # Near-ego gate, as in classify pass 2: the AW veto can't catch ego
+        # self-returns (near-ego voxels are maximally carved, never static).
         if (
             cfg.dynamic_min_range_m > 0.0
             and sweep_origin is not None
@@ -383,9 +339,7 @@ def classify_chunk(
         ):
             dyn_mask &= ~near_ego_mask(xyz, sweep_origin, cfg.dynamic_min_range_m)
 
-        # Ground-height veto: drop candidates skimming (or below) the Step C
-        # ground surface — MF-MOS road false positives that no voxel veto can
-        # reach because road voxels are never AW-static.
+        # Ground-height veto (road voxels are never AW-static).
         if ground_grid is not None and dyn_mask.any():
             idx = np.flatnonzero(dyn_mask)
             low = _height_above_ground(xyz[idx], ground_grid) < min_height
@@ -399,9 +353,8 @@ def classify_chunk(
             keys = voxel_indices(xyz[cand_idx], origin, voxel_size, chunk_id=chunk_id)
             vetoed = keys_in_sorted(keys, aw_static_keys)
             if dilation > 0:
-                # The dilated shell is exempt for candidates whose own voxel
-                # AW classed dynamic — AW corroborates the motion there, and
-                # movers brushing past structure must not be shredded.
+                # Candidates whose own voxel AW called dynamic skip the
+                # dilated shell (movers brush past structure).
                 near = _near_static_dilated(keys, aw_static_keys, dilation)
                 vetoed |= near & ~keys_in_sorted(keys, aw_dynamic_keys)
             if score_exempt is not None and vetoed.any():
@@ -449,10 +402,7 @@ def classify_chunk(
         dyn_kwargs["sweep_id"] = np.empty(0, dtype=np.int32)
     np.savez_compressed(local_path(dynamic_map_path(bag_id, chunk_id)), **dyn_kwargs)
 
-    # Post-veto temporal motion filter: the voxel vetoes above only reach
-    # MF-MOS false positives that land on the AW static map; persistence +
-    # coherence over the accumulated cloud catch the structure it covers
-    # sparsely. Rewrites dynamic_map.npz / per-sweep masks / index in place.
+    # Rewrites dynamic_map.npz / per-sweep masks / index in place.
     mf_result = filter_dynamic_artifacts(cfg, bag_id, chunk_id)
     if mf_result.applied:
         total_dynamic = mf_result.n_after

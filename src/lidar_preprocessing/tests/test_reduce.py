@@ -139,7 +139,7 @@ def test_voxel_snap_empty():
 
 
 # ---------------------------------------------------------------------------
-# Global ground reduce (Issue C) — bag-level height grid for SLF L_ground.
+# Global ground reduce — bag-level height grid.
 # ---------------------------------------------------------------------------
 
 

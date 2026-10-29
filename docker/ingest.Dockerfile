@@ -49,6 +49,17 @@ http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME
     && apt-get -qq autoremove -y && apt-get -qq clean \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc/* /usr/share/man/*
 
+# mcap CLI for `trim-bag`: it copies MCAP records byte-for-byte, schemas
+# included. rosbag2's writer would re-derive schemas from the message packages
+# installed here and write custom types (novatel_oem7_msgs, roscco_msg,
+# eidos_msgs) with empty ones. Pinned by release and checksum like the bases.
+ARG MCAP_CLI_VERSION=0.3.0
+ARG MCAP_CLI_SHA256=5d4100573fab880f1c6400952466275bb3b32c3d230a54f7c380ee0d08e59eef
+RUN curl -fsSL -o /usr/local/bin/mcap \
+        "https://github.com/foxglove/mcap/releases/download/releases%2Fmcap-cli%2Fv${MCAP_CLI_VERSION}/mcap-linux-amd64" \
+    && echo "${MCAP_CLI_SHA256}  /usr/local/bin/mcap" | sha256sum -c - \
+    && chmod +x /usr/local/bin/mcap
+
 ENV ROS_DISTRO=jazzy
 ENV PYTHONPATH=/opt/ros/jazzy/lib/python3.12/site-packages:${PYTHONPATH}
 

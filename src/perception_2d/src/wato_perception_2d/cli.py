@@ -14,9 +14,8 @@ from wato_perception_2d.pipeline import run as run_pipeline
 
 _SLUG = re.compile(r"[^a-zA-Z0-9_]+")
 
-# Keep tqdm (ours + the models' internal bars) to a single live line on a
-# terminal and silent when output is captured (watod/docker/file) instead of
-# spamming a line per update. See wato_common.progress.
+# Single live tqdm line on a terminal, silent when output is captured. See
+# wato_common.progress (override with WATO_PROGRESS=on|off).
 configure_tqdm()
 
 
@@ -28,9 +27,8 @@ def _resolve_bag_id(value: str) -> str:
     return value
 
 
-# Without this, every `log.info(...)` across perception_2d is dropped at
-# Python's default WARNING level — so you can't see model-load status,
-# per-chunk progress, etc. Mirrors src/ingest/src/wato_ingest/cli.py.
+# Python's default WARNING level would drop every log.info (model loads,
+# per-chunk progress).
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -39,7 +37,7 @@ logging.basicConfig(
 
 @click.group()
 def main() -> None:
-    """2D perception pass (GroundingDINO + SAM2 + Depth Anything V2 + DINOv2)."""
+    """2D perception pass (detector + SAM2 + Depth Anything V2 + DINOv2)."""
 
 
 @main.command("run")

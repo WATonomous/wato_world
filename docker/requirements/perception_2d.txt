@@ -13,6 +13,15 @@
 # emits. `sam2` in particular was installed from git main and is pinned to an
 # exact commit below.
 #
+# 2026-10-12: + ultralytics==8.4.175 (YOLO26 detector backend, AGPL-3.0) and
+# its 9 new transitive deps. Resolved inside the deps image with this file as
+# constraints, so nothing already pinned moved (verified: the freeze diff was
+# exactly these 10 additions). Resolved with --index-strategy unsafe-best-match:
+# under first-match, requests/urllib3/charset-normalizer came from the cu128
+# index's mirror (2022 releases, known CVEs) — that index carries the names, so
+# PyPI was never consulted. The Dockerfile install still uses first-match; these
+# exact versions exist only on PyPI, so it finds them there.
+#
 # KNOWN DRIFT CAPTURED IN THIS LOCK — clean up separately, do not hand-edit here
 # ------------------------------------------------------------------------------
 #   1. numpy==2.5.3, but the Dockerfile asks for "numpy<2". A later layer
@@ -61,6 +70,7 @@ antlr4-python3-runtime==4.9.3
 anyio==4.15.1
 brotli==1.2.0
 certifi==2026.7.22
+charset-normalizer==3.5.2
 click==8.5.0
 contourpy==1.4.0
 cycler==0.12.1
@@ -103,6 +113,7 @@ nvidia-curand-cu12==10.3.9.55
 nvidia-cusolver-cu12==11.7.2.55
 nvidia-cusparse-cu12==12.5.7.53
 nvidia-cusparselt-cu12==0.6.3
+nvidia-ml-py==13.615.71
 nvidia-nccl-cu12==2.26.2
 nvidia-nvjitlink-cu12==12.8.61
 nvidia-nvtx-cu12==12.8.55
@@ -113,7 +124,10 @@ orjson==3.12.0
 packaging==26.3
 pandas==3.0.5
 pillow==12.3.0
+polars==2.0.0
+polars-runtime-32==2.0.0
 portalocker==4.3.0
+psutil==7.2.2
 pyarrow==25.0.1
 pydantic==2.13.5
 pydantic-core==2.46.5
@@ -125,6 +139,7 @@ python-multipart==0.0.32
 pytz==2026.3.post1
 pyyaml==6.0.3
 regex==2026.9.10
+requests==2.34.2
 rich==15.0.0
 safehttpx==0.1.7
 safetensors==0.8.0
@@ -146,5 +161,9 @@ triton==3.3.1
 typer==0.27.2
 typing-extensions==4.16.0
 typing-inspection==0.4.4
+ultralytics==8.4.175
+ultralytics-platform==0.1.83
+ultralytics-thop==2.2.2
+urllib3==2.8.0
 uvicorn==0.52.4
 xformers==0.0.31

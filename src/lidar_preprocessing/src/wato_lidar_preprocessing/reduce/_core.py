@@ -3,9 +3,7 @@
 Merges all per-chunk static_map.npz files for a bag into a single
 downsampled global_static_map.npz. Invoked via the `reduce` CLI subcommand.
 
-Uses a numpy voxel-corner snap (np.unique on packed keys) — one point per
-voxel, snapped to cell centre. Cheaper than pulling in Open3D for what is
-effectively a QA / two-pass-prior artifact.
+One point per voxel, snapped to the cell centre (np.unique on packed keys).
 """
 
 from __future__ import annotations
@@ -126,16 +124,9 @@ def reduce_static_map(bag_id: str, cfg: ComponentConfig) -> str:
 def reduce_ground_map(bag_id: str, cfg: ComponentConfig) -> str:
     """Merge per-chunk ground.npz into a bag-level global_ground.npz.
 
-    Concatenates `ground_xyz` from every chunk and rebuilds one bag-level
-    height_grid + normal_grid via _build_height_grid (same helper as the
-    per-chunk path) so the schema matches and consumers can use a single
-    loader regardless of scope.
-
-    Lets proposal_generation query z_ground(x, y) over the full bag without
-    stitching per-chunk grids — solves the SLF chunk-boundary problem.
-
-    Missing or empty-ground chunks are skipped so partial runs still produce
-    a useful artifact.
+    Rebuilds one height/normal grid from every chunk's `ground_xyz` with the
+    per-chunk helper, so the schema matches ground.npz; for ground queries
+    that cross chunk boundaries. Missing or empty chunks are skipped.
     """
     chunk_rows = read_rows(chunks_index_path(bag_id))
     if not chunk_rows:

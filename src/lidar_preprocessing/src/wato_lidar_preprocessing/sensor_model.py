@@ -14,14 +14,12 @@ and the MF-MOS / IWU spherical projections.
 **Inverse-sensor-model probabilities** — `p_hit`, `p_miss`, `p_clamp`,
 `k_sigma`, `p_map_prior`. These are NOT on any datasheet. They are the
 occupancy-grid reliability parameters of Thrun, *Probabilistic Robotics* ch. 9,
-and they are the only tuning surface left in the component. They live here, in
-code, with their reasoning written down (see the comment block below) rather
-than in YAML, because a config that can move them is a
-config that will be tuned per bag until the labels stop being comparable.
+and the component's only tuning surface. They live in code, with their
+reasoning (below), not in YAML: a config that can move them will be tuned per
+bag until labels stop being comparable.
 
-Derived quantities (`l_occ`, `l_free`, `log_odds_clamp`, the decision
-thresholds, the range-credibility falloff, the carve margin, the grazing gate)
-are properties/methods here. Nothing recomputes them elsewhere.
+Derived quantities (`l_occ`, `l_free`, the clamp, decision thresholds, range
+credibility, carve margin, grazing gate) are properties/methods here only.
 """
 
 from __future__ import annotations

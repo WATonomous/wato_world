@@ -1,14 +1,9 @@
 """Spherical range-image projection shared by MF-MOS and IWU.
 
-Lives at the package top level, not under mf_mos/, because two independent
-steps need it: MF-MOS (the learned `mos` half) builds its residual images
-with it, and IWU (bag-level geometry, Step E) uses it to decide whether a map
-point was seen, seen through, or occluded in a sweep. The aw/mos module rule
-forbids geometry code importing from mf_mos/, so the projection is shared
-from here instead.
-
-Image geometry (rows, vertical FoV, azimuth width) is the caller's to supply
-from the scanner's SensorModel — this module holds no sensor constants.
+Top-level rather than under mf_mos/ because IWU (Step E) uses it too, to tell
+whether a map point was seen, seen through or occluded, and geometry code may
+not import from mf_mos/. Callers supply the image geometry from the scanner's
+SensorModel.
 """
 
 from __future__ import annotations

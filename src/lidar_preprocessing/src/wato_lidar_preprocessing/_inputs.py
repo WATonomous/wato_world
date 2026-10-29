@@ -18,18 +18,9 @@ log = logging.getLogger(__name__)
 def load_pose_valid_sweep_ids(bag_id: str, chunk_id: str) -> set[int] | None:
     """Sweep_ids that ingest marked pose-valid in frame_index.parquet.
 
-    frame_index carries one row per (sweep_id, cam_id) with a per-sweep
-    ``valid_pose`` flag: ingest sets it False when the sweep falls outside the
-    pose span, the two poses around it are more than
-    ``pose_requirements.max_bracket_ms`` apart, or they imply a pose jump (see
-    wato_common.pose_lookup and ingest README "Pose requirements"). Deskew honors
-    this so e.g. the window at the start of a bag — before SLAM converges and
-    emits poses — is skipped rather than silently clamped to the nearest
-    available pose by ``batch_interpolate_poses``.
-
-    Returns None when frame_index.parquet is absent (older artifacts), signalling
-    callers to fall back to processing every sweep. A sweep counts as valid if
-    any of its rows is pose-valid (all cam rows of a sweep share the flag).
+    Deskew skips the others rather than let ``batch_interpolate_poses`` clamp
+    them to the nearest pose. None when frame_index.parquet is absent: callers
+    then process every sweep.
     """
     try:
         rows = read_rows(frame_index_path(bag_id, chunk_id))
@@ -44,10 +35,7 @@ def load_pose_valid_sweep_ids(bag_id: str, chunk_id: str) -> set[int] | None:
 
 
 def load_pose_samples(bag_id: str, chunk_id: str) -> list[PoseSample]:
-    """Valid poses from poses.parquet, sorted by timestamp.
-
-    Read through wato_common.pose_lookup, the loader every component shares.
-    """
+    """Valid poses from poses.parquet (via wato_common.pose_lookup), sorted by time."""
     return PoseLookup.load(bag_id, chunk_id).samples
 
 
