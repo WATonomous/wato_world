@@ -106,8 +106,8 @@ doesn't load; the trim-bag end-to-end test skips).
   LiDAR (the three WATO scanners overwrite each other's world files) and must be
   re-ingested.
 - **lidar_preprocessing has two dynamic artifacts.** `*_dynamic_mask.npy` /
-  `dynamic_map.npz` is the seg method's *precision* verdict (`~mask` is trusted
-  static: perception_2d's depth anchors), read through
+  `dynamic_map.npz` is Step B's *precision* verdict after its point filter
+  (`~mask` is trusted static: perception_2d's depth anchors), read through
   `wato_common.artifacts.lidar_sweeps`, which checks it aligns with the world
   sweep. `*_motion_proposals.npz` / `motion_clusters.parquet` (Step F) is the
   *recall* artifact (per-point `source_bits` + HDBSCAN clusters with soft motion
@@ -215,7 +215,6 @@ labels aren't comparable.
 |---|---|---|
 | Python deps | `docker/requirements/{ingest,lidar_preprocessing,perception_2d,semantic_lifting}.txt` | exact `==` for the full transitive closure, installed `--no-deps` |
 | `sam2` | `docker/perception_2d.Dockerfile` | `ARG SAM2_COMMIT` (no PyPI release) |
-| MF-MOS | `docker/lidar_preprocessing.Dockerfile` | `ARG MF_MOS_COMMIT` |
 | Model weights | `src/perception_2d/src/wato_perception_2d/model_registry.py` | HF `revision=`, torch.hub `repo:<sha>`, raw `.pt` from an HF commit loaded by path |
 | Component bases | `docker/{ingest,lidar_preprocessing,perception_2d,semantic_lifting}.Dockerfile` | `base:<tag>@sha256:...` |
 | Upstream bases | `docker/base/inject_*.Dockerfile` | `ubuntu` / `nvcr.io` by digest, `ARG UV_VERSION` |
@@ -236,7 +235,7 @@ docker run --rm --entrypoint uv \
 ```
 
 Verify a lock still reproduces by diffing that output, sorted, against
-`sort docker/requirements/<c>.txt | grep -v '^#'`. The two GPU components need
+`sort docker/requirements/<c>.txt | grep -v '^#'`. perception_2d needs
 `--index-strategy unsafe-first-match`: `download.pytorch.org/whl/cu128` mirrors
 common packages at its own versions, and uv's default then refuses PyPI.
 
@@ -257,11 +256,9 @@ in place of their per-sweep files).
   build` runs them in parallel and ships stale code. `watod build` orders them.
 
 Known drift frozen into the locks, to fix as separate testable changes:
-lidar_preprocessing floated to `torch==2.11.0` + the multi-GB `cuda-toolkit`
-wheel (perception_2d pins 2.7.1 to avoid it); perception_2d declares `numpy<2`
-but ships 2.5.3; perception_2d has both `opencv-python` and
-`opencv-python-headless`; `depth-anything-v2` pulls in gradio, fastapi, uvicorn,
-starlette.
+perception_2d declares `numpy<2` but ships 2.5.3; perception_2d has both
+`opencv-python` and `opencv-python-headless`; `depth-anything-v2` pulls in
+gradio, fastapi, uvicorn, starlette.
 
 ## Pre-commit gotchas
 
@@ -275,4 +272,6 @@ Postgres / any database (`psycopg`, `sqlalchemy`, `PG_DSN`, `PG_PORT`,
 `docker-compose.infra.yaml` references are stale; the table shapes are
 `wato_common.schemas`), `watod bag` / `watod-bag.sh`,
 `watod_completion.bash` (port it from the monorepo if wanted),
-`watod-config.local.sh.example`.
+`watod-config.local.sh.example`. MF-MOS, with `--seg mos|union`, `union/` and
+torch/CUDA in the lidar_preprocessing image: Step B is the AW classifier, CPU
+only, and bit 3 of Step F's `source_bits` stays unused.

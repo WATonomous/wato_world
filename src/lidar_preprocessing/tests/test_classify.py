@@ -16,8 +16,6 @@ import pytest
 from wato_common.artifact_store import (
     dynamic_map_path,
     dynamic_mask_path,
-    ensure_local_dir,
-    lidar_proc_dir,
     lidar_proc_index_path,
     lidar_world_path,
     local_path,
@@ -32,6 +30,10 @@ from wato_lidar_preprocessing.voxel import voxel_indices
 
 # Sensor behind the scene on -x so a same-point sweep never self-carves.
 _SENSOR = np.array([-5.0, 0.0, 0.0])
+
+# For tests of the voxel verdict: these scenes are a few points per sweep, which
+# dynamic_filter would drop as speckle.
+_NO_FILTER = {"min_cluster_pts": 0, "persistence_max_s": 0.0}
 
 
 @pytest.fixture()
@@ -66,6 +68,9 @@ def _proc_row(
     xyz: np.ndarray,
     *,
     has_intensity: bool = False,
+    lidar_id: str = "LIDAR_TOP",
+    t_ns: int | None = None,
+    frame_id: int | None = None,
 ) -> dict:
     """Build a parquet row that mirrors what real deskew would write."""
     n = xyz.shape[0]
@@ -73,8 +78,9 @@ def _proc_row(
         "bag_id": bag_id,
         "chunk_id": chunk_id,
         "sweep_id": sweep_id,
-        "lidar_id": "LIDAR_TOP",
-        "reference_timestamp_ns": sweep_id * 100_000_000,
+        "lidar_id": lidar_id,
+        "frame_id": frame_id,
+        "reference_timestamp_ns": sweep_id * 100_000_000 if t_ns is None else t_ns,
         "n_points_total": n,
         "n_points_static": 0,
         "n_points_dynamic": 0,
@@ -151,7 +157,7 @@ def test_single_sweep_point_then_carved_is_dynamic(tmp_env):
         bag_id, chunk_id, list(range(n_carves + 1)), xyz_per_sweep=xyz_per_sweep
     )
 
-    result = process_chunk(ComponentConfig(), bag_id, chunk_id)
+    result = process_chunk(ComponentConfig(dynamic_filter=_NO_FILTER), bag_id, chunk_id)
 
     mask0 = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
     assert mask0[0], "voxel carved by many later rays must be dynamic"
@@ -441,11 +447,6 @@ def test_skip_endpoint_isolated_ground_voxel_not_dynamic(tmp_env):
     assert dyn["xyz"].shape[0] == 0, "dynamic_map.npz must be empty"
 
 
-# ---------------------------------------------------------------------------
-# MF-MOS fusion — per-sweep mask drives fusion (no chunk-wide vote tier).
-# ---------------------------------------------------------------------------
-
-
 def test_far_returns_beyond_carve_guard_become_static(tmp_env):
     """Returns beyond the profile's max range still register endpoint hits.
 
@@ -548,6 +549,106 @@ def test_static_map_carries_ambiguous_voxel_keys(tmp_env):
     assert np.all(np.diff(static["ambiguous_voxel_keys"]) >= 0), "keys must be sorted"
 
 
+# Three returns on the plane x=0, all inside one 0.15 m voxel: the voxel gets
+# a normal along x, so rays travelling along x pass the incidence gate and
+# can carve it.
+_PLANE = np.array([[0.0, -0.03, -0.03], [0.0, 0.03, -0.03], [0.0, 0.0, 0.04]])
+_BEYOND = np.array([[8.0, 0.0, 0.0]])
+
+
+def test_verdict_independent_of_sweep_order(tmp_env):
+    """The verdict is the chunk's total evidence, whatever the sweep order.
+
+    A voxel hit in 10 sweeps and passed through by 30 others reads static
+    (10·3·l_occ outweighs 30·l_free) whether the hits come first or last. A
+    clamped walk let the last ~23 observations decide, so hits-first read
+    dynamic and carves-first read static.
+    """
+    plane_mask = {}
+    for order, bag_id in (
+        ("hits_first", "bag_order_a"),
+        ("carves_first", "bag_order_b"),
+    ):
+        chunk_id = "chunk0"
+        kinds = ["hit"] * 10 + ["carve"] * 30
+        if order == "carves_first":
+            kinds = kinds[::-1]
+        xyz_per_sweep = []
+        for sid, kind in enumerate(kinds):
+            xyz = _PLANE if kind == "hit" else _BEYOND
+            _write_world_sweep(bag_id, chunk_id, sid, xyz, origin=_SENSOR)
+            xyz_per_sweep.append(xyz)
+        _write_proc_index(
+            bag_id, chunk_id, list(range(40)), xyz_per_sweep=xyz_per_sweep
+        )
+
+        process_chunk(ComponentConfig(), bag_id, chunk_id)
+
+        hit_sids = [sid for sid, kind in enumerate(kinds) if kind == "hit"]
+        plane_mask[order] = np.concatenate(
+            [
+                np.load(local_path(dynamic_mask_path(bag_id, chunk_id, s)))
+                for s in hit_sids
+            ]
+        )
+        static = np.load(local_path(static_map_path(bag_id, chunk_id)))
+        key = voxel_indices(_PLANE[:1], static["origin"], float(static["voxel_size"]))[
+            0
+        ]
+        assert key in static["static_voxel_keys"], f"{order}: voxel must read static"
+
+    assert not plane_mask["hits_first"].any()
+    np.testing.assert_array_equal(plane_mask["hits_first"], plane_mask["carves_first"])
+
+
+def test_frame_shield_keeps_partly_free_voxel_static(tmp_env):
+    """Another scanner's rays in the same frame don't carve a voxel this frame
+    hit; the same rays in a different frame do.
+
+    Each frame, lidar_a returns three points from a voxel (a pole, foliage,
+    an edge: the voxel is partly free) and lidar_b sends 30 rays straight
+    through it. Grouped into one frame (canonical lidar present) the hits
+    shield the voxel: static. Ungrouped (no canonical lidar) the 30 carves a
+    frame outweigh the three hits: dynamic.
+    """
+    rays = np.repeat(_BEYOND, 30, axis=0)
+    for canonical, bag_id, expect_dynamic in (
+        ("lidar_a", "bag_shield_on", False),
+        (None, "bag_shield_off", True),
+    ):
+        chunk_id = "chunk0"
+        rows = []
+        for f in range(10):
+            for k, (lidar, xyz) in enumerate((("lidar_a", _PLANE), ("lidar_b", rays))):
+                sid = 2 * f + k
+                _write_world_sweep(bag_id, chunk_id, sid, xyz, origin=_SENSOR)
+                rows.append(
+                    _proc_row(
+                        bag_id,
+                        chunk_id,
+                        sid,
+                        xyz,
+                        lidar_id=lidar,
+                        t_ns=f * 50_000_000 + k * 5_000_000,
+                        frame_id=f,
+                    )
+                )
+        write_table(
+            rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(bag_id, chunk_id)
+        )
+
+        cfg = ComponentConfig(
+            frame_sync={"canonical_lidar": canonical}, dynamic_filter=_NO_FILTER
+        )
+        process_chunk(cfg, bag_id, chunk_id)
+
+        for f in range(10):
+            mask = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 2 * f)))
+            assert (
+                mask.all() if expect_dynamic else not mask.any()
+            ), f"canonical={canonical!r} frame {f}: plane points dynamic={mask}"
+
+
 def test_classify_raises_when_world_npz_missing_origin(tmp_env):
     """classify must hard-fail when a valid sweep's world NPZ has no 'origin'."""
     bag_id, chunk_id = "bag_no_origin", "chunk0"
@@ -628,71 +729,55 @@ def test_cache_disabled_must_still_apply_ground_filter(tmp_env):
     assert dyn["xyz"].shape[0] == 0, "cache-disabled path must not leak ground points"
 
 
-# ---------------------------------------------------------------------------
-# Near-range dynamic exclusion + union snapshot (segmentation-method plumbing)
-# ---------------------------------------------------------------------------
+def test_dynamic_filter_cleans_masks_not_voxel_keys(tmp_env):
+    """A lone dynamic point leaves dynamic_mask and dynamic_map, and the index
+    counts it out, but its voxel stays in dynamic_voxel_keys: Step F's recall
+    bits must still see what the precision artifact drops."""
+    bag_id, chunk_id = "bag_filter", "chunk0"
+    hit_xyz = np.array([[0.0, 0.0, 0.0]])
+    beyond_xyz = np.array([[8.0, 0.0, 0.0]])
+    n_carves = 20
+    _write_world_sweep(bag_id, chunk_id, 0, hit_xyz, origin=_SENSOR)
+    xyz_per_sweep = [hit_xyz]
+    for i in range(1, n_carves + 1):
+        _write_world_sweep(bag_id, chunk_id, i, beyond_xyz, origin=_SENSOR)
+        xyz_per_sweep.append(beyond_xyz)
+    _write_proc_index(
+        bag_id, chunk_id, list(range(n_carves + 1)), xyz_per_sweep=xyz_per_sweep
+    )
+
+    result = process_chunk(ComponentConfig(), bag_id, chunk_id)
+
+    assert result.n_dynamic == 0
+    assert result.n_cluster_dropped == 1
+    assert not np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0))).any()
+    assert np.load(local_path(dynamic_map_path(bag_id, chunk_id)))["xyz"].shape[0] == 0
+    static = np.load(local_path(static_map_path(bag_id, chunk_id)))
+    key = voxel_indices(hit_xyz, static["origin"], float(static["voxel_size"]))[0]
+    assert key in static["dynamic_voxel_keys"]
 
 
-def test_near_range_gate_excludes_close_points(tmp_env):
-    """A dynamic-voxel point within dynamic_min_range_m of the sensor is
-    forced non-dynamic; a far one survives."""
-    from wato_lidar_preprocessing.classify.masking import apply_classification_to_sweep
+def test_near_range_gate_excludes_close_points():
+    """A dynamic-voxel point within dynamic_min_range_m of the sensor is not a
+    candidate; a far one is."""
+    from wato_lidar_preprocessing.classify.masking import dynamic_candidates
 
-    bag_id, chunk_id = "bag_nearrange", "chunk0"
-    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
     # point 0 at 1 m from sensor (excluded), point 1 at 10 m (kept).
     xyz = np.array([[1.0, 0.0, 0.0], [10.0, 0.0, 0.0]])
     keys = np.array([1, 2], dtype=np.int64)
-    empty = np.empty(0, dtype=np.int64)
 
-    def _apply(gate_m: float):
-        return apply_classification_to_sweep(
-            {},  # row: has_intensity defaults False; world_path unused (xyz cached)
-            0,
+    def _apply(gate_m: float) -> np.ndarray:
+        mask, _ = dynamic_candidates(
+            {},  # row: world_path unused (xyz cached)
             keys,
-            empty,  # static_arr
             keys,  # dynamic_arr -> both voxels carved-dynamic
-            xyz,  # xyz_cache_i
-            None,  # intensity_cache_i
-            None,  # ground_mask_cache_i
-            np.zeros(3, dtype=np.float64),  # sweep_origin
-            bag_id,
-            chunk_id,
-            False,  # any_intensity
+            xyz,
+            None,  # ground_mask
+            np.zeros(3, dtype=np.float64),
             dynamic_min_range_m=gate_m,
         )
+        return mask
 
-    res = _apply(2.5)
-    assert res.n_dynamic == 1, "only the far point should remain dynamic"
-    assert abs(float(res.dyn_xyz[0, 0]) - 10.0) < 1e-6
-    mask = np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0)))
-    assert not mask[0] and mask[1], "near point excluded, far point dynamic"
-
+    assert _apply(2.5).tolist() == [False, True]
     # With the gate disabled both stay dynamic.
-    assert _apply(0.0).n_dynamic == 2
-
-
-def test_aw_snapshot_written_only_on_union_path(tmp_env):
-    """segmentation='union' makes classify also write aw_dynamic_mask.npy
-    (identical to dynamic_mask.npy at that point) so union's keep_aw_dynamic
-    survives the fused overwrite; the plain aw path writes no snapshot."""
-    from wato_common.artifact_store import aw_dynamic_mask_path
-
-    xyz = np.array([[5.0, 0.0, 0.0], [6.0, 0.0, 0.0]])
-
-    for seg, bag_id in (("union", "bag_snap_union"), ("aw", "bag_snap_aw")):
-        chunk_id = "chunk0"
-        for i in range(5):
-            _write_world_sweep(bag_id, chunk_id, i, xyz, origin=_SENSOR)
-        _write_proc_index(bag_id, chunk_id, list(range(5)), xyz_per_sweep=[xyz] * 5)
-        process_chunk(ComponentConfig(segmentation=seg), bag_id, chunk_id)
-
-        snap = local_path(aw_dynamic_mask_path(bag_id, chunk_id, 0))
-        if seg == "union":
-            assert os.path.exists(snap), "union path must snapshot AW's verdict"
-            np.testing.assert_array_equal(
-                np.load(snap),
-                np.load(local_path(dynamic_mask_path(bag_id, chunk_id, 0))),
-            )
-        else:
-            assert not os.path.exists(snap), "aw path must not write a snapshot"
+    assert _apply(0.0).tolist() == [True, True]

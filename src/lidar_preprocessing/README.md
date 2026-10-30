@@ -8,7 +8,6 @@ ground maps, and recall-oriented motion proposals.
 
 ```bash
 ./watod run lidar_preprocessing --bag <bag>                 # Steps A–C per chunk, then D, E, F
-./watod run lidar_preprocessing --bag <bag> --seg union     # Step B method: aw (default) | mos | union
 ./watod run lidar_preprocessing --bag <bag> --chunk 0000    # one chunk: no reduce/IWU; F uses any existing global_iwu.npz
 ./watod run lidar_preprocessing --bag <bag> --force         # redo completed chunks
 ./watod run lidar_preprocessing --bag <bag> --no-proposals  # skip E and F
@@ -29,25 +28,21 @@ WATO bags must be ingested with `ingest.wato.yaml` / `ingest.wato_6cam.yaml`
 
 ```
 A  deskew/            per-point motion compensation → world-frame sweep (+ Patchwork++ ground mask)
-B  static/dynamic     --seg aw    classify/  Amanatides-Woo log-odds ray casting
-                      --seg mos   mf_mos/    MF-MOS learned moving-object segmentation
-                      --seg union union/     AW static map + MF-MOS dynamics vetoed by it
+B  classify/          Amanatides-Woo log-odds static/dynamic split, then a point-level dynamic filter
 C  ground/            per-sweep ground masks → chunk height grid
 D  reduce/            bag-level global static map + ground grid
 E  iwu/               bag-level UniLiPs IWU: evict floaters from the global map
 F  motion_proposals/  per-point source bits + HDBSCAN clusters with motion features
 ```
 
-`aw` and `mos` never import each other; `union` imports both. Every method
-writes the same artifacts, so C–F don't care which ran. A chunk counts as done
-when its summary exists for the same `--seg`, so A/B runs never reuse each
-other's outputs.
+A chunk counts as done when its summary exists, so a run after a Step B change
+needs `--force`.
 
 ### Two dynamic artifacts — which one to read
 
 | Artifact | Semantics | Use it for |
 |---|---|---|
-| `lidar_proc/*_dynamic_mask.npy`, `dynamic_map.npz` | **Precision.** The chosen method's verdict, vetoes included. `~mask` is trusted static. | Excluding movers: depth anchors (perception_2d), static maps. |
+| `lidar_proc/*_dynamic_mask.npy`, `dynamic_map.npz` | **Precision.** Step B's verdict after its filter. `~mask` is trusted static. | Excluding movers: depth anchors (perception_2d), static maps. |
 | `lidar_proc/*_motion_proposals.npz`, `motion_clusters.parquet` | **Recall.** Every point *any* heuristic calls a mover, plus per-cluster soft features. False positives expected. | Proposing objects: proposal_generation, tracking seeds. Threshold the features downstream. |
 
 Never widen one into the other: a false positive in `dynamic_mask` costs a
@@ -80,52 +75,44 @@ Per-point times come from, in order:
 
 ### B — Static/dynamic
 
-**`aw` (`classify/`).** Each sweep's rays are traced through a voxel grid
-(Numba Amanatides-Woo): `-l_free` along the ray, `+l_occ` at the endpoint.
-Carving stops a sensor-derived margin short of the endpoint, is down-weighted
-∝ 1/d past the beam-footprint crossover, and skips occupied voxels the ray only
-grazes. Rays past `max_range_m` skip the carve but still count their hit.
-Ground rays carve but add no hit. Every constant comes from the sensor profile
-(`sensor_model.py`). Then, for voxels with ≥ `min_observations` traversals and
-at least one hit:
+Each sweep's rays are traced through a voxel grid (Numba Amanatides-Woo):
+`-l_free` along the ray, `+l_occ` at the endpoint. Carving stops a sensor-derived
+margin short of the endpoint, is down-weighted ∝ 1/d past the beam-footprint
+crossover, and skips two kinds of voxel:
+
+- occupied voxels the ray only grazes;
+- voxels within one voxel of a non-ground return from the same frame, any
+  scanner. A voxel holding part of a pole, foliage or an edge is also partly
+  free, and a ray through the free part says nothing about the surface.
+
+Rays past `max_range_m` skip the carve but still count their hit. Ground rays
+carve but add no hit. Every constant comes from the sensor profile
+(`sensor_model.py`). Log-odds sum unclamped, so the verdict is the chunk's total
+evidence whatever the sweep order. Then, for voxels with ≥ `min_observations`
+traversals and at least one hit:
 
 ```
 static   p_occ >= p_static (= p_hit)
 dynamic  p_occ <  p_dynamic (= 1 - p_hit)
 ```
 
-A point is dynamic iff its voxel is dynamic, it isn't ground, and it lies
-beyond `dynamic_min_range_m` of the sensor. Never-observed, free-only,
+A point is a dynamic candidate iff its voxel is dynamic, it isn't ground, and it
+lies beyond `dynamic_min_range_m` of the sensor. Never-observed, free-only,
 under-evidenced and ambiguous voxels are neither.
 
-**`mos` (`mf_mos/`).** MF-MOS (KITTI-trained range-image model) predicts a
-per-sweep moving mask from range residuals against past sweeps, warped into the
-current frame. Residual offsets are rate-scaled to KITTI's 10 Hz, so the
-longest baseline is ~800 ms on any rig (`max_residual_gap_ms` must stay above
-it). Scanners with fewer than 32 channels (`MIN_BEAMS`; the WATO corner
-VLP-16s) are skipped. Masks are denoised by 3D cluster size and stored aligned
-to the *raw* sweep. Then:
+`dynamic_filter` then cleans the candidates in memory, before anything is
+written, and a point must pass both tests:
 
-```
-dynamic = mf_mos_moving & ~ground & ~near_ego
-static  = ~mf_mos_moving & ~ground
-```
+- **cluster:** within its frame, the point's connected cluster on a
+  `cluster_voxel_m` grid has ≥ `min_cluster_pts` points. Isolated returns are
+  mixed pixels and foliage speckle.
+- **persistence:** its `persistence_voxel_m` voxel holds candidates for fewer
+  sweeps than `persistence_max_s` covers at the chunk's sweep rate, every
+  scanner counted. Structure dwells; movers pass through.
 
-A sweep with no usable mask is left all static. `--seg mos` is the raw model
-output, so it can be A/B'd against `aw`.
-
-**`union` (`union/`).** AW's static map, verbatim, plus:
-
-```
-dynamic = mf_mos_moving & ~ground & ~near_ego & ~near_ground & ~aw_static_dilated
-```
-
-`near_ground` is below `union.ground_height_veto_m` over Step C's grid (so Step
-C runs before the fusion on this path). The AW-static veto is dilated by
-`veto_dilation_voxels`, except for candidates whose own voxel AW called dynamic.
-A post-veto motion filter then drops points whose voxel stays occupied for
-≥ `persistence_max_sweeps` sweeps (structure dwells; movers pass through). Its
-tuning and the alternatives that tested worse are in the
+The filter touches `dynamic_mask` and `dynamic_map` only. The voxel-key sets in
+`static_map.npz` keep the raw verdict, so Step F's `AW_DYNAMIC` still seeds on
+every point the filter drops. Tuning is in the
 [measurements](../../docs/lidar_preprocessing_measurements.md).
 
 ### C — Ground
@@ -140,7 +127,7 @@ skipped_no_ground_mask`).
 
 Merges every chunk's static map into `global_static_map.npz` (one point per
 `global_map_voxel_size_m` voxel) and every chunk's ground into
-`global_ground.npz`, skipping unfinished chunks. `--two-pass` (aw/union) then
+`global_ground.npz`, skipping unfinished chunks. `--two-pass` then
 re-classifies every chunk with the global map as a one-time log-odds prior —
 roughly 2× classify time, for better recall on sparsely seen far structure. It
 is not IWU.
@@ -163,16 +150,15 @@ heuristics fired:
 
 | bit | name | role | fires when |
 |---|---|---|---|
-| 0 | `AW_DYNAMIC` | seed | voxel AW called dynamic (aw, union) |
-| 1 | `AW_AMBIGUOUS` | attach | voxel in AW's ambiguous band (aw, union) |
+| 0 | `AW_DYNAMIC` | seed | voxel Step B called dynamic, before its filter |
+| 1 | `AW_AMBIGUOUS` | attach | voxel in Step B's ambiguous band |
 | 2 | `IWU_EVICTED` | seed | near an IWU-evicted map point |
-| 3 | `MF_MOS` | seed | raw MF-MOS mask (mos, union) |
 | 4 | `SEG_DYNAMIC` | seed | the run's `dynamic_mask.npy` |
 | 5 | `BOX_FILL` | — | inside the box of a moving cluster |
 | 6 | `UNMAPPED` | attach | no IWU-refined (or chunk) static-map point nearby |
 
-Seed bits start clusters; attach bits only join one. A missing source leaves its
-bit clear. Ground, near-ego points and points below
+Bit 3 is unused; the positions are the on-disk encoding. Seed bits start
+clusters; attach bits only join one. A missing source leaves its bit clear. Ground, near-ego points and points below
 `min_height_above_ground_m` are never flagged; BOX_FILL restores wheels and feet
 on clusters with `motion_score > 1`, `track_life ≥ 3` and
 `frac_persistent < 0.5`. Clusters are per `frame_sync` frame, tracked with
@@ -195,11 +181,9 @@ Per chunk, under `raw/<bag_id>/chunks/<chunk_id>/`:
 |---|---|
 | `lidar_proc/<sweep_id:06d>_world.npz` | Deskewed sweep: float64 xyz, mid-sweep `origin`, `ground_mask`, intensity, ring |
 | `lidar_proc/<sweep_id:06d>_dynamic_mask.npy` | bool, aligned to the world sweep |
-| `lidar_proc/<sweep_id:06d>_mf_mos_mask.npy` / `_mf_mos_score.npy` | mos/union: raw-aligned mask; scores when `save_scores` |
-| `lidar_proc/<sweep_id:06d>_aw_dynamic_mask.npy` | union: AW's own verdict, for re-fusing |
 | `lidar_proc/<sweep_id:06d>_motion_proposals.npz` | Step F `source_bits` + `cluster_id` |
 | `lidar_proc_index.parquet` | One `ProcessedSweepMeta` per sweep (`valid=False` rows for failures) |
-| `lidar_proc_summary.parquet` | One `ChunkSummaryRow`: counts, method, MF-MOS / union / Step F stats |
+| `lidar_proc_summary.parquet` | One `ChunkSummaryRow`: counts, filter drops, Step F stats |
 | `static_map.npz` | Static cloud + static / dynamic / ambiguous voxel-key sets |
 | `dynamic_map.npz` | Dynamic cloud + per-point `sweep_id` |
 | `ground.npz` | `height_grid`, `normal_grid`, `grid_origin`, `cell_size`, `ground_xyz` |
@@ -211,9 +195,7 @@ Per bag, under `raw/<bag_id>/`: `global_static_map.npz`, `global_ground.npz`,
 `global_iwu.npz` (P, update counts, `evicted`).
 
 Schemas: `wato_common.schemas` for the tables, `wato_common.artifacts` for the
-cross-component files, `wato_lidar_preprocessing.io` for the rest. The summary's
-`mf_mos_*` fields are null on `--seg aw`; `processed + skipped + unsupported`
-equals the valid sweeps (≈ 2/3 unsupported on the WATO rig).
+cross-component files, `wato_lidar_preprocessing.io` for the rest.
 
 ## Configuration
 
@@ -228,9 +210,7 @@ range accuracy, divergence, usable range, intensity scale and every log-odds
 constant come from the scanner profile in `sensor_model.py` (`vlp32c`, `vlp16`,
 `hdl32e`), which also records why its few hand-picked probabilities have the
 values they do. The YAML picks scanners and the genuinely free choices: voxel
-size, evidence count, which steps run, union's vetoes. The MF-MOS projection
-likewise comes from each scanner's profile plus checkpoint constants in
-`mf_mos/_core.py`.
+size, evidence count, which steps run, the dynamic filter.
 
 `WATO_LIDAR_CACHE_BYTES` (default 4 GB) caps classify's in-memory sweep cache;
 a larger chunk is read from disk twice instead.
@@ -254,16 +234,10 @@ need a display).
   (no slow fallback).
 - **Patchwork++** (`pypatchworkpp`, built in the image). With
   `require_patchwork: true` (default), deskew raises without it.
-- **MF-MOS** (`mos` / `union` only) needs torch, the weights under
-  `/data/models/mf_mos/`, and the pinned submodule:
-  `git submodule update --init src/lidar_preprocessing/third_party/MF-MOS`
-  (before `./watod build` for a deploy image; dev bind-mounts it).
 - **scikit-learn** for Step F's HDBSCAN.
 
-Everything is locked in `docker/requirements/lidar_preprocessing.txt`
-(MF-MOS at `ARG MF_MOS_COMMIT`). The lock floated to `torch==2.11.0` +
-`cuda-toolkit`, unlike perception_2d's 2.7.1; that's known drift (root
-`CLAUDE.md`). Tests need numba and pypatchworkpp, so run them in the container.
+Everything is locked in `docker/requirements/lidar_preprocessing.txt`. The image
+is CPU only. Tests need numba and pypatchworkpp, so run them in the container.
 
 ## Known limitations
 
@@ -276,8 +250,12 @@ Everything is locked in `docker/requirements/lidar_preprocessing.txt`
 - **The coherence gate** is tuned against its own greedy linker, not
   `wato_common.tracking`.
 - **perception_2d depth anchors use `~dynamic_mask`**, which also admits
-  ambiguous, under-evidenced and near-ego points. Static-voxel membership would
-  be stricter.
-- **MF-MOS is unvalidated on the WATO rig**; both profiles default to `aw`.
+  ambiguous, under-evidenced and near-ego points, and points the dynamic filter
+  dropped. Static-voxel membership would be stricter.
+- **Small movers' Step F tracks fragment.** Their points stay in clusters, but a
+  pedestrian's motion_score can fall below 1
+  ([measurements](../../docs/lidar_preprocessing_measurements.md)).
+- **A car parked for most of a chunk reads static there**, even if it then
+  leaves: the verdict is the chunk's total evidence. IWU evicts it at bag level.
 - **Voxel keys** cover [0, 2²⁰) voxels per axis from the chunk origin (157 km at
   0.15 m) and raise beyond it.

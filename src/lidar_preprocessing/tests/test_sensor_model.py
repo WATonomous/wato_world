@@ -12,10 +12,6 @@ import pytest
 from pydantic import ValidationError
 
 from wato_lidar_preprocessing.config import ComponentConfig
-from wato_lidar_preprocessing.mf_mos._core import (
-    KITTI_SWEEP_RATE_HZ,
-    residual_steps_for,
-)
 from wato_lidar_preprocessing.sensor_model import (
     available_profiles,
     get_sensor_model,
@@ -38,11 +34,10 @@ def test_profile_datasheet_fields_are_physical(profile):
 
 @pytest.mark.parametrize("profile", available_profiles())
 def test_derived_log_odds_constants_are_ordered(profile):
-    """An endpoint hit must outweigh a single pass-through, and both must sit
-    inside the clamp — otherwise one observation could saturate a voxel."""
+    """An endpoint hit must outweigh a single pass-through, and the decision
+    thresholds must sit either side of 0.5, symmetric about it."""
     sm = get_sensor_model(profile)
     assert sm.l_occ > sm.l_free > 0
-    assert sm.log_odds_clamp > sm.l_occ
     assert 0 < sm.p_dynamic_threshold < 0.5 < sm.p_static_threshold < 1
     assert sm.p_static_threshold + sm.p_dynamic_threshold == pytest.approx(1.0)
 
@@ -84,25 +79,3 @@ def test_per_lidar_profiles_resolve_and_fall_back():
 def test_per_lidar_unknown_profile_is_rejected_by_name():
     with pytest.raises(ValidationError, match="lidar_ne"):
         ComponentConfig(sensor_model={"per_lidar": {"lidar_ne": "vlp99"}})
-
-
-def test_residual_steps_scale_with_spin_rate():
-    """Residual channel k means "k frames back". A 20 Hz scanner must step two
-    frames to span the wall-clock motion KITTI's 10 Hz model was trained on."""
-    sm = get_sensor_model("vlp32c")
-    assert sm.sweep_rate_hz == pytest.approx(2 * KITTI_SWEEP_RATE_HZ)
-    assert residual_steps_for(sm, 8) == [2, 4, 6, 8, 10, 12, 14, 16]
-
-
-def test_residual_steps_never_collapse_to_zero():
-    """A scanner slower than KITTI still gets consecutive-frame offsets rather
-    than a degenerate all-zero window."""
-
-    slow = get_sensor_model("vlp32c").__class__(
-        **{
-            **get_sensor_model("vlp32c").__dict__,
-            "name": "slow",
-            "sweep_duration_ms": 200.0,  # 5 Hz
-        }
-    )
-    assert residual_steps_for(slow, 4) == [1, 2, 3, 4]

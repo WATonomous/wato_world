@@ -70,9 +70,9 @@ agreement patterns, with no ground truth.
 
 - MS3D++ fuses only detectors; VESPA and UniLiPs output boxes with no
   confidence.
-- The hard, publishable part: sources aren't independent. Under
-  `--seg union`, `SEG_DYNAMIC` is built from AW + MF-MOS evidence, so naive
-  agreement double-counts. The label model has to handle dependencies.
+- The hard, publishable part: sources aren't independent. `SEG_DYNAMIC` is
+  built from the same evidence as `AW_DYNAMIC`, so naive agreement
+  double-counts. The label model has to handle dependencies.
 - Payoff: confidence-weighted student training, and a human review queue
   (single-source boxes first).
 - Evidence needed: calibration (ECE) against nuScenes GT; student AP with

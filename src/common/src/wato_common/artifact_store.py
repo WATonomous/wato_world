@@ -109,35 +109,6 @@ def dynamic_mask_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
     return _join(lidar_proc_dir(bag_id, chunk_id), f"{sweep_id:06d}_dynamic_mask.npy")
 
 
-def aw_dynamic_mask_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
-    """Snapshot of Amanatides-Woo's own per-sweep dynamic verdict.
-
-    Written only on the union path (`--seg union`), where dynamic_mask.npy is
-    later overwritten by the fused verdict — union's keep_aw_dynamic reads
-    this snapshot so re-fusing never depends on classify having just run.
-    """
-    return _join(
-        lidar_proc_dir(bag_id, chunk_id), f"{sweep_id:06d}_aw_dynamic_mask.npy"
-    )
-
-
-def mf_mos_mask_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
-    """Per-sweep MF-MOS moving-object mask.  Shape (n_raw,) bool, True = moving.
-
-    Length matches the raw lidar NPZ (before deskew's nonfinite filter), so
-    consumers loading the raw NPZ get index-aligned arrays.
-    """
-    return _join(lidar_proc_dir(bag_id, chunk_id), f"{sweep_id:06d}_mf_mos_mask.npy")
-
-
-def mf_mos_score_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
-    """Per-sweep MF-MOS per-point moving probability.  Shape (n_raw,) float32.
-
-    Only written when cfg.mf_mos.save_scores is True.
-    """
-    return _join(lidar_proc_dir(bag_id, chunk_id), f"{sweep_id:06d}_mf_mos_score.npy")
-
-
 def motion_proposals_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
     """Per-sweep recall-oriented moving-object proposals (Step F).
 

@@ -14,30 +14,6 @@ lidar_preprocessing:
     profile: hdl32e
 
   # ====================================================================
-  # Step B method: aw | mos | union (`--seg` overrides).
-  # ====================================================================
-  segmentation: aw
-
-  # --- seg=union ---
-  union:
-    aw_static_veto: true
-    keep_aw_dynamic: false
-    # MF-MOS score that survives the veto (parked-then-moving objects).
-    # Needs mf_mos.save_scores; null = off. Suggested start: 0.9.
-    veto_score_exempt: null
-    ground_height_veto_m: 0.25
-    veto_dilation_voxels: 1
-    # Tuning: docs/lidar_preprocessing_measurements.md.
-    motion_filter:
-      enabled: true
-      persistence_max_sweeps: 20    # sweep COUNT — scale with sensor Hz; 0 = off
-      persistence_voxel_m: 0.5
-      coherence_min_life: 0         # off: cuts real movers on sparse LiDAR
-      coherence_cell_m: 0.4
-      coherence_link_gate_m: 3.0
-      coherence_max_object_m: 7.0
-
-  # ====================================================================
   # Step A — deskew.
   # ====================================================================
   filter_nonfinite_points: true
@@ -54,6 +30,10 @@ lidar_preprocessing:
   min_observations: 3
   dynamic_min_range_m: 2.5
   cache_world_xyz_in_memory: true
+  # Cleanup of the voxel verdict's dynamic points (measured on WATO only).
+  dynamic_filter:
+    min_cluster_pts: 5
+    persistence_max_s: 0.5
 
   # ====================================================================
   # Step D — global map voxel; also the match radius of the two-pass prior,
@@ -91,29 +71,6 @@ lidar_preprocessing:
   frame_sync:
     canonical_lidar: null
     tolerance_ms: 25.0
-
-  # ====================================================================
-  # MF-MOS (seg=mos / union only). Weights:
-  # https://github.com/SCNU-RISLAB/MF-MOS/releases → /data/models/mf_mos/.
-  # Projection geometry comes from the sensor profile, not here.
-  # ====================================================================
-  mf_mos:
-    checkpoint_path: /data/models/mf_mos/mf_mos_semantic_kitti.pt
-    arch_config:   /data/models/mf_mos/arch_cfg.yaml
-    data_config:   /data/models/mf_mos/data_cfg.yaml
-
-    device: cuda
-    score_threshold: 0.7
-    save_scores: true
-
-    max_pose_gap_ms: 6000
-    # Keep above the longest residual baseline (~800 ms on any rig).
-    max_residual_gap_ms: 1000
-    occlusion_range_tol_m: 1.0
-    prime_window_from_prior_chunk: true
-
-    moving_cluster_voxel_m: 0.5
-    moving_min_cluster_pts: 8
 
   # ====================================================================
   # Step E — IWU (bag level). α / τ are the paper's (iwu/_core.py).

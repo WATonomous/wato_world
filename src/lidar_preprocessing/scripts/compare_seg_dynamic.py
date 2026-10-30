@@ -1,15 +1,11 @@
 """Quantify how much of a chunk's dynamic_map is actually static structure.
 
-A clean dynamic cloud sits on movers, not on static surfaces. This measures
-the failure mode behind `--seg union`: for the dynamic_map.npz a segmentation
-method produced, what fraction of its points land within one voxel of a
-static_map.npz surface ("on-static %"). A shift-null (translate the dynamic
-cloud a few metres and re-measure) gives the chance floor from static-map
-density, so the gap above the floor is the real static leakage.
+A clean dynamic cloud sits on movers, not on static surfaces. This measures,
+for a chunk's dynamic_map.npz, what fraction of its points land within one
+voxel of a static_map.npz surface ("on-static %"). A shift-null (translate the
+dynamic cloud a few metres and re-measure) gives the chance floor from
+static-map density, so the gap above the floor is the real static leakage.
 
-Run it after each method to A/B them on the SAME chunk:
-
-    ./watod run lidar_preprocessing --bag <bag> --chunk 0000 --seg aw
     # in the lidar_preprocessing_dev container:
     python /ws/src/lidar_preprocessing/scripts/compare_seg_dynamic.py <bag> 0000
 
@@ -20,6 +16,20 @@ the union of all bits, and members of clusters with motion_score > 1. Expect
 the union well above the seg dynamic_map (false positives are by design). With
 global_iwu.npz the reference is the IWU-refined map, since IWU_EVICTED points
 come from static_map.npz and would read ~100% "on static" against it.
+
+On-static % moves with the static map it is scored against, so it can't
+compare two Step B versions. `--save-reference FILE` freezes two point sets
+from the current run instead; `--reference FILE` scores a later run of the
+same chunk against them (Step B changes, the deskewed sweeps don't):
+
+- movers: points of Step F tracks with motion_score > 2, frac_persistent < 0.3,
+  track_life >= 5 and >= 20 points. Share kept = recall; higher is better.
+- persistent static: dynamic points whose voxel's dynamic hits span >= 5 s (no
+  mover dwells that long in one voxel). Share still dynamic = static leak;
+  lower is better.
+
+The Step B measurements in docs/lidar_preprocessing_measurements.md were
+scored this way.
 """
 
 from __future__ import annotations
@@ -35,12 +45,12 @@ _BITS = {
     1: "AW_DYNAMIC",
     2: "AW_AMBIGUOUS",
     4: "IWU_EVICTED",
-    8: "MF_MOS",
     16: "SEG_DYNAMIC",
     32: "BOX_FILL",
     64: "UNMAPPED",
 }
 _CAP = 2_000_000  # points scored per group (uniform subsample above this)
+_PERSIST_NS = 5_000_000_000  # a car clears a 0.25 m voxel in < 1 s
 
 
 def _coincide_fraction(
@@ -102,6 +112,122 @@ def _load_proposal_groups(chunk_dir: Path) -> dict[str, np.ndarray]:
     return out
 
 
+def _voxel_keys(xyz: np.ndarray, origin: np.ndarray, voxel: float) -> np.ndarray:
+    idx = np.floor((xyz - origin) / voxel).astype(np.int64)
+    return (idx[:, 0] << 40) | (idx[:, 1] << 20) | idx[:, 2]
+
+
+def _valid_sweeps(chunk_dir: Path) -> list[tuple[int, int]]:
+    """(sweep_id, reference_timestamp_ns) of every valid sweep, index order."""
+    import pyarrow.parquet as pq
+
+    t = pq.read_table(
+        chunk_dir / "lidar_proc_index.parquet",
+        columns=["sweep_id", "reference_timestamp_ns", "valid", "world_path"],
+    ).to_pydict()
+    return [
+        (int(s), int(ts))
+        for s, ts, ok, w in zip(
+            t["sweep_id"], t["reference_timestamp_ns"], t["valid"], t["world_path"]
+        )
+        if ok is not False and w
+    ]
+
+
+def _save_reference(chunk_dir: Path, path: Path) -> None:
+    """Freeze the mover and persistent-static sets of the current run."""
+    import pyarrow.parquet as pq
+
+    sweeps = _valid_sweeps(chunk_dir)
+    t_of = dict(sweeps)
+    sm = np.load(chunk_dir / "static_map.npz")
+    origin, voxel = sm["origin"], float(sm["voxel_size"])
+    dm = np.load(chunk_dir / "dynamic_map.npz")
+    t = np.array([t_of[int(s)] for s in dm["sweep_id"]], dtype=np.int64)
+    uk, inv = np.unique(_voxel_keys(dm["xyz"], origin, voxel), return_inverse=True)
+    first = np.full(uk.size, np.iinfo(np.int64).max)
+    last = np.full(uk.size, np.iinfo(np.int64).min)
+    np.minimum.at(first, inv, t)
+    np.maximum.at(last, inv, t)
+    persistent = uk[(last - first) >= _PERSIST_NS]
+
+    c = pq.read_table(chunk_dir / "motion_clusters.parquet").to_pydict()
+    movers = np.array(
+        [
+            cid
+            for cid, ms, fp, life, n in zip(
+                c["cluster_id"],
+                c["motion_score"],
+                c["frac_persistent"],
+                c["track_life"],
+                c["n_points"],
+            )
+            if ms > 2.0 and fp < 0.3 and life >= 5 and n >= 20
+        ],
+        dtype=np.int64,
+    )
+
+    proc = chunk_dir / "lidar_proc"
+    movers_m, persistent_m, lens = [], [], []
+    for sid, _ in sweeps:
+        w = np.load(proc / f"{sid:06d}_world.npz")
+        xyz = np.stack([w["x"], w["y"], w["z"]], axis=1)
+        dyn = np.load(proc / f"{sid:06d}_dynamic_mask.npy")
+        cid = np.load(proc / f"{sid:06d}_motion_proposals.npz")["cluster_id"]
+        m = np.isin(cid, movers)
+        movers_m.append(m)
+        persistent_m.append(
+            dyn & np.isin(_voxel_keys(xyz, origin, voxel), persistent) & ~m
+        )
+        lens.append(dyn.shape[0])
+    m_all, p_all = np.concatenate(movers_m), np.concatenate(persistent_m)
+    np.savez_compressed(
+        path,
+        sweep_id=np.array([s for s, _ in sweeps], dtype=np.int64),
+        lens=np.array(lens, dtype=np.int64),
+        movers=np.packbits(m_all),
+        persistent=np.packbits(p_all),
+        n_points=m_all.size,
+        n_dynamic=dm["xyz"].shape[0],
+    )
+    print(
+        f"  reference -> {path}: {m_all.sum():,} mover pts ({movers.size} clusters), "
+        f"{p_all.sum():,} persistent-static pts, {dm['xyz'].shape[0]:,} dynamic pts"
+    )
+
+
+def _score_reference(chunk_dir: Path, path: Path) -> None:
+    """Share of the reference sets the current dynamic masks keep."""
+    ref = np.load(path)
+    n = int(ref["n_points"])
+    movers = np.unpackbits(ref["movers"], count=n).astype(bool)
+    persistent = np.unpackbits(ref["persistent"], count=n).astype(bool)
+    offs = np.concatenate([[0], np.cumsum(ref["lens"])])
+    proc = chunk_dir / "lidar_proc"
+    n_dyn = kept_m = kept_p = 0
+    for j, sid in enumerate(ref["sweep_id"]):
+        dyn = np.load(proc / f"{int(sid):06d}_dynamic_mask.npy")
+        if dyn.shape[0] != ref["lens"][j]:
+            raise SystemExit(f"sweep {int(sid)}: mask length changed; re-run deskew?")
+        sl = slice(offs[j], offs[j + 1])
+        n_dyn += int(dyn.sum())
+        kept_m += int((dyn & movers[sl]).sum())
+        kept_p += int((dyn & persistent[sl]).sum())
+    print(f"  vs reference {path}:")
+    print(
+        f"    dynamic points        {n_dyn:>10,}  "
+        f"({100 * n_dyn / max(int(ref['n_dynamic']), 1):.1f}% of the reference run)"
+    )
+    print(
+        f"    persistent static     {100 * kept_p / max(persistent.sum(), 1):5.1f}% "
+        f"still dynamic (of {persistent.sum():,}; lower = less static leak)"
+    )
+    print(
+        f"    movers                {100 * kept_m / max(movers.sum(), 1):5.1f}% "
+        f"kept (of {movers.sum():,}; higher = recall kept)"
+    )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("bag_id")
@@ -118,16 +244,35 @@ def main() -> None:
         action="store_true",
         help="score Step F motion proposals per source bit instead of dynamic_map",
     )
+    ap.add_argument(
+        "--save-reference",
+        type=Path,
+        metavar="FILE",
+        help="freeze this run's mover and persistent-static sets to FILE (.npz)",
+    )
+    ap.add_argument(
+        "--reference",
+        type=Path,
+        metavar="FILE",
+        help="score this run's dynamic masks against a --save-reference FILE",
+    )
     args = ap.parse_args()
 
     chunk_dir = Path(args.root) / args.bag_id / "chunks" / args.chunk_id
+    if args.save_reference or args.reference:
+        print(f"chunk {args.bag_id}/{args.chunk_id}")
+        if args.save_reference:
+            _save_reference(chunk_dir, args.save_reference)
+        if args.reference:
+            _score_reference(chunk_dir, args.reference)
+        return
     dyn = np.load(chunk_dir / "dynamic_map.npz")["xyz"]
     stat = np.load(chunk_dir / "static_map.npz")["xyz"]
 
     print(f"chunk {args.bag_id}/{args.chunk_id}")
     print(f"  dynamic points: {dyn.shape[0]:,}   static points: {stat.shape[0]:,}")
     # Proposals are scored against the static cloud only; dynamic_map may be
-    # empty (e.g. seg=aw on a quiet chunk) without making them unscoreable.
+    # empty (a quiet chunk) without making them unscoreable.
     if stat.shape[0] == 0 or (dyn.shape[0] == 0 and not args.proposals):
         print("  (need both clouds non-empty to score)")
         return

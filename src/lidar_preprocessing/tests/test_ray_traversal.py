@@ -55,7 +55,6 @@ def test_same_voxel_ray():
         n_hits=n_hits,
         l_occ=0.85,
         l_free=0.40,
-        log_odds_clamp=5.0,
         d_star=_NO_WEIGHT,
     )
 
@@ -90,7 +89,7 @@ def test_numba_python_parity():
     voxel_size = 0.15
     margin_m = 0.15
     max_length_m = 80.0
-    l_occ, l_free, log_odds_clamp = 0.85, 0.40, 5.0
+    l_occ, l_free = 0.85, 0.40
     d_star = _NO_WEIGHT
 
     # Numba path
@@ -108,7 +107,6 @@ def test_numba_python_parity():
         nnh,
         l_occ,
         l_free,
-        log_odds_clamp,
         d_star,
     )
     n_keys, n_lo, n_no, n_nh = extract_log_odds_arrays(nlo, nno, nnh)
@@ -130,7 +128,6 @@ def test_numba_python_parity():
         pnh,
         l_occ,
         l_free,
-        log_odds_clamp,
         d_star,
     )
     p_keys = np.array(sorted(plo.keys()), dtype=np.int64)
@@ -168,7 +165,6 @@ def test_range_weight_large_d_star_endpoint_unweighted():
         n_hits=n_hits,
         l_occ=0.85,
         l_free=0.40,
-        log_odds_clamp=50.0,
         d_star=_NO_WEIGHT,
     )
 
@@ -202,7 +198,6 @@ def test_range_weight_endpoint_scaled_by_d_star_over_length():
         n_hits=n_hits,
         l_occ=0.85,
         l_free=0.40,
-        log_odds_clamp=50.0,
         d_star=200.0,
     )
 
@@ -218,7 +213,7 @@ def test_range_weight_endpoint_scaled_by_d_star_over_length():
 
 @requires_numba
 def test_range_weight_endpoint_inside_d_star_is_unweighted():
-    """Endpoints at d <= d_star get full l_occ (the min() clamp pins r* to 1.0)."""
+    """Endpoints at d <= d_star get full l_occ (min(1, d_star/d) pins r* to 1.0)."""
     log_odds, n_obs, n_hits = make_log_odds_dicts()
     sweep_origin = np.array([0.001, 0.0, 0.0])
     # 50m endpoint, d_star=200 → r* = min(1, 200/50) = 1.0
@@ -238,7 +233,6 @@ def test_range_weight_endpoint_inside_d_star_is_unweighted():
         n_hits=n_hits,
         l_occ=0.85,
         l_free=0.40,
-        log_odds_clamp=50.0,
         d_star=200.0,
     )
 
@@ -277,7 +271,6 @@ def test_range_weight_per_voxel_free_space_uses_t_entry():
         n_hits=n_hits,
         l_occ=0.85,
         l_free=0.40,
-        log_odds_clamp=50.0,
         d_star=5.0,
     )
 
@@ -327,7 +320,7 @@ def test_range_weight_numba_python_parity():
     voxel_size = 0.5
     margin_m = 0.5
     max_length_m = 300.0
-    l_occ, l_free, log_odds_clamp = 1.20, 0.25, 50.0
+    l_occ, l_free = 1.20, 0.25
     d_star = 50.0  # small enough that many endpoints are down-weighted
 
     nlo, nno, nnh = make_log_odds_dicts()
@@ -344,7 +337,6 @@ def test_range_weight_numba_python_parity():
         nnh,
         l_occ,
         l_free,
-        log_odds_clamp,
         d_star,
     )
     n_keys, n_lo, n_no, n_nh = extract_log_odds_arrays(nlo, nno, nnh)
@@ -365,7 +357,6 @@ def test_range_weight_numba_python_parity():
         pnh,
         l_occ,
         l_free,
-        log_odds_clamp,
         d_star,
     )
     p_keys = np.array(sorted(plo.keys()), dtype=np.int64)
@@ -407,7 +398,6 @@ def test_range_weight_per_voxel_free_space_python_kernel():
         n_hits=n_hits,
         l_occ=0.85,
         l_free=0.40,
-        log_odds_clamp=50.0,
         d_star=5.0,
     )
 
@@ -455,7 +445,6 @@ def test_range_weight_endpoint_python_kernel():
         n_hits,
         0.85,
         0.40,
-        50.0,
         200.0,
     )
     assert _pack(50, 0, 0) in log_odds
@@ -483,7 +472,6 @@ def test_range_weight_endpoint_python_kernel():
         n_hits,
         0.85,
         0.40,
-        50.0,
         200.0,
     )
     assert _pack(500, 0, 0) in log_odds
@@ -511,7 +499,6 @@ def test_range_weight_endpoint_python_kernel():
         n_hits,
         0.85,
         0.40,
-        50.0,
         _NO_WEIGHT,
     )
     assert _pack(500, 0, 0) in log_odds
@@ -586,7 +573,6 @@ def test_incidence_gate_skips_grazing_carve_python_kernel():
         nh_g,
         0.85,
         0.40,
-        50.0,
         _NO_WEIGHT,
         nx,
         ny,
@@ -612,7 +598,6 @@ def test_incidence_gate_skips_grazing_carve_python_kernel():
         nh_h,
         0.85,
         0.40,
-        50.0,
         _NO_WEIGHT,
         nx,
         ny,
@@ -706,7 +691,6 @@ def test_over_length_ray_registers_endpoint_hit_only():
         n_hits=n_hits,
         l_occ=0.85,
         l_free=0.40,
-        log_odds_clamp=5.0,
         d_star=d_star,
     )
 
@@ -744,7 +728,7 @@ def test_over_length_ray_python_parity():
     voxel_size = 0.15
     margin_m = 0.15
     max_length_m = 5.0  # forces many rays over-length
-    l_occ, l_free, log_odds_clamp = 0.85, 0.40, 5.0
+    l_occ, l_free = 0.85, 0.40
     d_star = 3.0
 
     nlo, nno, nnh = make_log_odds_dicts()
@@ -761,7 +745,6 @@ def test_over_length_ray_python_parity():
         nnh,
         l_occ,
         l_free,
-        log_odds_clamp,
         d_star,
     )
     n_keys, n_lo, n_no, n_nh = extract_log_odds_arrays(nlo, nno, nnh)
@@ -782,7 +765,6 @@ def test_over_length_ray_python_parity():
         pnh,
         l_occ,
         l_free,
-        log_odds_clamp,
         d_star,
     )
     p_keys = np.array(sorted(plo.keys()), dtype=np.int64)
@@ -794,3 +776,173 @@ def test_over_length_ray_python_parity():
     assert np.array_equal(n_no, p_no), "n_obs arrays differ"
     assert np.array_equal(n_nh, p_nh), "n_hits arrays differ"
     assert np.array_equal(n_lo, p_lo), "log_odds arrays differ"
+
+
+# ---------------------------------------------------------------------------
+# Frame hit shield and unclamped accumulation
+# ---------------------------------------------------------------------------
+
+
+def _unpack(key: int) -> tuple[int, int, int]:
+    mask = (1 << SHIFT_Y) - 1
+    return (key >> SHIFT_X) & mask, (key >> SHIFT_Y) & mask, key & mask
+
+
+@requires_numba
+def test_build_hit_shield_covers_one_voxel_neighbourhood():
+    """A hit shields its own voxel and all 26 neighbours, nothing farther."""
+    from wato_lidar_preprocessing.ray_traversal import build_hit_shield
+
+    shield = build_hit_shield(np.array([_pack(5, 5, 5)], dtype=np.int64))
+    expected = {
+        _pack(5 + dx, 5 + dy, 5 + dz)
+        for dx in (-1, 0, 1)
+        for dy in (-1, 0, 1)
+        for dz in (-1, 0, 1)
+    }
+    assert set(shield.keys()) == expected
+    assert _pack(7, 5, 5) not in shield
+
+
+@requires_numba
+def test_build_hit_shield_stays_inside_the_grid():
+    """A hit on the grid edge must not wrap a -1 index into another axis's bits
+    (that would alias a real voxel far away)."""
+    from wato_lidar_preprocessing.ray_traversal import build_hit_shield
+
+    shield = build_hit_shield(np.array([_pack(0, 0, 0)], dtype=np.int64))
+    assert len(shield) == 8
+    assert all(max(_unpack(int(k))) <= 1 for k in shield.keys())
+
+
+@requires_numba
+def test_shield_blocks_carving_but_not_hits():
+    """A shielded voxel is neither carved nor counted as observed by a passing
+    ray; voxels outside the shield on the same ray are carved; an endpoint
+    inside the shield still registers its hit."""
+    from wato_lidar_preprocessing.ray_traversal import build_hit_shield
+
+    shield = build_hit_shield(np.array([_pack(5, 0, 0)], dtype=np.int64))
+    log_odds, n_obs, n_hits = make_log_odds_dicts()
+    update_sweep_log_odds(
+        np.array([0.5, 0.5, 0.5]),
+        np.array([[9.5, 0.5, 0.5], [6.5, 0.5, 0.5]]),
+        None,
+        np.zeros(3),
+        voxel_size=1.0,
+        margin_m=0.5,
+        max_length_m=50.0,
+        log_odds=log_odds,
+        n_obs=n_obs,
+        n_hits=n_hits,
+        l_occ=2.0,
+        l_free=0.5,
+        d_star=_NO_WEIGHT,
+        shield=shield,
+    )
+    for x in (4, 5, 6):  # shielded: no carve, no observation from the rays
+        assert int(n_hits.get(_pack(x, 0, 0), np.int32(0))) == (1 if x == 6 else 0)
+        assert float(log_odds.get(_pack(x, 0, 0), np.float32(0))) == (
+            2.0 if x == 6 else 0.0
+        )
+    for x in (1, 2, 3, 7, 8):  # outside the shield: carved by the long ray
+        assert float(log_odds[_pack(x, 0, 0)]) < 0.0
+    assert int(n_hits[_pack(9, 0, 0)]) == 1
+
+
+@requires_numba
+def test_shield_numba_python_parity():
+    """With a non-empty shield, both kernels stay bit-identical."""
+    from wato_lidar_preprocessing.ray_traversal import build_hit_shield
+    from wato_lidar_preprocessing.ray_traversal._python_kernel import (
+        _update_sweep_python,
+    )
+
+    rng = np.random.default_rng(seed=11)
+    endpoints = rng.uniform(-3.0, 3.0, size=(80, 3))
+    is_ground = rng.choice([True, False], size=80)
+    sweep_origin = np.array([0.001, -0.002, 0.003])
+    chunk_origin = np.array([-5.0, -5.0, -5.0])
+    voxel_size, margin_m, max_length_m = 0.15, 0.15, 80.0
+    hit_keys = np.unique(
+        np.floor((endpoints[::3] - chunk_origin) / voxel_size).astype(np.int64)
+        @ np.array([1 << SHIFT_X, 1 << SHIFT_Y, 1], dtype=np.int64)
+    )
+    shield = build_hit_shield(hit_keys)
+
+    nlo, nno, nnh = make_log_odds_dicts()
+    update_sweep_log_odds(
+        sweep_origin,
+        endpoints,
+        is_ground,
+        chunk_origin,
+        voxel_size,
+        margin_m,
+        max_length_m,
+        nlo,
+        nno,
+        nnh,
+        0.85,
+        0.40,
+        _NO_WEIGHT,
+        shield=shield,
+    )
+    n_keys, n_lo, n_no, n_nh = extract_log_odds_arrays(nlo, nno, nnh)
+
+    plo: dict[int, np.float32] = {}
+    pno: dict[int, np.int32] = {}
+    pnh: dict[int, np.int32] = {}
+    _update_sweep_python(
+        sweep_origin,
+        endpoints,
+        is_ground,
+        chunk_origin,
+        voxel_size,
+        margin_m,
+        max_length_m,
+        plo,
+        pno,
+        pnh,
+        0.85,
+        0.40,
+        _NO_WEIGHT,
+        shield={int(k) for k in shield.keys()},
+    )
+    p_keys = np.array(sorted(plo.keys()), dtype=np.int64)
+    assert np.array_equal(n_keys, p_keys), "voxel-key sets differ between kernels"
+    assert np.array_equal(n_no, np.array([int(pno[k]) for k in p_keys]))
+    assert np.array_equal(n_nh, np.array([int(pnh.get(k, 0)) for k in p_keys]))
+    assert np.array_equal(n_lo, np.array([plo[k] for k in p_keys], dtype=np.float32))
+
+
+@requires_numba
+def test_log_odds_are_unclamped_and_order_independent():
+    """Evidence sums without saturation, so the order sweeps arrive in can't
+    change a voxel's log-odds. (0.5 and 2.0 are exact in float32, so the two
+    orders must agree bit for bit.)"""
+    voxel = _pack(3, 0, 0)
+
+    def run(order: list[str]) -> float:
+        lo, no, nh = make_log_odds_dicts()
+        for kind in order:
+            end = [3.5, 0.5, 0.5] if kind == "hit" else [8.5, 0.5, 0.5]
+            update_sweep_log_odds(
+                np.array([0.5, 0.5, 0.5]),
+                np.array([end]),
+                None,
+                np.zeros(3),
+                voxel_size=1.0,
+                margin_m=0.5,
+                max_length_m=50.0,
+                log_odds=lo,
+                n_obs=no,
+                n_hits=nh,
+                l_occ=2.0,
+                l_free=0.5,
+                d_star=_NO_WEIGHT,
+            )
+        return float(lo[voxel])
+
+    hits_first = run(["hit"] * 10 + ["carve"] * 30)
+    carves_first = run(["carve"] * 30 + ["hit"] * 10)
+    assert hits_first == carves_first == 10 * 2.0 - 30 * 0.5

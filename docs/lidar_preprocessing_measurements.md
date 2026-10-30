@@ -3,8 +3,8 @@
 The measurements that set lidar_preprocessing's defaults and limitations. The
 behaviour itself is in the component README. "On-static %" is the share of a
 cloud within one voxel of a static-map surface, scored with
-`scripts/compare_seg_dynamic.py`; mover-recall is proxied by distance from the
-static map. There are no labels, so these are proxies, not accuracy.
+`scripts/compare_seg_dynamic.py`. There are no labels, so these are proxies, not
+accuracy.
 
 ## Deskew on the WATO rig (`ring_road_corrected`)
 
@@ -23,68 +23,112 @@ static map. There are no labels, so these are proxies, not accuracy.
   array position wasn't done because nuScenes clouds are ordered differently
   (their last points wrap past the start angle) and it is unverified there.
 
-## union: why the vetoes and the motion filter exist
+## Step B: keeping static structure out of the dynamic cloud
 
-- **Ground-height veto.** AW never calls road voxels static, so MF-MOS road
-  false positives pass every voxel veto. On nuScenes scene-0061 they were half
-  the union dynamic cloud, median height −0.36 m.
-- **Why a motion filter.** After the AW-static and ground vetoes, ~58 % of the
-  union dynamic cloud on real Velodyne data still sat within 25 cm of a static
-  surface: structure the AW map covers sparsely (far walls, foliage,
-  below-grade returns). MF-MOS is a SemanticKITTI (HDL-64E) model applied out
-  of domain and over-fires on textured static surfaces.
+Measured on WATO `may_30_ring_road_test_5_2`. With plain carving, chunk 0000's
+dynamic cloud was 3.2M points against 6.5M static, 27–31 % of non-ground points
+on every scanner. 80 % of those points sat in voxels hit across ≥ 2 s, 97.6 %
+lay within 0.5 m of a static-map point, and the median dynamic voxel had 96
+traversals to 1 hit. Canopies, façades and edges dominated.
 
-**Persistence threshold** (WATO ring-road bag):
+Scored with `compare_seg_dynamic.py --save-reference` / `--reference`, against
+sets frozen from the run before these changes:
 
-| `persistence_max_sweeps` | dynamic pts | on-static | mover-recall |
+- **Persistent static:** dynamic points in voxels with dynamic hits across
+  ≥ 5 s. Share still dynamic; lower is better.
+- **Movers:** points of Step F tracks with `motion_score` > 2, `frac_persistent`
+  < 0.3, `track_life` ≥ 5, ≥ 20 points (11 tracks on chunk 0000: five cars, a
+  pedestrian...). Share kept; higher is better. These tracks were seeded by the
+  old classifier, so the set leans towards what it already flagged.
+
+| Chunk 0000 | dynamic pts | % of before | persistent static | movers |
+|---|---|---|---|---|
+| Before (clamped, no shield) | 3.20M | 100 | 100 % | 73.5 % |
+| Clamp removed | 2.21M | 69.0 | 36.8 % | 79.5 % |
+| Shield, same sweep | 1.74M | 54.5 | 47.4 % | 72.9 % |
+| Shield, same frame | 1.63M | 50.9 | 44.0 % | 72.6 % |
+| Shield, ±250 ms | 1.07M | 33.6 | 26.0 % | 71.2 % |
+| **Same-frame shield + no clamp** | **886k** | **27.7** | **8.5 %** | **78.1 %** |
+| + cluster ≥ 5 | 440k | 13.8 | 4.4 % | 77.3 % |
+| **+ cluster ≥ 5 + persistence 0.5 s (default)** | **316k** | **9.9** | **2.2 %** | **76.9 %** |
+
+Across chunks: 0002 is the busiest (59 mover tracks), 0004 the worst leak (79 %
+of its dynamic cloud persistent).
+
+| Chunk | Movers before | Shield + no clamp (size / persistent / movers) | + filter (size / persistent / movers) |
 |---|---|---|---|
-| (no filter) | 360.7K | 58.3% | 100% |
-| 5 | 86.0K | 6.6% | 53% |
-| 12 | 117.6K | 9.3% | 71% |
-| **20 (default)** | **128.9K** | **12.6%** | **75%** |
-| 28 | 143.3K | 16.0% | 80% |
+| 0000 | 73.5 % | 27.7 % / 8.5 % / 78.1 % | 9.9 % / 2.2 % / 76.9 % |
+| 0002 | 71.6 % | 40.9 % / 21.8 % / 74.7 % | 17.1 % / 5.2 % / 73.5 % |
+| 0004 | 67.9 % | 29.6 % / 11.7 % / 74.8 % | 8.9 % / 2.0 % / 71.5 % |
 
-Persistence 5 + coherence gave 3.9 % on-static at 34 % recall (over-cuts).
-Leakage climbs faster than recall past ~24 sweeps. The recall ceiling is
-~75–80 %: an extended mover (a 4.5 m car at 5 m/s dwells ~9 sweeps in a 0.5 m
-voxel) is indistinguishable from structure by per-voxel occupancy alone.
+Both kernel changes are needed. Clamp removal alone leaves 60.0 % persistent on
+0002 and 37.9 % on 0004; the shield alone leaves 47.3 % and 40.0 %, and costs
+~0.5–0.9 points of movers. A voxel's clamped log-odds reflects only its last ~23
+observations: processing chunk 0000's sweeps in timestamp rather than `sweep_id`
+order (52 swaps) changed 386 sweeps' masks.
 
-**Rejected alternatives:**
+The shield adds ~15 % to ray casting: 184.9 s → 212.1 s for 400 sweeps of chunk
+0000, run alone, two alternating runs each.
 
-- The coherence gate cuts ~20 % of real movers for < 1 % precision on sparse
-  (32-/64-beam) LiDAR (distant movers don't cluster), so it is off by default.
-- A velocity gate, and a translating-cluster *rescue* of persistent points,
-  both tested worse: per-sweep visibility drifts a cluster's centroid as the ego
-  passes structure, faking velocity. The rescue re-admitted ~77 % structure via
-  wall-sliding.
-- An `MF-MOS ∩ AW-dynamic` intersection raised leakage (17 % → 72 % on
-  nuScenes): AW-dynamic voxels hug static surfaces.
+End to end on chunk 0000: static points 6.5M → 10.1M. Step F's clusters fall from
+99,072 to 48,775 and its moving clusters from 2,175 to 1,378, with nothing lost
+outright: of the frozen mover points, 98.8 % still carry a source bit, 98.1 % are
+clustered and 84.6 % sit in a moving cluster. Six of the seven car-sized tracks
+still pass the mover criteria. Small movers pay: the pedestrian's track fragments
+(95.1 % clustered, 45.4 % in moving clusters, median `motion_score` 0.34).
 
-## MF-MOS on the WATO rig (unaudited)
+**Filter thresholds** (cluster ≥ 5, on the three chunks):
 
-Both profiles default to `segmentation: aw` until MF-MOS mask quality on
-`lidar_cc` is audited (`scripts/debug_mfmos_contribution.py`). MF-MOS also
-skipped a large fraction of sweeps in two measured chunks (190/656 and
-101/101), so its real contribution may be far smaller than "enabled" suggests.
+- `persistence_max_s`: 0.5 s is 30 sweeps at this rig's 60 sweeps/s. 20 sweeps
+  falls off a cliff (movers −8.5 / −4.6 / −6.2 points); 40 sweeps gains
+  +0.3 / +0.3 / +1.1 points of movers for +0.5 / +2.3 / +0.7 of persistent.
+- `min_cluster_pts`: 8 instead of 5 trims the cloud a further ~1–2 points for
+  −0.2 / −0.2 / −0.6 points of movers. 5 matches Step F's `min_cluster_pts`.
+
+**Rejected:**
+
+- **Re-calibrating, or a grid per scanner.** `lidar_cc` alone keeps 23.7 % of its
+  non-ground points dynamic, against 26.7 % with all three: cross-scanner carving
+  is ~11 % of the leak.
+- **Wider shield.** ±250 ms costs movers (71.2 % against 72.6 % for one frame,
+  with the clamp on), likely by shielding a mover's own recent trail.
+- **DUFOMap's "void once" rule on top of the shield.** Ever-carved voxels flood:
+  235 % of the old cloud at k = 1, 199 % at k = 3. A single clean pass isn't
+  motion evidence here. The paper's stricter void test (all 26 neighbours
+  observed in the scan) was not tried.
+- **Ground-height veto.** At 0.25 m it costs 3.1–3.7 points of movers for 0.8–1.5
+  points of persistent, and would need Step C before the masks are written.
+- **Hit-span gate** (drop voxels with dynamic hits across ≥ T). Traffic reuses
+  voxels, so movers fall with it: at T = 3 s, 65.4 % / 53.8 % / 58.9 % kept.
+- A **velocity gate**, a **translating-cluster rescue** of persistent points and
+  a **coherence gate** all tested worse on the old fusion's candidates: per-sweep
+  visibility drifts a cluster's centroid as the ego passes structure, faking
+  velocity, and distant movers don't cluster on sparse LiDAR.
+
+Not measured: anything beyond this one WATO bag. No nuScenes data was available,
+so the filter defaults are unvalidated on `hdl32e`.
 
 ## Step E — IWU (nuScenes scene-0061)
 
-One 19 s chunk, `seg=union`, 191k map points, 77 sampled sweeps, 9 s runtime.
+One 19 s chunk, 191k map points, 77 sampled sweeps, 9 s runtime. Measured
+before the Step B changes above; re-measure.
 
 - The paper-literal rule (single-pixel seen-through test, nearest-only
   reinforcement) evicted 54 % of an AW-static map: ring gaps and origin error
   read as "seen through".
 - The windowed hybrid rule evicts 7.0 %, and eviction is 2.0× more likely within
-  0.5 m of the union dynamic cloud than elsewhere (the only precision proxy
-  available without labels).
+  0.5 m of the dynamic cloud than elsewhere (the only precision proxy available
+  without labels).
 
 ## Step F — motion proposals (same scene, 382 sweeps, 47 s)
+
+Measured before the Step B changes above; re-measure.
 
 - 5.4 % of points carry a bit; 21.6k clusters (57/frame), 404 with
   `motion_score > 1`, 12 box-filled tracks.
 - On-static leakage above chance, against the IWU-refined map
   (`compare_seg_dynamic --proposals`): IWU_EVICTED +20.6, BOX_FILL +21.4, moving
-  clusters +25.6, SEG_DYNAMIC +31.2, MF_MOS +55.7, AW_DYNAMIC +64.1,
+  clusters +25.6, SEG_DYNAMIC +31.2, AW_DYNAMIC +64.1,
   AW_AMBIGUOUS +72.7 pts. The leakage comes from the AW bits, so downstream
   should weight clusters by `n_sources`, `frac_persistent` and `motion_score`
   rather than trust any bit alone.

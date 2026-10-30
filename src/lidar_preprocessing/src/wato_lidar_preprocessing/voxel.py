@@ -78,7 +78,7 @@ def keys_in_sorted(keys: np.ndarray, sorted_keys: np.ndarray) -> np.ndarray:
     """Boolean mask: which `keys` are present in sorted-unique `sorted_keys`.
 
     The single membership test every voxel-set lookup must share (classify
-    pass 2, union veto) so a point resolves to the same verdict everywhere.
+    pass 2, Step F) so a point resolves to the same verdict everywhere.
     """
     if sorted_keys.size == 0 or keys.size == 0:
         return np.zeros(keys.shape[0], dtype=bool)

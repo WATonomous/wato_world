@@ -179,9 +179,8 @@ def test_apply_global_map_boost_injects_log_odds_only():
     hit_keys = np.array([42, 42, 7, 100], dtype=np.int64)  # voxel 42 hit twice
     hit_r_star = np.array([0.5, 0.8, 1.0, 0.25], dtype=np.float32)
     l_occ_boost = 0.10
-    clamp = 50.0
 
-    apply_global_map_boost(hit_keys, hit_r_star, l_occ_boost, clamp, log_odds)
+    apply_global_map_boost(hit_keys, hit_r_star, l_occ_boost, log_odds)
 
     # Voxel 42: max r_star across its two hits is 0.8 → boost = 0.1 * 0.8 = 0.08.
     #          Previous lo = 0.2 → new lo = 0.28.
@@ -196,19 +195,6 @@ def test_apply_global_map_boost_injects_log_odds_only():
     assert len(n_obs) == 0, "boost must not increment n_obs"
 
 
-def test_apply_global_map_boost_respects_clamp():
-    """Boost saturates at log_odds_clamp, doesn't overshoot."""
-    log_odds, _, _ = make_log_odds_dicts()
-    log_odds[1] = np.float32(49.5)
-    hit_keys = np.array([1], dtype=np.int64)
-    hit_r_star = np.array([1.0], dtype=np.float32)
-    apply_global_map_boost(
-        hit_keys, hit_r_star, l_occ_boost=2.0, clamp=50.0, log_odds=log_odds
-    )
-    # 49.5 + 2.0 = 51.5 → clamped to 50.0.
-    assert float(log_odds[1]) == pytest.approx(50.0)
-
-
 def test_apply_global_map_boost_empty_hits_is_noop():
     log_odds, _, _ = make_log_odds_dicts()
     log_odds[5] = np.float32(1.0)
@@ -216,7 +202,6 @@ def test_apply_global_map_boost_empty_hits_is_noop():
         np.empty(0, dtype=np.int64),
         np.empty(0, dtype=np.float32),
         l_occ_boost=0.5,
-        clamp=50.0,
         log_odds=log_odds,
     )
     assert float(log_odds[5]) == pytest.approx(1.0)
@@ -238,9 +223,6 @@ def test_build_log_odds_grid_with_prior_increases_lo(tmp_env):
           n_hits stays identical (since prior must NOT add synthetic hits).
     """
     bag_id, chunk_id = "bag_prior", "chunk0"
-    # One sweep so the derived l_occ (≈1.99) doesn't saturate the clamp
-    # (≈4.60) before the prior boost is added — keeps the boost magnitude
-    # exactly observable.
     n_sweeps = 1
     # One static point at world (1.0, 0.0, 0.0); sensor at the world origin.
     static_pt = np.array([[1.0, 0.0, 0.0]])

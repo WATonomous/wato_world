@@ -290,9 +290,6 @@ class ProcessedSweepMeta(BaseModel):
     # (canonical_lidar=None in config) just get frame_id = sweep ordinal.
     # Nullable: orphan sweeps outside any window are None.
     frame_id: Optional[int] = None
-    # MF-MOS mask: (n_raw,) bool NPY aligned to the raw sweep. Written on
-    # `--seg mos` / `--seg union`; None on `--seg aw`.
-    mf_mos_mask_path: Optional[str] = None
 
 
 PROCESSED_SWEEPS_SCHEMA = pa.schema(
@@ -319,7 +316,6 @@ PROCESSED_SWEEPS_SCHEMA = pa.schema(
         pa.field("world_zmin", pa.float64()),
         pa.field("world_zmax", pa.float64()),
         pa.field("frame_id", pa.int64()),
-        pa.field("mf_mos_mask_path", pa.string()),
     ]
 )
 
@@ -347,28 +343,11 @@ class ChunkSummaryRow(BaseModel):
     cache_auto_disabled: bool
     estimated_cache_bytes: int
     ground_status: str  # "ok" | "skipped_no_ground_mask" | "empty"
-    # Which Step-B method produced this chunk ("aw"|"mos"|"union"); None on
-    # older summaries. The skip check compares it with cfg.segmentation, so
-    # switching --seg never serves another method's artifacts.
-    segmentation_method: Optional[str] = None
-    # Sweeps Step B had no usable MF-MOS mask for (mos/union only; None for
-    # aw). Their movers are left static (mos) or dropped (union) — chunks
-    # where this is high (e.g. residual warm-up at chunk starts) lose recall.
-    seg_n_sweeps_no_mask: Optional[int] = None
-    # Dynamic candidates removed by the AW-static veto (union only).
-    union_n_points_vetoed: Optional[int] = None
-    # Dynamic candidates removed by the ground-height veto (union only).
-    union_n_points_ground_vetoed: Optional[int] = None
-    # Dynamic points removed by the post-veto motion filter (union only; None
-    # when the filter is disabled). persistence = voxel occupied across too
-    # many sweeps; coherence = not part of a multi-sweep cluster track.
-    motion_filter_n_persistence_dropped: Optional[int] = None
-    motion_filter_n_coherence_dropped: Optional[int] = None
-    # MF-MOS step stats — None when MF-MOS didn't run (`--seg aw`).
-    mf_mos_n_processed: Optional[int] = None
-    mf_mos_n_skipped: Optional[int] = None  # failures (pose gap, empty, infer error)
-    mf_mos_n_unsupported: Optional[int] = None  # scanner below MIN_BEAMS; by design
-    mf_mos_n_points_moving: Optional[int] = None
+    # Dynamic candidates Step B's filter removed: too small a cluster in their
+    # frame, then (of the rest) too persistent a voxel. None on chunks written
+    # before the filter existed.
+    n_filter_cluster_dropped: Optional[int] = None
+    n_filter_persistence_dropped: Optional[int] = None
     # Step F motion-proposal stats — None until `proposals` has run on the
     # chunk (it rewrites this row in place after Step B/C wrote it).
     # n_points_proposal: points with any source bit set (the recall union).
@@ -393,16 +372,8 @@ CHUNK_SUMMARY_SCHEMA = pa.schema(
         pa.field("cache_auto_disabled", pa.bool_()),
         pa.field("estimated_cache_bytes", pa.int64()),
         pa.field("ground_status", pa.string()),
-        pa.field("segmentation_method", pa.string()),
-        pa.field("seg_n_sweeps_no_mask", pa.int64()),
-        pa.field("union_n_points_vetoed", pa.int64()),
-        pa.field("union_n_points_ground_vetoed", pa.int64()),
-        pa.field("motion_filter_n_persistence_dropped", pa.int64()),
-        pa.field("motion_filter_n_coherence_dropped", pa.int64()),
-        pa.field("mf_mos_n_processed", pa.int64()),
-        pa.field("mf_mos_n_skipped", pa.int64()),
-        pa.field("mf_mos_n_unsupported", pa.int64()),
-        pa.field("mf_mos_n_points_moving", pa.int64()),
+        pa.field("n_filter_cluster_dropped", pa.int64()),
+        pa.field("n_filter_persistence_dropped", pa.int64()),
         pa.field("n_points_proposal", pa.int64()),
         pa.field("n_clusters", pa.int64()),
         pa.field("n_clusters_moving", pa.int64()),

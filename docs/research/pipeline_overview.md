@@ -29,8 +29,8 @@ multi-view shape fitting and multi-LiDAR point density.
 
 ```
 ingest             ← bags + calibration + poses + chunk index
-lidar_preprocessing← SAM4D preprocessing, static/dynamic split (AW log-odds /
-                      MF-MOS / union), ground plane, UniLiPs IWU (Step E),
+lidar_preprocessing← SAM4D preprocessing, static/dynamic split (AW log-odds),
+                      ground plane, UniLiPs IWU (Step E),
                       Chen et al. MOS auto-labeling proposals (Step F)
 perception_2d      ← YOLO26 / GroundingDINO detector + SAM2 video tracker + DA-V2 depth + DINOv2 ReID
 semantic_lifting   ← occlusion-aware 2D→3D label lifting (UniLiPs Eq.1)
@@ -53,10 +53,6 @@ Kalman/Hungarian tracking → "moved further than its own size". Implemented as 
 recall-oriented proposal artifact with soft motion features rather than a hard
 relabel; the box/Kalman/association code lives in `wato_common.tracking` for
 the `tracking` component to reuse. See `lidar_mos_guidance.md`.
-
-### MF-MOS (SCNU-RISLAB)
-Learned range-image MOS, opt-in via `--seg mos|union`. The default `--seg aw`
-runs no model inference at all.
 
 ### SAM4D (arxiv 2506.21547)
 Primarily drives **`perception_2d`** and informs **`lidar_preprocessing`**.
@@ -114,12 +110,11 @@ ingest
 
 lidar_preprocessing   reads: sweeps, poses, calibration
   └─ chunks/<chunk>/
-       ├─ lidar_proc_index.parquet   (per-sweep stats, world_path, dynamic_mask_path, mf_mos_mask_path)
-       ├─ lidar_proc_summary.parquet (chunk stats: counts, seg method, MF-MOS, union, proposals)
+       ├─ lidar_proc_index.parquet   (per-sweep stats, world_path, dynamic_mask_path)
+       ├─ lidar_proc_summary.parquet (chunk stats: counts, filter drops, proposals)
        ├─ lidar_proc/*_world.npz     (deskewed world-frame xyz + origin + ground_mask + intensity)
-       ├─ lidar_proc/*_dynamic_mask.npy     (PRECISION: the --seg method's per-point verdict)
+       ├─ lidar_proc/*_dynamic_mask.npy     (PRECISION: Step B's per-point verdict)
        ├─ lidar_proc/*_motion_proposals.npz (RECALL: per-point source_bits + cluster_id, Step F)
-       ├─ lidar_proc/*_mf_mos_mask.npy      (MF-MOS moving mask; --seg mos|union only)
        ├─ static_map.npz             (chunk static cloud + static/dynamic/ambiguous voxel keys)
        ├─ dynamic_map.npz            (chunk dynamic cloud + per-point sweep_id)
        ├─ motion_clusters.parquet    (Step F clusters: box + motion_score, track_life, ...)
@@ -162,8 +157,7 @@ label_refinement      reads: tracks, lidar_proc/*_world.npz, motion_proposals / 
 
 ## Implementation priority order
 
-Done: `ingest`; `lidar_preprocessing` (Steps A–F: deskew, `--seg aw|mos|union`,
-ground, reduce, IWU, motion proposals); `perception_2d` (YOLO26 or GroundingDINO / SAM2 /
+Done: `ingest`; `lidar_preprocessing` (Steps A–F: deskew, classify, ground, reduce, IWU, motion proposals); `perception_2d` (YOLO26 or GroundingDINO / SAM2 /
 DA-V2 / DINOv2); `semantic_lifting` core (UniLiPs Eq. 1 lifting + cross-camera
 voting). Next:
 

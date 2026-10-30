@@ -59,7 +59,7 @@ produces temporally consistent 3D masks without human annotation.
 |-----------------|---------------|--------|
 | LiDAR voxelization at 0.15 m | `voxel_size_m` in `classify/` (schema 0.15; shipped profiles 0.25) | ✓ Done |
 | Ego-motion per-point deskewing | `deskew/` (`batch_interpolate_poses`) | ✓ Done |
-| Static / dynamic separation | `classify/` AW log-odds ray casting (`--seg aw`, default), MF-MOS (`--seg mos`) or their fusion (`--seg union`) | ✓ Done |
+| Static / dynamic separation | `classify/` AW log-odds ray casting + point-level dynamic filter | ✓ Done |
 | Moving-object proposals | Step F `motion_proposals/` (recall-oriented, per-cluster motion scores; see `lidar_mos_guidance.md`) | ✓ Done |
 | Ground plane removal | `ground/` (Patchwork++ + height grid) | ✓ Done |
 | Camera intrinsics + extrinsics | `calibration.json` (from TF + camera_info) | ✓ Done |
@@ -82,8 +82,8 @@ is translation-invariant and intensity-agnostic.
 (`save_voxel_occupancy`, default on) and, with
 `save_per_frame_voxel_occupancy`, one `voxel_occupancy_frame_NNNN.npz` per
 `frame_id` — sparse int voxel coords, the (coords, features=1.0) pairs
-MinkUNet consumes. Written by Step B (`classify/occupancy_export.py`,
-`mf_mos/segment.py`); nothing consumes them yet.
+MinkUNet consumes. Written by Step B (`classify/occupancy_export.py`); nothing
+consumes them yet.
 
 ### 2. Camera-LiDAR projection (depth lifting)
 

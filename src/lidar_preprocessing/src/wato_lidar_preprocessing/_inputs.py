@@ -1,4 +1,4 @@
-"""Shared I/O helpers used by deskew and mf_mos."""
+"""Shared I/O helpers."""
 
 from __future__ import annotations
 

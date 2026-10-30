@@ -1,14 +1,17 @@
-"""Step B (seg=aw) — voxel static/dynamic classification; union's static basis.
+"""Step B — voxel static/dynamic classification.
 
   Pass 1: ray-trace every sweep into a log-odds voxel grid (constants from
-          the SensorModel; the carve margin also uses the bag's pose σ).
-  Pass 2: per sweep, write {sweep_id:06d}_dynamic_mask.npy — dynamic IFF the
-          voxel is in the carved-dynamic set and the point lies beyond
-          cfg.dynamic_min_range_m. Never filters keys: the mask must match the
-          world NPZ's length.
+          the SensorModel; the carve margin also uses the bag's pose σ),
+          frame by frame: a frame's hits shield their one-voxel
+          neighbourhood from its carving, and evidence sums unclamped.
+  Pass 2: per sweep, the dynamic candidates — voxel in the carved-dynamic set,
+          not ground, beyond cfg.dynamic_min_range_m. dynamic_filter then
+          cleans them across the chunk, and each sweep's
+          {sweep_id:06d}_dynamic_mask.npy is written once. Never filters keys:
+          the mask must match the world NPZ's length.
 
 static_map.npz also carries the static / dynamic / ambiguous voxel-key sets
-that Step C, union and Step F read.
+that Step C and Step F read: the raw voxel verdict, before dynamic_filter.
 """
 
 from __future__ import annotations
@@ -33,14 +36,20 @@ from wato_lidar_preprocessing._inputs import load_pose_samples
 from wato_lidar_preprocessing.config import ComponentConfig
 from wato_lidar_preprocessing.sensor_model import estimate_pose_sigma_m
 
+from .dynamic_filter import filter_candidates, sweep_rate_hz
 from .global_map_prior import GlobalMapPrior
 from .io_helpers import (
     cache_byte_budget,
     estimate_cache_bytes,
     origin_from_index,
 )
-from .log_odds import CLASS_AMBIGUOUS, build_log_odds_grid, classify_from_log_odds
-from .masking import apply_classification_to_sweep
+from .log_odds import (
+    CLASS_AMBIGUOUS,
+    build_log_odds_grid,
+    classify_from_log_odds,
+    frame_groups,
+)
+from .masking import apply_classification_to_sweep, dynamic_candidates
 from .occupancy_export import (
     write_chunk_voxel_diagnostics,
     write_chunk_voxel_occupancy,
@@ -55,6 +64,8 @@ class ClassifyResult:
     n_static: int
     n_dynamic: int
     static_map_path: str
+    n_cluster_dropped: int = 0
+    n_persistence_dropped: int = 0
     cache_auto_disabled: bool = False
     estimated_cache_bytes: int = 0
 
@@ -175,7 +186,59 @@ def process_chunk(
         unique_keys, lo_vals, n_obs_vals, n_hits_vals, cfg, sensor_model
     )
 
-    # Pass 2: per-sweep masks + accumulate static/dynamic clouds.
+    # Pass 2a: the voxel verdict per point, every sweep of the chunk.
+    masks: list[np.ndarray | None] = [None] * len(meta_rows)
+    cand_xyz: list[np.ndarray] = []
+    cand_sweep: list[np.ndarray] = []
+    cand_frame: list[np.ndarray] = []
+    groups = frame_groups(meta_rows, cfg.frame_sync.canonical_lidar)
+    for frame, group in enumerate(groups):
+        for i in group:
+            row = meta_rows[i]
+            mask, xyz = dynamic_candidates(
+                row,
+                sweep_keys[i],
+                dynamic_arr,
+                xyz_cache[i],
+                ground_mask_cache[i],
+                origin_cache[i],
+                dynamic_min_range_m=cfg.dynamic_min_range_m,
+            )
+            masks[i] = mask
+            n = int(mask.sum())
+            if n:
+                cand_xyz.append(xyz[mask])
+                cand_sweep.append(np.full(n, i, dtype=np.int64))
+                cand_frame.append(np.full(n, frame, dtype=np.int64))
+
+    # Pass 2b: chunk-wide cleanup of the candidates, before anything is written.
+    n_cluster_dropped = n_persistence_dropped = 0
+    if cand_xyz:
+        filtered = filter_candidates(
+            cfg.dynamic_filter,
+            np.concatenate(cand_xyz),
+            np.concatenate(cand_sweep),
+            np.concatenate(cand_frame),
+            sweep_rate_hz(
+                [
+                    int(r["reference_timestamp_ns"])
+                    for r in meta_rows
+                    if r.get("valid") is not False
+                ]
+            ),
+        )
+        n_cluster_dropped = filtered.n_cluster_dropped
+        n_persistence_dropped = filtered.n_persistence_dropped
+        # Candidates are laid out sweep by sweep, in each mask's point order.
+        offset = 0
+        for part in cand_sweep:
+            i, n = int(part[0]), part.shape[0]
+            mask = masks[i]
+            mask[np.flatnonzero(mask)[~filtered.keep[offset : offset + n]]] = False
+            offset += n
+    del cand_xyz, cand_sweep, cand_frame
+
+    # Pass 2c: write the masks and accumulate the static/dynamic clouds.
     static_xyz_chunks: list[np.ndarray] = []
     static_intensity_chunks: list[np.ndarray] = []
     dyn_xyz_chunks: list[np.ndarray] = []
@@ -203,18 +266,13 @@ def process_chunk(
             sweep_id,
             keys,
             static_arr,
-            dynamic_arr,
+            masks[i],
             xyz_cache[i],
             intensity_cache[i],
             ground_mask_cache[i],
-            origin_cache[i],
             bag_id,
             chunk_id,
             any_intensity,
-            dynamic_min_range_m=cfg.dynamic_min_range_m,
-            # union overwrites dynamic_mask.npy with the fused verdict, so
-            # preserve AW's own verdict for keep_aw_dynamic / re-fusing.
-            write_aw_snapshot=cfg.segmentation == "union",
         )
         total_static += result.n_static
         total_dynamic += result.n_dynamic
@@ -252,7 +310,6 @@ def process_chunk(
                 world_zmin=row.get("world_zmin"),
                 world_zmax=row.get("world_zmax"),
                 frame_id=row.get("frame_id"),
-                mf_mos_mask_path=row.get("mf_mos_mask_path"),
             ).model_dump()
         )
 
@@ -271,10 +328,8 @@ def process_chunk(
     save_kwargs["voxel_size"] = np.float32(cfg.voxel_size_m)
     save_kwargs["origin"] = origin
     save_kwargs["static_voxel_keys"] = static_arr
-    # Voxels AW itself classed as movers (the carved-dynamic set), sorted.
-    # Step C drops ground points landing in them, and union's dilated static
-    # veto exempts candidates in them — AW corroborates the motion there, so
-    # a static neighbour must not delete them.
+    # Voxels classed as movers (the carved-dynamic set), sorted. Step C drops
+    # ground points landing in them; Step F seeds proposals from them.
     save_kwargs["dynamic_voxel_keys"] = dynamic_arr
     # Evidenced voxels with hits whose p_occ sits between the dynamic and
     # static thresholds, sorted. Neither cloud uses them (conservative), but
@@ -297,12 +352,14 @@ def process_chunk(
     )
 
     log.info(
-        "chunk %s: static=%d dynamic=%d "
-        "(log_odds: %d touched, %d evidenced, %d dynamic-voxels, "
+        "chunk %s: static=%d dynamic=%d (filter dropped %d cluster + %d "
+        "persistence; log_odds: %d touched, %d evidenced, %d dynamic-voxels, "
         "%d under-evidenced-with-hits, %d ambiguous, %d free-only)",
         chunk_id,
         total_static,
         total_dynamic,
+        n_cluster_dropped,
+        n_persistence_dropped,
         unique_keys.size,
         diag.get("n_evidenced", 0),
         diag.get("n_dynamic_voxels", 0),
@@ -347,6 +404,8 @@ def process_chunk(
         n_static=total_static,
         n_dynamic=total_dynamic,
         static_map_path=out_uri,
+        n_cluster_dropped=n_cluster_dropped,
+        n_persistence_dropped=n_persistence_dropped,
         cache_auto_disabled=cache_auto_disabled,
         estimated_cache_bytes=estimated_bytes,
     )
@@ -377,5 +436,4 @@ def _invalid_meta_row(row: dict, sweep_id: int) -> dict:
         world_zmin=row.get("world_zmin"),
         world_zmax=row.get("world_zmax"),
         frame_id=row.get("frame_id"),
-        mf_mos_mask_path=row.get("mf_mos_mask_path"),
     ).model_dump()

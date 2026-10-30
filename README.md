@@ -15,8 +15,8 @@ flowchart TD
         I["decode sensor streams\nbag_meta · calibration · chunks\ncamera_frames · lidar_sweeps\nposes · frame_index"]
     end
 
-    subgraph lidar_prep["lidar_preprocessing  ·  CPU (GPU for --seg mos/union)"]
-        LP["motion compensation\nstatic / dynamic split (aw · mos · union)\nground height grid\nUniLiPs IWU · motion proposals"]
+    subgraph lidar_prep["lidar_preprocessing  ·  CPU"]
+        LP["motion compensation\nstatic / dynamic split\nground height grid\nUniLiPs IWU · motion proposals"]
     end
 
     subgraph perception_2d["perception_2d  ·  GPU"]
@@ -132,7 +132,7 @@ watod down all
 | `ingest` | Decode rosbag → frames + lidar + poses + frame_index | CPU | no |
 | `perception_2d` | YOLO26 or GroundingDINO detector + SAM2 video tracker + Depth Anything V2 + DINOv2 (optional Florence-2 discovery) | CUDA | yes |
 | `semantic_lifting` | Occlusion-aware 2D→3D label lifting (UniLiPs Eq.1) | CPU | no |
-| `lidar_preprocessing` | Motion comp, static/dynamic split (`--seg aw\|mos\|union`), ground grid, UniLiPs IWU, recall-oriented motion proposals | CUDA | only for `--seg mos\|union` |
+| `lidar_preprocessing` | Motion comp, static/dynamic split, ground grid, UniLiPs IWU, recall-oriented motion proposals | CPU | no |
 | `proposal_generation` | LiDAR detector + Segment-Lift-Fit + fusion | CUDA | yes |
 | `tracking` | 3D Kalman + masklet association + DINOv2 ReID | CUDA | yes (light) |
 | `label_refinement` | Multimodal LabelFormer (bootstrap → learned) | CUDA | yes |

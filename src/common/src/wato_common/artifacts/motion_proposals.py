@@ -22,7 +22,7 @@ computed). Seed bits start clusters; attach bits only join one.
   0    AW_DYNAMIC     seed
   1    AW_AMBIGUOUS   attach
   2    IWU_EVICTED    seed
-  3    MF_MOS         seed
+  3    (unused; positions are the on-disk encoding, so don't renumber)
   4    SEG_DYNAMIC    seed
   5    BOX_FILL       -      inside the box of a moving cluster
   6    UNMAPPED       attach
@@ -53,19 +53,17 @@ from wato_common.schemas import (
 AW_DYNAMIC = np.uint8(1 << 0)
 AW_AMBIGUOUS = np.uint8(1 << 1)
 IWU_EVICTED = np.uint8(1 << 2)
-MF_MOS = np.uint8(1 << 3)
 SEG_DYNAMIC = np.uint8(1 << 4)
 BOX_FILL = np.uint8(1 << 5)
 UNMAPPED = np.uint8(1 << 6)
 
-SEED_BITS = np.uint8(AW_DYNAMIC | IWU_EVICTED | MF_MOS | SEG_DYNAMIC)
+SEED_BITS = np.uint8(AW_DYNAMIC | IWU_EVICTED | SEG_DYNAMIC)
 ATTACH_BITS = np.uint8(AW_AMBIGUOUS | UNMAPPED)
 
 BIT_NAMES: dict[int, str] = {
     int(AW_DYNAMIC): "AW_DYNAMIC",
     int(AW_AMBIGUOUS): "AW_AMBIGUOUS",
     int(IWU_EVICTED): "IWU_EVICTED",
-    int(MF_MOS): "MF_MOS",
     int(SEG_DYNAMIC): "SEG_DYNAMIC",
     int(BOX_FILL): "BOX_FILL",
     int(UNMAPPED): "UNMAPPED",

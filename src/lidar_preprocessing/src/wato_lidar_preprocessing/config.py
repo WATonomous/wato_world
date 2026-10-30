@@ -120,180 +120,52 @@ class PatchworkParams(BaseModel):
         }
 
 
-class MFMosParams(BaseModel):
-    """MF-MOS moving-object segmentation (`--seg mos|union`; never `aw`).
+class DynamicFilterParams(BaseModel):
+    """Step B — cleanup of the voxel verdict's dynamic points (classify/dynamic_filter.py).
 
-    Needs a CUDA GPU for real data; device="cpu" is for smoke tests. The
-    projection geometry comes from each lidar's sensor profile and the
-    checkpoint's constants from mf_mos/_core.py, so only running the model is
-    configured here.
+    Acts on dynamic_mask / dynamic_map only: the voxel-key sets keep the raw
+    verdict, so Step F's recall bits see everything this removes. Tuning:
+    docs/lidar_preprocessing_measurements.md.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    checkpoint_path: str = "/data/models/mf_mos/mf_mos_semantic_kitti.pt"
-    arch_config: str = "/data/models/mf_mos/arch_cfg.yaml"
-    data_config: str = "/data/models/mf_mos/data_cfg.yaml"
-    device: str = "cuda"
-    score_threshold: float = 0.5
-    save_scores: bool = False
-    # Max pose-interpolation gap (ms) used when warping a historical sweep
-    # into the current frame for a residual. Gates POSE quality only.
-    max_pose_gap_ms: float = 200.0
-    # Max sweep-to-sweep baseline (ms) accepted for a residual channel. Not
-    # max_pose_gap_ms: a residual at step k spans k * sweep_dt. Steps are
-    # rate-scaled to KITTI's 10 Hz (mf_mos/_core.residual_steps_for), so the
-    # longest baseline is ~n_input_scans * 100 ms (800 ms for the released
-    # checkpoint) on any rig; keep this above it or long channels are zeroed.
-    max_residual_gap_ms: float = 1000.0
-    # Occlusion gate for unprojecting the per-pixel moving mask back to points.
-    occlusion_range_tol_m: float = 1.0
-    # Seed each lidar's residual sliding window from the temporally-preceding
-    # chunk's sweeps so the first sweeps of a chunk get full residual channels
-    # instead of cold-start zeros.
-    prime_window_from_prior_chunk: bool = True
-
-    # Per-sweep denoise: cluster moving points on a 26-connected grid of this
-    # cell size [m] and drop clusters under moving_min_cluster_pts (speckle is
-    # 1-few points; a pedestrian at MF-MOS range is well above it). Temporal
-    # confirmation is the tracker's job.
-    moving_cluster_voxel_m: float = 0.5
-    moving_min_cluster_pts: int = 8
-
-    @field_validator("score_threshold")
-    @classmethod
-    def _threshold_range(cls, v: float) -> float:
-        if not (0.0 <= v <= 1.0):
-            raise ValueError(f"score_threshold must be in [0, 1], got {v}")
-        return v
-
-    @field_validator(
-        "occlusion_range_tol_m", "moving_cluster_voxel_m", "max_residual_gap_ms"
-    )
-    @classmethod
-    def _positive_float(cls, v: float) -> float:
-        if v <= 0:
-            raise ValueError(f"value must be > 0, got {v}")
-        return v
-
-    @field_validator("moving_min_cluster_pts")
-    @classmethod
-    def _positive_min_cluster(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError(f"moving_min_cluster_pts must be >= 1, got {v}")
-        return v
-
-
-class MotionFilterParams(BaseModel):
-    """Post-veto temporal filter on union's accumulated dynamic cloud.
-
-      persistence — drop a point whose voxel is occupied across
-                    >= persistence_max_sweeps distinct sweeps (a mover
-                    crosses a 0.5 m voxel in 1-2 sweeps; mislabelled
-                    structure dwells).
-      coherence   — drop a point whose per-sweep cluster doesn't link into a
-                    track of >= coherence_min_life sweeps. Off by default: it
-                    cuts real movers on sparse LiDAR.
-
-    Both thresholds are sweep COUNTS: scale them with sensor rate. Tuning
-    measurements: docs/lidar_preprocessing_measurements.md.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    # False = write the raw post-veto cloud, to measure the filter.
-    enabled: bool = True
-
-    # 0 disables. Lower cuts more slow/large movers; higher leaks structure.
-    persistence_max_sweeps: int = 20
-    # Coarser than voxel_size_m so a mover's returns land in one voxel.
+    # A frame's dynamic points must form a connected cluster of at least
+    # min_cluster_pts (cluster_voxel_m grid). Isolated returns are mixed
+    # pixels and foliage speckle. 0 disables.
+    min_cluster_pts: int = 5
+    cluster_voxel_m: float = 0.5
+    # Drop points whose voxel (persistence_voxel_m grid) holds dynamic points
+    # across this much sweep time, however many scanners. Structure dwells;
+    # movers pass through. Below ~0.4 s it starts cutting real movers.
+    # Converted to a sweep count with the chunk's sweep rate. 0.0 disables.
+    persistence_max_s: float = 0.5
     persistence_voxel_m: float = 0.5
 
-    # 0 disables (default). Membership only, not a velocity test.
-    coherence_min_life: int = 0
-    # Connected-components cell (m) for per-sweep clustering.
-    coherence_cell_m: float = 0.4
-    # Max centroid step (m) between consecutive sweeps when linking clusters.
-    coherence_link_gate_m: float = 3.0
-    # Clusters larger than this (m) are structure and never seed a track.
-    coherence_max_object_m: float = 7.0
-
-    @field_validator(
-        "persistence_max_sweeps",
-        "coherence_min_life",
-    )
+    @field_validator("min_cluster_pts")
     @classmethod
-    def _nonneg_int(cls, v: int) -> int:
+    def _nonneg_pts(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"value must be >= 0, got {v}")
+            raise ValueError(f"min_cluster_pts must be >= 0, got {v}")
         return v
 
-    @field_validator(
-        "persistence_voxel_m",
-        "coherence_cell_m",
-        "coherence_link_gate_m",
-        "coherence_max_object_m",
-    )
+    @field_validator("persistence_max_s")
     @classmethod
-    def _positive_float(cls, v: float) -> float:
+    def _nonneg_duration(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError(f"persistence_max_s must be >= 0, got {v}")
+        return v
+
+    @field_validator("cluster_voxel_m", "persistence_voxel_m")
+    @classmethod
+    def _positive_voxel(cls, v: float) -> float:
         if v <= 0:
-            raise ValueError(f"value must be > 0, got {v}")
-        return v
-
-
-class UnionParams(BaseModel):
-    """`--seg union`: AW's static map verbatim; MF-MOS's moving points, ground
-    removed and vetoed by that static map, as the dynamic cloud."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    # Drop MF-MOS-moving points whose voxel AW calls static. False = raw
-    # MF-MOS dynamic (still ground-removed), to measure the veto.
-    aw_static_veto: bool = True
-    # Also add AW's own dynamic verdict (vetoed the same way). Off: AW
-    # dynamics hug static surfaces.
-    keep_aw_dynamic: bool = False
-    # MF-MOS moving probability at or above which a point survives the veto
-    # (an object parked most of the chunk, then driven off, has static voxel
-    # evidence). Needs mf_mos.save_scores. None = no exemption.
-    veto_score_exempt: float | None = None
-    # Drop candidates below this height (m) over Step C's ground grid. AW
-    # never calls road voxels static, so road false positives pass every
-    # voxel veto. Costs wheels/feet. 0.0 disables; skipped with a warning
-    # when ground.npz is missing.
-    ground_height_veto_m: float = 0.25
-    # Also veto voxels within this Chebyshev distance of a static voxel
-    # (surface returns straddle voxel boundaries), unless AW called the
-    # candidate's own voxel dynamic. 0 = exact voxel only.
-    veto_dilation_voxels: int = 1
-    # Removes leakage the voxel vetoes miss (sparsely mapped walls, foliage).
-    motion_filter: MotionFilterParams = MotionFilterParams()
-
-    @field_validator("veto_score_exempt")
-    @classmethod
-    def _exempt_range(cls, v: float | None) -> float | None:
-        if v is not None and not (0.0 <= v <= 1.0):
-            raise ValueError(f"veto_score_exempt must be in [0, 1], got {v}")
-        return v
-
-    @field_validator("ground_height_veto_m")
-    @classmethod
-    def _ground_height_nonneg(cls, v: float) -> float:
-        if v < 0.0:
-            raise ValueError(f"ground_height_veto_m must be >= 0, got {v}")
-        return v
-
-    @field_validator("veto_dilation_voxels")
-    @classmethod
-    def _dilation_range(cls, v: int) -> int:
-        # (2D+1)^3 - 1 neighbour lookups per candidate; D=3 is already 342.
-        if not (0 <= v <= 3):
-            raise ValueError(f"veto_dilation_voxels must be in [0, 3], got {v}")
+            raise ValueError(f"voxel size must be > 0, got {v}")
         return v
 
 
 class IWUParams(BaseModel):
-    """Step E — UniLiPs IWU over the bag static map (any --seg).
+    """Step E — UniLiPs IWU over the bag static map.
 
     The paper's constants live in iwu/_core.py; the match radius is
     global_map_voxel_size_m.
@@ -315,13 +187,14 @@ class IWUParams(BaseModel):
 
 
 class MotionProposalParams(BaseModel):
-    """Step F — recall-oriented moving-object proposals (Chen et al. 2022; any --seg)."""
+    """Step F — recall-oriented moving-object proposals (Chen et al. 2022)."""
 
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
-    # Points lower than this over the ground grid are never flagged (as
-    # union.ground_height_veto_m); BOX_FILL restores wheels/feet. 0.0 disables.
+    # Points lower than this over the ground grid are never flagged (road
+    # voxels are never classified static, so road false positives survive
+    # every voxel test); BOX_FILL restores wheels/feet. 0.0 disables.
     min_height_above_ground_m: float = 0.25
     # Chen N_min — smallest cluster kept (HDBSCAN min_cluster_size).
     min_cluster_pts: int = 5
@@ -329,6 +202,11 @@ class MotionProposalParams(BaseModel):
     max_side_m: float = 20.0
     # Chen box fill: points inside a moving cluster's box get BOX_FILL.
     box_fill: bool = True
+    # frac_persistent: a cluster member is persistent when its voxel holds
+    # members across >= this many sweeps. A sweep COUNT, tuned with
+    # BOX_FILL's frac_persistent gate; scale with sensor rate. 0 disables.
+    persistence_max_sweeps: int = 20
+    persistence_voxel_m: float = 0.5
 
     @field_validator("min_height_above_ground_m")
     @classmethod
@@ -357,12 +235,6 @@ class ComponentConfig(BaseModel):
 
     sensor_model: SensorModelParams = SensorModelParams()
 
-    # Step B static/dynamic split (`--seg` overrides):
-    #   "aw"    — Amanatides-Woo log-odds ray-casting (classify/)
-    #   "mos"   — MF-MOS learned segmentation (mf_mos/)
-    #   "union" — both, fused (union/; the only one importing the other two)
-    segmentation: Literal["aw", "mos", "union"] = "aw"
-
     # Step A — deskew filter.
     filter_nonfinite_points: bool = True
 
@@ -384,8 +256,11 @@ class ComponentConfig(BaseModel):
     min_observations: int = 3
 
     # Points within this horizontal range (m) of the sensor are never dynamic
-    # (ego body, near clutter, maximal carving). Every --seg. 0.0 disables.
+    # (ego body, near clutter, maximal carving). 0.0 disables.
     dynamic_min_range_m: float = 2.5
+
+    # Step B — cleanup of the dynamic points the voxel verdict leaves.
+    dynamic_filter: DynamicFilterParams = DynamicFilterParams()
 
     cache_world_xyz_in_memory: bool = True
 
@@ -409,16 +284,10 @@ class ComponentConfig(BaseModel):
 
     frame_sync: FrameSyncParams = FrameSyncParams()
 
-    # MF-MOS parameters (used when segmentation is "mos" or "union").
-    mf_mos: MFMosParams = MFMosParams()
-
-    # Fusion parameters (used only when segmentation == "union").
-    union: UnionParams = UnionParams()
-
-    # Step E — bag-level UniLiPs IWU (any segmentation method).
+    # Step E — bag-level UniLiPs IWU.
     iwu: IWUParams = IWUParams()
 
-    # Step F — per-chunk recall-oriented motion proposals (any method).
+    # Step F — per-chunk recall-oriented motion proposals.
     motion_proposals: MotionProposalParams = MotionProposalParams()
 
     # voxel_occupancy.npz: every occupied voxel, static and dynamic.

@@ -28,18 +28,20 @@ def _update_sweep_python(
     n_hits: dict,
     l_occ: float,
     l_free: float,
-    log_odds_clamp: float,
     d_star: float,
     nx: dict | None = None,
     ny: dict | None = None,
     nz: dict | None = None,
     grazing_cos: float = 0.0,
+    shield: set | None = None,
 ) -> None:
     """Reference DDA — same arithmetic as _update_sweep_numba in pure Python.
 
     nx/ny/nz are per-voxel surface-normal lookups (occupied voxels only);
     when present, a through-ray grazing an occupied voxel (|ray·n| <
     grazing_cos) does not carve it. Pass None to disable the gate.
+    `shield` holds voxel keys the ray must not carve (the frame's hits and
+    their neighbours); None or empty disables it.
     """
     ox = float(sweep_origin[0])
     oy = float(sweep_origin[1])
@@ -166,11 +168,11 @@ def _update_sweep_python(
                     if dot < grazing_cos:
                         continue
 
+                if shield and key in shield:
+                    continue
+
                 old_lo = log_odds.get(key, 0.0)
-                new_lo = np.float32(old_lo) - np.float32(l_free * r_star_t)
-                if new_lo < np.float32(-log_odds_clamp):
-                    new_lo = np.float32(-log_odds_clamp)
-                log_odds[key] = new_lo
+                log_odds[key] = np.float32(old_lo) - np.float32(l_free * r_star_t)
                 n_obs[key] = n_obs.get(key, np.int32(0)) + np.int32(1)
 
         if (
@@ -181,9 +183,6 @@ def _update_sweep_python(
         ):
             key = (exi << SHIFT_X) | (eyi << SHIFT_Y) | ezi
             old_lo = log_odds.get(key, 0.0)
-            new_lo = np.float32(old_lo) + np.float32(l_occ * r_star_endpoint)
-            if new_lo > np.float32(log_odds_clamp):
-                new_lo = np.float32(log_odds_clamp)
-            log_odds[key] = new_lo
+            log_odds[key] = np.float32(old_lo) + np.float32(l_occ * r_star_endpoint)
             n_obs[key] = n_obs.get(key, np.int32(0)) + np.int32(1)
             n_hits[key] = n_hits.get(key, np.int32(0)) + np.int32(1)

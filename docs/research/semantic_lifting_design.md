@@ -339,7 +339,7 @@ Pack into `lifted_labels/<sweep_id>.npz` with the schema above.
 ## Dynamic-point handling
 
 lidar_preprocessing separates dynamic points upstream in two artifacts:
-`lidar_proc/*_dynamic_mask.npy` (the `--seg` method's precision verdict) and
+`lidar_proc/*_dynamic_mask.npy` (Step B's precision verdict) and
 `lidar_proc/*_motion_proposals.npz` + `motion_clusters.parquet` (the
 recall-oriented proposals, with per-cluster motion scores).
 
