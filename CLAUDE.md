@@ -32,9 +32,9 @@ ingest → lidar_preprocessing → perception_2d → semantic_lifting →
 proposal_generation → tracking → label_refinement / open_vocab_discovery → student_training
 ```
 
-ingest, lidar_preprocessing and perception_2d are implemented end to end;
-semantic_lifting's core algorithm is implemented; the rest are stubs raising
-NotImplementedError. Each implemented component's README is its reference.
+ingest, lidar_preprocessing, perception_2d and semantic_lifting are implemented
+end to end; the rest are stubs raising NotImplementedError. Each implemented
+component's README is its reference.
 Measurements behind defaults are in `docs/*_measurements.md`; which recordings
 are usable is `docs/drive_bag_survey.md`.
 
@@ -92,7 +92,8 @@ doesn't load; the trim-bag end-to-end test skips).
   once per sweep it is nearest to (~4.9× on the 3-LiDAR WATO rig). Per-image
   work collapses rows by `(cam_id, camera_seq)` first: perception_2d
   `_one_frame_per_image` (keeping the matched `sweep_ids` for depth anchors),
-  semantic_lifting `load_frame_refs`. Feeding rows straight to SAM2 got the
+  semantic_lifting `load_sweep_frames` (one shared frame per image, its depth
+  and mask raster cached across the sweeps it is paired with). Feeding rows straight to SAM2 got the
   process SIGKILLed on a 30 s WATO chunk.
 - **Every pose is looked up at its datum's own time**: a sweep's, a deskewed
   point's, a camera frame's, all interpolated from `poses.parquet` through
@@ -116,6 +117,11 @@ doesn't load; the trim-bag end-to-end test skips).
   `--two-pass` is a one-time log-odds prior, not IWU. Step F's box / Kalman /
   association code is `wato_common/tracking/`, for the `tracking` component to
   reuse.
+- **Lifted instances are chunk-local merged masklets.** `tracking` (the owner
+  of `global_object_id`) runs after semantic_lifting, so lifting merges one
+  object's per-camera masklets itself from the LiDAR points they both claim;
+  `lifted_labels` name the instance by its smallest masklet_id and
+  `lifted_instances.parquet` lists its masklets and cameras.
 - **Sensor physics lives in `sensor_model.py`** (profiles `vlp32c`, `vlp16`,
   `hdl32e`), never in YAML.
 
@@ -207,17 +213,17 @@ labels aren't comparable.
 
 | Surface | Where | Mechanism |
 |---|---|---|
-| Python deps | `docker/requirements/{ingest,lidar_preprocessing,perception_2d}.txt` | exact `==` for the full transitive closure, installed `--no-deps` |
+| Python deps | `docker/requirements/{ingest,lidar_preprocessing,perception_2d,semantic_lifting}.txt` | exact `==` for the full transitive closure, installed `--no-deps` |
 | `sam2` | `docker/perception_2d.Dockerfile` | `ARG SAM2_COMMIT` (no PyPI release) |
 | MF-MOS | `docker/lidar_preprocessing.Dockerfile` | `ARG MF_MOS_COMMIT` |
 | Model weights | `src/perception_2d/src/wato_perception_2d/model_registry.py` | HF `revision=`, torch.hub `repo:<sha>`, raw `.pt` from an HF commit loaded by path |
-| Component bases | `docker/{ingest,lidar_preprocessing,perception_2d}.Dockerfile` | `base:<tag>@sha256:...` |
+| Component bases | `docker/{ingest,lidar_preprocessing,perception_2d,semantic_lifting}.Dockerfile` | `base:<tag>@sha256:...` |
 | Upstream bases | `docker/base/inject_*.Dockerfile` | `ubuntu` / `nvcr.io` by digest, `ARG UV_VERSION` |
 | `mcap` CLI | `docker/ingest.Dockerfile` | `ARG MCAP_CLI_VERSION` + `MCAP_CLI_SHA256` |
 
-Unpinned: the other six Dockerfiles, semantic_lifting included (mutable
-`base:<tag>`, no lockfile, no `WATO_BASE_IMAGE`, no manifest) — pin each when it
-stops being a stub; and ingest's ROS 2 Jazzy apt packages (no apt lockfile;
+Unpinned: the other five Dockerfiles, all stubs (mutable `base:<tag>`, no
+lockfile, no `WATO_BASE_IMAGE`, no manifest) — pin each when it stops being
+one; and ingest's ROS 2 Jazzy apt packages (no apt lockfile;
 noted in `docker/requirements/ingest.txt`).
 
 **Lockfiles are generated.** Change the intent in the component Dockerfile,
@@ -239,8 +245,9 @@ common packages at its own versions, and uv's default then refuses PyPI.
 `/opt/watonomous/requirements.lock.txt`; `manifest.py` writes one manifest per
 (bag, chunk) per component with content-hashed inputs (> 64 MB: size + mtime),
 so a changed input marks the outputs stale. ingest writes `manifest.json`;
-lidar_preprocessing and perception_2d write `manifest_<component>.json`;
-semantic_lifting writes none yet.
+lidar_preprocessing, perception_2d and semantic_lifting write
+`manifest_<component>.json` (semantic_lifting hashes its upstreams' manifests
+in place of their per-sweep files).
 
 - `WATO_GIT_COMMIT` is baked in at build time (`watod-setup-env.sh` →
   `modules/.env` → build arg): deploy images have no `.git`.

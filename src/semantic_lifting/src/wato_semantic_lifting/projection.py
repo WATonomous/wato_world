@@ -1,14 +1,28 @@
-"""LiDAR-to-image projection for semantic_lifting.
-
-Thin wrapper around wato_common.geometry.project_lidar_to_image that
-also handles mask-in-image point assignment.
-"""
+"""LiDAR-to-image projection and mask lookup for semantic_lifting."""
 
 from __future__ import annotations
 
 import numpy as np
 
-from wato_common.geometry import project_lidar_to_image
+from wato_common.geometry import invert_se3, project_lidar_to_image
+
+
+def compute_cam_T_world(
+    world_T_ego_frame: np.ndarray,
+    ego_T_cam: np.ndarray,
+) -> np.ndarray:
+    """The transform that projects world-frame points into a camera.
+
+    The sweep's points are already in the SLAM world frame (deskewed per
+    point at their own timestamps upstream), so the only pose that matters is
+    the camera's world pose at the frame time:
+
+        cam_T_world = inv(ego_T_cam) @ inv(world_T_ego_frame)
+
+    Motion of *dynamic* objects between a point's time and the frame's is not
+    compensated — see "Dynamic-point handling" in the design doc.
+    """
+    return invert_se3(ego_T_cam) @ invert_se3(world_T_ego_frame)
 
 
 def project_and_clip(
@@ -17,10 +31,7 @@ def project_and_clip(
     cam_T_world: np.ndarray,
     image_size: tuple[int, int],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Project world-frame points and return pixel coords, depths, valid mask.
-
-    The points are world-frame, so ``cam_T_world`` carries them into the
-    camera (``project_lidar_to_image`` applies whatever ``cam_T_*`` it gets).
+    """Project world-frame points; returns pixel coords, depths, valid mask.
 
     Args:
         points_world: (N, 3) float64 points in the SLAM world frame.
@@ -34,44 +45,30 @@ def project_and_clip(
         valid: (N,) bool — True for points that project inside the image with
                positive depth.
     """
-    uv, depth_cam, valid = project_lidar_to_image(
-        points_world, K, cam_T_world, image_size
-    )
-    return uv, depth_cam, valid
+    return project_lidar_to_image(points_world, K, cam_T_world, image_size)
 
 
-def assign_masks_to_points(
-    uv_valid: np.ndarray,
-    masks: list[np.ndarray],
-) -> np.ndarray:
-    """For each visible point, find which mask it falls inside (or -1).
+def pixel_indices(
+    uv: np.ndarray, width: int, height: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Nearest pixel (column, row) of each projected point, clipped to the image."""
+    ui = np.clip(np.round(uv[:, 0]).astype(np.int64), 0, width - 1)
+    vi = np.clip(np.round(uv[:, 1]).astype(np.int64), 0, height - 1)
+    return ui, vi
 
-    When a point falls inside multiple masks, the smallest-area mask wins
-    (innermost-object heuristic per design doc).
 
-    Args:
-        uv_valid: (M, 2) float32 pixel coords of visible points.
-        masks: list of (H, W) bool arrays, one per detection.
+def label_raster(masks: list[np.ndarray], labels: list[int]) -> np.ndarray:
+    """One frame's masks as an (H, W) int32 raster of label, -1 = no mask.
 
-    Returns:
-        (M,) int32 index into `masks`, or -1 if no mask contains the point.
+    Where masks overlap the smallest one wins (the innermost object: a
+    pedestrian's mask inside a bus's); at equal area, the earlier mask.
     """
-    M = uv_valid.shape[0]
-    assignment = np.full(M, -1, dtype=np.int32)
-    if not masks or M == 0:
-        return assignment
-
-    # Precompute mask areas.
-    areas = np.array([float(m.sum()) for m in masks], dtype=np.float32)
-
-    ui = np.clip(np.round(uv_valid[:, 0]).astype(int), 0, masks[0].shape[1] - 1)
-    vi = np.clip(np.round(uv_valid[:, 1]).astype(int), 0, masks[0].shape[0] - 1)
-
-    best_area = np.full(M, np.inf, dtype=np.float32)
-    for k, mask in enumerate(masks):
-        inside = mask[vi, ui]
-        better = inside & (areas[k] < best_area)
-        assignment[better] = k
-        best_area[better] = areas[k]
-
-    return assignment
+    if not masks:
+        raise ValueError("label_raster needs at least one mask")
+    raster = np.full(masks[0].shape, -1, dtype=np.int32)
+    areas = [int(m.sum()) for m in masks]
+    # Paint largest first so smaller masks overwrite; reversed index order
+    # within one area lets the earlier mask paint last.
+    for k in sorted(range(len(masks)), key=lambda k: (-areas[k], -k)):
+        raster[masks[k]] = labels[k]
+    return raster

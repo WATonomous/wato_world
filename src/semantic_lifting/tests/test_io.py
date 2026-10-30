@@ -1,29 +1,18 @@
-"""Tests for the sweeps and camera-frame references semantic_lifting reads:
-real timestamps, and the ego pose looked up at each camera frame's own time."""
+"""Tests for the camera frames semantic_lifting pairs with each sweep: ingest's
+pairing (frame_index), and the ego pose looked up at each frame's own time."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from wato_common.artifact_store import (
-    frame_index_path,
-    lidar_proc_index_path,
-    poses_path,
-)
+from wato_common.artifact_store import frame_index_path, poses_path
+from wato_common.artifacts import ArtifactFormatError
 from wato_common.geometry import PoseSample
 from wato_common.io.parquet_io import write_table
 from wato_common.pose_lookup import interval_drop_reasons
-from wato_common.schemas import (
-    FRAME_INDEX_SCHEMA,
-    POSES_SCHEMA,
-    PROCESSED_SWEEPS_SCHEMA,
-    FrameIndexRow,
-    ProcessedSweepMeta,
-)
-from wato_common.artifacts.lidar_sweeps import ProcessedSweeps
-from wato_semantic_lifting.io import load_frame_refs
-from wato_semantic_lifting.temporal_match import match_sweep_to_frames
+from wato_common.schemas import FRAME_INDEX_SCHEMA, POSES_SCHEMA, FrameIndexRow
+from wato_semantic_lifting.io import load_sweep_frames
 
 MS = 1_000_000
 BAG, CHUNK = "b", "0000"
@@ -68,7 +57,12 @@ def _write_poses(times_ms: list[int]) -> None:
 
 
 def _fi_row(
-    sweep_id: int, sweep_ms: int, cam_seq: int, cam_ms: int, valid_cam=True
+    sweep_id: int,
+    sweep_ms: int,
+    cam_seq: int | None,
+    cam_ms: int | None,
+    valid_cam=True,
+    cam_id="cam_front",
 ) -> dict:
     return FrameIndexRow(
         frame_id=f"{sweep_id}_{cam_seq}",
@@ -78,9 +72,9 @@ def _fi_row(
         lidar_id="lidar_cc",
         lidar_path="",
         reference_timestamp_ns=sweep_ms * MS,
-        cam_id="cam_front",
+        cam_id=cam_id,
         camera_seq=cam_seq,
-        camera_timestamp_ns=cam_ms * MS,
+        camera_timestamp_ns=None if cam_ms is None else cam_ms * MS,
         valid_camera=valid_cam,
         # The sweep's pose: deliberately wrong for the camera, to prove it's unused.
         world_T_ego_flat=np.eye(4).flatten().tolist(),
@@ -88,62 +82,48 @@ def _fi_row(
     ).model_dump()
 
 
+def _frames(rows: list[dict]):
+    write_table(rows, FRAME_INDEX_SCHEMA, frame_index_path(BAG, CHUNK))
+    return load_sweep_frames(BAG, CHUNK)
+
+
 def test_frame_pose_is_looked_up_at_camera_time():
     _write_poses([0, 100, 200, 300])
-    write_table(
-        [_fi_row(0, 100, 7, 140)], FRAME_INDEX_SCHEMA, frame_index_path(BAG, CHUNK)
-    )
-    (ref,) = load_frame_refs(BAG, CHUNK)
+    (ref,) = _frames([_fi_row(0, 100, 7, 140)])[0]
     assert ref.timestamp_ns == 140 * MS
     np.testing.assert_allclose(ref.world_T_ego[:3, 3], [1.4, 0.0, 0.0])
 
 
-def test_each_camera_frame_is_returned_once():
+def test_each_sweep_gets_the_frames_ingest_paired_with_it():
     _write_poses([0, 100, 200, 300])
-    rows = [_fi_row(0, 100, 7, 140), _fi_row(1, 150, 7, 140), _fi_row(2, 200, 8, 225)]
-    write_table(rows, FRAME_INDEX_SCHEMA, frame_index_path(BAG, CHUNK))
-    assert [r.camera_seq for r in load_frame_refs(BAG, CHUNK)] == [7, 8]
+    rows = [
+        _fi_row(0, 100, 7, 140),
+        _fi_row(0, 100, 3, 95, cam_id="cam_back"),
+        _fi_row(1, 150, 7, 140),
+        _fi_row(2, 200, 8, 225),
+    ]
+    frames = _frames(rows)
+    assert {s: [(f.cam_id, f.camera_seq) for f in fs] for s, fs in frames.items()} == {
+        0: [("cam_front", 7), ("cam_back", 3)],
+        1: [("cam_front", 7)],
+        2: [("cam_front", 8)],
+    }
+    assert frames[0][0] is frames[1][0]  # one frame, shared by both sweeps
 
 
-def test_frames_in_untrusted_pose_stretches_and_invalid_cameras_are_skipped():
+def test_frames_in_untrusted_pose_stretches_and_dropped_cameras_are_skipped():
     _write_poses([0, 100, 1_100])  # 1 s dropout after 100 ms
     rows = [
         _fi_row(0, 50, 1, 60),
         _fi_row(1, 90, 2, 500),
-        _fi_row(2, 50, 3, 70, valid_cam=False),
+        _fi_row(2, 50, None, None, valid_cam=False),
     ]
-    write_table(rows, FRAME_INDEX_SCHEMA, frame_index_path(BAG, CHUNK))
-    assert [r.camera_seq for r in load_frame_refs(BAG, CHUNK)] == [1]
+    frames = _frames(rows)
+    assert [f.camera_seq for f in frames[0]] == [1]
+    assert 1 not in frames and 2 not in frames
 
 
-def test_sweeps_carry_their_timestamp_and_match_the_nearest_frame():
-    _write_poses([0, 100, 200, 300])
-    meta = [
-        ProcessedSweepMeta(
-            bag_id=BAG,
-            chunk_id=CHUNK,
-            sweep_id=i,
-            lidar_id="lidar_cc",
-            reference_timestamp_ns=t * MS,
-            n_points_total=1,
-            n_points_static=1,
-            n_points_dynamic=0,
-            world_path="w",
-            dynamic_mask_path="d",
-            has_intensity=False,
-            deskewed=True,
-        ).model_dump()
-        for i, t in enumerate((50, 150))
-    ]
-    write_table(meta, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(BAG, CHUNK))
-    rows = [_fi_row(0, 50, 1, 45), _fi_row(1, 150, 2, 160)]
-    write_table(rows, FRAME_INDEX_SCHEMA, frame_index_path(BAG, CHUNK))
-
-    sweeps = ProcessedSweeps.load(BAG, CHUNK).rows
-    assert [s.reference_timestamp_ns for s in sweeps] == [50 * MS, 150 * MS]
-    refs = load_frame_refs(BAG, CHUNK)
-    # Each sweep matches the frame taken during it, not the chunk's first frame.
-    assert [
-        match_sweep_to_frames(s.reference_timestamp_ns, refs)["cam_front"].camera_seq
-        for s in sweeps
-    ] == [1, 2]
+def test_a_valid_camera_row_without_a_frame_is_rejected():
+    _write_poses([0, 100, 200])
+    with pytest.raises(ArtifactFormatError, match="without camera_seq"):
+        _frames([_fi_row(0, 50, None, None)])

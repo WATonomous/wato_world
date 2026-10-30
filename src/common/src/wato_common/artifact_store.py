@@ -273,6 +273,11 @@ def lifted_labels_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
     )
 
 
+def lifted_instances_path(bag_id: str, chunk_id: str) -> str:
+    """Parquet of LiftedInstanceRow rows — one per lifted instance."""
+    return _join(semantic_lifting_dir(bag_id, chunk_id), "lifted_instances.parquet")
+
+
 def lifted_stats_path(bag_id: str, chunk_id: str) -> str:
     """Parquet of LiftedStatsRow rows — one per sweep in this chunk."""
     return _join(semantic_lifting_dir(bag_id, chunk_id), "lifted_stats.parquet")

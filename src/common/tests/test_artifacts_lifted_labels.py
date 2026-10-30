@@ -86,3 +86,26 @@ def test_stats_round_trip_with_int_sweep_id():
     lifted_labels.write_stats(BAG, CHUNK, [row])
     assert lifted_labels.exists(BAG, CHUNK)
     assert lifted_labels.read_stats(BAG, CHUNK) == [row]
+
+
+def test_instances_round_trip_with_sorted_lists():
+    inst = lifted_labels.LiftedInstance(
+        instance_id="a1",
+        cls="car",
+        masklet_ids=("c3", "a1"),
+        cam_ids=("PANO_SE", "PANO_EE", "PANO_SE"),
+        n_points_labeled=120,
+        n_sweeps=14,
+    )
+    lifted_labels.write_instances(BAG, CHUNK, [inst])
+    (got,) = lifted_labels.read_instances(BAG, CHUNK)
+    assert got.masklet_ids == ("a1", "c3")
+    assert got.cam_ids == ("PANO_EE", "PANO_SE")
+    assert (got.instance_id, got.cls, got.n_points_labeled, got.n_sweeps) == (
+        "a1",
+        "car",
+        120,
+        14,
+    )
+    lifted_labels.write_instances(BAG, CHUNK, [])
+    assert lifted_labels.read_instances(BAG, CHUNK) == []

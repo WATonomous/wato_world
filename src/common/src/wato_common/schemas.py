@@ -615,11 +615,47 @@ class LiftedStatsRow(BaseModel):
     chunk_id: str
     n_points_total: int
     n_points_labeled: int
+    # Points inside a mask in at least one camera, before the visibility test.
     n_points_in_any_mask: int
+    # Of those, points the visibility test rejected in every such camera
+    # (= n_points_in_any_mask - n_points_labeled).
     n_points_failed_visibility: int
+    # Labeled points with at least one camera voting another class.
     n_points_disagreement: int
     mean_confidence_labeled: float
+    # Paired camera frames with masklets and a depth artifact.
     n_cameras_used: int
+
+
+class LiftedInstanceRow(BaseModel):
+    """One row per lifted instance (an object's masklets merged across
+    cameras) in lifted_instances.parquet, for every instance some point is
+    labeled with."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    instance_id: str  # the smallest masklet_id among its masklets
+    bag_id: str
+    chunk_id: str
+    cls: str
+    masklet_ids: str  # JSON list[str], sorted
+    cam_ids: str  # JSON list[str], sorted, distinct
+    n_points_labeled: int  # summed over the chunk's sweeps
+    n_sweeps: int  # sweeps with at least one point labeled with it
+
+
+LIFTED_INSTANCES_SCHEMA = pa.schema(
+    [
+        pa.field("instance_id", pa.string()),
+        pa.field("bag_id", pa.string()),
+        pa.field("chunk_id", pa.string()),
+        pa.field("cls", pa.string()),
+        pa.field("masklet_ids", pa.string()),
+        pa.field("cam_ids", pa.string()),
+        pa.field("n_points_labeled", pa.int64()),
+        pa.field("n_sweeps", pa.int64()),
+    ]
+)
 
 
 LIFTED_STATS_SCHEMA = pa.schema(

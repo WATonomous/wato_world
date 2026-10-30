@@ -185,6 +185,12 @@ sweep's `reference_timestamp_ns` (lidar_preprocessing's index) and `t_frame`
 the frame's `camera_timestamp_ns` (`frame_index.parquet`, one reference per
 camera frame).
 
+**As implemented**, lifting does no matching of its own: ingest already pairs
+every sweep with each camera's nearest frame in `frame_index` (within its
+`max_cam_offset_ms`, 60 ms on WATO, with a `camera_drop_reason` when it
+doesn't), and `io.load_sweep_frames` takes that pairing as is. One owner for
+the decision; a separate lifting window had drifted to 50 ms.
+
 ### Step 2: ego-motion compensation (UniLiPs-borrowed)
 
 Because cameras and LiDAR are not hardware-synchronized, the ego pose at
@@ -205,7 +211,7 @@ done upstream: lidar_preprocessing writes every point in world coordinates,
 each at its own measurement time. Lifting therefore only needs
 `cam_T_world = inv(ego_T_cam) ∘ inv(world_T_ego(t_frame))`, with
 `world_T_ego(t_frame)` looked up at `camera_timestamp_ns` through
-`wato_common.pose_lookup` (`io.load_frame_refs`). `frame_index.world_T_ego` is
+`wato_common.pose_lookup` (`io.load_sweep_frames`). `frame_index.world_T_ego` is
 the sweep's pose and is not used here: on the WATO rig it misplaced a point
 30 m away by 17 cm median, up to 87 cm.
 
@@ -253,6 +259,22 @@ d_cam ≤ min(D(N(u, v))) + τ_visibility
 where `N(u, v)` is a small neighborhood (e.g., 3×3) around the pixel. Use
 this form. Add a config option `visibility_neighborhood` (default 3).
 
+**As implemented**, D has two sources, and a point must pass both
+(`visibility.py`; numbers in `docs/semantic_lifting_measurements.md`):
+
+- perception_2d's depth map, min-pooled over the 7×7 patch, with `0` (fitted
+  inverse depth ≤ 0) as +∞. Its single per-frame inverse-depth fit is off by a
+  median 0.1 m at 5–10 m but 2 m at 20–30 m and 20 m at 30–50 m, so against it
+  alone 39–62% of in-mask points beyond 10 m failed — including whole rows of
+  parked cars. Only its surfaces nearer than `depth_map_max_range_m` (10 m)
+  occlude.
+- the sweep's own non-ground LiDAR returns, z-buffered into 8 px cells and
+  min-pooled over 3×3 cells: `d ≤ z · 1.05 + 0.5 m`. Exact at any range, sparse
+  (it misses most near occluders the map sees, hence both). This is the design's
+  "LiDAR-only sparse-depth visibility" fallback, used everywhere.
+
+In-mask points kept at 20–30 / 30–50 m: 37% / 25% → 84% / 65%.
+
 ### Step 5: mask lookup
 
 For each visible (u, v), check which detection masks contain that pixel.
@@ -267,7 +289,9 @@ vote = (instance_id, class_id, score = det_score × depth_confidence[u,v])
 ```
 
 **As implemented**, `score = max(det_score, 1e-3)`: the depth artifact carries
-no per-pixel confidence.
+no per-pixel confidence. Each frame's masks are painted once into a label
+raster (largest first, so the innermost wins) and cached across the sweeps the
+frame is paired with (`frames.py`).
 
 ### Step 6: cross-camera vote reduction
 
@@ -281,6 +305,30 @@ For each LiDAR point that received votes from one or more cameras, reduce:
 - If no votes (point projected outside all masks in every camera, or failed
   visibility in every camera): `class_id = 0`, `instance_id = -1`,
   confidence = 0.
+
+**As implemented**, votes are reduced by **class** first, then instance:
+masklets are per-camera and `global_object_id` is only assigned by `tracking`,
+which runs after lifting, so voting on `instance_id` made two cameras on the
+same car always disagree (on chunk 0000 of `may_30_ring_road_test_5_2`, every
+one of 2,994 "disagreeing" points in 40 sweeps was a same-class pair). The
+class with the highest summed score wins; within it, the highest-scoring
+instance. `confidence = winner / (winner + runner-up class)`, 1.0 when
+unanimous; `n_supporting_cameras` / `n_disagreeing_cameras` count cameras
+voting the winning / another class. Unvoted points are not written.
+
+**Cross-camera instances (as implemented, `instances.py`).** The design
+assumed `global_object_id` from a cross-camera merge upstream; nothing assigns
+it before lifting (`tracking` runs after), yet proposal_generation groups
+points by instance to fit one box per object. So lifting merges masklets
+itself, from geometry it already has: two same-class masklets from different
+cameras that claim the same visible LiDAR points. Merge when, over the chunk,
+they share ≥ `min_shared_points` (20) points that are ≥
+`min_shared_fraction` (0.3) of the smaller one's claims where they overlap,
+strongest pairs first, refusing a merge that would put two masklets one camera
+saw in one frame — or two masklets whose claimed points are > `max_separation_m`
+(5 m) apart (median over the sweeps both claim points in) — in one group.
+`lifted_instances.parquet` maps each instance to its masklets and cameras.
+Measurements: `docs/semantic_lifting_measurements.md`, "Instances".
 
 ### Step 7: write artifact
 
@@ -316,7 +364,14 @@ labels lifted here. So for lifting itself, do this:
    (the label probably came from a stale pixel).
 
 In v1, accept some noise on dynamic points and rely on SLF's L_lidar +
-L_mask combination to resolve it during pose fitting. When the tracker's
+L_mask combination to resolve it during pose fitting. Measured on the WATO rig
+(`docs/semantic_lifting_measurements.md`, "Dynamic points"): 12% of labeled
+points are on moving clusters, displaced a median 0.1 m (p99 1.1 m) between
+LiDAR and camera time; compensating with Step F track velocities is
+directionally right but recovers ~5 points of in-mask rate on the fastest
+movers only. It needs per-point times kept in the world NPZ and cluster
+velocities exported by Step F (`tracking` runs after lifting, so it can't be
+the source). Revisit when box fits on fast movers come out short or shifted. When the tracker's
 velocities exist (item 1), `motion_clusters.parquet`'s per-cluster motion
 features are the natural first signal for which points to compensate.
 
@@ -379,20 +434,23 @@ The shipped schema (authoritative: `src/semantic_lifting/config/semantic_lifting
 and its Pydantic model in `config.py`):
 
 ```yaml
-temporal:
-  max_offset_s: 0.05           # reject cameras farther than this from sweep time
 visibility:
-  tolerance_m: 0.5             # UniLiPs Eq. 1 τ
-  neighborhood: 3              # min over the NxN patch in depth_2d
-voting:                        # not read yet
-  min_supporting_cameras: 1
-  innermost_wins: true
-upstream_versions: {}          # not read
+  tolerance_m: 0.5               # UniLiPs Eq. 1 τ
+  neighborhood: 3                # depth map: min over the (2n+1)² patch
+  depth_map_max_range_m: 10.0    # depth-map surfaces beyond this don't occlude
+  lidar_cell_px: 8               # LiDAR occluder z-buffer cell
+  lidar_neighborhood_cells: 1    # min over the (2n+1)² cells
+  lidar_tolerance_per_m: 0.05    # occluder × (1 + this) + tolerance_m
+instances:
+  min_shared_points: 20
+  min_shared_fraction: 0.3
+  max_separation_m: 5.0
 ```
 
-The design's `projection.*`, `voting.confidence_min` /
-`disagreement_threshold`, `dynamic_points.*` and `outputs.*` keys were not
-implemented; add them to the YAML and `config.py` together if they are.
+The design's `temporal.*` (ingest's `frame_index` pairing is used),
+`voting.*` (innermost-wins and class-first voting are fixed; consumers filter on
+`n_supporting_cameras`), `upstream_versions` (the manifest records inputs),
+`projection.*`, `dynamic_points.*` and `outputs.*` keys are not part of it.
 
 ---
 
@@ -406,10 +464,10 @@ src/semantic_lifting/
     ├── __init__.py
     ├── cli.py                       Chunk-level CLI runner
     ├── config.py                    Pydantic config schemas
-    ├── io.py                        Read perception_2d + lidar artifacts; write lifted_labels
+    ├── io.py                        Chunks; frame_index pairing with camera-time poses
     ├── pipeline.py                  Per-chunk orchestration
-    ├── temporal_match.py            Sweep ↔ frame matching with ego-motion compensation
-    ├── projection.py                LiDAR → camera projection (re-uses perception_2d's projection.py via wato_common)
+    ├── frames.py                    Per-frame pooled depth + mask raster, cached across sweeps
+    ├── projection.py                cam_T_world, projection (wato_common.geometry), mask raster
     ├── visibility.py                Occlusion test (UniLiPs Eq. 1)
     ├── voting.py                    Cross-camera vote aggregation
     └── stats.py                     Per-sweep diagnostics
@@ -458,8 +516,8 @@ implementation. Single source of truth for the projection math.
 2. `visibility.py` — synthetic depth map with known occlusion, verify
    visibility test returns expected results.
 3. `voting.py` — synthetic vote sets with known winners, verify reduction.
-4. `temporal_match.py` — synthetic timestamps, verify correct frame
-   matching and ego-motion math.
+4. `io.py` / `projection.py` — frame_index pairing, poses at camera time,
+   cam_T_world.
 
 **Integration tests:**
 

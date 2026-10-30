@@ -141,6 +141,7 @@ perception_2d         reads: frames, poses, lidar_proc_index, lidar_proc/*_world
 semantic_lifting      reads: frame_index, poses, lidar_proc/*_world.npz, masks_2d, tracklets_2d, depth_2d, calibration
   └─ chunks/<chunk>/semantic_lifting/
        ├─ lifted_labels/<sweep_id:06d>.npz (per-point instance_id, class, confidence)
+       ├─ lifted_instances.parquet     (instance -> class, masklet_ids, cam_ids)
        └─ lifted_stats.parquet         (per-sweep lifting statistics)
 
 proposal_generation   reads: lidar_proc/*_world.npz, lifted_labels, motion_clusters, ground.npz, calibration

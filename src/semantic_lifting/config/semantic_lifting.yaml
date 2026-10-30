@@ -1,14 +1,23 @@
-temporal:
-  max_offset_s: 0.05
-
+# Occlusion test (visibility.py); values measured on the WATO rig in
+# docs/semantic_lifting_measurements.md.
 visibility:
-  tolerance_m: 0.5
-  neighborhood: 3
+  tolerance_m: 0.5               # UniLiPs Eq. 1 tau
+  neighborhood: 3                # depth map: min over the (2n+1)^2 pixel patch
+  depth_map_max_range_m: 10.0    # depth-map surfaces beyond this don't occlude:
+                                 # its error grows ~d^2 (median 0.1 m at 5-10 m,
+                                 # 2 m at 20-30 m)
+  lidar_cell_px: 8               # LiDAR occluder: nearest non-ground return in
+  lidar_neighborhood_cells: 1    # the (2n+1)^2 cells of this many pixels;
+  lidar_tolerance_per_m: 0.05    # occluder x (1 + this) + tolerance_m. Wider
+                                 # windows reject far cars standing behind others
 
-# Not read yet: votes always go to the highest cumulative score, and the
-# innermost mask always wins.
-voting:
-  min_supporting_cameras: 1
-  innermost_wins: true
-
-upstream_versions: {}  # not read
+# Cross-camera instances (instances.py): two masklets from different cameras,
+# one class, merge when they claim the same visible points.
+instances:
+  min_shared_points: 20      # over the chunk
+  min_shared_fraction: 0.3   # of the smaller masklet's claims where they overlap:
+                             # a road-sized mask touching a car shares ~0.03-0.07
+  max_separation_m: 5.0      # median distance between their claimed points, and
+                             # every pair in a merged group's; stops a drifted
+                             # masklet chaining two objects (a truck's front and
+                             # rear views can sit ~4 m apart)

@@ -1,70 +1,98 @@
-"""Occlusion-aware visibility test (UniLiPs Eq.1).
+"""Occlusion-aware visibility test (UniLiPs Eq. 1).
 
-A LiDAR point is considered visible from a camera if its projected depth
-is no greater than the minimum depth in a neighborhood of the depth map
-plus a tolerance:
+A LiDAR point is visible from a camera if nothing sits in front of it: its
+camera depth is no greater than the nearest surface around its pixel plus a
+tolerance,
 
-    visible ⟺ d_cam ≤ min(D(N(u, v))) + tolerance_m
+    visible ⟺ d_cam ≤ min(D(N(u, v))) + tolerance
 
-This test filters out LiDAR points that are occluded by closer surfaces
-(e.g. a point on a wall behind a car).
+which stops a point on a wall behind a car from taking the car's label.
+
+Two sources of D, because neither works everywhere
+(docs/semantic_lifting_measurements.md):
+
+- perception_2d's metric depth map: dense, but its single per-frame
+  inverse-depth fit is anchored on mostly near LiDAR points, so its error
+  grows ~d² (median 0.1 m at 5-10 m, 2 m at 20-30 m, 20 m at 30-50 m on the
+  WATO rig). Only its surfaces nearer than depth_map_max_range_m occlude.
+- the sweep's own LiDAR returns, projected into the image: exact at any
+  range but sparse, so the nearest non-ground return within a small window
+  of cells around the point's pixel, with a tolerance that grows with range
+  (the window's footprint, and a surface's depth change across it, scale
+  with d).
+
+A point must pass both.
 """
 
 from __future__ import annotations
 
 import numpy as np
+from scipy.ndimage import minimum_filter
+
+from wato_semantic_lifting.config import VisibilityConfig
 
 
-def visibility_test(
-    d_cam: np.ndarray,
-    depth_map: np.ndarray,
-    uv: np.ndarray,
-    tolerance_m: float = 0.5,
-    neighborhood: int = 3,
+def pooled_occluder(depth_m: np.ndarray, neighborhood: int) -> np.ndarray:
+    """(H, W) float32: the nearest depth-map surface in each pixel's
+    (2·neighborhood+1)² patch.
+
+    depth_m == 0 is perception_2d's value for a non-positive fitted inverse
+    depth — farther than the fit can represent (sky, far background) — so it
+    is +inf here, never an occluder.
+    """
+    d = depth_m.astype(np.float32)
+    d[d <= 0] = np.inf
+    return minimum_filter(d, size=2 * neighborhood + 1, mode="nearest")
+
+
+def depth_map_visible(
+    d_cam: np.ndarray, occluder_m: np.ndarray, tolerance_m: float
 ) -> np.ndarray:
-    """Apply UniLiPs Eq.1 occlusion test.
+    """(N,) bool: Eq. 1 against the pooled depth map at each point's pixel."""
+    return d_cam <= occluder_m + tolerance_m
+
+
+def lidar_occluder(
+    ui: np.ndarray,
+    vi: np.ndarray,
+    d_cam: np.ndarray,
+    can_occlude: np.ndarray,
+    size: tuple[int, int],
+    cell_px: int,
+    neighborhood_cells: int,
+) -> np.ndarray:
+    """(N,) float32: per projected point, the nearest LiDAR return among the
+    occluding points in the (2·neighborhood_cells+1)² cells of cell_px pixels
+    around it (+inf when there is none).
 
     Args:
-        d_cam: (N,) float32 camera-frame depths of projected LiDAR points.
-        depth_map: (H, W) float32 metric depth map from depth_2d artifact.
-        uv: (N, 2) float32 pixel coordinates of the projected points.
-        tolerance_m: additive tolerance in metres (default 0.5 m).
-        neighborhood: half-size of the patch for min-depth pooling (default 3,
-            giving a 7×7 neighborhood).
-
-    Returns:
-        (N,) bool array — True for points that pass the visibility test.
+        ui, vi: (N,) pixel column / row of every projected point of the sweep.
+        d_cam: (N,) camera depths.
+        can_occlude: (N,) bool; False for ground, which can't hide what stands
+            on it but sits in front of its lower edge in the image.
+        size: (W, H) of the image.
     """
-    H, W = depth_map.shape
-    N = d_cam.shape[0]
-    visible = np.zeros(N, dtype=bool)
-
-    if N == 0:
-        return visible
-
-    ui = np.clip(np.round(uv[:, 0]).astype(int), 0, W - 1)
-    vi = np.clip(np.round(uv[:, 1]).astype(int), 0, H - 1)
-
-    # Precompute min-pooled depth map to avoid per-point nested loops.
-    # Uses a sliding-window minimum via cumulative min over rows then cols.
-    half = neighborhood
-    min_depth = _min_pool(depth_map, half)
-
-    local_min = min_depth[vi, ui]
-
-    # Points where the depth map is zero (no measurement) are considered
-    # non-occluded — the depth artifact may have gaps.
-    no_measurement = local_min <= 0.0
-    visible = (d_cam <= local_min + tolerance_m) | no_measurement
-    return visible
+    W, H = size
+    gw, gh = -(-W // cell_px), -(-H // cell_px)
+    cell = (vi // cell_px) * gw + (ui // cell_px)
+    zbuf = np.full(gh * gw, np.inf, dtype=np.float32)
+    np.minimum.at(zbuf, cell[can_occlude], d_cam[can_occlude].astype(np.float32))
+    pooled = minimum_filter(
+        zbuf.reshape(gh, gw), size=2 * neighborhood_cells + 1, mode="nearest"
+    )
+    return pooled.reshape(-1)[cell]
 
 
-def _min_pool(depth: np.ndarray, half: int) -> np.ndarray:
-    """Return a map where each pixel holds the minimum in its (2*half+1)^2 patch."""
-    from scipy.ndimage import minimum_filter
-
-    try:
-        return minimum_filter(depth, size=2 * half + 1, mode="nearest")
-    except Exception:  # noqa: BLE001
-        # Fallback: no pooling (point-wise depth lookup).
-        return depth
+def visible(
+    d_cam: np.ndarray,
+    map_occluder_m: np.ndarray,
+    lidar_occluder_m: np.ndarray,
+    cfg: VisibilityConfig,
+) -> np.ndarray:
+    """(N,) bool: no trusted depth-map surface and no LiDAR return in front."""
+    near_map = map_occluder_m < cfg.depth_map_max_range_m
+    map_ok = ~near_map | depth_map_visible(d_cam, map_occluder_m, cfg.tolerance_m)
+    lidar_ok = (
+        d_cam <= lidar_occluder_m * (1.0 + cfg.lidar_tolerance_per_m) + cfg.tolerance_m
+    )
+    return map_ok & lidar_ok

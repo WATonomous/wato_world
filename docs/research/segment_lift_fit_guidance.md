@@ -97,14 +97,18 @@ lifted_labels/<sweep_id:06d>.npz  (point_indices, instance_ids, classes, confide
 lifted_stats.parquet              (per-sweep coverage statistics)
 ```
 
-Read both through `wato_common.artifacts.lifted_labels` (`read_sweep`,
-`read_stats`), which owns the format.
+plus `lifted_instances.parquet` (instance → class, `masklet_ids`, `cam_ids`).
+Read them through `wato_common.artifacts.lifted_labels` (`read_sweep`,
+`read_instances`, `read_stats`), which owns the format.
 
 `semantic_lifting` consumes `perception_2d`'s `masks_2d/` and `depth_2d/`
 artifacts, runs the UniLiPs Eq.1 occlusion test, and outputs per-LiDAR-point
 labels with cross-camera confidence.  `proposal_generation` reads these and
 groups LiDAR points by `instance_id` to form per-instance point clouds for
-the SLF silhouette-fit stage.
+the SLF silhouette-fit stage. An instance is one object's masklets merged
+across cameras (chunk-local; `tracking`'s `global_object_id` comes later), so
+L_mask compares against every masklet in its `masklet_ids`, each in its own
+camera.
 
 ### 2. Vehicle shape prior (PCA over 3D meshes)
 
