@@ -295,7 +295,7 @@ def _render_html(payload: dict) -> str:
 <title>{payload["title"]}</title>
 <style>
 html, body {{ margin: 0; width: 100%; height: 100%; overflow: hidden; background: #101113; color: #eef1f4; font-family: system-ui, -apple-system, Segoe UI, sans-serif; }}
-#gl {{ position: fixed; inset: 0; width: 100%; height: 100%; display: block; }}
+#gl {{ position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }}
 #panel {{ position: fixed; left: 16px; right: 16px; bottom: 16px; display: grid; grid-template-columns: 1fr; gap: 10px; padding: 12px; background: rgba(18, 20, 23, 0.88); border: 1px solid rgba(255,255,255,0.14); border-radius: 8px; backdrop-filter: blur(8px); }}
 #row {{ display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }}
 #title {{ font-size: 14px; font-weight: 650; min-width: 260px; }}
@@ -462,19 +462,34 @@ function mul(a,b) {{
   for (let c=0;c<4;c++) for (let r=0;r<4;r++) for (let k=0;k<4;k++) o[c*4+r]+=a[k*4+r]*b[c*4+k];
   return o;
 }}
+function rotate(v, axis, angle) {{
+  const a = normalize(axis), c = Math.cos(angle), s = Math.sin(angle), d = dot(a, v), x = cross(a, v);
+  return [v[0]*c+x[0]*s+a[0]*d*(1-c), v[1]*c+x[1]*s+a[1]*d*(1-c), v[2]*c+x[2]*s+a[2]*d*(1-c)];
+}}
 const mn = PAYLOAD.bounds_min, mx = PAYLOAD.bounds_max;
 const center = [(mn[0]+mx[0])/2, (mn[1]+mx[1])/2, (mn[2]+mx[2])/2];
 const extent = Math.max(1, Math.hypot(mx[0]-mn[0], mx[1]-mn[1], mx[2]-mn[2]));
+let zoom = 1, yaw = 0, pitch = 0, panX = 0, panY = 0, drag = null;
 function mvp() {{
   const aspect = canvas.width / Math.max(1, canvas.height);
-  const half = extent * 0.58;
+  const half = extent * 0.58 / zoom;
   const view = document.getElementById('view').value;
   const dist = extent * 1.8;
   let eye = [center[0], center[1], center[2] + dist], up = [0, 1, 0];
   if (view === 'iso') {{ eye = [center[0]+dist, center[1]-dist, center[2]+dist]; up = [0,0,1]; }}
   if (view === 'side') {{ eye = [center[0], center[1]-dist, center[2]]; up = [0,0,1]; }}
   if (view === 'front') {{ eye = [center[0]-dist, center[1], center[2]]; up = [0,0,1]; }}
-  return mul(mat4Ortho(-half*aspect, half*aspect, -half, half, -dist*4, dist*4), lookAt(eye, center, up));
+  let offset = [eye[0]-center[0], eye[1]-center[1], eye[2]-center[2]];
+  offset = rotate(offset, [0, 0, 1], yaw);
+  up = rotate(up, [0, 0, 1], yaw);
+  let right = normalize(cross(up, normalize(offset)));
+  offset = rotate(offset, right, pitch);
+  up = rotate(up, right, pitch);
+  right = normalize(cross(up, normalize(offset)));
+  const screenUp = normalize(cross(normalize(offset), right));
+  const target = [center[0]+right[0]*panX+screenUp[0]*panY, center[1]+right[1]*panX+screenUp[1]*panY, center[2]+right[2]*panX+screenUp[2]*panY];
+  eye = [target[0]+offset[0], target[1]+offset[1], target[2]+offset[2]];
+  return mul(mat4Ortho(-half*aspect, half*aspect, -half, half, -dist*4, dist*4), lookAt(eye, target, up));
 }}
 function drawCloud(cloud) {{
   gl.bindBuffer(gl.ARRAY_BUFFER, cloud.pos);
@@ -498,6 +513,31 @@ function render() {{
   requestAnimationFrame(render);
 }}
 function refresh() {{ dynamicSelection(); }}
+canvas.addEventListener('wheel', (ev) => {{
+  ev.preventDefault();
+  zoom = Math.max(0.2, Math.min(8, zoom * Math.exp(-ev.deltaY * 0.001)));
+}}, {{ passive: false }});
+canvas.addEventListener('contextmenu', (ev) => ev.preventDefault());
+canvas.addEventListener('pointerdown', (ev) => {{
+  if (ev.button !== 0 && ev.button !== 2) return;
+  drag = {{ mode: ev.button === 0 ? 'orbit' : 'pan', x: ev.clientX, y: ev.clientY }};
+  canvas.setPointerCapture(ev.pointerId);
+  ev.preventDefault();
+}});
+canvas.addEventListener('pointermove', (ev) => {{
+  if (!drag) return;
+  const dx = (ev.clientX - drag.x) / Math.max(1, canvas.clientWidth);
+  const dy = (ev.clientY - drag.y) / Math.max(1, canvas.clientHeight);
+  drag.x = ev.clientX; drag.y = ev.clientY;
+  if (drag.mode === 'orbit') {{
+    yaw += dx * Math.PI * 2;
+    pitch = Math.max(-1.5, Math.min(1.5, pitch + dy * Math.PI));
+  }} else {{
+    panX -= dx * extent * 1.16 / zoom;
+    panY += dy * extent * 1.16 / zoom;
+  }}
+}});
+for (const event of ['pointerup', 'pointercancel']) canvas.addEventListener(event, () => {{ drag = null; }});
 for (const id of ['view','mode','color','sweep','static','dynamic','point']) document.getElementById(id).addEventListener('input', refresh);
 document.getElementById('prev').onclick = () => {{ sweepInput.value = Math.max(0, Number(sweepInput.value)-1); refresh(); }};
 document.getElementById('next').onclick = () => {{ sweepInput.value = Math.min(Number(sweepInput.max), Number(sweepInput.value)+1); refresh(); }};

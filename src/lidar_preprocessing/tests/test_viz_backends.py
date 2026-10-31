@@ -18,7 +18,8 @@ from wato_lidar_preprocessing.viz_data import (
     load_sweep_viz_data,
 )
 from wato_lidar_preprocessing.viz_export import export_ply
-from wato_lidar_preprocessing.html_viz import open_html_file
+from wato_lidar_preprocessing.html_viz import _render_html, open_html_file
+from wato_lidar_preprocessing.web_viz import _render_web_html
 
 
 def _ensure_parent(path: str) -> None:
@@ -111,6 +112,28 @@ def test_open_html_file_resolves_relative_paths(tmp_path, monkeypatch):
 
     assert open_html_file(html) is True
     assert opened == [(html.resolve().as_uri(), 2)]
+
+
+def test_browser_viewers_include_orbit_pan_and_wheel_controls():
+    payload = {
+        "title": "test",
+        "bag_id": "bag",
+        "chunk_id": "0000",
+        "mode": "chunk",
+        "static_xyz": {"dtype": "float32", "shape": [0, 3], "data": ""},
+        "dynamic_xyz": {"dtype": "float32", "shape": [0, 3], "data": ""},
+        "dynamic_sweep_id": {"dtype": "int32", "shape": [0], "data": ""},
+        "dynamic_intensity": {"dtype": "float32", "shape": [0], "data": ""},
+        "has_intensity": False,
+        "bounds_min": [0, 0, 0],
+        "bounds_max": [1, 1, 1],
+        "counts": {},
+    }
+
+    for html in (_render_html(payload), _render_web_html()):
+        assert "canvas.addEventListener('wheel'" in html
+        assert "ev.button === 0 ? 'orbit' : 'pan'" in html
+        assert "canvas.addEventListener('contextmenu'" in html
 
 
 def test_proposals_layer_viz_data_and_html(tmp_path, monkeypatch):
