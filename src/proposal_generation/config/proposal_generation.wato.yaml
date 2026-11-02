@@ -1,0 +1,19 @@
+# proposal_generation on the WATO rig: proposal_generation.yaml with the
+# canonical LiDAR of lidar_preprocessing.wato.yaml's frame_sync.
+proposal_generation:
+  frames:
+    canonical_lidar: lidar_cc
+
+  lidar_mos:
+    min_motion_score: 1.0
+    min_n_sources: 2
+    max_frac_persistent: 0.5
+    min_labeled_fraction: 0.3
+
+  lifted:
+    cluster_radius_m: 2.0
+    min_points: 5
+
+  fusion:
+    min_shared_points: 5
+    min_shared_fraction: 0.3

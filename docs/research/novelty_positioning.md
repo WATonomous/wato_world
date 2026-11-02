@@ -129,7 +129,8 @@ labels, we can't claim annotation-free and can't fairly evaluate on nuScenes.
   best here: nobody has fused domain-shifted detectors, zero-shot VFMs and
   geometry.
 
-`proposal_generation`, `tracking` and `label_refinement` are still stubs, so
+`proposal_generation` has only its geometry and lifted-label sources so far,
+and `tracking` and `label_refinement` are still stubs, so
 all three candidates live in code not yet written. Build `proposal_generation`
 around per-source reliability from the start rather than NMS-then-fuse.
 

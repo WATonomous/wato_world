@@ -1,37 +1,116 @@
 # proposal_generation
 
-Multimodal proposal generation (LiDAR detectors, Segment-Lift-Fit, fusion).
+3D box proposals from what upstream already produces: lidar_preprocessing's
+Step F moving-object clusters and semantic_lifting's labelled instances, one
+box per source and one fused box per object, per frame. CPU only. SLF (fitting
+shapes to camera masks) and a LiDAR detector are later sources.
+Measurements behind the defaults: `docs/proposal_generation_measurements.md`.
 
-See `wato_world/README.md` and the architecture doc for context.
+## How a proposal is made
 
-## Inputs from lidar_preprocessing
+Per frame — lidar_preprocessing's frame_sync tick: a `lidar_cc` sweep and the
+corner sweeps matched to it on WATO, one sweep on a single-LiDAR bag:
 
-Besides the world-frame sweeps, lidar_preprocessing's Step C writes
-`ground.npz`: read it through `wato_common.artifacts.ground` (`GroundGrid`'s
-`height_at`, `height_above`, `normal_at`), which raises
-`GroundUnavailableError` for a chunk Step C had no ground for.
+- **`lidar_mos`**: each Step F cluster passing the gates (`motion_score > 1`,
+  `n_sources ≥ 2`, `frac_persistent < 0.5`; `docs/research/lidar_mos_guidance.md`)
+  is one box: Step F's, with its bottom lowered to the ground grid (it stopped
+  at Step F's 0.25 m height floor). It takes a class when ≥ 30% of its points
+  carry a lifted label, by a confidence-weighted vote; otherwise `cls` is None.
+  Its Step F features are kept as evidence (`motion_score`, `n_sources`,
+  `frac_persistent`, `track_life`).
+- **`lifted`**: each semantic_lifting instance's labelled points in the frame.
+  Masklets bleed onto background, so only the largest group of points chained
+  within 2 m is the object; with ≥ 5 points it is boxed (`fit_bev_box`, bottom
+  to the ground) and takes the instance's class and cameras. Evidence:
+  `lift_confidence`, the points' mean lifting confidence.
+- **`fused`**: a lidar_mos and a lifted box sharing ≥ 5 LiDAR points, ≥ 30%
+  of the smaller one's, are one object (greedy, most shared first, one to one):
+  a box fit to both point sets, with the lifted class. Every other box is
+  fused on its own, class-less if it has none, so each object either source
+  found has one fused row. `member_proposal_ids` lists the source rows.
 
-Step F writes `motion_clusters.parquet`: class-less, recall-oriented
-moving-object proposals with soft features (`motion_score`, `track_life`,
-`n_sources`, `frac_seg_dynamic`, `frac_persistent`). Its box columns use
-`ProposalRow`'s names, so a row maps onto a proposal with
-`provenance="lidar_mos"`; false positives are expected, so gate on those
-features (see `docs/research/lidar_mos_guidance.md`) and take the class from
-semantic_lifting's labels. Read both proposal artifacts, and decode
-`source_bits`, through `wato_common.artifacts.motion_proposals` —
-lidar_preprocessing's package isn't installed in this image.
+Scores are placeholders until per-source reliability is measured: lidar_mos
+`min(1, motion_score / 2)`, lifted `lift_confidence`, fused the members' mean.
+Boxes are yaw-only and undirected (heading mod π). Neighbouring chunks overlap
+by 6 s and both label the shared span; tracking stitches them.
+
+## Run
+
+`ingest`, `lidar_preprocessing` (with its `proposals` step) and
+`semantic_lifting` must have run first.
+
+```bash
+./watod run proposal_generation --bag <bag_id> [--chunk <chunk_id>] [--force] \
+    --config /ws/src/proposal_generation/config/proposal_generation.wato.yaml
+```
+
+Chunks whose `proposals.parquet` exists are skipped unless `--force`. Each
+chunk gets `manifest_proposal_generation.json` (wato_common.manifest): config,
+build provenance, and hashed inputs — the per-sweep files through their
+producers' manifests and indexes. A WATO chunk takes 8–21 s.
+
+## Viewers
+
+```bash
+./watod run proposal_generation viz --bag <bag_id> --chunk <chunk_id> \
+    --config <same config> --view 3d|bev|camera [--show sources|fused] [--every N]
+```
+
+Under `chunks/<chunk_id>/viz/`:
+
+- `--view 3d` → `proposals_<show>.html`: each frame's non-ground points (all
+  inside a box, a sample of the rest) and box wireframes over grey context,
+  with a slider over frames (`wato_common.viz.point_cloud_html`; wheel zooms,
+  drag pans, "follow" keeps the frame centred). Every 5th frame by default;
+  36 MB for a WATO chunk.
+- `--view bev` → `proposals_bev_<show>/<sweep_id>.png`: top-down, 50 m around
+  the reference LiDAR, every 10th frame.
+- `--view camera` → `proposals_cam_<show>/<cam>/<seq>.jpg`: boxes projected
+  into every 10th image of each camera (`--camera` to pick), with the ego pose
+  at the image's own time. Boxes are at the sweep's time, up to 44 ms off on
+  WATO, so a moving car's box sits a little off it.
+
+`--show sources` colours lidar_mos orange and lifted cyan; `--show fused`
+colours the fused boxes by class (grey: none).
+
+## Inputs
+
+Every cross-component artifact is read through `wato_common.artifacts`, which
+owns its format:
+
+| Artifact | Producer | Read through |
+|---|---|---|
+| `lidar_proc_index.parquet`, `lidar_proc/<sweep_id:06d>_world.npz` | lidar_preprocessing | `lidar_sweeps.ProcessedSweeps` (`.frames(canonical_lidar)` groups sweeps into frames) |
+| `motion_clusters.parquet`, `lidar_proc/<sweep_id:06d>_motion_proposals.npz` | lidar_preprocessing Step F | `motion_proposals` |
+| `ground.npz` | lidar_preprocessing Step C | `ground` (`GroundGrid.height_at`); a sentinel leaves boxes' bottoms as they are |
+| `semantic_lifting/lifted_labels/`, `lifted_instances.parquet` | semantic_lifting | `lifted_labels` |
+| `calibration.json`, `frame_index.parquet`, `poses.parquet` (camera viewer only) | ingest | `calibration`, `frame_index.FrameIndex` |
+
+No artifact records lidar_preprocessing's canonical LiDAR, so the config states
+it (`frames.canonical_lidar`). A run fails with `CanonicalLidarError` when it
+doesn't match: a frame without exactly one sweep from it, or a Step F cluster
+not stamped with its frame's reference time.
 
 ## Output
 
 `proposals.parquet`, written through `wato_common.artifacts.proposals`, one
-`ProposalRow` per object per frame_sync frame:
+`ProposalRow` per box:
 
-- `sweep_id` is the frame's reference sweep (the canonical LiDAR's), `sweep_ids`
-  all its sweeps. `frame_id` is None for a sweep frame_sync matched to no
-  canonical sweep; a Step F cluster's `-1` maps to None.
-- Every source writes its own rows (`lidar_mos`, `slf`, `lidar_detector`), and
-  fusion writes `fused` rows listing them in `member_proposal_ids`. tracking
-  reads the fused rows; the source rows are kept to measure each source.
+- `sweep_id` is the frame's reference sweep (the canonical LiDAR's),
+  `sweep_ids` all its sweeps, `reference_timestamp_ns` its time. `frame_id` is
+  None for a sweep frame_sync matched to no canonical sweep (a Step F
+  cluster's `-1` maps to None).
+- `provenance` `lidar_mos` / `lifted` / `fused`; tracking reads the fused rows,
+  the source rows stay to measure each source.
 - `cls` is perception_2d's class (`car`, `truck`, `bus`, `motorcycle`,
-  `bicycle`, `pedestrian` under the fixed taxonomy), or None when no lifted
-  instance supports the box.
+  `bicycle`, `pedestrian` under the fixed taxonomy), or None.
+- The evidence columns are null except on rows of the source that measures
+  them.
+
+## Configuration
+
+`config/proposal_generation.yaml` (single-LiDAR bags, `canonical_lidar: null`)
+and `config/proposal_generation.wato.yaml` (`canonical_lidar: lidar_cc`, as
+`lidar_preprocessing.wato.yaml`'s frame_sync; a test fails if anything else
+drifts). Every field is documented in
+[`config.py`](src/wato_proposal_generation/config.py).

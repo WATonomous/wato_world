@@ -1,9 +1,13 @@
 """Compute virtual chunk boundaries for a bag.
 
-We do not physically split the rosbag — chunks are just (t_start, t_end) ranges
-that downstream tooling can read independently from the original bag.  Each
-chunk overlaps the next by `chunk_overlap_seconds` so tracks crossing the seam
-can be stitched in tracking.
+We do not physically split the rosbag — chunks are just time ranges that
+downstream tooling can read independently from the original bag.  Nominal
+windows [t_start, t_end] are `chunk_seconds` long and start
+`chunk_seconds - chunk_overlap_seconds` apart; ingest decodes each chunk over
+[t_overlap_start, t_overlap_end], its nominal window widened by
+`chunk_overlap_seconds` on each side (clamped to the bag).  Neighbouring chunks
+therefore share 3 × `chunk_overlap_seconds` of decoded data (6 s at 30 s / 2 s):
+the span tracking stitches tracks across (src/tracking/README.md).
 """
 
 from __future__ import annotations

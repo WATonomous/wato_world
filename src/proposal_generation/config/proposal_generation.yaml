@@ -1,0 +1,26 @@
+# proposal_generation (nuScenes and other single-LiDAR bags).
+# Per-chunk counts behind the defaults: docs/proposal_generation_measurements.md.
+proposal_generation:
+  # Must match lidar_preprocessing's frame_sync.canonical_lidar for the bag.
+  frames:
+    canonical_lidar: null        # one LiDAR: each sweep is its own frame
+
+  # Step F clusters (lidar_mos). Gates from docs/research/lidar_mos_guidance.md.
+  lidar_mos:
+    min_motion_score: 1.0        # Chen: moved further than its own size
+    min_n_sources: 2             # heuristics agreeing, excluding BOX_FILL
+    max_frac_persistent: 0.5     # mostly in long-occupied voxels: structure
+    min_labeled_fraction: 0.3    # of its points lifted-labelled, to take a class
+
+  # Boxes around semantic_lifting instances (lifted).
+  lifted:
+    cluster_radius_m: 2.0        # largest group of points chained this close
+                                 # is the object, the rest mask bleed; smaller
+                                 # splits far, sparse cars
+    min_points: 5                # per frame; half of WATO's (frame, instance)
+                                 # pairs have fewer
+
+  # Matching lidar_mos to lifted boxes within a frame, by shared LiDAR points.
+  fusion:
+    min_shared_points: 5
+    min_shared_fraction: 0.3     # of the smaller box's points

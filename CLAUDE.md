@@ -33,8 +33,10 @@ proposal_generation → tracking → label_refinement / open_vocab_discovery →
 ```
 
 ingest, lidar_preprocessing, perception_2d and semantic_lifting are implemented
-end to end; the rest are stubs raising NotImplementedError. Each implemented
-component's README is its reference.
+end to end; proposal_generation has its first sources (Step F clusters,
+lifted instances, fusion; no SLF or LiDAR detector yet); the rest are stubs
+raising NotImplementedError. Each implemented component's README is its
+reference.
 Measurements behind defaults are in `docs/*_measurements.md`; which recordings
 are usable is `docs/drive_bag_survey.md`.
 
@@ -107,6 +109,16 @@ doesn't load; the trim-bag end-to-end test skips).
   and joins key on `sweep_id` alone. Chunks ingested before that restart it per
   LiDAR (the three WATO scanners overwrite each other's world files) and must be
   re-ingested.
+- **Neighbouring chunks share 6 s, and every id restarts per chunk.** Ingest
+  decodes each chunk over `t_overlap_*`, its nominal window ±
+  `chunk_overlap_seconds`, and nominal windows start
+  `chunk_seconds - chunk_overlap_seconds` apart, so neighbours share
+  3 × `chunk_overlap_seconds`. `sweep_id`, `camera_seq`, masklet,
+  lifted-instance and `track_hint_id` ids are chunk-local: match a sweep or
+  image across chunks by `(lidar_id, reference_timestamp_ns)` /
+  `(cam_id, camera_timestamp_ns)`. `tracking` stitches across the span and gives
+  each instant in it to one chunk (split at the midpoint):
+  `src/tracking/README.md`.
 - **lidar_preprocessing has two dynamic artifacts.** `*_dynamic_mask.npy` /
   `dynamic_map.npz` is Step B's *precision* verdict after its point filter
   (`~mask` is trusted static: perception_2d's depth anchors), read through
@@ -127,10 +139,14 @@ doesn't load; the trim-bag end-to-end test skips).
 - **Proposals are per frame and per source.** One `ProposalRow` per object per
   frame_sync frame, keyed on the frame's reference `sweep_id` (the canonical
   LiDAR's; `frame_id` is None for a sweep matched to none). Every source's rows
-  (`lidar_mos`, `slf`, `lidar_detector`) stay beside the `fused` rows that list
-  them in `member_proposal_ids`, so each source's reliability can be measured;
-  tracking reads the fused rows. `cls` is perception_2d's class (`car`,
-  `truck`, ...), None when no lifted instance supports the box.
+  (`lidar_mos`, `lifted` today; `slf`, `lidar_detector` later) stay beside the
+  `fused` rows that list them in `member_proposal_ids`, so each source's
+  reliability can be measured; tracking reads the fused rows. `cls` is
+  perception_2d's class (`car`, `truck`, ...), None when no lifted instance
+  supports the box. No artifact records lidar_preprocessing's canonical LiDAR,
+  so proposal_generation's config restates it (`frames.canonical_lidar`,
+  `lidar_cc` in `.wato.yaml`) and `ProcessedSweeps.frames` raises
+  `CanonicalLidarError` on a mismatch.
 - **Sensor physics lives in `sensor_model.py`** (profiles `vlp32c`, `vlp16`,
   `hdl32e`), never in YAML.
 
@@ -229,14 +245,14 @@ labels aren't comparable.
 
 | Surface | Where | Mechanism |
 |---|---|---|
-| Python deps | `docker/requirements/{ingest,lidar_preprocessing,perception_2d,semantic_lifting}.txt` | exact `==` for the full transitive closure, installed `--no-deps` |
+| Python deps | `docker/requirements/{ingest,lidar_preprocessing,perception_2d,semantic_lifting,proposal_generation}.txt` | exact `==` for the full transitive closure, installed `--no-deps` |
 | `sam2` | `docker/perception_2d.Dockerfile` | `ARG SAM2_COMMIT` (no PyPI release) |
 | Model weights | `src/perception_2d/src/wato_perception_2d/model_registry.py` | HF `revision=`, torch.hub `repo:<sha>`, raw `.pt` from an HF commit loaded by path |
-| Component bases | `docker/{ingest,lidar_preprocessing,perception_2d,semantic_lifting}.Dockerfile` | `base:<tag>@sha256:...` |
+| Component bases | `docker/{ingest,lidar_preprocessing,perception_2d,semantic_lifting,proposal_generation}.Dockerfile` | `base:<tag>@sha256:...` |
 | Upstream bases | `docker/base/inject_*.Dockerfile` | `ubuntu` / `nvcr.io` by digest, `ARG UV_VERSION` |
 | `mcap` CLI | `docker/ingest.Dockerfile` | `ARG MCAP_CLI_VERSION` + `MCAP_CLI_SHA256` |
 
-Unpinned: the other five Dockerfiles, all stubs (mutable `base:<tag>`, no
+Unpinned: the other four Dockerfiles, all stubs (mutable `base:<tag>`, no
 lockfile, no `WATO_BASE_IMAGE`, no manifest) — pin each when it stops being
 one; and ingest's ROS 2 Jazzy apt packages (no apt lockfile;
 noted in `docker/requirements/ingest.txt`).
@@ -260,9 +276,9 @@ common packages at its own versions, and uv's default then refuses PyPI.
 `/opt/watonomous/requirements.lock.txt`; `manifest.py` writes one manifest per
 (bag, chunk) per component with content-hashed inputs (> 64 MB: size + mtime),
 so a changed input marks the outputs stale. ingest writes `manifest.json`;
-lidar_preprocessing, perception_2d and semantic_lifting write
-`manifest_<component>.json` (semantic_lifting hashes its upstreams' manifests
-in place of their per-sweep files).
+lidar_preprocessing, perception_2d, semantic_lifting and proposal_generation
+write `manifest_<component>.json` (semantic_lifting and proposal_generation
+hash their upstreams' manifests in place of their per-sweep files).
 
 - `WATO_GIT_COMMIT` is baked in at build time (`watod-setup-env.sh` →
   `modules/.env` → build arg): deploy images have no `.git`.

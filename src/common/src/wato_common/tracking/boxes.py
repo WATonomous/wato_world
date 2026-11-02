@@ -94,6 +94,15 @@ def bev_corners(box: Box3D) -> np.ndarray:
     return local @ rot.T + np.array([box.cx, box.cy])
 
 
+def box_corners_3d(box: Box3D) -> np.ndarray:
+    """(8, 3) corners: the bottom face's 4 (bev_corners order), then the top's."""
+    bev = bev_corners(box)
+    z0, z1 = box.cz - box.h / 2.0, box.cz + box.h / 2.0
+    return np.vstack(
+        [np.column_stack([bev, np.full(4, z0)]), np.column_stack([bev, np.full(4, z1)])]
+    )
+
+
 def _clip_polygon(subject: np.ndarray, clip: np.ndarray) -> np.ndarray:
     """Sutherland–Hodgman: subject ∩ clip for convex CCW polygons."""
     out = subject

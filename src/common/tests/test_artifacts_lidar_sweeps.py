@@ -94,13 +94,22 @@ def _index(rows: list[dict]) -> None:
     write_table(rows, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(BAG, CHUNK))
 
 
-def _meta(sweep_id: int, world_uri: str, valid: bool = True) -> dict:
+def _meta(
+    sweep_id: int,
+    world_uri: str,
+    valid: bool = True,
+    *,
+    lidar_id: str = "lidar_cc",
+    frame_id: int | None = None,
+    t_ns: int | None = None,
+) -> dict:
     return ProcessedSweepMeta(
         bag_id=BAG,
         chunk_id=CHUNK,
         sweep_id=sweep_id,
-        lidar_id="lidar_cc",
-        reference_timestamp_ns=sweep_id * 100,
+        lidar_id=lidar_id,
+        frame_id=frame_id,
+        reference_timestamp_ns=sweep_id * 100 if t_ns is None else t_ns,
         n_points_total=4,
         n_points_static=3,
         n_points_dynamic=1,
@@ -139,3 +148,63 @@ def test_empty_sweep_has_an_empty_mask():
     _index([_meta(3, w)])
     world, dynamic = ls.ProcessedSweeps.load(BAG, CHUNK).world_and_dynamic_mask(3)
     assert world.n_points == 0 and dynamic.shape == (0,)
+
+
+def _frame_index(rows: list[tuple[int, str, int | None, int]]) -> ls.ProcessedSweeps:
+    """(sweep_id, lidar_id, frame_id, t_ns) rows -> the loaded index."""
+    _index(
+        [
+            _meta(sid, "", lidar_id=lid, frame_id=fid, t_ns=t)
+            for sid, lid, fid, t in rows
+        ]
+    )
+    return ls.ProcessedSweeps.load(BAG, CHUNK)
+
+
+def test_frames_group_on_the_canonical_lidar():
+    sweeps = _frame_index(
+        [
+            (0, "lidar_ne", 0, 990),
+            (1, "lidar_cc", 0, 1000),
+            (2, "lidar_nw", 0, 1010),
+            (3, "lidar_cc", 1, 2000),
+            (4, "lidar_ne", None, 2500),  # matched to no canonical sweep
+        ]
+    )
+    assert sweeps.frames("lidar_cc") == [
+        ls.Frame(0, 1, (0, 1, 2), 1000),
+        ls.Frame(1, 3, (3,), 2000),
+        ls.Frame(None, 4, (4,), 2500),
+    ]
+
+
+def test_without_a_canonical_lidar_every_sweep_is_a_frame():
+    sweeps = _frame_index([(0, "lidar_top", 0, 100), (1, "lidar_top", 1, 200)])
+    assert sweeps.frames(None) == [
+        ls.Frame(0, 0, (0,), 100),
+        ls.Frame(1, 1, (1,), 200),
+    ]
+
+
+@pytest.mark.parametrize(
+    "rows, canonical, match",
+    [
+        # The config names a LiDAR that anchors nothing.
+        (
+            [(0, "lidar_cc", 0, 100), (1, "lidar_ne", 0, 105)],
+            "lidar_nw",
+            "has 0 sweeps",
+        ),
+        # Two sweeps from the canonical LiDAR in one frame.
+        (
+            [(0, "lidar_ne", 0, 100), (1, "lidar_ne", 0, 150)],
+            "lidar_ne",
+            "has 2 sweeps",
+        ),
+    ],
+)
+def test_frames_reject_a_canonical_lidar_lidar_preprocessing_did_not_use(
+    rows, canonical, match
+):
+    with pytest.raises(ls.CanonicalLidarError, match=match):
+        _frame_index(rows).frames(canonical)

@@ -36,7 +36,7 @@ Under `data/artifacts/raw/<bag_id>/`:
 |---|---|
 | `bag_meta.json` | Source path, duration, per-topic counts and types, detected storage plugin |
 | `calibration.json` | Per-bag calibration (format: `wato_common.artifacts.calibration`) |
-| `chunks/index.parquet` | Virtual chunk windows, with overlap ranges |
+| `chunks/index.parquet` | Virtual chunk windows: nominal `t_start_ns` / `t_end_ns` and the decoded `t_overlap_start_ns` / `t_overlap_end_ns` |
 | `chunks/<chunk_id>/camera_frames.parquet` | One row per decoded image |
 | `chunks/<chunk_id>/lidar_sweeps.parquet` | One row per sweep `.npz` (format: `wato_common.artifacts.lidar_sweeps`) |
 | `chunks/<chunk_id>/poses.parquet` | Pose samples over the chunk window ± (`max_bracket_ms` + 1 s), each with `interval_drop_reason` for the stretch to the next sample |
@@ -48,6 +48,14 @@ Contracts every consumer relies on:
 
 - **`sweep_id` is one counter per chunk across all LiDARs** (record order), so
   `(bag_id, chunk_id, sweep_id)` names one sweep on a multi-LiDAR rig.
+- **Neighbouring chunks share 3 × `chunk_overlap_seconds` of data** (6 s at
+  the defaults). Nominal windows start `chunk_seconds - chunk_overlap_seconds`
+  apart, and each chunk is decoded over its nominal window widened by
+  `chunk_overlap_seconds` on both sides (`t_overlap_*`). An image or sweep in
+  the shared span is in both chunks under different `camera_seq` / `sweep_id`
+  (each restarts at 0 per chunk): match it across chunks by
+  `(cam_id, camera_timestamp_ns)` / `(lidar_id, reference_timestamp_ns)`.
+  `tracking` stitches across the span (`src/tracking/README.md`).
 - **`frame_index` repeats an image once per sweep it is nearest to** (~4.9× on
   the 3-LiDAR WATO rig). Consumers read it through
   `wato_common.artifacts.frame_index.FrameIndex`, which hands out each image

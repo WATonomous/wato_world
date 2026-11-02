@@ -13,6 +13,7 @@ from wato_common.tracking import (
     BoxKalmanFilter,
     MultiObjectTracker,
     associate,
+    box_corners_3d,
     cost_terms,
     fit_bev_box,
     iou_3d,
@@ -57,6 +58,17 @@ def test_fit_bev_box_degenerate_inputs_have_floored_extents():
     line = fit_bev_box(np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 2.0, 0.0]]))
     assert line.l == pytest.approx(math.sqrt(8), abs=1e-6)
     assert abs(wrap_heading_half_pi(line.heading - math.pi / 4)) < 1e-6
+
+
+def test_box_corners_3d_span_the_box():
+    box = _box(cx=10.0, cy=-3.0, cz=1.0, heading=0.4)
+    corners = box_corners_3d(box)
+    assert corners.shape == (8, 3)
+    np.testing.assert_allclose(corners[:4, 2], 0.25)
+    np.testing.assert_allclose(corners[4:, 2], 1.75)
+    np.testing.assert_allclose(corners[:4, :2], corners[4:, :2])
+    np.testing.assert_allclose(corners.mean(axis=0), [10.0, -3.0, 1.0])
+    assert points_in_box(corners, box, margin_m=1e-9).all()
 
 
 def test_iou_identical_disjoint_and_half_overlap():

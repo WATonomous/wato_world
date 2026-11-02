@@ -653,11 +653,13 @@ class ProposalRow(BaseModel):
     canonical sweep — so per-sweep joins key on sweep_id alone.
 
     Every source's proposals are rows, and so are fusion's: provenance
-    "lidar_detector", "slf", "lidar_mos" (lidar_preprocessing Step F motion
-    clusters; MotionClusterRow shares the box columns) or "fused". A fused row
-    lists the source rows it merges in member_proposal_ids; source rows stay
-    so each source's reliability can be measured. tracking reads the fused
-    rows. List columns are JSON-encoded.
+    "lidar_mos" (lidar_preprocessing Step F motion clusters; MotionClusterRow
+    shares the box columns), "lifted" (a box around one semantic_lifting
+    instance's points), "slf", "lidar_detector" or "fused". A fused row lists
+    the source rows it merges in member_proposal_ids; source rows stay so each
+    source's reliability can be measured. tracking reads the fused rows. List
+    columns are JSON-encoded. The evidence columns at the end are null except
+    on rows of the source that measures them.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -684,11 +686,19 @@ class ProposalRow(BaseModel):
     # semantic_lifting; None when no lifted instance supports the box.
     cls: Optional[str]
     score: float
-    provenance: str  # "lidar_detector" | "slf" | "lidar_mos" | "fused"
+    # "lidar_mos" | "lifted" | "slf" | "lidar_detector" | "fused"
+    provenance: str
     lidar_point_count: Optional[int] = None
     supporting_cam_ids: str = "[]"  # JSON list[str] of cam_id
     supporting_masklet_ids: str = "[]"  # JSON list[str] of masklet_id
     member_proposal_ids: str = "[]"  # JSON list[str]; fused rows only
+    # lidar_mos evidence: the Step F cluster's MotionClusterRow features.
+    motion_score: Optional[float] = None
+    n_sources: Optional[int] = None
+    frac_persistent: Optional[float] = None
+    track_life: Optional[int] = None
+    # lifted evidence: mean semantic_lifting confidence of the box's points.
+    lift_confidence: Optional[float] = None
 
 
 PROPOSAL_SCHEMA = pa.schema(
@@ -714,6 +724,11 @@ PROPOSAL_SCHEMA = pa.schema(
         pa.field("supporting_cam_ids", pa.string()),
         pa.field("supporting_masklet_ids", pa.string()),
         pa.field("member_proposal_ids", pa.string()),
+        pa.field("motion_score", pa.float64()),
+        pa.field("n_sources", pa.int64()),
+        pa.field("frac_persistent", pa.float64()),
+        pa.field("track_life", pa.int64()),
+        pa.field("lift_confidence", pa.float64()),
     ]
 )
 

@@ -6,8 +6,10 @@
 # ---------------------------------------------------------------------------
 # Chunking — virtual time windows over the bag.  No physical splitting.
 # ---------------------------------------------------------------------------
-chunk_seconds: 30.0          # window length
-chunk_overlap_seconds: 2.0   # overlap with neighbors so tracks can be stitched
+chunk_seconds: 30.0          # nominal window length
+chunk_overlap_seconds: 2.0   # nominal windows overlap by this, and each chunk is
+                             # decoded this much further on both sides, so
+                             # neighbours share 3x it (6 s) for tracking to stitch
 reference_clock: lidar       # unused: frame_index pairs every LiDAR sweep with each camera
 
 # ---------------------------------------------------------------------------

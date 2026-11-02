@@ -252,5 +252,7 @@ Done:
 
 Next:
 - Gaps 1–2 above (ground-truth recall, WATO rig).
-- proposal_generation consuming `motion_clusters.parquet`.
+- proposal_generation consumes `motion_clusters.parquet` (gated `lidar_mos`
+  rows, classed from semantic_lifting); measure the gates' recall once labels
+  exist.
 - tracking built on `wato_common.tracking`.

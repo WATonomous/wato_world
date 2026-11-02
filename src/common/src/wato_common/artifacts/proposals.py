@@ -18,6 +18,7 @@ sweep_id), and only fused rows list members.
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass, fields
 from typing import Optional
 
@@ -34,7 +35,7 @@ from wato_common.schemas import (
 )
 
 FUSED = "fused"
-SOURCES = ("lidar_detector", "slf", "lidar_mos")
+SOURCES = ("lidar_mos", "lifted", "slf", "lidar_detector")
 PROVENANCES = SOURCES + (FUSED,)
 
 _LIST_FIELDS = {
@@ -71,6 +72,11 @@ class Proposal:
     supporting_cam_ids: tuple[str, ...] = ()
     supporting_masklet_ids: tuple[str, ...] = ()
     member_proposal_ids: tuple[str, ...] = ()
+    motion_score: Optional[float] = None
+    n_sources: Optional[int] = None
+    frac_persistent: Optional[float] = None
+    track_life: Optional[int] = None
+    lift_confidence: Optional[float] = None
 
 
 def _problem(proposals: list[Proposal]) -> Optional[str]:
@@ -138,3 +144,7 @@ def read(bag_id: str, chunk_id: str) -> list[Proposal]:
 def fused(proposals: list[Proposal]) -> list[Proposal]:
     """The rows tracking consumes."""
     return [p for p in proposals if p.provenance == FUSED]
+
+
+def exists(bag_id: str, chunk_id: str) -> bool:
+    return os.path.exists(local_path(proposals_path(bag_id, chunk_id)))

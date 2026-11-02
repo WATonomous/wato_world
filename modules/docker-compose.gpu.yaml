@@ -21,9 +21,6 @@ services:
               capabilities: [gpu]
   perception_2d_dev: *gpu-defaults
 
-  proposal_generation: *gpu-defaults
-  proposal_generation_dev: *gpu-defaults
-
   tracking: *gpu-defaults
   tracking_dev: *gpu-defaults
 

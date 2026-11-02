@@ -15,6 +15,13 @@ Payload keys (render_html):
   has_intensity, bounds_min, bounds_max, counts
   static_label, dynamic_label, uniform_label, all_label, static_color
                      optional wording / base colour (default: static/dynamic)
+  boxes              optional {"sweep_id": (B,) int32, "corners": (B, 8, 3)
+                     float32 (wato_common.tracking.box_corners_3d order),
+                     "rgb": (B, 3) uint8} array specs: wireframes shown with
+                     the overlay points of the same sweep_id
+
+Wheel zooms, drag pans, double-click resets; "follow" keeps the shown sweep
+centred.
 """
 
 from __future__ import annotations
@@ -122,6 +129,8 @@ input[type="range"] {{ min-width: 180px; }}
     <button id="next">next</button>
     <label><input id="static" type="checkbox" checked> {payload.get("static_label", "static")}</label>
     <label><input id="dynamic" type="checkbox" checked> {payload.get("dynamic_label", "dynamic")}</label>
+    {'<label><input id="boxes" type="checkbox" checked> boxes</label>' if payload.get("boxes") else ""}
+    <label><input id="follow" type="checkbox"> follow</label>
     <label>point <input id="point" type="range" min="1" max="8" value="2"></label>
   </div>
 </div>
@@ -142,6 +151,12 @@ const dynamicXYZ = decode(PAYLOAD.dynamic_xyz, Float32Array);
 const dynamicSweep = decode(PAYLOAD.dynamic_sweep_id, Int32Array);
 const dynamicIntensity = decode(PAYLOAD.dynamic_intensity, Float32Array);
 const fixedRGB = PAYLOAD.dynamic_rgb ? decode(PAYLOAD.dynamic_rgb, Uint8Array) : null;
+const BOXES = PAYLOAD.boxes ? {{
+  sweep: decode(PAYLOAD.boxes.sweep_id, Int32Array),
+  corners: decode(PAYLOAD.boxes.corners, Float32Array),
+  rgb: decode(PAYLOAD.boxes.rgb, Uint8Array),
+}} : null;
+const BOX_EDGES = [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
 
 const sweepValues = Array.from(new Set(Array.from(dynamicSweep))).sort((a, b) => a - b);
 const sweepInput = document.getElementById('sweep');
@@ -188,6 +203,27 @@ const locColor = gl.getAttribLocation(program, 'aColor');
 const locMvp = gl.getUniformLocation(program, 'uMvp');
 const locPoint = gl.getUniformLocation(program, 'uPointSize');
 
+// Box wireframes: the point shader discards by gl_PointCoord, which lines lack.
+const lineProgram = gl.createProgram();
+gl.attachShader(lineProgram, shader(gl.VERTEX_SHADER, `
+attribute vec3 aPos;
+attribute vec3 aColor;
+uniform mat4 uMvp;
+varying vec3 vColor;
+void main() {{
+  gl_Position = uMvp * vec4(aPos, 1.0);
+  vColor = aColor;
+}}`));
+gl.attachShader(lineProgram, shader(gl.FRAGMENT_SHADER, `
+precision mediump float;
+varying vec3 vColor;
+void main() {{ gl_FragColor = vec4(vColor, 1.0); }}`));
+gl.linkProgram(lineProgram);
+if (!gl.getProgramParameter(lineProgram, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(lineProgram));
+const lineLocPos = gl.getAttribLocation(lineProgram, 'aPos');
+const lineLocColor = gl.getAttribLocation(lineProgram, 'aColor');
+const lineLocMvp = gl.getUniformLocation(lineProgram, 'uMvp');
+
 function makeCloud(xyz, colors) {{
   const pos = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, pos);
@@ -205,6 +241,7 @@ function fillColor(n, rgb) {{
 }}
 const staticCloud = makeCloud(staticXYZ, fillColor(staticXYZ.length / 3, {json.dumps(payload.get("static_color", [0.29, 0.56, 0.85]))}));
 let dynamicCloud = makeCloud(new Float32Array(0), new Float32Array(0));
+let boxLines = makeCloud(new Float32Array(0), new Float32Array(0));
 
 function ramp(t) {{
   t = Math.max(0, Math.min(1, t));
@@ -212,13 +249,30 @@ function ramp(t) {{
           Math.max(0, Math.min(1, 1.5 - Math.abs(4*t - 2))),
           Math.max(0, Math.min(1, 1.5 - Math.abs(4*t - 1)))];
 }}
-function dynamicSelection() {{
+function selected(sid) {{
   const mode = modeInput.value;
   const current = sweepValues[Number(sweepInput.value)] ?? 0;
+  return mode === 'all' || sid === current || (mode === 'trail' && sid <= current && sid > current - 5);
+}}
+function boxSelection() {{
+  if (!BOXES) return;
+  const pos = [], col = [];
+  for (let b = 0; b < BOXES.sweep.length; b++) {{
+    if (!selected(BOXES.sweep[b])) continue;
+    const c = [BOXES.rgb[b*3]/255, BOXES.rgb[b*3+1]/255, BOXES.rgb[b*3+2]/255];
+    for (const [i, j] of BOX_EDGES) {{
+      for (const k of [i, j]) {{
+        pos.push(BOXES.corners[(b*8 + k)*3], BOXES.corners[(b*8 + k)*3 + 1], BOXES.corners[(b*8 + k)*3 + 2]);
+        col.push(c[0], c[1], c[2]);
+      }}
+    }}
+  }}
+  boxLines = makeCloud(new Float32Array(pos), new Float32Array(col));
+}}
+function dynamicSelection() {{
   const idx = [];
   for (let i = 0; i < dynamicSweep.length; i++) {{
-    const sid = dynamicSweep[i];
-    if (mode === 'all' || sid === current || (mode === 'trail' && sid <= current && sid > current - 5)) idx.push(i);
+    if (selected(dynamicSweep[i])) idx.push(i);
   }}
   const xyz = new Float32Array(idx.length * 3);
   const col = new Float32Array(idx.length * 3);
@@ -240,6 +294,13 @@ function dynamicSelection() {{
     col.set(c, j*3);
   }}
   dynamicCloud = makeCloud(xyz, col);
+  if (document.getElementById('follow').checked && idx.length) {{
+    const m = [0, 0, 0];
+    for (let j = 0; j < idx.length; j++) {{ m[0] += xyz[j*3]; m[1] += xyz[j*3+1]; m[2] += xyz[j*3+2]; }}
+    const s = viewSetup();
+    const d = [m[0]/idx.length - center[0], m[1]/idx.length - center[1], m[2]/idx.length - center[2]];
+    pan = [dot(d, s.x), dot(d, s.y)];
+  }}
   document.getElementById('meta').textContent = `${{PAYLOAD.bag_id}} / ${{PAYLOAD.chunk_id}} · {payload.get("dynamic_label", "dynamic")} ${{idx.length.toLocaleString()}} pts · {payload.get("static_label", "static")} ${{(staticXYZ.length/3).toLocaleString()}} pts`;
 }}
 
@@ -263,17 +324,40 @@ function mul(a,b) {{
 const mn = PAYLOAD.bounds_min, mx = PAYLOAD.bounds_max;
 const center = [(mn[0]+mx[0])/2, (mn[1]+mx[1])/2, (mn[2]+mx[2])/2];
 const extent = Math.max(1, Math.hypot(mx[0]-mn[0], mx[1]-mn[1], mx[2]-mn[2]));
+let zoom = 1, pan = [0, 0];
+function viewSetup() {{
+  const view = document.getElementById('view').value;
+  let dir = [0, 0, 1], up = [0, 1, 0];
+  if (view === 'iso') {{ dir = [1, -1, 1]; up = [0,0,1]; }}
+  if (view === 'side') {{ dir = [0, -1, 0]; up = [0,0,1]; }}
+  if (view === 'front') {{ dir = [-1, 0, 0]; up = [0,0,1]; }}
+  const z = normalize(dir), x = normalize(cross(up, z));
+  return {{ dir, up, x, y: cross(z, x), dist: extent * 1.8 }};
+}}
+function halfHeight() {{ return extent * 0.58 / zoom; }}
 function mvp() {{
   const aspect = canvas.width / Math.max(1, canvas.height);
-  const half = extent * 0.58;
-  const view = document.getElementById('view').value;
-  const dist = extent * 1.8;
-  let eye = [center[0], center[1], center[2] + dist], up = [0, 1, 0];
-  if (view === 'iso') {{ eye = [center[0]+dist, center[1]-dist, center[2]+dist]; up = [0,0,1]; }}
-  if (view === 'side') {{ eye = [center[0], center[1]-dist, center[2]]; up = [0,0,1]; }}
-  if (view === 'front') {{ eye = [center[0]-dist, center[1], center[2]]; up = [0,0,1]; }}
-  return mul(mat4Ortho(-half*aspect, half*aspect, -half, half, -dist*4, dist*4), lookAt(eye, center, up));
+  const half = halfHeight();
+  const s = viewSetup();
+  const c = [0, 1, 2].map(k => center[k] + s.x[k]*pan[0] + s.y[k]*pan[1]);
+  const eye = [0, 1, 2].map(k => c[k] + s.dir[k]*s.dist);
+  return mul(mat4Ortho(-half*aspect, half*aspect, -half, half, -s.dist*4, s.dist*4), lookAt(eye, c, s.up));
 }}
+let drag = null;
+canvas.addEventListener('mousedown', (e) => {{ drag = [e.clientX, e.clientY]; }});
+window.addEventListener('mouseup', () => {{ drag = null; }});
+window.addEventListener('mousemove', (e) => {{
+  if (!drag) return;
+  const half = halfHeight(), aspect = canvas.width / Math.max(1, canvas.height);
+  pan[0] -= (e.clientX - drag[0]) * 2 * half * aspect / Math.max(1, canvas.clientWidth);
+  pan[1] += (e.clientY - drag[1]) * 2 * half / Math.max(1, canvas.clientHeight);
+  drag = [e.clientX, e.clientY];
+}});
+canvas.addEventListener('wheel', (e) => {{
+  e.preventDefault();
+  zoom = Math.min(500, Math.max(0.2, zoom * Math.exp(-e.deltaY * 0.0015)));
+}}, {{ passive: false }});
+canvas.addEventListener('dblclick', () => {{ zoom = 1; pan = [0, 0]; }});
 function drawCloud(cloud) {{
   gl.bindBuffer(gl.ARRAY_BUFFER, cloud.pos);
   gl.vertexAttribPointer(locPos, 3, gl.FLOAT, false, 0, 0);
@@ -293,10 +377,22 @@ function render() {{
   gl.uniform1f(locPoint, Number(document.getElementById('point').value) * (window.devicePixelRatio || 1));
   if (document.getElementById('static').checked) drawCloud(staticCloud);
   if (document.getElementById('dynamic').checked) drawCloud(dynamicCloud);
+  if (BOXES && document.getElementById('boxes').checked && boxLines.count) {{
+    gl.useProgram(lineProgram);
+    gl.uniformMatrix4fv(lineLocMvp, false, new Float32Array(mvp()));
+    gl.bindBuffer(gl.ARRAY_BUFFER, boxLines.pos);
+    gl.vertexAttribPointer(lineLocPos, 3, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(lineLocPos);
+    gl.bindBuffer(gl.ARRAY_BUFFER, boxLines.col);
+    gl.vertexAttribPointer(lineLocColor, 3, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(lineLocColor);
+    gl.drawArrays(gl.LINES, 0, boxLines.count);
+    gl.useProgram(program);
+  }}
   requestAnimationFrame(render);
 }}
-function refresh() {{ dynamicSelection(); }}
-for (const id of ['view','mode','color','sweep','static','dynamic','point']) document.getElementById(id).addEventListener('input', refresh);
+function refresh() {{ dynamicSelection(); boxSelection(); }}
+for (const id of ['view','mode','color','sweep','static','dynamic','point','follow']) document.getElementById(id).addEventListener('input', refresh);
 document.getElementById('prev').onclick = () => {{ sweepInput.value = Math.max(0, Number(sweepInput.value)-1); refresh(); }};
 document.getElementById('next').onclick = () => {{ sweepInput.value = Math.min(Number(sweepInput.max), Number(sweepInput.value)+1); refresh(); }};
 let timer = null;

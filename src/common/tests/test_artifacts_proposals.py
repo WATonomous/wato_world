@@ -45,6 +45,10 @@ def _proposal(**overrides) -> pr.Proposal:
         lidar_point_count=120,
         supporting_cam_ids=("PANO_NN",),
         supporting_masklet_ids=("m3",),
+        motion_score=1.9,
+        n_sources=2,
+        frac_persistent=0.05,
+        track_life=9,
     )
     fields.update(overrides)
     return pr.Proposal(**fields)
@@ -64,18 +68,28 @@ def _chunk() -> list[pr.Proposal]:
             supporting_cam_ids=(),
             supporting_masklet_ids=(),
         ),
-        _proposal(proposal_id="slf-0", provenance="slf"),
+        _proposal(
+            proposal_id="lifted-0",
+            provenance="lifted",
+            motion_score=None,
+            n_sources=None,
+            frac_persistent=None,
+            track_life=None,
+            lift_confidence=0.8,
+        ),
         _proposal(
             proposal_id="fused-0",
             provenance="fused",
-            member_proposal_ids=("mos-4", "slf-0"),
+            member_proposal_ids=("mos-4", "lifted-0"),
         ),
     ]
 
 
 def test_round_trip():
     proposals = _chunk()
+    assert not pr.exists(BAG, CHUNK)
     pr.write(BAG, CHUNK, proposals)
+    assert pr.exists(BAG, CHUNK)
     assert pr.read(BAG, CHUNK) == proposals
     assert [p.proposal_id for p in pr.fused(proposals)] == ["fused-0"]
     pr.write(BAG, CHUNK, [])
@@ -128,7 +142,7 @@ def test_record_tracks_the_row_schema():
             "itself fused",
         ),
         (
-            lambda ps: [dataclasses.replace(ps[0], member_proposal_ids=("slf-0",))]
+            lambda ps: [dataclasses.replace(ps[0], member_proposal_ids=("lifted-0",))]
             + ps[1:],
             "only fused rows",
         ),

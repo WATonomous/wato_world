@@ -139,11 +139,12 @@ semantic_lifting      reads: frame_index, poses, lidar_proc/*_world.npz, masks_2
        ├─ lifted_instances.parquet     (instance -> class, masklet_ids, cam_ids)
        └─ lifted_stats.parquet         (per-sweep lifting statistics)
 
-proposal_generation   reads: lidar_proc/*_world.npz, lifted_labels, motion_clusters, ground.npz, calibration
+proposal_generation   reads: lidar_proc_index, lidar_proc/*_world.npz, motion_proposals, motion_clusters,
+                             ground.npz, lifted_labels, lifted_instances (calibration, frame_index: viewers)
   └─ chunks/<chunk>/
-       ├─ proposals.parquet          (3D boxes per frame_sync frame: every source's rows plus
+       ├─ proposals.parquet          (3D boxes per frame_sync frame: lidar_mos + lifted rows plus
        │                              the fused rows that list them; tracking reads the fused)
-       └─ proposal_masks/            (projected 2D mask used during SLF fitting)
+       └─ proposal_masks/            (planned: projected 2D mask used during SLF fitting)
 
 tracking              reads: proposals, tracklets_2d, lidar_proc/*_world.npz  (builds on wato_common.tracking)
   └─ per-bag/
@@ -160,15 +161,16 @@ label_refinement      reads: tracks, lidar_proc/*_world.npz, motion_proposals / 
 
 Done: `ingest`; `lidar_preprocessing` (Steps A–F: deskew, classify, ground, reduce, IWU, motion proposals); `perception_2d` (YOLO26 or GroundingDINO / SAM2 /
 DA-V2 / DINOv2); `semantic_lifting` core (UniLiPs Eq. 1 lifting + cross-camera
-voting). Next:
+voting); `proposal_generation` first sources (gated `motion_clusters.parquet`
+rows as `lidar_mos`, boxes around lifted instances as `lifted`, fused on shared
+LiDAR points; `docs/proposal_generation_measurements.md`). Next:
 
-1. **`proposal_generation`** — the next unblocker
-   - Map `motion_clusters.parquet` rows onto `ProposalRow`
-     (`provenance="lidar_mos"`), gating on the soft features
-     (`motion_score`, `n_sources`, `frac_persistent`)
-   - LiDAR detector (CenterPoint or similar) on aggregated static/dynamic points
-   - SLF: lift 2D masks into 3D using ground plane from `ground.npz`
-   - Fuse LiDAR, MOS and SLF proposals (NMS or learned fusion)
+1. **`proposal_generation`** — the remaining sources
+   - SLF: fit shapes to the 2D masks, using the ground plane from `ground.npz`
+     (lifted-only boxes cover one side of far cars today)
+   - LiDAR detector (CenterPoint or similar), deferred until the comparison
+     class is chosen (`novelty_positioning.md`)
+   - Per-source reliability in place of the placeholder scores
 
 2. **`tracking`** — once proposals exist
    - 3D Kalman filter on proposals across chunks — build on
