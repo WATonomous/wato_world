@@ -25,6 +25,17 @@ ground maps, and recall-oriented motion proposals.
 WATO bags must be ingested with `ingest.wato.yaml` / `ingest.wato_6cam.yaml`
 (per-corner LiDAR topics), then processed with `lidar_preprocessing.wato.yaml`.
 
+## Visualization
+
+The default viewer is a standalone HTML file:
+
+```bash
+./watod run lidar_preprocessing viz --bag <bag> --chunk <chunk> --open
+```
+
+Scroll or two-finger trackpad scroll to zoom, left-drag to orbit, and
+right-drag to pan. The `--backend web` viewer uses the same controls.
+
 ## Steps
 
 ```
