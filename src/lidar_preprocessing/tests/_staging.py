@@ -165,7 +165,7 @@ def write_flat_ground(bag_id: str, chunk_id: str, z: float = 0.0) -> None:
     )
 
 
-def write_summary(bag_id: str, chunk_id: str, segmentation: str = "aw") -> None:
+def write_summary(bag_id: str, chunk_id: str) -> None:
     row = ChunkSummaryRow(
         bag_id=bag_id,
         chunk_id=chunk_id,
@@ -180,7 +180,6 @@ def write_summary(bag_id: str, chunk_id: str, segmentation: str = "aw") -> None:
         cache_auto_disabled=False,
         estimated_cache_bytes=0,
         ground_status="ok",
-        segmentation_method=segmentation,
     )
     write_table(
         [row.model_dump()],

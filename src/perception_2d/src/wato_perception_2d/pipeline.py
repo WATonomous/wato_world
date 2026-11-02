@@ -12,9 +12,11 @@ Large + SAM2 + DINOv2 don't fit together on ~6 GB):
     keyframes, SAM2's video predictor masks and tracks each box, DINOv2 embeds
     each masklet → tracklets_2d.parquet + detections_2d.parquet + mask PNGs.
 
-Model loading is fail-loud, and SAM2 + the detector are import-checked before
-the depth pass. Cross-camera identity is left to the `tracking` component
-(global_object_id stays null).
+Model loading and inference are fail-loud: a detector, SAM2 or DINOv2 failure
+stops the run rather than leaving a camera with fewer masklets or no
+embeddings. SAM2 + the detector are import-checked, and the SAM2, YOLO and
+DINOv2 weights load-checked, before the depth pass. Cross-camera identity is
+left to the `tracking` component.
 """
 
 from __future__ import annotations
@@ -23,8 +25,7 @@ import logging
 import os
 import pickle
 import shutil
-from collections import defaultdict, deque
-from dataclasses import replace
+from collections import deque
 from typing import Optional, Union
 
 from tqdm.auto import tqdm
@@ -45,8 +46,8 @@ from wato_common.artifact_store import (
 )
 from wato_common.artifacts import depth, masklets
 from wato_common.artifacts.calibration import Calibration, CameraCalibration
+from wato_common.artifacts.frame_index import CameraFrame, FrameIndex
 from wato_common.geometry import invert_se3
-from wato_common.pose_lookup import PoseLookup
 from wato_perception_2d.config import ComponentConfig
 from wato_perception_2d.model_registry import revisions as model_revisions
 from wato_perception_2d.fusion.depth_align import (
@@ -56,10 +57,8 @@ from wato_perception_2d.fusion.depth_align import (
 )
 from wato_perception_2d.fusion.masklet import Masklet
 from wato_perception_2d.io import (
-    CameraFrameInfo,
     clear_lidar_caches,
     load_chunks,
-    load_frame_index,
     load_static_lidar_points,
 )
 from wato_perception_2d.models._sam2_runtime import (
@@ -73,6 +72,7 @@ from wato_perception_2d.models.detector import (
     detector_importable,
 )
 from wato_perception_2d.models.discovery import Florence2Discovery
+from wato_perception_2d.models.embeddings import check_model as check_dino_model
 from wato_perception_2d.models.yolo_detector import (
     YoloDetector,
     check_class_map,
@@ -109,6 +109,31 @@ def _load_image(path: str) -> Optional[np.ndarray]:
     except Exception as exc:  # noqa: BLE001
         log.warning("Failed to load image %s: %s", path, exc)
         return None
+
+
+def _ego_mask(cfg: ComponentConfig, cam_id: str, width: int, height: int):
+    """(H, W) bool region of ``cam_id``'s images showing the ego vehicle, or
+    None when the camera has no polygons (it doesn't see the car).
+
+    Raises ValueError when the polygons were drawn on a different image size.
+    """
+    polygons = cfg.ego_mask.polygons.get(cam_id)
+    if not polygons:
+        return None
+    if tuple(cfg.ego_mask.image_size) != (width, height):
+        raise ValueError(
+            f"ego_mask polygons are drawn on {cfg.ego_mask.image_size[0]}x"
+            f"{cfg.ego_mask.image_size[1]} images but {cam_id}'s are "
+            f"{width}x{height}"
+        )
+    from PIL import Image as PILImage
+    from PIL import ImageDraw
+
+    canvas = PILImage.new("1", (width, height))
+    draw = ImageDraw.Draw(canvas)
+    for poly in polygons:
+        draw.polygon([(float(x), float(y)) for x, y in poly], fill=1)
+    return np.asarray(canvas, dtype=bool)
 
 
 def _chunk_complete(bag_id: str, chunk_id: str) -> bool:
@@ -174,19 +199,18 @@ def _align_and_write_depth(
     bag_id: str,
     chunk_id: str,
     cam_id: str,
-    frame: CameraFrameInfo,
+    frame: CameraFrame,
     disparity: np.ndarray,
     calib: CameraCalibration,
-    poses: PoseLookup,
     fallback_window: deque,
 ) -> None:
     """LiDAR-align one frame's DA-V2 disparity to metric depth and write it.
 
     The caller runs DA-V2 (batched); this is the per-frame sequential tail.
     Writes nothing on FitStatus.FAILED (a missing frame means no usable depth).
-    The world-frame static points are projected with the ego pose at the
-    frame's camera_timestamp_ns, not frame_index's sweep pose (up to ~0.9 m
-    apart at 30 m on the WATO rig).
+    The world-frame static points are projected with the frame's own pose
+    (CameraFrame.world_T_ego, at the image's time); a frame without one gets
+    no anchors.
     """
     H, W = disparity.shape[:2]
     fit_params: dict = {
@@ -201,19 +225,13 @@ def _align_and_write_depth(
     # static points are world-frame, so they combine directly; the corner
     # scanners add anchors where the centre one doesn't reach.
     per_sweep = [
-        load_static_lidar_points(bag_id, chunk_id, sid)
-        for sid in (frame.sweep_ids or (frame.sweep_id,))
+        load_static_lidar_points(bag_id, chunk_id, sid) for sid in frame.sweep_ids
     ]
     per_sweep = [p for p in per_sweep if p is not None and len(p)]
     static_pts = np.concatenate(per_sweep) if per_sweep else None
-    pose = (
-        poses.at(frame.camera_timestamp_ns)
-        if frame.camera_timestamp_ns is not None
-        else None
-    )
 
-    if static_pts is not None and pose is not None and pose.valid:
-        cam_T_world = invert_se3(calib.ego_T_cam) @ invert_se3(pose.world_T_ego)
+    if static_pts is not None and frame.world_T_ego is not None:
+        cam_T_world = invert_se3(calib.ego_T_cam) @ invert_se3(frame.world_T_ego)
         d_lidar, disp = build_anchor_pairs(
             static_pts,
             disparity,
@@ -261,10 +279,10 @@ def _cam_partial_path(bag_id: str, chunk_id: str, cam_id: str) -> str:
 def _load_cam_partial(
     bag_id: str, chunk_id: str, cam_id: str
 ) -> Optional[list[Masklet]]:
-    """Return cached per-camera masklets if a usable partial exists.
+    """Return cached per-camera masklets if a readable partial exists.
 
-    An empty cached list counts as no cache: zero masklets is almost always a
-    silent failure, and trusting it would skip the camera on every resume.
+    An empty list is a real result (an empty road): tracking failures raise
+    instead of returning fewer masklets.
     """
     p = _cam_partial_path(bag_id, chunk_id, cam_id)
     if not os.path.exists(p):
@@ -279,26 +297,13 @@ def _load_cam_partial(
         except OSError:
             pass
         return None
-    if not cached:
-        return None
     return cached
 
 
 def _save_cam_partial(
     bag_id: str, chunk_id: str, cam_id: str, cam_masklets: list[Masklet]
 ) -> None:
-    """Persist per-camera masklets so abort doesn't lose this camera's work.
-
-    Skips writing an empty result (a likely silent failure) so the next run
-    re-attempts this camera rather than trusting an empty cache.
-    """
-    if not cam_masklets:
-        log.info(
-            "%s produced 0 masklets — skipping partial save so the next run "
-            "re-attempts this camera instead of trusting an empty cache",
-            cam_id,
-        )
-        return
+    """Persist per-camera masklets so abort doesn't lose this camera's work."""
     p = _cam_partial_path(bag_id, chunk_id, cam_id)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     tmp = p + ".tmp"
@@ -355,6 +360,25 @@ def _inference_ctx():
         return contextlib.nullcontext()
 
 
+def _check_tracking_weights(cfg: ComponentConfig, detector: Detector) -> None:
+    """Raise unless the tracking pass's weights are there, before the depth pass.
+
+    The tracking pass loads them after a chunk's depth pass (~25 min on a WATO
+    chunk), which is where a missing checkpoint would otherwise surface. None of
+    this takes VRAM: YOLO and DINOv2 load on the CPU. GroundingDINO loads
+    straight onto the GPU, so it is left to its first detect().
+    """
+    if not os.path.isfile(cfg.segmentation.checkpoint):
+        raise RuntimeError(
+            f"SAM2 checkpoint {cfg.segmentation.checkpoint!r} not found. Fetch it "
+            "with scripts/fetch_models.py."
+        )
+    if isinstance(detector, YoloDetector):
+        detector.load()
+    if cfg.embeddings.every_k_frames > 0:
+        check_dino_model(cfg.embeddings.model)
+
+
 def _process_chunk(
     cfg: ComponentConfig,
     bag_id: str,
@@ -385,8 +409,9 @@ def _process_chunk(
             if os.path.isdir(d):
                 shutil.rmtree(d)
 
-    frames = load_frame_index(bag_id, chunk_id)
-    if not frames:
+    frames_by_cam = FrameIndex.load(bag_id, chunk_id).by_camera()
+    n_images = sum(len(v) for v in frames_by_cam.values())
+    if not n_images:
         log.warning("chunk %s: empty frame index — skipping", chunk_id)
         _write_empty(bag_id, chunk_id)
         return
@@ -396,7 +421,7 @@ def _process_chunk(
     if not sam2_importable():
         raise RuntimeError(
             f"chunk {chunk_id}: SAM2 (`sam2`) is not importable but "
-            f"{len(frames)} frames need tracking. Install the `sam2` package and "
+            f"{n_images} frames need tracking. Install the `sam2` package and "
             "fetch facebook/sam2.1-hiera-large into the HF cache."
         )
     backend_ok, backend_pkg = (
@@ -407,30 +432,21 @@ def _process_chunk(
     if not backend_ok():
         raise RuntimeError(
             f"chunk {chunk_id}: the {cfg.detection.backend} detector backend "
-            f"(`{backend_pkg}`) is not importable but {len(frames)} frames need "
+            f"(`{backend_pkg}`) is not importable but {n_images} frames need "
             f"detection. Install {backend_pkg} and fetch the checkpoint "
             "(scripts/fetch_models.py)."
         )
+    _check_tracking_weights(cfg, detector)
 
     calib = Calibration.load(bag_id)
     calibration = {cam_id: calib.camera(cam_id) for cam_id in calib.cameras}
 
     partial_dir = _partial_dir(bag_id, chunk_id)
 
-    frames_by_cam: dict[str, list[CameraFrameInfo]] = defaultdict(list)
-    for f in frames:
-        frames_by_cam[f.cam_id].append(f)
-    for cam_id in frames_by_cam:
-        frames_by_cam[cam_id] = _one_frame_per_image(
-            sorted(frames_by_cam[cam_id], key=lambda f: f.camera_seq)
-        )
-
     log.info(
-        "chunk %s: %d images (%d frame_index rows) across %d cameras; "
-        "discovery=%s; depth=%s",
+        "chunk %s: %d images across %d cameras; discovery=%s; depth=%s",
         chunk_id,
-        sum(len(v) for v in frames_by_cam.values()),
-        len(frames),
+        n_images,
         len(frames_by_cam),
         cfg.discovery.backend,
         "on" if cfg.depth.enabled else "off",
@@ -469,7 +485,7 @@ def _run_depth_pass(
     cfg: ComponentConfig,
     bag_id: str,
     chunk_id: str,
-    frames_by_cam: dict[str, list[CameraFrameInfo]],
+    frames_by_cam: dict[str, list[CameraFrame]],
     calibration: dict[str, CameraCalibration],
 ) -> None:
     """PASS 1: write metric depth for every frame, then free DA-V2's VRAM.
@@ -480,15 +496,6 @@ def _run_depth_pass(
     the LiDAR alignment that follows each batch stays strictly sequential, so the
     fallback-window state is identical to per-frame processing.
     """
-    try:
-        poses = PoseLookup.load(bag_id, chunk_id)
-    except FileNotFoundError:
-        log.warning(
-            "chunk %s has no poses.parquet — no frame can be LiDAR-aligned "
-            "(re-run ingest)",
-            chunk_id,
-        )
-        poses = PoseLookup([])
     depth_model = DepthAnythingV2(model_size=cfg.depth.model, device=None)
     batch_size = max(1, cfg.depth.batch_size)
     try:
@@ -508,7 +515,7 @@ def _run_depth_pass(
                 for start in range(0, len(cam_frames), batch_size):
                     batch_frames = cam_frames[start : start + batch_size]
                     images: list[np.ndarray] = []
-                    kept_frames: list[CameraFrameInfo] = []
+                    kept_frames: list[CameraFrame] = []
                     for frame in batch_frames:
                         image = _load_image(frame.image_path)
                         if image is None:
@@ -528,7 +535,6 @@ def _run_depth_pass(
                                 frame,
                                 disparity,
                                 calib,
-                                poses,
                                 fallback_window,
                             )
                     pbar.update(len(batch_frames))
@@ -539,34 +545,11 @@ def _run_depth_pass(
         _free_cuda()
 
 
-def _one_frame_per_image(frames: list[CameraFrameInfo]) -> list[CameraFrameInfo]:
-    """One entry per camera image, from a camera's frames sorted by camera_seq.
-
-    frame_index has one row per (sweep, camera), so an image repeats for every
-    sweep it is nearest to — ~4.9x on the 3-LiDAR WATO rig (3 x 19.8 Hz sweeps
-    against 12 Hz cameras). Both passes must see each image once: repeats
-    re-run depth on the same image (last row's sweep wins the file), multiply
-    SAM2's frame stack in host RAM, write each camera_seq into frames_present
-    once per row, and make the frame-counted settings (redetect_every_k,
-    drop_lost_after_frames, embeddings.every_k_frames) count rows instead of
-    images. Keeps the first row of each camera_seq, with every row's sweep in
-    `sweep_ids` so depth can anchor on all of them.
-    """
-    out: list[CameraFrameInfo] = []
-    sweeps: list[list[int]] = []
-    for f in frames:
-        if not out or out[-1].camera_seq != f.camera_seq:
-            out.append(f)
-            sweeps.append([])
-        sweeps[-1].extend(f.sweep_ids or (f.sweep_id,))
-    return [replace(f, sweep_ids=tuple(dict.fromkeys(s))) for f, s in zip(out, sweeps)]
-
-
 def _run_tracking_pass(
     cfg: ComponentConfig,
     bag_id: str,
     chunk_id: str,
-    frames_by_cam: dict[str, list[CameraFrameInfo]],
+    frames_by_cam: dict[str, list[CameraFrame]],
     calibration: dict[str, CameraCalibration],
     discovery: Optional[Florence2Discovery],
     detector: Detector,
@@ -616,7 +599,7 @@ def _run_tracking_pass(
                 "chunk %s / %s: tracking (%d frames)", chunk_id, cam_id, len(cam_frames)
             )
 
-            valid_frames: list[CameraFrameInfo] = []
+            valid_frames: list[CameraFrame] = []
             valid_images: list[np.ndarray] = []
             for frame in cam_frames:
                 image = _load_image(frame.image_path)
@@ -630,6 +613,13 @@ def _run_tracking_pass(
                 concepts = _discover_concepts_florence2(discovery, valid_images, cfg)
             else:
                 concepts = fixed_concepts
+            ego = (
+                _ego_mask(
+                    cfg, cam_id, valid_images[0].shape[1], valid_images[0].shape[0]
+                )
+                if valid_images
+                else None
+            )
 
             cam_masklets = track_camera(
                 predictor,
@@ -651,6 +641,21 @@ def _run_tracking_pass(
                 drop_lost_after_frames=cfg.tracking.drop_lost_after_frames,
                 duplicate_mask_iou=cfg.tracking.duplicate_mask_iou,
                 autocast_dtype=cfg.tracking.autocast_dtype,
+                ego_mask=ego,
+                ego_max_fraction=cfg.ego_mask.max_fraction,
+                island_fraction=cfg.tracking.island_fraction,
+                collapse_fraction=cfg.tracking.collapse_fraction,
+                collapse_after_frames=cfg.tracking.collapse_after_frames,
+                contained_classes=tuple(cfg.tracking.contained_classes),
+                container_classes=tuple(cfg.tracking.container_classes),
+                containment_fraction=cfg.tracking.containment_fraction,
+                containment_after_frames=cfg.tracking.containment_after_frames,
+                birth_score=cfg.tracking.birth_score,
+                confirm_keyframes=cfg.tracking.confirm_keyframes,
+                support_keyframes=cfg.tracking.support_keyframes,
+                support_min_area=cfg.tracking.support_min_area,
+                reprompt_score=cfg.tracking.reprompt_score,
+                reprompt_below_iou=cfg.tracking.reprompt_below_iou,
             )
             log.info(
                 "chunk %s / %s: %d masklets from %d frames",
@@ -683,7 +688,6 @@ def _masklet_record(mkl: Masklet, syn2cls: dict[str, str]) -> masklets.MaskletRe
         frames_present=tuple(mkl.frames_present),
         raw_phrase=mkl.cls,
         det_score=mkl.score,
-        global_object_id=mkl.global_object_id,
         dino_feature_path=dino_path,
         tracker_backend=mkl.tracker_backend,
     )

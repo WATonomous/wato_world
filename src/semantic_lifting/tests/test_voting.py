@@ -1,80 +1,106 @@
-"""Tests for voting.py — cross-camera vote aggregation."""
+"""Tests for voting.py — cross-camera vote resolution."""
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
-from wato_semantic_lifting.voting import PointVote, accumulate_votes
+from wato_semantic_lifting.voting import Votes, resolve
+
+# Labels (masklets) used below: index -> class index, instance index.
+CAR, PED = 0, 1
 
 
-def _vote(pt_idx: int, instance: str, cls: str, score: float, cam: str) -> PointVote:
-    return PointVote(
-        point_idx=pt_idx,
-        instance_id=instance,
-        cls=cls,
-        score=score,
-        cam_id=cam,
-        mask_area=100,
+def _votes(*rows: tuple[int, int, int, float]) -> Votes:
+    """rows of (point, camera, label, score)."""
+    a = np.array(rows, dtype=float).reshape(-1, 4)
+    return Votes(
+        point_idx=a[:, 0].astype(np.int64),
+        cam_idx=a[:, 1].astype(np.int64),
+        label_idx=a[:, 2].astype(np.int64),
+        score=a[:, 3],
     )
 
 
+def _resolve(votes: Votes, label_cls, label_instance=None):
+    label_cls = np.asarray(label_cls, np.int64)
+    if label_instance is None:
+        label_instance = np.arange(len(label_cls))
+    return resolve(votes, label_cls, np.asarray(label_instance, np.int64))
+
+
 def test_single_vote_wins_with_confidence_one():
-    votes = [_vote(0, "obj1", "car", 0.9, "cam_front")]
-    result = accumulate_votes(votes, n_points=1)
-    assert len(result) == 1
-    assert result[0].instance_id == "obj1"
-    assert result[0].confidence == pytest.approx(1.0)
-    assert result[0].n_supporting_cameras == 1
-    assert result[0].n_disagreeing_cameras == 0
+    r = _resolve(_votes((0, 0, 0, 0.9)), [CAR])
+    assert r.point_idx.tolist() == [0]
+    assert r.instance.tolist() == [0] and r.cls.tolist() == [CAR]
+    assert r.confidence.tolist() == [1.0]
+    assert r.n_supporting_cameras.tolist() == [1]
+    assert r.n_disagreeing_cameras.tolist() == [0]
 
 
-def test_two_cameras_agree_high_confidence():
-    """Two cameras vote for the same instance → confidence 1.0, 2 supporting cameras."""
-    votes = [
-        _vote(0, "obj1", "car", 0.8, "cam_front"),
-        _vote(0, "obj1", "car", 0.9, "cam_back"),
-    ]
-    result = accumulate_votes(votes, n_points=1)
-    assert len(result) == 1
-    assert result[0].instance_id == "obj1"
-    assert result[0].confidence == pytest.approx(1.0)
-    assert result[0].n_supporting_cameras == 2
-    assert result[0].n_disagreeing_cameras == 0
+def test_two_cameras_on_the_same_class_agree():
+    """Each camera's masklet is its own instance until they're merged, but two
+    cameras calling a point "car" agree: full confidence, both support it."""
+    r = _resolve(_votes((0, 0, 0, 0.6), (0, 1, 1, 0.8)), [CAR, CAR])
+    assert r.cls.tolist() == [CAR]
+    assert r.instance.tolist() == [1]  # the higher-scoring masklet
+    assert r.confidence.tolist() == [1.0]
+    assert r.n_supporting_cameras.tolist() == [2]
+    assert r.n_disagreeing_cameras.tolist() == [0]
 
 
-def test_two_cameras_disagree_winner_by_score():
-    """Winner is the instance with higher cumulative score."""
-    votes = [
-        _vote(0, "obj1", "car", 0.9, "cam_front"),
-        _vote(0, "obj2", "truck", 0.3, "cam_back"),
-    ]
-    result = accumulate_votes(votes, n_points=1)
-    assert result[0].instance_id == "obj1"
-    assert result[0].n_disagreeing_cameras == 1
-    # confidence = 0.9 / (0.9 + 0.3) = 0.75
-    assert result[0].confidence == pytest.approx(0.75, abs=0.01)
+def test_merged_masklets_vote_as_one_instance():
+    r = _resolve(_votes((0, 0, 0, 0.6), (0, 1, 1, 0.8)), [CAR, CAR], [5, 5])
+    assert r.instance.tolist() == [5]
+    assert r.n_supporting_cameras.tolist() == [2]
 
 
-def test_multiple_points_independently_resolved():
-    votes = [
-        _vote(0, "A", "car", 1.0, "cam"),
-        _vote(1, "B", "truck", 1.0, "cam"),
-    ]
-    result = accumulate_votes(votes, n_points=2)
-    assert len(result) == 2
-    by_idx = {r.point_idx: r for r in result}
-    assert by_idx[0].instance_id == "A"
-    assert by_idx[1].instance_id == "B"
+def test_cameras_on_different_classes_disagree():
+    r = _resolve(_votes((0, 0, 0, 0.9), (0, 1, 1, 0.3)), [CAR, PED])
+    assert r.cls.tolist() == [CAR]
+    assert r.confidence[0] == pytest.approx(0.9 / 1.2)
+    assert r.n_supporting_cameras.tolist() == [1]
+    assert r.n_disagreeing_cameras.tolist() == [1]
 
 
-def test_empty_votes_returns_empty():
-    result = accumulate_votes([], n_points=10)
-    assert result == []
+def test_class_score_is_summed_across_cameras():
+    """Two weak "car" votes outweigh one stronger "pedestrian" vote; the
+    disagreeing count is in cameras, not in competing labels."""
+    votes = _votes((0, 0, 0, 0.35), (0, 1, 1, 0.35), (0, 2, 2, 0.5))
+    r = _resolve(votes, [CAR, CAR, PED])
+    assert r.cls.tolist() == [CAR]
+    assert r.confidence[0] == pytest.approx(0.7 / 1.2)
+    assert r.n_supporting_cameras.tolist() == [2]
+    assert r.n_disagreeing_cameras.tolist() == [1]
 
 
-def test_point_with_no_vote_not_in_result():
-    """Points that received no vote are absent from the result."""
-    votes = [_vote(5, "obj1", "car", 0.8, "cam")]
-    result = accumulate_votes(votes, n_points=10)
-    assert len(result) == 1
-    assert result[0].point_idx == 5
+def test_runner_up_is_the_strongest_other_class():
+    votes = _votes((0, 0, 0, 0.8), (0, 1, 1, 0.3), (0, 2, 2, 0.1))
+    r = _resolve(votes, [CAR, PED, 2])
+    assert r.confidence[0] == pytest.approx(0.8 / 1.1)
+    assert r.n_disagreeing_cameras.tolist() == [2]
+
+
+def test_points_resolve_independently_and_in_point_order():
+    votes = _votes((5, 0, 1, 0.6), (2, 0, 0, 0.9), (2, 1, 1, 0.2))
+    r = _resolve(votes, [CAR, PED])
+    assert r.point_idx.tolist() == [2, 5]
+    assert r.cls.tolist() == [CAR, PED]
+    assert r.confidence[1] == pytest.approx(1.0)
+
+
+def test_ties_break_deterministically_to_the_lower_index():
+    r = _resolve(_votes((0, 0, 1, 0.5), (0, 1, 0, 0.5)), [PED, CAR])
+    assert r.cls.tolist() == [CAR]  # class index 0 beats 1 at equal score
+    r = _resolve(_votes((0, 0, 1, 0.5), (0, 1, 0, 0.5)), [CAR, CAR])
+    assert r.instance.tolist() == [0]
+
+
+def test_empty_votes_resolve_to_nothing():
+    r = _resolve(_votes(), [CAR])
+    assert r.point_idx.shape == (0,) and r.confidence.shape == (0,)
+
+
+def test_a_camera_voting_twice_for_one_point_is_rejected():
+    with pytest.raises(ValueError, match="one vote per camera"):
+        _resolve(_votes((0, 0, 0, 0.5), (0, 0, 1, 0.5)), [CAR, CAR])

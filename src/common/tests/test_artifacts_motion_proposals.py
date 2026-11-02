@@ -97,8 +97,21 @@ def test_cluster_record_tracks_the_row_schema():
 def test_bit_roles_and_decode():
     assert int(mp.SEED_BITS) & int(mp.ATTACH_BITS) == 0
     assert int(mp.BOX_FILL) & (int(mp.SEED_BITS) | int(mp.ATTACH_BITS)) == 0
-    decoded = mp.decode_bits(np.array([mp.MF_MOS | mp.UNMAPPED, 0], np.uint8))
-    assert decoded["MF_MOS"].tolist() == [True, False]
+    decoded = mp.decode_bits(np.array([mp.SEG_DYNAMIC | mp.UNMAPPED, 0], np.uint8))
+    assert decoded["SEG_DYNAMIC"].tolist() == [True, False]
     assert decoded["UNMAPPED"].tolist() == [True, False]
     assert not decoded["BOX_FILL"].any()
     assert set(decoded) == set(mp.BIT_NAMES.values())
+
+
+def test_bit_positions_are_the_on_disk_encoding():
+    """Bit values are stored in motion_proposals.npz: renumbering one silently
+    changes what every existing artifact means. Bit 3 is unused."""
+    assert (
+        int(mp.AW_DYNAMIC),
+        int(mp.AW_AMBIGUOUS),
+        int(mp.IWU_EVICTED),
+        int(mp.SEG_DYNAMIC),
+        int(mp.BOX_FILL),
+        int(mp.UNMAPPED),
+    ) == (1, 2, 4, 16, 32, 64)

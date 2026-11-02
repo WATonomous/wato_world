@@ -55,10 +55,11 @@ per camera stream        │                                                    
                          └─────────────────────────────────────────────────────────────┘
 ```
 
-Model loading is **fail-loud**: a missing detector / SAM2 / depth model raises
-rather than emitting degraded output, and the SAM2 + detector imports are checked
-*before* the depth pass so a missing install fails fast instead of after the
-whole depth pass has run.
+Model loading and inference are **fail-loud**: a detector / SAM2 / DINOv2 /
+depth failure raises rather than emitting degraded output (a camera with fewer
+masklets, masklets without embeddings), and the SAM2 + detector imports and the
+SAM2 / YOLO / DINOv2 weights are checked *before* the depth pass so a missing
+install or checkpoint fails fast instead of after the whole depth pass has run.
 
 ---
 
@@ -70,8 +71,8 @@ selected by `discovery.backend`:
 - **`fixed`** (default) — the closed-set taxonomy from `discovery.fixed_classes`
   (or `prompts.yaml`, or the hardcoded fallback when neither is present). One
   prompt phrase per class. Deterministic and fast; the right default for a known
-  AV taxonomy (car, truck, bus, motorcycle, bicycle, pedestrian, traffic cone,
-  barrier).
+  AV taxonomy (car, truck, bus, motorcycle, bicycle, pedestrian; no traffic
+  cone or barrier, which no detector tried finds on WATO).
 - **`florence2`** — open-vocabulary. Florence-2 (`<DENSE_REGION_CAPTION>`) runs
   on every `sample_every_k`-th frame of a camera stream; phrases scoring above
   `min_confidence` are pooled, deduped, and canonicalised through the
@@ -92,18 +93,18 @@ object means one masklet per object (no synonym explosion).
    called with `offload_video_to_cpu=True` so the frame stack lives in host RAM
    and streams to the GPU per frame — essential for long panoramic clips — and
    `async_loading_frames=True` so decoding overlaps tracking.
-2. At each keyframe (every `redetect_every_k` frames), first remove the tracks
-   that **ended** since the last keyframe (below) from the session
-   (`remove_object`). Then run **GroundingDINO** → class-labeled boxes,
-   highest score first. A box whose mask-bbox IoU with an already-tracked
-   object is ≥ `iou_match_threshold` is dropped as the existing object, and so
-   is one that repeats a box already accepted at this keyframe (the detector's
-   NMS is per class, so one shuttle comes back as both `truck` and `bus`);
-   genuinely new boxes get a fresh `obj_id` via `add_new_points_or_box`. This
-   is how objects entering mid-clip are introduced without duplicating existing
-   tracks. A keyframe with no live objects and no detections is skipped (SAM2
-   refuses to propagate zero objects — previously that error abandoned the
-   whole window, so an empty first frame lost every later object).
+2. At each keyframe (every `redetect_every_k` frames), run the detector →
+   class-labeled boxes, highest score first. A box whose IoU with a tracked
+   object's mask bbox is ≥ `iou_match_threshold` **supports** that track
+   (below); then the tracks that **ended** (below) leave the session
+   (`remove_object`). The remaining boxes, less one repeating a box already
+   accepted at this keyframe (the detector's NMS is per class, so one shuttle
+   comes back as both `truck` and `bus`), get a fresh `obj_id` via
+   `add_new_points_or_box`. This is how objects entering mid-clip are
+   introduced without duplicating existing tracks. A keyframe with no live
+   objects and no detections is skipped: SAM2 refuses to propagate zero
+   objects, and letting that error end the window would lose every later
+   object.
 3. `propagate_in_video` forward to the next keyframe, recording per-object masks
    into `Masklet`s (persistent ids) — per-frame mask PNGs (written on a thread
    pool) plus a DINOv2 appearance embedding extracted every
@@ -145,6 +146,76 @@ car half-hidden beside it — and a pixel in two masks would be lifted to 3D as
 both. Ownership is decided only after ending tracks: done first, it would split
 a jumped track's stolen object with its rightful track instead of revealing the
 jump (the two masks never overlap, so `duplicate_mask_iou` can't fire).
+Ownership also ends a third kind of hijack: a lost track latched onto *part* of
+another track's object (a pedestrian's id on a car's hood) keeps an IoU with
+the host's mask far below `duplicate_mask_iou`, but the host wins most of the
+shared pixels, so a track owning under `collapse_fraction` (0.05) of its own
+mask for `collapse_after_frames` (3) images in a row ends. Real objects whose
+neighbours' masks bleed over them own 15–80% and dip only briefly, which is why
+the threshold is low and must persist. A legitimate occluder (a pedestrian in
+front of a car whose mask covers it) wins its own pixels and survives.
+
+**Specks**: before ownership each mask drops components under
+`island_fraction` (0.1) of its largest, which SAM2 scatters around
+low-confidence masks. Specks a track wins inside a contested region (where two
+logits are close the winner flips pixel to pixel) go to the runner-up claimant
+rather than becoming holes.
+
+**Containment**: SAM2 segments what it sees through a car's windows as objects
+of their own — the driver as a pedestrian, sometimes the cabin as a second car.
+These lie inside the car's mask (it covers its windows) and end well above its
+bottom; an object in front of a vehicle stands on the road, nearer the camera,
+so its mask reaches the vehicle's bottom or below. A `contained_classes` mask
+at least `containment_fraction` (0.9) inside a `container_classes` mask and
+ending above its bottom by a tenth of its height, for
+`containment_after_frames` (3) images, is not recorded and ends; its pixels
+stay the vehicle's. Only pedestrians are contained by default: containing cars
+too also ends distant cars sitting inside a neighbour's bleeding mask.
+
+**Detector support** (`_Support`), modelled on SAM 3's tracker
+(`new_det_thresh`, masklet confirmation and `trk_keep_alive` in
+`sam3_video_base.py`). SAM2 alone follows whatever its mask becomes — the sky,
+the road, a smear over parked cars. SAM 3 runs its detector on every frame;
+here the detector boxes keyframes, and a box supports a track whose mask bbox
+it matches.
+
+- **Keep-alive** rises by one per supported keyframe, capped at
+  `support_keyframes` (5), and falls by one per keyframe the track's mask bbox
+  covers at least `support_min_area` (1%) of the image with no supporting box;
+  at zero the track ends. SAM 3 counts every unmatched frame, which COCO YOLO
+  can't carry: it boxes a real distant car once and then rarely, while SAM2
+  tracks it well, so an ungated keep-alive ends real cars as readily as junk.
+  What it boxes reliably is what looks large, so a large mask it doesn't box
+  (sky, road, the hood) is not an object.
+- **Confirmation** is there but off (`birth_score` 0): with `birth_score` > 0
+  a weaker box starts a track tentatively — masks held back (bit-packed in
+  RAM), not written — until boxes support it at `confirm_keyframes` keyframes
+  in a row, and the first keyframe without drops it unwritten. With COCO YOLO
+  it drops most real distant cars.
+- **Class**: the one the track's boxes' scores sum highest for (COCO flips the
+  campus shuttle between `truck` and `bus`); its score is their mean, which
+  semantic_lifting weighs votes by.
+- **Re-prompting** (SAM 3 re-conditions a track on a confident matching
+  detection's mask; here, its box): a box scoring ≥ `reprompt_score`, backing
+  one track alone, whose mask bbox has drifted below `reprompt_below_iou` from
+  it, prompts that track again at the keyframe. The predictor is built with
+  `add_all_frames_to_correct_as_cond=true`: with the default, a prompt on a
+  frame already tracked is stored as ordinary memory and `propagate_in_video`
+  re-infers the frame and discards it.
+
+The measurements behind these rules and their defaults are in
+`docs/perception_2d_measurements.md`.
+
+**Ego vehicle**: the rear and side cameras see the roof rack, and YOLO boxes it
+as a truck on every keyframe. The rig's config (`perception_2d.wato.yaml`)
+carries per-camera `ego_mask` polygons: a box or mask at least
+`ego_mask.max_fraction` inside them never becomes or stays a track (a box that
+was prompted and then segmented as the rack is not prompted again), and every
+mask loses those pixels. `ego-mask` (`wato_perception_2d/ego_mask.py`) drafts
+the polygons from a run without them — the body masklets: at the image border
+in every sampled mask, mask IoU ≥ 0.85 throughout, over half the chunk while
+the vehicle drives ≥ 20 m — and, after a run with them, reports body masklets
+they miss.
 
 **Precision**: SAM2 calls (`init_state`, `add_new_points_or_box`,
 `propagate_in_video`, `remove_object`) run under CUDA autocast at
@@ -162,8 +233,7 @@ path.
 
 **Detector backend** (`detection.backend`): **`yolo`** (default) — Ultralytics
 YOLO26-x, COCO weights, closed-set; `detection.yolo.class_map` maps COCO classes
-onto the taxonomy and drops the rest, so traffic cones and barriers (absent
-from COCO) are never detected. Frames are converted RGB → BGR (Ultralytics'
+onto the taxonomy and drops the rest. Frames are converted RGB → BGR (Ultralytics'
 numpy convention), the pinned `.pt` is loaded by path, and ultralytics runs with
 `YOLO_OFFLINE=1`. Chosen over GroundingDINO for the fixed taxonomy because
 GroundingDINO's class scores depend on which other phrases share its prompt
@@ -200,7 +270,7 @@ and for downstream Segment-Lift-Fit.
   large absolute error on AV scenes; the relative variant has better ordinal
   consistency and aligns cleanly to LiDAR via a scale + shift fit in
   inverse-depth space. Trust LiDAR for scale, DA for density.
-- **Static-only anchors** (`use_static_anchors_only`, non-optional): cameras
+- **Static-only anchors** (always; no setting): cameras
   (~12 Hz) and LiDARs (~20 Hz) are unsynchronized. A dynamic LiDAR point
   projects to where the object *was* at LiDAR time, not where it is in the
   current image, which wrecks the fit. Only points outside
@@ -211,9 +281,9 @@ and for downstream Segment-Lift-Fit.
   stricter anchor set — a known follow-up.)
 - **Camera-time pose**: the static points are world-frame (each deskewed at
   its own time), so they are projected with the ego pose when the *image* was
-  taken — looked up at the frame's `camera_timestamp_ns` through
-  `wato_common.pose_lookup` — not `frame_index.world_T_ego`, which is the
-  LiDAR sweep's pose. The two are up to ~44 ms apart on the WATO rig and
+  taken (`CameraFrame.world_T_ego`, which `wato_common.artifacts.frame_index`
+  looks up at the frame's `camera_timestamp_ns`) — not the LiDAR sweep's
+  pose. The two are up to ~44 ms apart on the WATO rig and
   ~120 ms on nuScenes; using the sweep's pose misplaced a point 30 m away by
   15–17 cm median and up to 0.9–1.3 m. A frame whose time falls in an
   untrusted stretch of the pose stream gets no anchors.
@@ -261,9 +331,9 @@ component uses for cross-camera / cross-chunk re-identification.
 perception_2d's deliverable is **per-camera** masklets + masks + metric depth +
 DINOv2 embeddings. Resolving the same physical object across the 12 cameras is a
 3D/4D problem that belongs in the downstream `tracking` component (gated by the
-DINOv2 features persisted here). `global_object_id` is left **null** for
-`tracking` to populate. (The earlier SAM3 plan did cross-camera merge inside
-perception_2d; that has been removed.)
+DINOv2 features persisted here); perception_2d writes no cross-camera id.
+(The earlier SAM3 plan did cross-camera merge inside perception_2d; that has
+been removed.)
 
 ---
 
@@ -299,7 +369,6 @@ the tracked detection.
 | `frames_present` | str | JSON list[int] of `camera_seq` where the mask exists |
 | `mask_path` | str | Directory of per-frame mask PNGs |
 | `dino_feature_path` | str? | DINOv2 embedding `.npy` (null if not extracted) |
-| `global_object_id` | str? | **null** — populated downstream by `tracking` |
 | `raw_phrase` | str | Raw detector label before canonicalisation |
 | `det_score` | float | Detector (× SAM2 mask) confidence |
 | `discovery_score` | float | Detector / Florence-2 discovery confidence |

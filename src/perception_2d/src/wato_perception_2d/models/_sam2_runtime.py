@@ -62,7 +62,17 @@ def get_sam2_predictor(
             dev,
         )
         t0 = time.perf_counter()
-        predictor = build_sam2_video_predictor(config_file, checkpoint, device=dev)
+        # A box re-prompting an object on a frame it was already tracked through
+        # (sam2_tracker's re-prompting) must be kept as a conditioning frame:
+        # otherwise propagate_in_video re-infers that frame from memory and
+        # discards the correction. A new object's first prompt is a
+        # conditioning frame either way.
+        predictor = build_sam2_video_predictor(
+            config_file,
+            checkpoint,
+            device=dev,
+            hydra_overrides_extra=["++model.add_all_frames_to_correct_as_cond=true"],
+        )
         _cache[key] = predictor
         log.info(
             "SAM2 predictor ready in %.1fs (ckpt=%s)",

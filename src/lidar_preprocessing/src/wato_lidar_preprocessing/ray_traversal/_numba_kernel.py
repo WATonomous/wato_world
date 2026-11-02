@@ -66,6 +66,37 @@ def _accumulate_cov_numba(
 
 
 @numba.njit(cache=True)
+def _build_shield_numba(
+    hit_keys: np.ndarray,  # (M,) int64 voxel keys of one frame's non-ground hits
+    shield: numba.typed.Dict,  # int64 -> uint8, filled in place
+) -> None:
+    """Insert every voxel within Chebyshev distance 1 of a hit voxel.
+
+    Neighbours are built from decoded indices and bounds-checked, so a hit on
+    the grid edge never wraps into another axis's bits and aliases a voxel.
+    """
+    axis_mask = AXIS_RANGE - 1
+    for i in range(hit_keys.shape[0]):
+        k = hit_keys[i]
+        cx = (k >> SHIFT_X) & axis_mask
+        cy = (k >> SHIFT_Y) & axis_mask
+        cz = k & axis_mask
+        for dx in range(-1, 2):
+            x = cx + dx
+            if x < 0 or x >= AXIS_RANGE:
+                continue
+            for dy in range(-1, 2):
+                y = cy + dy
+                if y < 0 or y >= AXIS_RANGE:
+                    continue
+                for dz in range(-1, 2):
+                    z = cz + dz
+                    if z < 0 or z >= AXIS_RANGE:
+                        continue
+                    shield[(x << SHIFT_X) | (y << SHIFT_Y) | z] = numba.uint8(1)
+
+
+@numba.njit(cache=True)
 def _update_sweep_numba(
     ox: float,
     oy: float,
@@ -83,19 +114,25 @@ def _update_sweep_numba(
     n_hits: numba.typed.Dict,  # int64 -> int32
     l_occ: float,
     l_free: float,
-    log_odds_clamp: float,
     d_star: float,
     nx: numba.typed.Dict,  # int64 -> float32 surface-normal x (occupied voxels)
     ny: numba.typed.Dict,
     nz: numba.typed.Dict,
     grazing_cos: float,
+    shield: numba.typed.Dict,  # int64 -> uint8; empty = no shield
 ) -> None:
     """Update log_odds, n_obs, n_hits for one sweep's rays.
 
     Range weighting scales each update by min(1, d_star/d) (endpoint d=length,
     carve d=t_entry). Carving stops margin_m short of the endpoint. Incidence
     gate: a voxel with a surface normal (nx/ny/nz) is not carved when grazed
-    (|ray·n| < grazing_cos); voxels without a normal carve normally.
+    (|ray·n| < grazing_cos); voxels without a normal carve normally. Shield: a
+    voxel in `shield` (within one voxel of a hit in the same frame) is not
+    carved — the ray cleared the free part of a partly-occupied voxel, which
+    is not evidence that the surface moved.
+
+    Log-odds accumulate unclamped, so the result does not depend on the order
+    sweeps are applied in.
 
     Rays longer than max_length_m skip the carve (a pure compute guard) but
     STILL register their endpoint hit — otherwise far returns would leave
@@ -103,6 +140,7 @@ def _update_sweep_numba(
     evidence at all.
     """
     INF = 1e18
+    has_shield = len(shield) > 0
     for i in range(endpoints.shape[0]):
         ex = endpoints[i, 0]
         ey = endpoints[i, 1]
@@ -236,11 +274,12 @@ def _update_sweep_numba(
                     if dot < grazing_cos:
                         continue
 
-                old_lo = log_odds.get(key, numba.float32(0.0))
-                new_lo = old_lo - numba.float32(l_free * r_star_t)
-                if new_lo < numba.float32(-log_odds_clamp):
-                    new_lo = numba.float32(-log_odds_clamp)
-                log_odds[key] = new_lo
+                if has_shield and key in shield:
+                    continue
+
+                log_odds[key] = log_odds.get(key, numba.float32(0.0)) - numba.float32(
+                    l_free * r_star_t
+                )
                 n_obs[key] = numba.int32(
                     n_obs.get(key, numba.int32(0)) + numba.int32(1)
                 )
@@ -255,11 +294,9 @@ def _update_sweep_numba(
             and ezi < AXIS_RANGE
         ):
             key = (exi << SHIFT_X) | (eyi << SHIFT_Y) | ezi
-            old_lo = log_odds.get(key, numba.float32(0.0))
-            new_lo = old_lo + numba.float32(l_occ * r_star_endpoint)
-            if new_lo > numba.float32(log_odds_clamp):
-                new_lo = numba.float32(log_odds_clamp)
-            log_odds[key] = new_lo
+            log_odds[key] = log_odds.get(key, numba.float32(0.0)) + numba.float32(
+                l_occ * r_star_endpoint
+            )
             n_obs[key] = numba.int32(n_obs.get(key, numba.int32(0)) + numba.int32(1))
             n_hits[key] = numba.int32(n_hits.get(key, numba.int32(0)) + numba.int32(1))
 
@@ -269,18 +306,13 @@ def _apply_global_map_boost_numba(
     unique_keys: np.ndarray,  # (M,) int64, deduped
     max_r_star: np.ndarray,  # (M,) float32, per-key max r*
     l_occ_boost: float,
-    clamp: float,
     log_odds: numba.typed.Dict,  # int64 -> float32
 ) -> None:
-    """Add l_occ_boost * max_r_star[k] to log_odds[k] for each unique key, clamped."""
+    """Add l_occ_boost * max_r_star[k] to log_odds[k] for each unique key."""
     for i in range(unique_keys.shape[0]):
         k = unique_keys[i]
         boost = numba.float32(l_occ_boost * max_r_star[i])
-        old = log_odds.get(k, numba.float32(0.0))
-        new_lo = old + boost
-        if new_lo > numba.float32(clamp):
-            new_lo = numba.float32(clamp)
-        log_odds[k] = new_lo
+        log_odds[k] = log_odds.get(k, numba.float32(0.0)) + boost
 
 
 @numba.njit(cache=True)

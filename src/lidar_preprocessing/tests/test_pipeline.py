@@ -132,15 +132,15 @@ def test_validates_chunks_index(tmp_env):
 
 
 def test_skips_completed_chunks(tmp_env):
-    """If ground.npz + the chunk summary exist (with a matching seg method),
-    the chunk is skipped and deskew not invoked."""
+    """If ground.npz + the chunk summary exist, the chunk is skipped and deskew
+    not invoked."""
     bag_id = "bag_skip"
     _write_chunks_index(bag_id, ["chunk0"])
     # Pretend chunk0 was already fully processed (summary is written last).
     out = local_path(ground_path(bag_id, "chunk0"))
     os.makedirs(os.path.dirname(out), exist_ok=True)
     np.savez_compressed(out, ground_xyz=np.empty((0, 3)))
-    _write_summary_with_method(bag_id, "chunk0", "aw")
+    _write_summary(bag_id, "chunk0")
 
     cfg = ComponentConfig()
     with mock.patch.object(pipeline.deskew, "process_chunk") as mock_deskew:
@@ -148,7 +148,7 @@ def test_skips_completed_chunks(tmp_env):
     mock_deskew.assert_not_called()
 
 
-def _write_summary_with_method(bag_id: str, chunk_id: str, method: str | None):
+def _write_summary(bag_id: str, chunk_id: str):
     from wato_common.artifact_store import lidar_proc_summary_path
     from wato_common.schemas import CHUNK_SUMMARY_SCHEMA, ChunkSummaryRow
 
@@ -166,7 +166,6 @@ def _write_summary_with_method(bag_id: str, chunk_id: str, method: str | None):
         cache_auto_disabled=False,
         estimated_cache_bytes=0,
         ground_status="ok",
-        segmentation_method=method,
     )
     write_table(
         [row.model_dump()],
@@ -175,29 +174,18 @@ def _write_summary_with_method(bag_id: str, chunk_id: str, method: str | None):
     )
 
 
-def test_chunk_complete_is_segmentation_aware(tmp_env):
-    """Artifacts produced by one --seg method must not satisfy the skip check
-    for another, or A/B comparisons silently reuse stale outputs. The summary
-    (written last) is the completeness marker — ground.npz alone is not
-    enough, since union runs after Step C. Summaries without the method
-    column (legacy) are trusted."""
-    bag_id, chunk_id = "bag_seg_aware", "chunk0"
+def test_summary_marks_a_chunk_complete(tmp_env):
+    """The summary is written last, so ground.npz alone means the chunk crashed
+    part-way and must be re-processed."""
+    bag_id, chunk_id = "bag_complete", "chunk0"
     out = local_path(ground_path(bag_id, chunk_id))
     os.makedirs(os.path.dirname(out), exist_ok=True)
     np.savez_compressed(out, ground_xyz=np.empty((0, 3)))
 
-    # ground.npz but no summary: the chunk crashed mid-way (e.g. before the
-    # union fusion) — must re-process.
-    assert pipeline._chunk_complete(bag_id, chunk_id, "aw") is False
+    assert pipeline._chunk_complete(bag_id, chunk_id) is False
 
-    _write_summary_with_method(bag_id, chunk_id, "aw")
-    assert pipeline._chunk_complete(bag_id, chunk_id, "aw") is True
-    assert pipeline._chunk_complete(bag_id, chunk_id, "mos") is False
-    assert pipeline._chunk_complete(bag_id, chunk_id, "union") is False
-
-    # Legacy summary (method column null): trusted as complete.
-    _write_summary_with_method(bag_id, chunk_id, None)
-    assert pipeline._chunk_complete(bag_id, chunk_id, "union") is True
+    _write_summary(bag_id, chunk_id)
+    assert pipeline._chunk_complete(bag_id, chunk_id) is True
 
 
 def test_force_flag_overrides_skip(tmp_env):
@@ -302,19 +290,9 @@ def test_chunk_summary_written(tmp_env):
     assert row["cache_auto_disabled"] is False
     # No Patchwork++ in tests → ground status flags it.
     assert row["ground_status"] in ("ok", "skipped_no_ground_mask", "empty")
-    # Step-B provenance: the aw path records its method; the mos/union-only
-    # counters stay null.
-    assert row["segmentation_method"] == "aw"
-    assert row["seg_n_sweeps_no_mask"] is None
-    assert row["union_n_points_vetoed"] is None
-    # MF-MOS never runs under seg=aw → its fields are null, not zero.
-    for k in (
-        "mf_mos_n_processed",
-        "mf_mos_n_skipped",
-        "mf_mos_n_unsupported",
-        "mf_mos_n_points_moving",
-    ):
-        assert row[k] is None, k
+    # The filter ran on the (empty or small) candidate set: counts, not null.
+    assert row["n_filter_cluster_dropped"] == 0
+    assert row["n_filter_persistence_dropped"] == 0
 
 
 def test_cache_auto_disable_logged_in_summary(tmp_env, monkeypatch):

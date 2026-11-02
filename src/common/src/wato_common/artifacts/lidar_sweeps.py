@@ -1,6 +1,6 @@
 """LiDAR sweeps: as ingest records them, and as lidar_preprocessing places them.
 
-Raw sweep — written by ingest, read by lidar_preprocessing (deskew, MF-MOS):
+Raw sweep — written by ingest, read by lidar_preprocessing (deskew):
 
   lidar/<lidar_id>/<sweep_id:06d>.npz        sensor frame, as recorded
     x, y, z       float32 (N,)   may hold non-finite returns
@@ -23,7 +23,7 @@ semantic_lifting (and lidar_preprocessing's later steps):
     ring                  (N,)   optional, as recorded
     ground_mask   bool    (N,)   optional; Patchwork++ ground
   lidar_proc/<sweep_id:06d>_dynamic_mask.npy
-    bool (N,)     the segmentation method's dynamic verdict (True = dynamic),
+    bool (N,)     Step B's dynamic verdict (True = dynamic),
                   same N and order as the world sweep; length 0 for an empty
                   sweep. Precision-oriented: ~mask is trusted static.
   lidar_proc_index.parquet

@@ -45,7 +45,6 @@ def test_round_trip():
         cls="pedestrian",
         score=0.7,
         frames_present=(8,),
-        global_object_id="obj3",
     )
     masks = {("m0", 7): _mask(), ("m0", 8): _mask(box=(0, 2, 0, 2))}
     masks[("m1", 8)] = _mask(box=(2, 4, 3, 6))
@@ -64,7 +63,6 @@ def test_round_trip():
     for (mid, seq), m in masks.items():
         (rec,) = [r for r in index.records if r.masklet_id == mid]
         np.testing.assert_array_equal(index.mask(rec, seq), m)
-    assert car.instance_id == "m0" and ped.instance_id == "obj3"
 
 
 def test_frames_present_is_stored_as_a_json_string():

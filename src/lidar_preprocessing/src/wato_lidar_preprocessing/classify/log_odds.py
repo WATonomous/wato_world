@@ -1,7 +1,15 @@
 """Log-odds ray-casting classifier (Amanatides-Woo).
 
 All increments, thresholds, range weighting and the carve margin come from the
-datasheet SensorModel (sensor_model.py).
+datasheet SensorModel (sensor_model.py). Two rules keep static structure out
+of the dynamic set (measurements: docs/lidar_preprocessing_measurements.md):
+
+- A frame's non-ground hits, from every scanner in it, shield their one-voxel
+  neighbourhood from that frame's carving. Foliage, pole and edge voxels are
+  partly free, so rays that clear the free part would otherwise carve them.
+- Log-odds accumulate unclamped, so the verdict is the chunk's total evidence.
+  A clamped walk lets the last few dozen observations decide: a wall passed
+  through by the rays of a car driving away ends dynamic.
 """
 
 from __future__ import annotations
@@ -15,6 +23,7 @@ from wato_lidar_preprocessing.config import ComponentConfig
 from wato_lidar_preprocessing.ray_traversal import (
     accumulate_cov,
     apply_global_map_boost,
+    build_hit_shield,
     compute_normals,
     extract_log_odds_arrays,
     make_cov_dicts,
@@ -39,6 +48,30 @@ CLASS_FREE_ONLY = 3  # traversed but never hit (n_hits == 0)
 CLASS_DYNAMIC = 4  # evidenced + has_hits + p_occ < p_dynamic_threshold
 
 
+def frame_groups(meta_rows: list[dict], canonical_lidar: str | None) -> list[list[int]]:
+    """Indices of valid rows grouped into frames, in time order.
+
+    With the canonical lidar in the chunk, deskew gave every sweep within the
+    frame-sync tolerance of a canonical tick that tick's frame_id, so sweeps
+    sharing a frame_id were recorded together. Otherwise frame_ids are
+    per-lidar ordinals that collide across lidars, so each sweep is its own
+    frame.
+    """
+    valid = [i for i, r in enumerate(meta_rows) if r.get("valid") is not False]
+    shared = canonical_lidar is not None and any(
+        meta_rows[i]["lidar_id"] == canonical_lidar for i in valid
+    )
+    groups: dict[tuple[str, int], list[int]] = {}
+    for i in valid:
+        fid = meta_rows[i].get("frame_id")
+        key = ("frame", int(fid)) if shared and fid is not None else ("sweep", i)
+        groups.setdefault(key, []).append(i)
+    return sorted(
+        groups.values(),
+        key=lambda g: min(int(meta_rows[i]["reference_timestamp_ns"]) for i in g),
+    )
+
+
 def build_log_odds_grid(
     meta_rows: list[dict],
     cfg: ComponentConfig,
@@ -60,7 +93,8 @@ def build_log_odds_grid(
     tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
 ]:
     """Pass 1: sub-pass 1a estimates per-voxel surface normals, sub-pass 1b
-    ray-casts the log-odds grid with the incidence gate. Caches xyz/intensity/
+    ray-casts the log-odds grid frame by frame (frame_groups), with the
+    incidence gate and the frame's hit shield. Caches xyz/intensity/
     ground/origin/keys per sweep for Pass 2.
 
     pose_sigma_m: per-bag SLAM pose noise (poses.parquet); sets the carve margin.
@@ -78,20 +112,18 @@ def build_log_odds_grid(
     voxel_size = cfg.voxel_size_m
     l_occ = sensor_model.l_occ
     l_free = sensor_model.l_free
-    clamp = sensor_model.log_odds_clamp
     d_star = sensor_model.credibility_crossover_m(voxel_size)
     margin_m = sensor_model.carve_margin_m(pose_sigma_m)
     grazing_cos = sensor_model.grazing_cos_threshold(voxel_size)
     max_len = sensor_model.max_range_m
     log.info(
-        "chunk %s log-odds model (%s): l_occ=%.3f l_free=%.3f clamp=%.3f "
+        "chunk %s log-odds model (%s): l_occ=%.3f l_free=%.3f "
         "d*=%.1fm carve_margin=%.3fm grazing_cos=%.2f (σ_range=%.3f "
         "σ_pose=%.3f) max_ray=%.1fm",
         chunk_id,
         sensor_model.name,
         l_occ,
         l_free,
-        clamp,
         d_star,
         margin_m,
         grazing_cos,
@@ -163,34 +195,41 @@ def build_log_odds_grid(
     # Estimate one surface normal per planar, sufficiently-observed voxel.
     normal_dicts = compute_normals(cov_dicts, min_pts=cfg.min_observations)
 
-    # --- Sub-pass 1b: ray traversal with the incidence gate + global prior. --
-    for i, row in enumerate(
-        tqdm(meta_rows, desc=f"classify chunk {chunk_id} pass 1b", unit="sweep")
-    ):
-        if row.get("valid") is False:
-            continue
-        keys = sweep_keys[i]
-        if keys.shape[0] == 0:
-            continue
-        sweep_origin = origin_cache[i]
-        ground_mask = ground_mask_cache[i]
-        if xyz_cache[i] is not None:
-            xyz = xyz_cache[i]
-        else:
-            xyz, _, _, _ = load_world_full(row["world_path"])
+    # --- Sub-pass 1b: ray traversal, one frame at a time, with the incidence
+    # gate, the frame's hit shield, and the global prior. ---------------------
+    groups = frame_groups(meta_rows, cfg.frame_sync.canonical_lidar)
+    for group in tqdm(groups, desc=f"classify chunk {chunk_id} pass 1b", unit="frame"):
+        # Every scanner's non-ground returns in this frame shield their voxel
+        # and its neighbours from the frame's own carving (build_hit_shield).
+        hit_parts = [
+            sweep_keys[i]
+            if ground_mask_cache[i] is None
+            else sweep_keys[i][~ground_mask_cache[i]]
+            for i in group
+        ]
+        shield = build_hit_shield(np.unique(np.concatenate(hit_parts)))
 
-        # Ground rays are traversed for their free-space evidence but add no
-        # +l_occ at the endpoint: the road is not a mover, and crediting it
-        # with occupancy makes every drive-over reinforce a surface that
-        # Patchwork++ has already claimed. The kernel applies this per point.
-        endpoints_arr = xyz
-        is_ground_arr = ground_mask
+        for i in group:
+            row = meta_rows[i]
+            keys = sweep_keys[i]
+            if keys.shape[0] == 0:
+                continue
+            sweep_origin = origin_cache[i]
+            ground_mask = ground_mask_cache[i]
+            if xyz_cache[i] is not None:
+                xyz = xyz_cache[i]
+            else:
+                xyz, _, _, _ = load_world_full(row["world_path"])
 
-        if endpoints_arr.shape[0] > 0:
+            # Ground rays are traversed for their free-space evidence but add
+            # no +l_occ at the endpoint: the road is not a mover, and crediting
+            # it with occupancy makes every drive-over reinforce a surface
+            # that Patchwork++ has already claimed. The kernel applies this per
+            # point.
             update_sweep_log_odds(
                 sweep_origin,
-                endpoints_arr,
-                is_ground_arr,
+                xyz,
+                ground_mask,
                 origin,
                 voxel_size,
                 margin_m,
@@ -200,27 +239,30 @@ def build_log_odds_grid(
                 n_hits_dict,
                 l_occ,
                 l_free,
-                clamp,
                 d_star,
                 normal_dicts=normal_dicts,
                 grazing_cos=grazing_cos,
+                shield=shield,
             )
 
-        # Collect global-map matches for the one-time prior (non-ground only).
-        if global_map_prior is not None:
-            if ground_mask is not None:
-                boost_select = ~ground_mask
-                boost_xyz = xyz[boost_select]
-                boost_keys = keys[boost_select]
-            else:
-                boost_xyz = xyz
-                boost_keys = keys
-            if boost_xyz.shape[0] > 0:
-                map_hit, ranges = global_map_prior.query_sweep(boost_xyz, sweep_origin)
-                if map_hit.any():
-                    cred = sensor_model.range_weight(ranges[map_hit], voxel_size)
-                    prior_keys_parts.append(boost_keys[map_hit])
-                    prior_cred_parts.append(cred.astype(np.float32))
+            # Collect global-map matches for the one-time prior (non-ground
+            # only).
+            if global_map_prior is not None:
+                if ground_mask is not None:
+                    boost_select = ~ground_mask
+                    boost_xyz = xyz[boost_select]
+                    boost_keys = keys[boost_select]
+                else:
+                    boost_xyz = xyz
+                    boost_keys = keys
+                if boost_xyz.shape[0] > 0:
+                    map_hit, ranges = global_map_prior.query_sweep(
+                        boost_xyz, sweep_origin
+                    )
+                    if map_hit.any():
+                        cred = sensor_model.range_weight(ranges[map_hit], voxel_size)
+                        prior_keys_parts.append(boost_keys[map_hit])
+                        prior_cred_parts.append(cred.astype(np.float32))
 
     # One-time global-map prior shift over the chunk-wide matched voxel set.
     if prior_keys_parts:
@@ -228,7 +270,6 @@ def build_log_odds_grid(
             np.concatenate(prior_keys_parts),
             np.concatenate(prior_cred_parts),
             sensor_model.l_map_prior,
-            clamp,
             log_odds_dict,
         )
 

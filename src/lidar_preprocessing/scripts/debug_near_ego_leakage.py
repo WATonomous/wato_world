@@ -15,7 +15,7 @@ import numpy as np
 from wato_lidar_preprocessing.voxel import voxel_indices
 
 CLASS_NAMES = {
-    0: "STATIC (flipped by mfmos?)",
+    0: "STATIC",
     1: "AMBIGUOUS",
     2: "UNDER_EVIDENCED",
     3: "FREE_ONLY",
@@ -127,9 +127,7 @@ def main() -> None:
             f"  STATIC-bucket flips ({len(arr)} pts): p_occ "
             f"min={arr.min():.3f} median={np.median(arr):.3f} max={arr.max():.3f}"
         )
-        print(
-            "    -> these are voxels AW called static but MF-MOS / fusion flipped to dynamic"
-        )
+        print("    -> should be empty: a static voxel's points are never dynamic")
     if n_obs_dynamic:
         arr = np.asarray(n_obs_dynamic, dtype=np.float64)
         print(

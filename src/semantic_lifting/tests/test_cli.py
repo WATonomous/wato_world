@@ -21,3 +21,10 @@ def test_run_help_exits_zero():
     result = runner.invoke(main, ["run", "--help"])
     assert result.exit_code == 0
     assert "--bag" in result.output
+    assert "--force" in result.output
+
+
+def test_viz_help_exits_zero():
+    result = CliRunner().invoke(main, ["viz", "--help"])
+    assert result.exit_code == 0
+    assert "--color" in result.output

@@ -18,7 +18,7 @@ from wato_lidar_preprocessing.viz_data import (
     load_sweep_viz_data,
 )
 from wato_lidar_preprocessing.viz_export import export_ply
-from wato_lidar_preprocessing.html_viz import open_html_file
+from wato_common.viz.point_cloud_html import open_html_file
 
 
 def _ensure_parent(path: str) -> None:

@@ -1,77 +1,26 @@
 """Artifact I/O helpers for perception_2d.
 
-Reads upstream artifacts from ingest + lidar_preprocessing. Calibration and
-processed LiDAR sweeps are read, and perception_2d's own outputs written,
-through wato_common.artifacts.
+Reads upstream artifacts from ingest + lidar_preprocessing. Calibration, the
+camera frames (frame_index) and processed LiDAR sweeps are read, and
+perception_2d's own outputs written, through wato_common.artifacts.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 
-from wato_common.artifact_store import (
-    chunks_index_path,
-    frame_index_path,
-    local_path,
-)
+from wato_common.artifact_store import chunks_index_path
 from wato_common.artifacts.lidar_sweeps import ProcessedSweeps
 from wato_common.io.parquet_io import read_rows
 
 log = logging.getLogger(__name__)
 
 
-@dataclass
-class CameraFrameInfo:
-    """One camera frame entry from frame_index.parquet."""
-
-    frame_id: str
-    bag_id: str
-    chunk_id: str
-    sweep_id: int
-    cam_id: str
-    image_path: str
-    camera_seq: int
-    # When the image was taken.  The ego pose for projecting into this image is
-    # looked up at this time (wato_common.pose_lookup), not taken from
-    # frame_index's world_T_ego, which is the LiDAR sweep's pose.
-    camera_timestamp_ns: Optional[int]
-    valid_camera: bool
-    # Every sweep this image is nearest to. frame_index has one row per
-    # (sweep, camera), so an image repeats once per such sweep; the pipeline
-    # collapses those rows into one entry (pipeline._one_frame_per_image) and
-    # keeps their sweeps here for depth anchoring. Empty = just `sweep_id`.
-    sweep_ids: tuple[int, ...] = ()
-
-
 def load_chunks(bag_id: str) -> list[dict]:
     return read_rows(chunks_index_path(bag_id))
-
-
-def load_frame_index(bag_id: str, chunk_id: str) -> list[CameraFrameInfo]:
-    rows = read_rows(frame_index_path(bag_id, chunk_id))
-    result = []
-    for r in rows:
-        if not r.get("valid_camera", False):
-            continue
-        cam_ts = r.get("camera_timestamp_ns")
-        result.append(
-            CameraFrameInfo(
-                frame_id=str(r.get("frame_id", "")),
-                bag_id=bag_id,
-                chunk_id=chunk_id,
-                sweep_id=int(r["sweep_id"]),
-                cam_id=str(r["cam_id"]),
-                image_path=local_path(str(r["image_path"])),
-                camera_seq=int(r["camera_seq"]),
-                camera_timestamp_ns=int(cam_ts) if cam_ts is not None else None,
-                valid_camera=bool(r.get("valid_camera", False)),
-            )
-        )
-    return result
 
 
 # Per-chunk caches so the lidar-proc index isn't re-read (and sweeps aren't

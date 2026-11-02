@@ -21,6 +21,7 @@ try:
         _accumulate_cov_numba,
         _apply_global_map_boost_numba,
         _build_normal_dicts_numba,
+        _build_shield_numba,
         _extract_arrays_numba,
         _extract_cov_numba,
         _update_sweep_numba,
@@ -193,16 +194,18 @@ def update_sweep_log_odds(
     n_hits,
     l_occ: float,
     l_free: float,
-    log_odds_clamp: float,
     d_star: float,
     normal_dicts: tuple | None = None,
     grazing_cos: float = 0.0,
+    shield=None,
 ) -> None:
     """Plumb a single sweep through the Numba DDA kernel.
 
     margin_m: carve stop-distance [m]. d_star: range-credibility crossover [m].
     normal_dicts: (nx, ny, nz) from compute_normals — occupied voxels grazed by
     the ray (|ray·n| < grazing_cos) are not carved. None disables the gate.
+    shield: from build_hit_shield — voxels this sweep's rays must not carve.
+    None disables it. Log-odds accumulate unclamped (order-independent).
     """
     _require_numba()
     if is_ground is None:
@@ -213,6 +216,8 @@ def update_sweep_log_odds(
         nx, ny, nz = make_normal_dicts()
     else:
         nx, ny, nz = normal_dicts
+    if shield is None:
+        shield = make_shield_dict()
     _update_sweep_numba(
         float(sweep_origin[0]),
         float(sweep_origin[1]),
@@ -230,27 +235,47 @@ def update_sweep_log_odds(
         n_hits,
         float(l_occ),
         float(l_free),
-        float(log_odds_clamp),
         float(d_star),
         nx,
         ny,
         nz,
         float(grazing_cos),
+        shield,
     )
+
+
+def make_shield_dict():
+    """Empty shield (int64 voxel key -> uint8) for update_sweep_log_odds."""
+    _require_numba()
+    return numba.typed.Dict.empty(key_type=_nbtypes.int64, value_type=_nbtypes.uint8)
+
+
+def build_hit_shield(hit_keys: np.ndarray):
+    """Shield for one frame: every voxel within one voxel of a hit voxel.
+
+    hit_keys: voxel keys of the frame's non-ground returns, from every
+    scanner in the frame. A voxel holding part of a surface (foliage, a pole,
+    an edge) is also partly free, so a ray clearing the free part would carve
+    it; the one-voxel margin also absorbs sub-voxel registration error
+    between the frame's scanners.
+    """
+    shield = make_shield_dict()
+    if hit_keys.size:
+        _build_shield_numba(np.ascontiguousarray(hit_keys, dtype=np.int64), shield)
+    return shield
 
 
 def apply_global_map_boost(
     hit_keys: np.ndarray,
     hit_r_star: np.ndarray,
     l_occ_boost: float,
-    clamp: float,
     log_odds,
 ) -> None:
     """Global-map prior boost for endpoints matched in the global static map.
 
     For each unique voxel key the sweep hit, take the max r_star across the
     sweep's hits and add `l_occ_boost * max_r_star` to that voxel's
-    log_odds, clamped at ±clamp.
+    log_odds.
 
     Only touches log_odds — n_hits stays backed by real sweep returns so
     the has_hits gate isn't bypassed by the prior.
@@ -265,7 +290,6 @@ def apply_global_map_boost(
         unique_keys.astype(np.int64),
         max_r_star,
         float(l_occ_boost),
-        float(clamp),
         log_odds,
     )
 

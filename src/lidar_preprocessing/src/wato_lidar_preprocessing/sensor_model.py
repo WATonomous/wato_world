@@ -9,17 +9,17 @@ physical constant. Two groups of fields live here:
 `rotation_dir`, `firing_cycle_us`. These are published numbers; a wrong value
 is a bug with a citable answer. Everything downstream reads them: deskew's
 azimuth-to-time synthesis, classify's log-odds constants and carve geometry,
-and the MF-MOS / IWU spherical projections.
+and IWU's spherical projection.
 
-**Inverse-sensor-model probabilities** — `p_hit`, `p_miss`, `p_clamp`,
-`k_sigma`, `p_map_prior`. These are NOT on any datasheet. They are the
-occupancy-grid reliability parameters of Thrun, *Probabilistic Robotics* ch. 9,
-and the component's only tuning surface. They live in code, with their
-reasoning (below), not in YAML: a config that can move them will be tuned per
-bag until labels stop being comparable.
+**Inverse-sensor-model probabilities** — `p_hit`, `p_miss`, `k_sigma`,
+`p_map_prior`. These are NOT on any datasheet. They are the occupancy-grid
+reliability parameters of Thrun, *Probabilistic Robotics* ch. 9, and the
+component's only tuning surface. They live in code, with their reasoning
+(below), not in YAML: a config that can move them will be tuned per bag until
+labels stop being comparable.
 
-Derived quantities (`l_occ`, `l_free`, the clamp, decision thresholds, range
-credibility, carve margin, grazing gate) are properties/methods here only.
+Derived quantities (`l_occ`, `l_free`, decision thresholds, range credibility,
+carve margin, grazing gate) are properties/methods here only.
 """
 
 from __future__ import annotations
@@ -35,8 +35,7 @@ import numpy as np
 # p_hit = 0.88 — P(voxel occupied | a return landed in it). Below 1 because a
 #   return is not proof of a persistent surface: rain, dust, exhaust, spray and
 #   mixed (edge-straddling) pixels all produce returns from empty space, and a
-#   single sweep cannot tell those from a wall. 0.88 gives l_occ ≈ 2.0, so
-#   three clean hits saturate a voxel against the 0.99 clamp (l ≈ 4.6). Any
+#   single sweep cannot tell those from a wall. 0.88 gives l_occ ≈ 2.0. Any
 #   value in 0.85–0.92 behaves the same; the classifier is insensitive here
 #   because the decision is a threshold on accumulated evidence, not on one
 #   observation.
@@ -50,11 +49,13 @@ import numpy as np
 #   to undo one hit", which is what makes a parked car read static and a
 #   driving car read dynamic over a chunk.
 #
-# p_clamp = 0.99 — saturation confidence, |log-odds| ≤ 4.6. Standard
-#   occupancy-grid practice: without a clamp a voxel observed for a thousand
-#   sweeps ossifies and can never be revised when the world changes (a car
-#   parks, then leaves). The clamp bounds how much history one observation has
-#   to overcome.
+# No clamp. Log-odds accumulate unbounded over the chunk, so the verdict is
+#   the chunk's total evidence whatever order the sweeps arrive in. The usual
+#   occupancy-grid clamp (±4.6 at 0.99) lets the last ~23 observations decide:
+#   a wall seen solidly, then passed through by the rays of a car driving
+#   away, ends dynamic. A chunk is tens of seconds, too short to ossify; a car
+#   that parks for most of one and then leaves reads static there, and evicting
+#   it is IWU's job at bag level (Step E).
 #
 # k_sigma = 3.0 — how many sigmas of endpoint uncertainty to protect from
 #   self-carving, used by both `carve_margin_m` and `grazing_cos_threshold`.
@@ -74,7 +75,6 @@ import numpy as np
 # profile switch changes geometry only, never the decision rule.
 _P_HIT = 0.88
 _P_MISS = 0.40
-_P_CLAMP = 0.99
 
 
 def logit(p: float) -> float:
@@ -89,7 +89,7 @@ class SensorModel:
     """One physical scanner's datasheet specs + the constants derived from them.
 
     Datasheet fields:
-        beams:               vertical channel count (= MF-MOS range-image rows).
+        beams:               vertical channel count (= range-image rows).
         fov_up_deg:          vertical FoV upper bound [deg].
         fov_down_deg:        vertical FoV lower bound [deg], negative.
         range_sigma_m:       1σ range accuracy [m].
@@ -103,7 +103,7 @@ class SensorModel:
                              azimuth step (see azimuth_res_deg).
 
     Inverse-sensor-model fields (picked, not measured — see module docstring):
-        p_hit, p_miss, p_clamp, k_sigma, p_map_prior.
+        p_hit, p_miss, k_sigma, p_map_prior.
     """
 
     name: str
@@ -119,7 +119,6 @@ class SensorModel:
     firing_cycle_us: float
     p_hit: float = _P_HIT
     p_miss: float = _P_MISS
-    p_clamp: float = _P_CLAMP
     k_sigma: float = 3.0
     p_map_prior: float = 0.75
 
@@ -147,7 +146,7 @@ class SensorModel:
         """Range-image width at the scanner's native azimuth step."""
         return int(round(360.0 / self.azimuth_res_deg))
 
-    # --- Log-odds increments / bounds ---
+    # --- Log-odds increments ---
 
     @property
     def l_occ(self) -> float:
@@ -158,10 +157,6 @@ class SensorModel:
     def l_free(self) -> float:
         """Log-odds magnitude subtracted per through-ray (kernel subtracts it)."""
         return logit(1.0 - self.p_miss)
-
-    @property
-    def log_odds_clamp(self) -> float:
-        return logit(self.p_clamp)
 
     @property
     def l_map_prior(self) -> float:
@@ -227,7 +222,7 @@ _PROFILES: dict[str, SensorModel] = {
         firing_cycle_us=55.296,  # VLP-32C manual: 32 channels in 55.296 µs
     ),
     # WATO rig corner scanners. Datasheet: 16 channels, ±15°, ±3 cm, ~3 mrad,
-    # 100 m range. Too few channels for the MF-MOS projection (see mf_mos).
+    # 100 m range.
     "vlp16": SensorModel(
         name="vlp16",
         beams=16,

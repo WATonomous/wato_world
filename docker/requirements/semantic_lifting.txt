@@ -1,0 +1,33 @@
+# Locked Python dependency set for the semantic_lifting component.
+#
+# GENERATED, NOT HAND-EDITED. Frozen on 2026-10-29 from the deps stage built on
+# the digest-pinned base in docker/semantic_lifting.Dockerfile:
+#     docker run --rm --entrypoint uv \
+#         ghcr.io/watonomous/wato_world/semantic_lifting:deps_<tag> pip freeze --system
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# This pipeline's output is training data. A rebuild that silently resolves a
+# different dependency set is a different labeler, and labels produced by it
+# are not comparable to labels produced by this one. Every version here is
+# exact so that an image rebuilt in a year behaves identically.
+#
+# TO CHANGE A DEPENDENCY
+# ----------------------
+# Edit the *unpinned* intent in docker/semantic_lifting.Dockerfile's comment
+# block, install it unpinned in the deps stage, build that stage, re-freeze
+# into this file, restore the locked install, and commit both together. Do not
+# bump a pin here by hand without rebuilding — the transitive set moves with it.
+
+annotated-types==0.8.0
+click==8.5.0
+fsspec==2026.9.0
+numpy==2.5.4
+pillow==13.0.0
+pyarrow==26.0.0
+pydantic==2.14.2
+pydantic-core==2.50.2
+pyyaml==6.0.3
+scipy==1.18.1
+typing-extensions==4.16.0
+typing-inspection==0.4.4

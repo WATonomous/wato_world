@@ -182,7 +182,7 @@ POSES_SCHEMA = pa.schema(
 
 
 class FrameIndexRow(BaseModel):
-    """One row per (sweep_id, cam_id) — the contract for downstream components."""
+    """One row per (sweep_id, cam_id); format: wato_common.artifacts.frame_index."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -202,12 +202,9 @@ class FrameIndexRow(BaseModel):
     valid_camera: bool = False
     camera_drop_reason: Optional[str] = None
 
-    # Ego pose at the SWEEP's time (reference_timestamp_ns), not the camera's.
-    # A component that projects into the image looks the pose up at
-    # camera_timestamp_ns with wato_common.pose_lookup instead.
-    pose_timestamp_ns: Optional[int] = None
-    world_T_ego_flat: Optional[list[float]] = None
-    pose_interp_error: Optional[float] = None
+    # Whether the SWEEP's time (reference_timestamp_ns) has a trusted pose.
+    # No pose is stored: consumers read camera frames, each posed at its own
+    # time, through wato_common.artifacts.frame_index.
     valid_pose: bool = False
     # Why valid_pose is False: no_pose_samples | outside_pose_span |
     # pose_gap_<ms>ms | pose_jump_<mps>mps.  Null when valid_pose is True.
@@ -232,9 +229,6 @@ FRAME_INDEX_SCHEMA = pa.schema(
         pa.field("camera_offset_ms", pa.float64()),
         pa.field("valid_camera", pa.bool_()),
         pa.field("camera_drop_reason", pa.string()),
-        pa.field("pose_timestamp_ns", pa.int64()),
-        pa.field("world_T_ego_flat", pa.list_(pa.float64())),
-        pa.field("pose_interp_error", pa.float64()),
         pa.field("valid_pose", pa.bool_()),
         pa.field("pose_drop_reason", pa.string()),
         pa.field("calibration_path", pa.string()),
@@ -290,9 +284,6 @@ class ProcessedSweepMeta(BaseModel):
     # (canonical_lidar=None in config) just get frame_id = sweep ordinal.
     # Nullable: orphan sweeps outside any window are None.
     frame_id: Optional[int] = None
-    # MF-MOS mask: (n_raw,) bool NPY aligned to the raw sweep. Written on
-    # `--seg mos` / `--seg union`; None on `--seg aw`.
-    mf_mos_mask_path: Optional[str] = None
 
 
 PROCESSED_SWEEPS_SCHEMA = pa.schema(
@@ -319,7 +310,6 @@ PROCESSED_SWEEPS_SCHEMA = pa.schema(
         pa.field("world_zmin", pa.float64()),
         pa.field("world_zmax", pa.float64()),
         pa.field("frame_id", pa.int64()),
-        pa.field("mf_mos_mask_path", pa.string()),
     ]
 )
 
@@ -347,28 +337,11 @@ class ChunkSummaryRow(BaseModel):
     cache_auto_disabled: bool
     estimated_cache_bytes: int
     ground_status: str  # "ok" | "skipped_no_ground_mask" | "empty"
-    # Which Step-B method produced this chunk ("aw"|"mos"|"union"); None on
-    # older summaries. The skip check compares it with cfg.segmentation, so
-    # switching --seg never serves another method's artifacts.
-    segmentation_method: Optional[str] = None
-    # Sweeps Step B had no usable MF-MOS mask for (mos/union only; None for
-    # aw). Their movers are left static (mos) or dropped (union) — chunks
-    # where this is high (e.g. residual warm-up at chunk starts) lose recall.
-    seg_n_sweeps_no_mask: Optional[int] = None
-    # Dynamic candidates removed by the AW-static veto (union only).
-    union_n_points_vetoed: Optional[int] = None
-    # Dynamic candidates removed by the ground-height veto (union only).
-    union_n_points_ground_vetoed: Optional[int] = None
-    # Dynamic points removed by the post-veto motion filter (union only; None
-    # when the filter is disabled). persistence = voxel occupied across too
-    # many sweeps; coherence = not part of a multi-sweep cluster track.
-    motion_filter_n_persistence_dropped: Optional[int] = None
-    motion_filter_n_coherence_dropped: Optional[int] = None
-    # MF-MOS step stats — None when MF-MOS didn't run (`--seg aw`).
-    mf_mos_n_processed: Optional[int] = None
-    mf_mos_n_skipped: Optional[int] = None  # failures (pose gap, empty, infer error)
-    mf_mos_n_unsupported: Optional[int] = None  # scanner below MIN_BEAMS; by design
-    mf_mos_n_points_moving: Optional[int] = None
+    # Dynamic candidates Step B's filter removed: too small a cluster in their
+    # frame, then (of the rest) too persistent a voxel. None on chunks written
+    # before the filter existed.
+    n_filter_cluster_dropped: Optional[int] = None
+    n_filter_persistence_dropped: Optional[int] = None
     # Step F motion-proposal stats — None until `proposals` has run on the
     # chunk (it rewrites this row in place after Step B/C wrote it).
     # n_points_proposal: points with any source bit set (the recall union).
@@ -393,16 +366,8 @@ CHUNK_SUMMARY_SCHEMA = pa.schema(
         pa.field("cache_auto_disabled", pa.bool_()),
         pa.field("estimated_cache_bytes", pa.int64()),
         pa.field("ground_status", pa.string()),
-        pa.field("segmentation_method", pa.string()),
-        pa.field("seg_n_sweeps_no_mask", pa.int64()),
-        pa.field("union_n_points_vetoed", pa.int64()),
-        pa.field("union_n_points_ground_vetoed", pa.int64()),
-        pa.field("motion_filter_n_persistence_dropped", pa.int64()),
-        pa.field("motion_filter_n_coherence_dropped", pa.int64()),
-        pa.field("mf_mos_n_processed", pa.int64()),
-        pa.field("mf_mos_n_skipped", pa.int64()),
-        pa.field("mf_mos_n_unsupported", pa.int64()),
-        pa.field("mf_mos_n_points_moving", pa.int64()),
+        pa.field("n_filter_cluster_dropped", pa.int64()),
+        pa.field("n_filter_persistence_dropped", pa.int64()),
         pa.field("n_points_proposal", pa.int64()),
         pa.field("n_clusters", pa.int64()),
         pa.field("n_clusters_moving", pa.int64()),
@@ -529,7 +494,6 @@ class MaskletRow(BaseModel):
     frames_present: str  # JSON list[int] — camera_seq values where mask is present
     mask_path: str  # path to directory of per-frame mask PNG files
     dino_feature_path: Optional[str] = None  # DINOv2 embedding NPZ
-    global_object_id: Optional[str] = None  # cross-camera identity
     # detector + SAM2 fields
     raw_phrase: str = ""  # raw detector label before canonicalisation
     det_score: float = 0.0  # detector (× SAM2 mask) confidence
@@ -549,7 +513,6 @@ MASKLET_SCHEMA = pa.schema(
         pa.field("frames_present", pa.string()),
         pa.field("mask_path", pa.string()),
         pa.field("dino_feature_path", pa.string()),
-        pa.field("global_object_id", pa.string()),
         pa.field("raw_phrase", pa.string()),
         pa.field("det_score", pa.float64()),
         pa.field("discovery_score", pa.float64()),
@@ -615,11 +578,47 @@ class LiftedStatsRow(BaseModel):
     chunk_id: str
     n_points_total: int
     n_points_labeled: int
+    # Points inside a mask in at least one camera, before the visibility test.
     n_points_in_any_mask: int
+    # Of those, points the visibility test rejected in every such camera
+    # (= n_points_in_any_mask - n_points_labeled).
     n_points_failed_visibility: int
+    # Labeled points with at least one camera voting another class.
     n_points_disagreement: int
     mean_confidence_labeled: float
+    # Paired camera frames with masklets and a depth artifact.
     n_cameras_used: int
+
+
+class LiftedInstanceRow(BaseModel):
+    """One row per lifted instance (an object's masklets merged across
+    cameras) in lifted_instances.parquet, for every instance some point is
+    labeled with."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    instance_id: str  # the smallest masklet_id among its masklets
+    bag_id: str
+    chunk_id: str
+    cls: str
+    masklet_ids: str  # JSON list[str], sorted
+    cam_ids: str  # JSON list[str], sorted, distinct
+    n_points_labeled: int  # summed over the chunk's sweeps
+    n_sweeps: int  # sweeps with at least one point labeled with it
+
+
+LIFTED_INSTANCES_SCHEMA = pa.schema(
+    [
+        pa.field("instance_id", pa.string()),
+        pa.field("bag_id", pa.string()),
+        pa.field("chunk_id", pa.string()),
+        pa.field("cls", pa.string()),
+        pa.field("masklet_ids", pa.string()),
+        pa.field("cam_ids", pa.string()),
+        pa.field("n_points_labeled", pa.int64()),
+        pa.field("n_sweeps", pa.int64()),
+    ]
+)
 
 
 LIFTED_STATS_SCHEMA = pa.schema(

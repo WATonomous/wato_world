@@ -1,5 +1,5 @@
 """Tests for wato_common.geometry.interpolation: interpolate_pose (PoseLookup)
-and batch_interpolate_poses (deskew, MF-MOS). SLERP of the rotation is covered
+and batch_interpolate_poses (deskew). SLERP of the rotation is covered
 through PoseLookup in test_pose_lookup.py."""
 
 from __future__ import annotations

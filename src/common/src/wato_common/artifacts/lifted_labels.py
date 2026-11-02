@@ -1,18 +1,25 @@
 """semantic_lifting output: 2D masklet labels lifted onto LiDAR points.
 
 Written by semantic_lifting; read by proposal_generation (Segment-Lift-Fit),
-tracking and label_refinement once they exist.
+tracking and label_refinement once they exist. Write order: labels, then
+instances, then stats (the completion marker).
 
 On disk, per chunk (under semantic_lifting/):
 
   lifted_labels/<sweep_id:06d>.npz   one per processed sweep; M labeled points
       point_indices          int32 (M,)  index into the sweep's world NPZ
                                          (lidar_proc/<sweep_id:06d>_world.npz)
-      instance_ids           str   (M,)  masklet global_object_id or masklet_id
+      instance_ids           str   (M,)  the lifted instance: an object's
+                                         masklets merged across cameras,
+                                         named by its smallest masklet_id
       classes                str   (M,)  canonical class
-      confidences            float32 (M,)
-      n_supporting_cameras   int32 (M,)
-      n_disagreeing_cameras  int32 (M,)
+      confidences            float32 (M,) winning class score / (winning +
+                                         runner-up class score); 1 = unanimous
+      n_supporting_cameras   int32 (M,)  cameras voting the winning class
+      n_disagreeing_cameras  int32 (M,)  cameras voting another class
+  lifted_instances.parquet           one LiftedInstanceRow per instance: its
+                                     class, masklet_ids and cam_ids (to find
+                                     its 2D masks), labeled point counts
   lifted_stats.parquet               one LiftedStatsRow per sweep (completion marker)
 
 Strings are fixed-width unicode arrays, so files load without pickle. Files
@@ -27,10 +34,22 @@ from typing import Optional
 
 import numpy as np
 
-from wato_common.artifact_store import lifted_labels_path, lifted_stats_path, local_path
+from wato_common.artifact_store import (
+    lifted_instances_path,
+    lifted_labels_path,
+    lifted_stats_path,
+    local_path,
+)
 from wato_common.artifacts import ArtifactFormatError
 from wato_common.io.parquet_io import read_rows, write_table
-from wato_common.schemas import LIFTED_STATS_SCHEMA, LiftedStatsRow
+from wato_common.schemas import (
+    LIFTED_INSTANCES_SCHEMA,
+    LIFTED_STATS_SCHEMA,
+    LiftedInstanceRow,
+    LiftedStatsRow,
+    decode_str_list,
+    encode_str_list,
+)
 
 
 @dataclass(frozen=True)
@@ -100,6 +119,51 @@ def read_sweep(
             path, f"point_indices outside the world sweep's {n_points} points"
         )
     return SweepLabels(**arrays)
+
+
+@dataclass(frozen=True)
+class LiftedInstance:
+    """A LiftedInstanceRow without bag/chunk ids, lists decoded."""
+
+    instance_id: str
+    cls: str
+    masklet_ids: tuple[str, ...]
+    cam_ids: tuple[str, ...]
+    n_points_labeled: int
+    n_sweeps: int
+
+
+def write_instances(
+    bag_id: str, chunk_id: str, instances: list[LiftedInstance]
+) -> None:
+    rows = [
+        LiftedInstanceRow(
+            instance_id=i.instance_id,
+            bag_id=bag_id,
+            chunk_id=chunk_id,
+            cls=i.cls,
+            masklet_ids=encode_str_list(sorted(i.masklet_ids)),
+            cam_ids=encode_str_list(sorted(set(i.cam_ids))),
+            n_points_labeled=i.n_points_labeled,
+            n_sweeps=i.n_sweeps,
+        ).model_dump()
+        for i in instances
+    ]
+    write_table(rows, LIFTED_INSTANCES_SCHEMA, lifted_instances_path(bag_id, chunk_id))
+
+
+def read_instances(bag_id: str, chunk_id: str) -> list[LiftedInstance]:
+    return [
+        LiftedInstance(
+            instance_id=r["instance_id"],
+            cls=r["cls"],
+            masklet_ids=tuple(decode_str_list(r["masklet_ids"])),
+            cam_ids=tuple(decode_str_list(r["cam_ids"])),
+            n_points_labeled=int(r["n_points_labeled"]),
+            n_sweeps=int(r["n_sweeps"]),
+        )
+        for r in read_rows(lifted_instances_path(bag_id, chunk_id))
+    ]
 
 
 def write_stats(bag_id: str, chunk_id: str, rows: list[LiftedStatsRow]) -> None:

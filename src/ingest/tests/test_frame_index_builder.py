@@ -135,7 +135,6 @@ def test_pose_marked_invalid_when_no_samples_close_enough():
         max_cam_offset_ms=50.0,
     )
     assert rows[0].valid_pose is False
-    assert rows[0].world_T_ego_flat is None
     assert rows[0].pose_drop_reason == "outside_pose_span"
 
 
@@ -157,7 +156,6 @@ def test_sweep_between_distant_poses_gets_pose_gap_reason():
     )
     assert rows[0].valid_pose is False
     assert rows[0].pose_drop_reason == "pose_gap_1000ms"
-    assert rows[0].world_T_ego_flat is None
 
 
 def test_valid_pose_has_no_drop_reason():

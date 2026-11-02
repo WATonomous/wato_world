@@ -28,12 +28,9 @@ from wato_common.artifact_store import (
 from wato_common.artifacts.lidar_sweeps import WorldSweep, read_raw, write_world
 from wato_common.geometry import PoseSample, batch_interpolate_poses
 from wato_common.io.parquet_io import read_rows, write_table
+from wato_common.pose_lookup import PoseLookup
 from wato_common.schemas import PROCESSED_SWEEPS_SCHEMA, ProcessedSweepMeta
-from wato_lidar_preprocessing._inputs import (
-    load_ego_T_lidar_dict,
-    load_pose_samples,
-    load_pose_valid_sweep_ids,
-)
+from wato_lidar_preprocessing._inputs import load_ego_T_lidar_dict
 from wato_lidar_preprocessing.config import (
     ComponentConfig,
     FrameSyncParams,
@@ -375,14 +372,12 @@ def process_chunk(
     ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
     index_uri = lidar_proc_index_path(bag_id, chunk_id)
 
-    pose_samples = load_pose_samples(bag_id, chunk_id)
+    poses = PoseLookup.load(bag_id, chunk_id)
+    pose_samples = poses.samples
     if not pose_samples:
         log.warning("chunk %s has no valid poses; skipping deskew", chunk_id)
         write_table([], PROCESSED_SWEEPS_SCHEMA, index_uri)
         return []
-
-    # None = no frame_index → process all.
-    pose_valid_sweep_ids = load_pose_valid_sweep_ids(bag_id, chunk_id)
 
     unit_scale = cfg.point_time_scale_to_ns()
 
@@ -416,9 +411,11 @@ def process_chunk(
         sweep_id = int(row["sweep_id"])
         header_ts = int(row["header_timestamp_ns"])
 
-        # Skip pose-invalid sweeps rather than clamp them to a stale pose; the
-        # valid=False row tells downstream it existed.
-        if pose_valid_sweep_ids is not None and sweep_id not in pose_valid_sweep_ids:
+        # Skip a sweep whose time has no trusted pose rather than let
+        # batch_interpolate_poses clamp it to a stale one; the valid=False row
+        # tells downstream it existed.
+        sweep_pose = poses.at(header_ts)
+        if not sweep_pose.valid:
             meta_rows.append(
                 ProcessedSweepMeta(
                     bag_id=bag_id,
@@ -435,8 +432,8 @@ def process_chunk(
                     has_intensity=False,
                     deskewed=False,
                     valid=False,
-                    drop_reason="pose_invalid: no interpolatable ego pose "
-                    "(valid_pose=False in frame_index)",
+                    drop_reason=f"pose_invalid: {sweep_pose.drop_reason} at the "
+                    "sweep's time",
                 ).model_dump()
             )
             continue

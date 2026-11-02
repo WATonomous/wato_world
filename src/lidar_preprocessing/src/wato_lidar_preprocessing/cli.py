@@ -57,19 +57,6 @@ def main(log_level: str) -> None:
     default="/ws/src/lidar_preprocessing/config/lidar_preprocessing.yaml",
 )
 @click.option(
-    "--seg",
-    "seg",
-    type=click.Choice(["aw", "mos", "union"]),
-    default=None,
-    help=(
-        "Segmentation method for the static/dynamic split (Step B). "
-        "'aw' = pure Amanatides-Woo log-odds ray-casting (no MF-MOS). "
-        "'mos' = pure MF-MOS learned segmentation (no ray traversal). "
-        "'union' = fusion: AW static map + MF-MOS dynamics vetoed by it. "
-        "Overrides the config's `segmentation` field; default uses the config."
-    ),
-)
-@click.option(
     "--force",
     "-f",
     "force",
@@ -106,7 +93,7 @@ def main(log_level: str) -> None:
         "(a one-time log-odds boost for map-matched voxels — NOT UniLiPs IWU, "
         "which is the separate `iwu` step).  Roughly doubles classify wall "
         "time; improves static recall on long-range structure sparsely "
-        "observed in any single chunk, and sharpens union's static veto."
+        "observed in any single chunk."
     ),
 )
 @click.option(
@@ -126,19 +113,15 @@ def run_cmd(
     bag_id: str,
     chunk_id: str | None,
     config_path: str,
-    seg: str | None,
     force: bool,
     workers: int,
     auto_reduce: bool,
     two_pass: bool,
     proposals: bool,
 ) -> None:
-    """Run deskew → (aw|mos|union) → ground → [reduce → iwu → proposals]."""
+    """Run deskew → classify → ground → [reduce → iwu → proposals]."""
     bag_id = _resolve_bag_id(bag_id)
     cfg = load_config(config_path)
-    if seg is not None:
-        cfg.segmentation = seg
-    log.info("segmentation method: %s", cfg.segmentation)
     run_pipeline(
         cfg,
         bag_id=bag_id,
@@ -183,8 +166,7 @@ def run_cmd(
 def iwu_cmd(bag_id: str, config_path: str) -> None:
     """Step E — UniLiPs IWU over global_static_map.npz → global_iwu.npz.
 
-    Needs `reduce` first. Seg-agnostic: refines whichever static map the
-    chosen segmentation method produced.
+    Needs `reduce` first.
     """
     from wato_lidar_preprocessing.iwu import run_iwu
 
@@ -390,7 +372,8 @@ def viz_cmd(
             )
         if layer == "proposals" and sweep_id is not None:
             raise click.ClickException("--layer proposals is chunk-level; omit --sweep")
-        from wato_lidar_preprocessing.html_viz import open_html_file, write_html_viewer
+        from wato_common.viz.point_cloud_html import open_html_file
+        from wato_lidar_preprocessing.html_viz import write_html_viewer
 
         chunk_ids = selected_chunks()
         for cid in chunk_ids:

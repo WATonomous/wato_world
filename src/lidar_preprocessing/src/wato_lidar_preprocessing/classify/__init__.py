@@ -1,4 +1,4 @@
-"""Step B (seg=aw) — Amanatides-Woo voxel static/dynamic classification."""
+"""Step B — Amanatides-Woo voxel static/dynamic classification."""
 
 from wato_lidar_preprocessing.voxel import VoxelOverflowError
 

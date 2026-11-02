@@ -1,9 +1,7 @@
-"""Spherical range-image projection shared by MF-MOS and IWU.
+"""Spherical range-image projection.
 
-Top-level rather than under mf_mos/ because IWU (Step E) uses it too, to tell
-whether a map point was seen, seen through or occluded, and geometry code may
-not import from mf_mos/. Callers supply the image geometry from the scanner's
-SensorModel.
+IWU (Step E) uses it to tell whether a map point was seen, seen through or
+occluded. Callers supply the image geometry from the scanner's SensorModel.
 """
 
 from __future__ import annotations
@@ -24,8 +22,7 @@ def spherical_pixels(
 
     Args:
         points_xyz: (N, 3) coordinates relative to the projection centre
-            (sensor frame for MF-MOS; origin-centred, world-axis-aligned for
-            IWU).
+            (origin-centred, world-axis-aligned for IWU).
         h, w: image rows / azimuth columns.
         fov_up_deg, fov_down_deg: vertical field of view (fov_down negative).
         min_range_m, max_range_m: points outside this range are not in FoV.

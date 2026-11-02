@@ -2,7 +2,7 @@
 
 The end-to-end scene (12 sweeps at 20 Hz, sensor at (0, 0, 1.8)):
   * mover   — a 4×2×1.5 m car driving +1 m/frame along x at y=+5, flagged by
-              the seg method (SEG_DYNAMIC), with "wheel" returns below the
+              Step B (SEG_DYNAMIC), with "wheel" returns below the
               0.25 m height floor that only BOX_FILL may recover;
   * parked  — the same car standing still at y=−5, a seg false positive,
               also covered by IWU-evicted map points (IWU_EVICTED);
@@ -18,6 +18,8 @@ from __future__ import annotations
 import os
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from wato_common.artifact_store import (
@@ -34,18 +36,13 @@ from wato_common.artifacts.motion_proposals import (
     AW_DYNAMIC,
     BOX_FILL,
     IWU_EVICTED,
-    MF_MOS,
     SEED_BITS,
     SEG_DYNAMIC,
     UNMAPPED,
 )
 from wato_common.io.parquet_io import read_rows
 from wato_common.schemas import Box3D
-from wato_lidar_preprocessing.config import (
-    ComponentConfig,
-    MotionFilterParams,
-    UnionParams,
-)
+from wato_lidar_preprocessing.config import ComponentConfig
 from wato_lidar_preprocessing.motion_proposals import (
     cluster_points,
     compute_sweep_bits,
@@ -87,8 +84,7 @@ def _cfg(**mp_kw) -> ComponentConfig:
         voxel_size_m=VOXEL,
         global_map_voxel_size_m=0.3,
         dynamic_min_range_m=2.5,
-        union=UnionParams(motion_filter=MotionFilterParams(persistence_max_sweeps=10)),
-        motion_proposals=mp_kw or {},
+        motion_proposals={"persistence_max_sweeps": 10, **mp_kw},
     )
 
 
@@ -209,8 +205,8 @@ def test_end_to_end_scene(tmp_env):
         wheel_bits = bits[sl["wheels"]]
         assert (wheel_bits == BOX_FILL).all()
         assert (cid[sl["wheels"]] >= 0).all()
-        # MF-MOS never ran → bit 3 never set.
-        assert not (bits & MF_MOS).any()
+        # Bit 3 is unused.
+        assert not (bits & (1 << 3)).any()
         # UNMAPPED: the cars are far from the IWU-kept wall; the slider isn't.
         assert (bits[sl["mover"]] & UNMAPPED).all()
         assert not (bits[sl["slider"]] & UNMAPPED).any()
@@ -248,6 +244,24 @@ def test_up_to_date_tracks_inputs(tmp_env):
     t = os.path.getmtime(local_path(motion_clusters_path(bag, chunk)))
     os.utime(sm, (t + 10, t + 10))
     assert not proposals_up_to_date(bag, chunk)
+
+
+def test_summary_from_before_a_column_was_retired_still_updates(tmp_env):
+    """`proposals` on an existing chunk rewrites a summary that may still carry
+    columns the schema has since dropped; they go, the rest stay."""
+    bag, chunk = "bag_old_summary", "c0"
+    _stage_scene(bag, chunk)
+    uri = lidar_proc_summary_path(bag, chunk)
+    table = pq.read_table(local_path(uri))
+    pq.write_table(
+        table.append_column("segmentation_method", pa.array(["union"])), local_path(uri)
+    )
+
+    process_chunk(_cfg(), bag, chunk)
+
+    row = read_rows(uri)[0]
+    assert "segmentation_method" not in row
+    assert row["n_clusters"] > 0
 
 
 def test_box_fill_can_be_disabled(tmp_env):

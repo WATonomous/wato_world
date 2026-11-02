@@ -15,7 +15,7 @@ Both papers produce moving-object labels offline, with no learned model, from
 geometry alone. We use them to add a *recall-oriented proposal* artifact to
 lidar_preprocessing. False positives in it are acceptable, because
 downstream association (proposal_generation, tracking) removes them cheaply.
-The model-free AW log-odds split stays the default `--seg aw`.
+Step B is the model-free AW log-odds split.
 
 ---
 
@@ -64,9 +64,7 @@ checked over three consecutive scans. Ablation (UniLiPs Table 8): without
 | Need | What exists | Where |
 |---|---|---|
 | Poses | eidos SLAM odometry via ingest | `poses.parquet` |
-| Coarse map cleaning | Amanatides-Woo log-odds ray casting, with sensor-model constants, carve margin, grazing gate and range credibility | `classify/` (`--seg aw`) |
-| Learned MOS (opt-in) | MF-MOS | `mf_mos/` (`--seg mos`) |
-| Fusion | AW-static veto of MF-MOS + persistence motion filter | `union/` (`--seg union`) |
+| Coarse map cleaning | Amanatides-Woo log-odds ray casting, with sensor-model constants, carve margin, grazing gate and range credibility | `classify/` |
 | Bag static map | voxel-snapped 0.30 m | `reduce/` → `global_static_map.npz` |
 | Leakage metric | on-static % vs a shift-null chance floor | `scripts/compare_seg_dynamic.py` |
 
@@ -97,7 +95,6 @@ A deskew → B seg (aw | mos | union) → C ground → D reduce
 | `AW_DYNAMIC` | AW carved-dynamic voxel | seed |
 | `AW_AMBIGUOUS` | AW voxel between the two p_occ thresholds (a new export) | attach |
 | `IWU_EVICTED` | near an IWU floater | seed |
-| `MF_MOS` | raw MF-MOS mask (if it ran) | seed |
 | `SEG_DYNAMIC` | the seg method's final `dynamic_mask` | seed |
 | `BOX_FILL` | inside a moving cluster's box (Chen) | — |
 | `UNMAPPED` | no IWU-refined map point nearby (UniLiPs' moving rule) | attach |
@@ -139,7 +136,7 @@ is carved only through ground or background rays that cross its vacated space.
 | r* uses r_max = 200 m | `SensorModel.range_weight` (d* = voxel / divergence ≈ 100 m) | One range-credibility model for the whole component. |
 | C(m) = label consensus | C = 0 (hook: `consensus=`) | No semantics in this stage yet. |
 | Chen relabels non-moving clusters static | Soft features only; nothing dropped | This is a proposal source; downstream thresholds. |
-| Chen's coarse stage: ERASOR | Union of AW / IWU / MF-MOS / seg / unmapped bits | See above. |
+| Chen's coarse stage: ERASOR | Union of AW / IWU / seg / unmapped bits | See above. |
 | Chen: moving iff trajectory > max side | `motion_score` = **net** displacement of the Kalman-**filtered** centre (median of first/last 3 frames) ÷ max side | Path length accumulates visibility jitter, which is the velocity-gate failure measured on `main`. |
 | Chen box fill: every moving box | Only if `track_life ≥ 3` and `frac_persistent < 0.5`; box grown down to the ground | Wall-sliding fragments pass the size-normalised test (measured below). Growing the box down restores wheels and feet removed by the 0.25 m height floor. |
 | HDBSCAN with ε ∈ {2, 1, 0.5, 0.25} | sklearn HDBSCAN (it integrates over ε itself) on a 0.1 m-deduplicated seed grid | Same clusters, bounded runtime. |
@@ -148,7 +145,7 @@ is carved only through ground or background rays that cross its vacated space.
 
 ## Measured on real data
 
-**nuScenes scene-0061**: one 19 s chunk, 382 HDL-32E sweeps, `--seg union`,
+**nuScenes scene-0061**: one 19 s chunk, 382 HDL-32E sweeps, measured on a since-removed fusion classifier,
 191k global map points. There are no labels, so the precision proxies are:
 
 - **Enrichment**: how much more likely IWU eviction is within 0.5 m of the
@@ -175,7 +172,7 @@ follows from ρ and the scanner geometry, and it evicts the least.
 - 21.6k clusters (57 per frame); 404 score > 1.
 - 12 tracks are box-filled, all below the `frac_persistent < 0.5` gate by
   construction. Of the ten longest moving tracks, the eight filled ones have
-  `frac_persistent ≤ 0.11`, and all but one have seg-dynamic or MF-MOS support.
+  `frac_persistent ≤ 0.11`, and all but one have seg-dynamic support.
 - Two persistent "movers" in that list are left unfilled: a
   0.5 × 0.2 × 1.3 m track (persistence 0.92; pole- or person-sized), and a
   1.0 × 0.5 × 1.2 m track (0.52, `motion_score` 2.65). Either may be a real,
@@ -190,7 +187,6 @@ On-static leakage above chance, with the IWU-refined map as reference:
 | BOX_FILL | +21.4 |
 | moving clusters | +25.6 |
 | SEG_DYNAMIC | +31.2 |
-| MF_MOS | +55.7 |
 | AW_DYNAMIC | +64.1 |
 | AW_AMBIGUOUS | +72.7 |
 | UNMAPPED | −10.1 (off-map by definition) |
@@ -251,7 +247,6 @@ Done:
 - `wato_common/tracking/`: `fit_bev_box`, `iou_3d`, `BoxKalmanFilter`,
   `associate`, `MultiObjectTracker`.
 - `classify` exports `ambiguous_voxel_keys`.
-- `range_image.py` is shared by `mf_mos/` and `iwu/`.
 - `--two-pass` is off by default and renamed as a global-map prior. It is not IWU.
 - `compare_seg_dynamic.py --proposals`, and `viz --layer proposals`.
 

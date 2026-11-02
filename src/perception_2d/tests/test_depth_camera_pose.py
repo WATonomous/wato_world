@@ -1,5 +1,6 @@
-"""The depth pass projects LiDAR into an image with the ego pose at the image's
-own timestamp, not the LiDAR sweep's pose."""
+"""The depth pass projects LiDAR into an image with the frame's own pose (looked
+up at the image's time by wato_common.artifacts.frame_index), anchoring on
+every sweep the image is paired with."""
 
 from __future__ import annotations
 
@@ -7,52 +8,37 @@ from collections import deque
 
 import numpy as np
 
-from wato_common.geometry import PoseSample, invert_se3
-from wato_common.pose_lookup import PoseLookup, interval_drop_reasons
+from wato_common.artifacts.calibration import CameraCalibration
+from wato_common.artifacts.frame_index import CameraFrame
+from wato_common.geometry import invert_se3
 from wato_perception_2d import pipeline
 from wato_perception_2d.config import ComponentConfig
-from wato_common.artifacts.calibration import CameraCalibration
-from wato_perception_2d.io import CameraFrameInfo
-
-MS = 1_000_000
 
 
-def _poses() -> PoseLookup:
-    # Ego moving +x at 10 m/s, samples every 100 ms, then a 1 s dropout.
-    samples = [
-        PoseSample(
-            t * MS, np.array([t / 100.0, 0.0, 0.0]), np.array([0.0, 0.0, 0.0, 1.0])
-        )
-        for t in (0, 100, 200, 1_200)
-    ]
-    return PoseLookup(
-        samples,
-        interval_drop_reasons(samples, max_bracket_ns=250 * MS, max_speed_mps=30.0),
-    )
-
-
-def _frame(camera_ms: int | None) -> CameraFrameInfo:
-    return CameraFrameInfo(
-        frame_id="f0",
-        bag_id="bag",
-        chunk_id="0000",
-        sweep_id=0,
+def _frame(world_T_ego: np.ndarray | None, sweep_ids=(0,)) -> CameraFrame:
+    return CameraFrame(
         cam_id="cam_front",
-        image_path="/img/0.jpg",
         camera_seq=0,
-        camera_timestamp_ns=None if camera_ms is None else camera_ms * MS,
-        valid_camera=True,
+        timestamp_ns=0,
+        image_path="/img/0.jpg",
+        sweep_ids=tuple(sweep_ids),
+        world_T_ego=world_T_ego,
     )
 
 
-def _run(monkeypatch, frame: CameraFrameInfo) -> tuple[list[np.ndarray], np.ndarray]:
-    seen: list[np.ndarray] = []
+def _run(monkeypatch, frame: CameraFrame, per_sweep=None):
+    """(points, cam_T_world) passed to each build_anchor_pairs call."""
+    seen: list[tuple[np.ndarray, np.ndarray]] = []
     monkeypatch.setattr(
-        pipeline, "load_static_lidar_points", lambda *a: np.array([[5.0, 0.0, 0.0]])
+        pipeline,
+        "load_static_lidar_points",
+        lambda b, c, sid: (
+            np.array([[5.0, 0.0, 0.0]]) if per_sweep is None else per_sweep[sid]
+        ),
     )
 
     def fake_anchor_pairs(points, disparity, K, cam_T_world, size, **kw):
-        seen.append(cam_T_world)
+        seen.append((points, cam_T_world))
         return np.zeros(0), np.zeros(0)
 
     monkeypatch.setattr(pipeline, "build_anchor_pairs", fake_anchor_pairs)
@@ -69,26 +55,32 @@ def _run(monkeypatch, frame: CameraFrameInfo) -> tuple[list[np.ndarray], np.ndar
         frame,
         np.ones((4, 5), dtype=np.float32),
         CameraCalibration(cam_id="cam_front", K=np.eye(3), ego_T_cam=ego_T_cam),
-        _poses(),
         deque(),
     )
     return seen, ego_T_cam
 
 
-def test_projection_uses_the_pose_at_camera_time(monkeypatch):
-    seen, ego_T_cam = _run(monkeypatch, _frame(camera_ms=140))
+def test_projection_uses_the_frames_pose(monkeypatch):
     world_T_ego = np.eye(4)
-    world_T_ego[0, 3] = 1.4  # 10 m/s × 140 ms
+    world_T_ego[0, 3] = 1.4
+    seen, ego_T_cam = _run(monkeypatch, _frame(world_T_ego))
+    ((_, cam_T_world),) = seen
     np.testing.assert_allclose(
-        seen[0], invert_se3(ego_T_cam) @ invert_se3(world_T_ego), atol=1e-9
+        cam_T_world, invert_se3(ego_T_cam) @ invert_se3(world_T_ego), atol=1e-9
     )
 
 
-def test_camera_time_in_an_untrusted_stretch_gets_no_anchors(monkeypatch):
-    seen, _ = _run(monkeypatch, _frame(camera_ms=600))  # inside the 1 s dropout
+def test_frame_without_a_trusted_pose_gets_no_anchors(monkeypatch):
+    seen, _ = _run(monkeypatch, _frame(None))
     assert seen == []
 
 
-def test_frame_without_camera_time_gets_no_anchors(monkeypatch):
-    seen, _ = _run(monkeypatch, _frame(camera_ms=None))
-    assert seen == []
+def test_depth_anchors_on_every_paired_sweep(monkeypatch):
+    per_sweep = {
+        470: np.array([[1.0, 0.0, 0.0]]),
+        471: None,  # a sweep with no static points contributes nothing
+        472: np.array([[2.0, 0.0, 0.0], [3.0, 0.0, 0.0]]),
+    }
+    seen, _ = _run(monkeypatch, _frame(np.eye(4), sweep_ids=(470, 471, 472)), per_sweep)
+    ((points, _),) = seen
+    assert points[:, 0].tolist() == [1.0, 2.0, 3.0]

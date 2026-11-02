@@ -50,6 +50,49 @@ class GroundResult:
     n_dropped_dynamic: int = 0  # rejected by dynamic-voxel intersection
 
 
+def load_ground_grid(
+    bag_id: str, chunk_id: str
+) -> tuple[np.ndarray, np.ndarray, float] | None:
+    """ground.npz → (height_grid, grid_origin, cell_size) or None.
+
+    None (with a warning) when ground.npz is absent or a sentinel (Patchwork++
+    unavailable).
+    """
+    path = local_path(ground_path(bag_id, chunk_id))
+    if not os.path.exists(path):
+        log.warning("chunk %s: ground.npz not found — no height grid", chunk_id)
+        return None
+    g = np.load(path)
+    status = str(g["status"]) if "status" in g.files else "ok"
+    if status != "ok" or "height_grid" not in g.files:
+        log.warning("chunk %s: ground.npz status=%r — no height grid", chunk_id, status)
+        return None
+    return (
+        g["height_grid"],
+        np.asarray(g["grid_origin"], dtype=np.float64),
+        float(g["cell_size"]),
+    )
+
+
+def height_above_ground(
+    xyz: np.ndarray, grid: tuple[np.ndarray, np.ndarray, float]
+) -> np.ndarray:
+    """Per-point height over the ground grid.
+
+    height_grid is (H, W) = (y, x) — see _build_height_grid. Points outside
+    the grid clamp to the nearest edge cell; the grid spans the bbox of all
+    ground returns, so real out-of-bounds points are rare.
+    """
+    hg, grid_origin, cell = grid
+    ix = np.clip(
+        ((xyz[:, 0] - grid_origin[0]) / cell).astype(np.int64), 0, hg.shape[1] - 1
+    )
+    iy = np.clip(
+        ((xyz[:, 1] - grid_origin[1]) / cell).astype(np.int64), 0, hg.shape[0] - 1
+    )
+    return xyz[:, 2] - hg[iy, ix]
+
+
 def _load_dynamic_voxel_set(
     bag_id: str, chunk_id: str
 ) -> tuple[np.ndarray, np.ndarray, float]:

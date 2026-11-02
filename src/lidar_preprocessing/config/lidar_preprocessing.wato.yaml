@@ -1,7 +1,8 @@
 lidar_preprocessing:
   # ====================================================================
   # WATO 3-Velodyne rig (VLP-32C centre + 2× VLP-16 corners). Ingest with
-  # ingest.wato.yaml / ingest.wato_6cam.yaml (per-corner LiDAR topics).
+  # ingest.wato.yaml / ingest.wato_6cam.yaml / ingest.wato_no_lidar_nw.yaml
+  # (per-corner LiDAR topics; per_lidar entries for absent LiDARs are unused).
   #   ./watod run lidar_preprocessing --bag <wato_bag> \
   #       --config /ws/src/lidar_preprocessing/config/lidar_preprocessing.wato.yaml
   # ====================================================================
@@ -23,6 +24,12 @@ lidar_preprocessing:
 
   voxel_size_m: 0.25
   min_observations: 3
+
+  # Cleanup of the voxel verdict's dynamic points. Tuned on this rig
+  # (docs/lidar_preprocessing_measurements.md).
+  dynamic_filter:
+    min_cluster_pts: 5
+    persistence_max_s: 0.5
 
   cache_world_xyz_in_memory: true
 
@@ -57,25 +64,6 @@ lidar_preprocessing:
   frame_sync:
     canonical_lidar: lidar_cc
     tolerance_ms: 25.0
-
-  # MF-MOS (seg=mos / union only) runs on lidar_cc alone: the VLP-16 corners
-  # are below MIN_BEAMS. Unaudited on this rig — keep `aw` until
-  # scripts/debug_mfmos_contribution.py says otherwise.
-  mf_mos:
-    checkpoint_path: /data/models/mf_mos/mf_mos_semantic_kitti.pt
-    arch_config:   /data/models/mf_mos/arch_cfg.yaml
-    data_config:   /data/models/mf_mos/data_cfg.yaml
-
-    device: cuda
-    score_threshold: 0.7
-    save_scores: true
-
-    max_pose_gap_ms: 6000
-    occlusion_range_tol_m: 1.0
-    prime_window_from_prior_chunk: true
-
-    moving_cluster_voxel_m: 0.5
-    moving_min_cluster_pts: 8
 
   # Steps E/F: as the nuScenes profile. Proposals cluster per frame_sync
   # frame, so one tick's three sweeps form one object.

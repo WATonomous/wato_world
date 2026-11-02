@@ -77,7 +77,14 @@ def load_world_full(
 
 
 def sigmoid(x: np.ndarray) -> np.ndarray:
-    return 1.0 / (1.0 + np.exp(-x.astype(np.float64)))
+    """Logistic function, overflow-free for the unclamped log-odds' range."""
+    x = x.astype(np.float64)
+    out = np.empty_like(x)
+    pos = x >= 0
+    out[pos] = 1.0 / (1.0 + np.exp(-x[pos]))
+    e = np.exp(x[~pos])
+    out[~pos] = e / (1.0 + e)
+    return out
 
 
 def origin_from_index(meta_rows: list[dict]) -> np.ndarray | None:

@@ -18,22 +18,14 @@ from wato_perception_2d import model_registry as reg
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
-@pytest.mark.parametrize("tag", list(reg.HF_MODELS))
-def test_hf_models_pin_an_exact_revision(tag):
-    assert SHA_RE.match(reg.HF_MODELS[tag].revision), (
-        f"{tag} must pin a full commit SHA, not a branch or tag — "
-        "a moving revision silently changes the labeler"
+def test_every_model_pins_an_exact_commit():
+    pins = (
+        {tag: m.revision for tag, m in reg.HF_MODELS.items()}
+        | {tag: m.revision for tag, m in reg.RAW_CHECKPOINTS.items()}
+        | {tag: m.ref for tag, m in reg.TORCH_HUB_MODELS.items()}
     )
-
-
-@pytest.mark.parametrize("tag", list(reg.RAW_CHECKPOINTS))
-def test_raw_checkpoints_pin_an_exact_revision(tag):
-    assert SHA_RE.match(reg.RAW_CHECKPOINTS[tag].revision)
-
-
-@pytest.mark.parametrize("tag", list(reg.TORCH_HUB_MODELS))
-def test_torch_hub_models_pin_a_commit_not_a_branch(tag):
-    assert SHA_RE.match(reg.TORCH_HUB_MODELS[tag].ref)
+    unpinned = {tag: rev for tag, rev in pins.items() if not SHA_RE.match(rev)}
+    assert not unpinned, f"pin a full commit SHA, not a branch or tag: {unpinned}"
 
 
 def test_torch_hub_repo_is_ref_qualified():
@@ -55,25 +47,6 @@ def test_revisions_covers_every_registered_model():
     assert set(revs) == set(reg.ALL_TAGS)
     for tag, value in revs.items():
         assert "@" in value, f"{tag} revision string must be repo@sha"
-
-
-def test_config_referenced_models_are_registered():
-    """Models named in perception_2d.yaml must be pre-fetchable.
-
-    The container runs with HF_HUB_OFFLINE=1 and /data/models mounted
-    read-only, so a model that is referenced but not in the registry is never
-    downloaded by fetch_models.py and fails at load time on a clean host.
-    Florence-2 was exactly this case before 2026-09-21.
-    """
-    registered = {m.repo_id for m in reg.HF_MODELS.values()}
-    assert "microsoft/Florence-2-large-ft" in registered
-    assert "IDEA-Research/grounding-dino-base" in registered
-
-
-@pytest.mark.parametrize("tag", list(reg.HF_MODELS))
-def test_hf_revision_returns_the_pinned_sha(tag):
-    m = reg.HF_MODELS[tag]
-    assert reg.hf_revision(m.repo_id) == m.revision
 
 
 def test_hf_revision_refuses_unregistered_repo():

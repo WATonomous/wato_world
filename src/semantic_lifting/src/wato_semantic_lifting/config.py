@@ -8,33 +8,30 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class TemporalConfig(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    max_offset_s: float = 0.05
-
-
 class VisibilityConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     tolerance_m: float = 0.5
     neighborhood: int = 3
+    depth_map_max_range_m: float = 10.0
+    lidar_cell_px: int = 8
+    lidar_neighborhood_cells: int = 1
+    lidar_tolerance_per_m: float = 0.05
 
 
-class VotingConfig(BaseModel):
+class InstancesConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    min_supporting_cameras: int = 1
-    innermost_wins: bool = True
+    min_shared_points: int = 20
+    min_shared_fraction: float = 0.3
+    max_separation_m: float = 5.0
 
 
 class ComponentConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    temporal: TemporalConfig = Field(default_factory=TemporalConfig)
     visibility: VisibilityConfig = Field(default_factory=VisibilityConfig)
-    voting: VotingConfig = Field(default_factory=VotingConfig)
-    upstream_versions: dict[str, str] = Field(default_factory=dict)
+    instances: InstancesConfig = Field(default_factory=InstancesConfig)
 
 
 def load_config(path: str) -> ComponentConfig:

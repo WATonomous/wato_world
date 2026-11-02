@@ -1,8 +1,6 @@
 """Step F — recall-oriented moving-object proposals.
 
-A seg-agnostic consumer layer (like `union`, it may read every method's
-artifacts; `aw` and `mos` still never import each other). Built on Chen et
-al., "Automatic Labeling to Generate Training Data for Online LiDAR-based
+Built on Chen et al., "Automatic Labeling to Generate Training Data for Online LiDAR-based
 Moving Object Segmentation" (arXiv 2201.04501): coarse dynamic candidates →
 class-agnostic clustering (HDBSCAN) → multi-object tracking → "moved further
 than its own size". Two changes to that recipe, both because this artifact is
@@ -19,11 +17,10 @@ The artifacts and the bit layout belong to wato_common.artifacts.motion_proposal
 (consumers read them there). Per point, source_bits (uint8):
 
   bit  name            seeds?  source
-  0    AW_DYNAMIC      seed    voxel in static_map.npz dynamic_voxel_keys (aw, union)
-  1    AW_AMBIGUOUS    attach  voxel in static_map.npz ambiguous_voxel_keys (aw, union)
+  0    AW_DYNAMIC      seed    voxel in static_map.npz dynamic_voxel_keys
+  1    AW_AMBIGUOUS    attach  voxel in static_map.npz ambiguous_voxel_keys
   2    IWU_EVICTED     seed    within the match radius of an IWU-evicted map point
-  3    MF_MOS          seed    raw MF-MOS moving mask (mos, union)
-  4    SEG_DYNAMIC     seed    the run's final dynamic_mask.npy (any method)
+  4    SEG_DYNAMIC     seed    the run's final dynamic_mask.npy
   5    BOX_FILL        —       inside the box of a moving cluster (Chen)
   6    UNMAPPED        attach  no IWU-refined (or chunk static) map point nearby —
                                UniLiPs' "no correspondence in the refined map"
@@ -79,7 +76,6 @@ from wato_common.artifacts.motion_proposals import (
     AW_DYNAMIC,
     BOX_FILL,
     IWU_EVICTED,
-    MF_MOS,
     SEED_BITS,
     SEG_DYNAMIC,
     UNMAPPED,
@@ -88,18 +84,12 @@ from wato_common.artifacts.motion_proposals import (
 from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.schemas import CHUNK_SUMMARY_SCHEMA, Box3D, ChunkSummaryRow
 from wato_common.tracking import MultiObjectTracker, fit_bev_box, points_in_box
+from wato_lidar_preprocessing.classify.dynamic_filter import persistence_keep
+from wato_lidar_preprocessing.classify.io_helpers import load_world_full
+from wato_lidar_preprocessing.classify.masking import near_ego_mask
 from wato_lidar_preprocessing.config import ComponentConfig
+from wato_lidar_preprocessing.ground import height_above_ground, load_ground_grid
 from wato_lidar_preprocessing.iwu import load_global_iwu
-from wato_lidar_preprocessing.mf_mos.segment import (
-    _load_world,
-    load_mf_mos_world_mask,
-    near_ego_mask,
-)
-from wato_lidar_preprocessing.union.motion_filter import persistence_keep
-from wato_lidar_preprocessing.union.segment import (
-    _height_above_ground,
-    _load_ground_grid,
-)
 from wato_lidar_preprocessing.voxel import keys_in_sorted, voxel_indices
 
 log = logging.getLogger(__name__)
@@ -225,11 +215,9 @@ def _load_sources(
                 np.asarray(sm["ambiguous_voxel_keys"], np.int64)
             )
     if src.dynamic_keys is None:
-        src.missing.append("AW_DYNAMIC (no dynamic_voxel_keys — seg=mos?)")
+        src.missing.append("AW_DYNAMIC (no dynamic_voxel_keys — stale classify)")
     if src.ambiguous_keys is None:
-        src.missing.append(
-            "AW_AMBIGUOUS (no ambiguous_voxel_keys — seg=mos or stale classify)"
-        )
+        src.missing.append("AW_AMBIGUOUS (no ambiguous_voxel_keys — stale classify)")
 
     iwu_map = load_global_iwu(bag_id)
     if iwu_map is not None:
@@ -243,7 +231,7 @@ def _load_sources(
         src.missing.append("UNMAPPED (no static map to compare against)")
 
     if cfg.motion_proposals.min_height_above_ground_m > 0.0:
-        src.ground_grid = _load_ground_grid(bag_id, chunk_id)
+        src.ground_grid = load_ground_grid(bag_id, chunk_id)
     return src
 
 
@@ -267,7 +255,6 @@ def compute_sweep_bits(
     src: _Sources,
     cfg: ComponentConfig,
     *,
-    mf_mask: np.ndarray | None = None,
     seg_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     """source_bits for one sweep (BOX_FILL is applied later, per cluster)."""
@@ -280,7 +267,7 @@ def compute_sweep_bits(
     if src.ground_grid is not None and live.any():
         idx = np.flatnonzero(live)
         low = (
-            _height_above_ground(xyz[idx], src.ground_grid)
+            height_above_ground(xyz[idx], src.ground_grid)
             < cfg.motion_proposals.min_height_above_ground_m
         )
         live[idx[low]] = False
@@ -306,8 +293,6 @@ def compute_sweep_bits(
     if src.mapped_tree is not None:
         d, _ = src.mapped_tree.query(p, k=1, distance_upper_bound=radius, workers=-1)
         b[~np.isfinite(d)] |= UNMAPPED
-    if mf_mask is not None:
-        b[mf_mask[idx]] |= MF_MOS
     if seg_mask is not None:
         b[seg_mask[idx]] |= SEG_DYNAMIC
     bits[idx] = b
@@ -551,15 +536,9 @@ def process_chunk(cfg: ComponentConfig, bag_id: str, chunk_id: str) -> ProposalR
         seed_parts, attach_parts = [], []
         for row in fr.rows:
             sid = int(row["sweep_id"])
-            xyz, _, ground, origin = _load_world(row["world_path"])
-            n = xyz.shape[0]
-            mf = load_mf_mos_world_mask(
-                bag_id, chunk_id, row, n, cfg.filter_nonfinite_points
-            )
-            seg = _load_seg_mask(bag_id, chunk_id, sid, n)
-            bits = compute_sweep_bits(
-                xyz, ground, origin, src, cfg, mf_mask=mf, seg_mask=seg
-            )
+            xyz, _, origin, ground = load_world_full(row["world_path"])
+            seg = _load_seg_mask(bag_id, chunk_id, sid, xyz.shape[0])
+            bits = compute_sweep_bits(xyz, ground, origin, src, cfg, seg_mask=seg)
             sweep_bits[sid] = bits
             is_seed = (bits & SEED_BITS) != 0
             is_attach = ((bits & ATTACH_BITS) != 0) & ~is_seed
@@ -625,17 +604,13 @@ def process_chunk(cfg: ComponentConfig, bag_id: str, chunk_id: str) -> ProposalR
     _score_tracks(trackers, step_clusters, clusters)
 
     # frac_persistent: members in voxels occupied across many sweeps — the
-    # same persistence statistic union's motion filter gates on, as a feature.
-    mf_params = cfg.union.motion_filter
-    if member_xyz and mf_params.persistence_max_sweeps > 0:
+    # statistic dynamic_filter gates on, as a soft feature.
+    if member_xyz and mp.persistence_max_sweeps > 0:
         all_xyz = np.concatenate(member_xyz)
         all_sid = np.concatenate(member_sweep)
         all_cid = np.concatenate(member_cid)
         persistent = ~persistence_keep(
-            all_xyz,
-            all_sid,
-            mf_params.persistence_voxel_m,
-            mf_params.persistence_max_sweeps,
+            all_xyz, all_sid, mp.persistence_voxel_m, mp.persistence_max_sweeps
         )
         n_per = np.bincount(all_cid, minlength=len(clusters))
         n_pers = np.bincount(all_cid[persistent], minlength=len(clusters))
@@ -665,7 +640,7 @@ def process_chunk(cfg: ComponentConfig, bag_id: str, chunk_id: str) -> ProposalR
         for pidx, cid in sweep_assign.get(sid, []):
             cluster_id[pidx] = cid
         if sid in fill_by_sweep:
-            xyz, _, ground, origin = _load_world(row["world_path"])
+            xyz, _, origin, ground = load_world_full(row["world_path"])
             eligible = _fill_eligible(xyz, ground, origin, cfg)
             for c in fill_by_sweep[sid]:
                 box = fill_box(c.box, mp.min_height_above_ground_m)
@@ -702,7 +677,8 @@ def _update_summary(bag_id, chunk_id, n_points, n_clusters, n_moving) -> None:
     rows = read_rows(uri)
     if not rows:
         return
-    row = dict(rows[0])
+    # A summary written before a column was retired still carries it.
+    row = {k: v for k, v in rows[0].items() if k in ChunkSummaryRow.model_fields}
     row.update(
         n_points_proposal=n_points, n_clusters=n_clusters, n_clusters_moving=n_moving
     )

@@ -11,7 +11,6 @@ import pytest
 from wato_common.artifact_store import (
     calibration_path,
     ensure_local_dir,
-    frame_index_path,
     lidar_proc_dir,
     lidar_proc_index_path,
     lidar_sweeps_path,
@@ -20,12 +19,7 @@ from wato_common.artifact_store import (
     poses_path,
 )
 from wato_common.io.parquet_io import read_rows, write_table
-from wato_common.schemas import (
-    FRAME_INDEX_SCHEMA,
-    LIDAR_SWEEPS_SCHEMA,
-    POSES_SCHEMA,
-    FrameIndexRow,
-)
+from wato_common.schemas import LIDAR_SWEEPS_SCHEMA, POSES_SCHEMA
 from wato_lidar_preprocessing.config import ComponentConfig, FrameSyncParams
 from wato_lidar_preprocessing.deskew import _assign_frame_ids, process_chunk
 
@@ -63,27 +57,6 @@ def _write_poses(bag_id: str, chunk_id: str, poses: list[dict]):
 
 def _write_sweep_index(bag_id: str, chunk_id: str, rows: list[dict]):
     write_table(rows, LIDAR_SWEEPS_SCHEMA, lidar_sweeps_path(bag_id, chunk_id))
-
-
-def _write_frame_index(
-    bag_id: str, chunk_id: str, pose_valid_by_sweep: dict[int, bool]
-):
-    """Write a minimal frame_index.parquet with one row per sweep_id."""
-    rows = [
-        FrameIndexRow(
-            frame_id=f"{bag_id}__{chunk_id}__{sweep_id:06d}__CAM0",
-            bag_id=bag_id,
-            chunk_id=chunk_id,
-            sweep_id=sweep_id,
-            lidar_id="LIDAR_TOP",
-            lidar_path="",
-            reference_timestamp_ns=sweep_id,
-            cam_id="CAM0",
-            valid_pose=valid,
-        ).model_dump()
-        for sweep_id, valid in pose_valid_by_sweep.items()
-    ]
-    write_table(rows, FRAME_INDEX_SCHEMA, frame_index_path(bag_id, chunk_id))
 
 
 def _write_raw_sweep(bag_id: str, chunk_id: str, sweep_id: int, **arrays):
@@ -228,13 +201,13 @@ def test_translation_applied(tmp_env):
 
 
 def test_skips_pose_invalid_sweeps(tmp_env):
-    """Sweeps flagged valid_pose=False in frame_index are skipped, not clamped."""
+    """Sweeps whose time has no trusted pose are skipped, not clamped."""
     bag_id, chunk_id = "bag_pose_invalid", "chunk0"
     _write_calibration(bag_id)
 
     # Two identical poses at t=100 and t=200 — the interpolator would happily
-    # clamp a sweep at t=0 to the first sample, which is exactly what we don't
-    # want ingest's valid_pose flag to allow.
+    # clamp a sweep at t=0 to the first sample, which is exactly what the
+    # pose check must prevent.
     T_identity = np.eye(4)
     poses = [
         {
@@ -294,7 +267,6 @@ def test_skips_pose_invalid_sweeps(tmp_env):
             for sweep_id, ts in ((0, 0), (1, 150))
         ],
     )
-    _write_frame_index(bag_id, chunk_id, {0: False, 1: True})
 
     cfg = ComponentConfig()
     results = process_chunk(cfg, bag_id, chunk_id)
@@ -308,7 +280,7 @@ def test_skips_pose_invalid_sweeps(tmp_env):
         r["sweep_id"]: r for r in read_rows(lidar_proc_index_path(bag_id, chunk_id))
     }
     assert meta[0]["valid"] is False
-    assert "pose_invalid" in meta[0]["drop_reason"]
+    assert meta[0]["drop_reason"].startswith("pose_invalid: outside_pose_span")
     assert meta[1]["valid"] is True
 
 
@@ -1302,7 +1274,10 @@ def test_process_chunk_populates_frame_id(tmp_env):
         "source": "odom",
         "valid": True,
     }
-    _write_poses(bag_id, chunk_id, [pose_row])
+    # Poses span all three sweeps: one outside the span would be skipped.
+    _write_poses(
+        bag_id, chunk_id, [pose_row, {**pose_row, "timestamp_ns": 200_000_000}]
+    )
 
     from wato_common.artifact_store import lidar_proc_index_path, lidar_sweep_path
 

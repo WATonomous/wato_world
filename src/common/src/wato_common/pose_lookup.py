@@ -5,9 +5,11 @@ topic's samples to poses.parquet and, for each sample, records whether the
 stretch to the next sample can be interpolated across
 (`interval_drop_reason`, computed by `interval_drop_reasons` from ingest's
 `pose_requirements`).  Every component then looks the pose up at the
-timestamp of its own data: ingest at each LiDAR sweep (frame_index),
-lidar_preprocessing at each point, perception_2d and semantic_lifting at each
-camera frame.  They all interpolate the same way and trust the same stretches.
+timestamp of its own data: ingest at each LiDAR sweep (frame_index's
+valid_pose), lidar_preprocessing at each sweep and point,
+wato_common.artifacts.frame_index at each camera frame (for perception_2d and
+semantic_lifting).  They all interpolate the same way and trust the same
+stretches.
 
 Interpolation is linear in translation and SLERP in rotation between the two
 samples around the target time, which assumes constant velocity between

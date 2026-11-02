@@ -15,8 +15,8 @@ flowchart TD
         I["decode sensor streams\nbag_meta · calibration · chunks\ncamera_frames · lidar_sweeps\nposes · frame_index"]
     end
 
-    subgraph lidar_prep["lidar_preprocessing  ·  CPU (GPU for --seg mos/union)"]
-        LP["motion compensation\nstatic / dynamic split (aw · mos · union)\nground height grid\nUniLiPs IWU · motion proposals"]
+    subgraph lidar_prep["lidar_preprocessing  ·  CPU"]
+        LP["motion compensation\nstatic / dynamic split\nground height grid\nUniLiPs IWU · motion proposals"]
     end
 
     subgraph perception_2d["perception_2d  ·  GPU"]
@@ -49,7 +49,7 @@ flowchart TD
 
     BAG --> ingest
     ingest -- "frame_index · images · poses\ncalibration" --> perception_2d
-    ingest -- "frame_index · lidar_sweeps · poses" --> lidar_prep
+    ingest -- "lidar_sweeps · poses" --> lidar_prep
     lidar_prep -- "world sweeps · dynamic masks" --> perception_2d
     lidar_prep -- "world sweeps" --> semantic_lifting
     perception_2d -- "masks_2d · depth_2d · tracklets_2d" --> semantic_lifting
@@ -63,11 +63,11 @@ flowchart TD
 ```
 
 `frame_index.parquet` (written by **ingest**) aligns every LiDAR sweep with the
-nearest image per camera. Every pose is looked up from `poses.parquet` through
-`wato_common.pose_lookup` at the timestamp of the data being placed — a point,
-a sweep, a camera frame — and honours ingest's verdict on which stretches of
-the pose stream are trustworthy. `frame_index.world_T_ego` is the sweep's pose
-only.
+nearest image per camera; consumers read it as one entry per image through
+`wato_common.artifacts.frame_index`. Every pose is looked up from
+`poses.parquet` through `wato_common.pose_lookup` at the timestamp of the data
+being placed — a point, a sweep, a camera frame — and honours ingest's verdict
+on which stretches of the pose stream are trustworthy.
 
 **ingest**, **lidar_preprocessing** and **perception_2d** are implemented end-to-end (and
 **semantic_lifting**'s core lifting algorithm). The remaining components are stubs.
@@ -132,7 +132,7 @@ watod down all
 | `ingest` | Decode rosbag → frames + lidar + poses + frame_index | CPU | no |
 | `perception_2d` | YOLO26 or GroundingDINO detector + SAM2 video tracker + Depth Anything V2 + DINOv2 (optional Florence-2 discovery) | CUDA | yes |
 | `semantic_lifting` | Occlusion-aware 2D→3D label lifting (UniLiPs Eq.1) | CPU | no |
-| `lidar_preprocessing` | Motion comp, static/dynamic split (`--seg aw\|mos\|union`), ground grid, UniLiPs IWU, recall-oriented motion proposals | CUDA | only for `--seg mos\|union` |
+| `lidar_preprocessing` | Motion comp, static/dynamic split, ground grid, UniLiPs IWU, recall-oriented motion proposals | CPU | no |
 | `proposal_generation` | LiDAR detector + Segment-Lift-Fit + fusion | CUDA | yes |
 | `tracking` | 3D Kalman + masklet association + DINOv2 ReID | CUDA | yes (light) |
 | `label_refinement` | Multimodal LabelFormer (bootstrap → learned) | CUDA | yes |

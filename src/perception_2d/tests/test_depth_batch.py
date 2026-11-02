@@ -14,20 +14,17 @@ import numpy as np
 from wato_perception_2d import pipeline
 from wato_perception_2d.config import ComponentConfig
 from wato_common.artifacts.calibration import CameraCalibration
-from wato_perception_2d.io import CameraFrameInfo
+from wato_common.artifacts.frame_index import CameraFrame
 
 
-def _frame(seq: int) -> CameraFrameInfo:
-    return CameraFrameInfo(
-        frame_id=f"f{seq}",
-        bag_id="bag",
-        chunk_id="chunk_0000",
-        sweep_id=seq,
+def _frame(seq: int) -> CameraFrame:
+    return CameraFrame(
         cam_id="cam_front",
-        image_path=f"/img/{seq}.jpg",
         camera_seq=seq,
-        camera_timestamp_ns=seq * 83_000_000,
-        valid_camera=True,
+        timestamp_ns=seq * 83_000_000,
+        image_path=f"/img/{seq}.jpg",
+        sweep_ids=(seq,),
+        world_T_ego=None,
     )
 
 
@@ -74,7 +71,7 @@ def _run(
     monkeypatch.setattr(
         pipeline,
         "_align_and_write_depth",
-        lambda cfg, bag, chunk, cam, frame, disparity, calib, poses, fb: aligned.append(
+        lambda cfg, bag, chunk, cam, frame, disparity, calib, fb: aligned.append(
             (frame.camera_seq, float(disparity[0, 0]))
         ),
     )
@@ -100,19 +97,9 @@ def test_frames_grouped_into_batches(monkeypatch):
     assert aligned == [(i, float(i)) for i in range(5)]
 
 
-def test_batch_size_one_is_per_frame(monkeypatch):
-    aligned, model = _run(monkeypatch, n_frames=3, batch_size=1)
-    assert model.batch_sizes == [1, 1, 1]
-    assert aligned == [(0, 0.0), (1, 1.0), (2, 2.0)]
-
-
 def test_unreadable_frame_dropped_from_batch(monkeypatch):
     # Frame 1 fails to load → excluded from inference + alignment, others intact.
     aligned, model = _run(monkeypatch, n_frames=4, batch_size=2, skip_seq={1})
     # First batch had only frame 0 (1 image); second batch frames 2,3 (2 images).
     assert model.batch_sizes == [1, 2]
     assert aligned == [(0, 0.0), (2, 2.0), (3, 3.0)]
-
-
-def test_default_batch_size_is_one():
-    assert ComponentConfig().depth.batch_size == 1

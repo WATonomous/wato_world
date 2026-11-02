@@ -16,8 +16,11 @@ import pyarrow.parquet as pq
 import pytest
 from PIL import Image as PILImage
 
-from wato_common.artifacts import calibration
+from wato_common.artifact_store import poses_path
+from wato_common.artifacts import calibration, frame_index
 from wato_common.artifacts.calibration import Calibration, CameraCalibration
+from wato_common.io.parquet_io import write_table
+from wato_common.schemas import POSES_SCHEMA, FrameIndexRow
 from wato_perception_2d.config import ComponentConfig
 from wato_perception_2d.pipeline import run
 
@@ -30,8 +33,8 @@ from wato_perception_2d.pipeline import run
 def _make_bag(tmp_path, monkeypatch, *, valid_camera: bool):
     """Create the minimum artifact tree for one bag / one chunk / one camera.
 
-    valid_camera=False makes load_frame_index drop the frame, so the pipeline
-    takes the model-free empty-output path.
+    valid_camera=False makes FrameIndex drop the frame, so the pipeline takes
+    the model-free empty-output path.
     """
     monkeypatch.setenv("ARTIFACT_ROOT_URI", f"file://{tmp_path}")
 
@@ -64,23 +67,44 @@ def _make_bag(tmp_path, monkeypatch, *, valid_camera: bool):
     img_path = str(frames_dir / "000000.jpg")
     PILImage.fromarray(np.zeros((480, 640, 3), dtype=np.uint8)).save(img_path)
 
-    pose_flat = np.eye(4, dtype=np.float64).ravel().tolist()
-    frame_tbl = pa.table(
-        {
-            "frame_id": ["f0"],
-            "bag_id": [bag_id],
-            "chunk_id": [chunk_id],
-            "sweep_id": [0],
-            "cam_id": ["cam_front"],
-            "image_path": [img_path],
-            "camera_seq": [0],
-            "camera_timestamp_ns": [0],
-            "world_T_ego_flat": pa.array([pose_flat], type=pa.list_(pa.float64())),
-            "valid_camera": [valid_camera],
-            "valid_pose": [True],
-        }
+    write_table(
+        [
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "timestamp_ns": 0,
+                **dict.fromkeys(("x", "y", "z", "qx", "qy", "qz"), 0.0),
+                "qw": 1.0,
+                "world_T_ego_flat": np.eye(4).ravel().tolist(),
+                "source": "/odom",
+                "valid": True,
+                "interval_drop_reason": None,
+            }
+        ],
+        POSES_SCHEMA,
+        poses_path(bag_id, chunk_id),
     )
-    pq.write_table(frame_tbl, str(chunks_dir / "frame_index.parquet"))
+    frame_index.write(
+        bag_id,
+        chunk_id,
+        [
+            FrameIndexRow(
+                frame_id="f0",
+                bag_id=bag_id,
+                chunk_id=chunk_id,
+                sweep_id=0,
+                lidar_id="lidar_top",
+                lidar_path="",
+                reference_timestamp_ns=0,
+                cam_id="cam_front",
+                image_path=img_path,
+                camera_seq=0,
+                camera_timestamp_ns=0,
+                valid_camera=valid_camera,
+                valid_pose=True,
+            )
+        ],
+    )
 
     lidar_tbl = pa.table(
         {
@@ -112,24 +136,42 @@ def empty_bag(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_pipeline_raises_when_models_unavailable(live_bag):
-    """A valid frame + no SAM2 / detector installed → loud RuntimeError."""
-    bag_id, _, _ = live_bag
-    cfg = ComponentConfig()  # defaults: discovery.backend=fixed, depth enabled
-
-    with pytest.raises(RuntimeError):
-        run(cfg, bag_id=bag_id)
-
-
-def test_fixed_mode_raises_without_models(live_bag):
+def test_fixed_mode_raises_without_models(live_bag, tmp_path):
     """Fixed-vocab mode skips Florence-2 but still needs SAM2 → loud failure."""
     bag_id, _, _ = live_bag
     cfg = ComponentConfig()
     cfg.discovery.backend = "fixed"
     cfg.discovery.fixed_classes = ["car"]
     cfg.depth.enabled = False  # isolate the failure to tracking
+    # Missing even where data/models is mounted (the dev image).
+    cfg.segmentation.checkpoint = str(tmp_path / "missing_sam2.pt")
 
     with pytest.raises(RuntimeError):
+        run(cfg, bag_id=bag_id)
+
+
+def test_missing_tracking_weights_fail_before_the_depth_pass(
+    live_bag, tmp_path, monkeypatch
+):
+    """The tracking pass loads its weights after a chunk's depth pass, so a
+    missing YOLO checkpoint must be caught before DA-V2 is even built."""
+    from wato_perception_2d import pipeline
+
+    class _DepthMustNotRun:
+        def __init__(self, *a, **k):
+            raise AssertionError("depth pass started before the weights check")
+
+    monkeypatch.setattr(pipeline, "sam2_importable", lambda: True)
+    monkeypatch.setattr(pipeline, "yolo_importable", lambda: True)
+    monkeypatch.setattr(pipeline, "DepthAnythingV2", _DepthMustNotRun)
+    sam2_ckpt = tmp_path / "sam2.pt"
+    sam2_ckpt.write_bytes(b"")
+    bag_id, _, _ = live_bag
+    cfg = ComponentConfig()
+    cfg.segmentation.checkpoint = str(sam2_ckpt)
+    cfg.detection.yolo.checkpoint = str(tmp_path / "missing_yolo26x.pt")
+
+    with pytest.raises(RuntimeError, match="missing_yolo26x.pt"):
         run(cfg, bag_id=bag_id)
 
 
@@ -157,38 +199,22 @@ def test_pipeline_writes_valid_parquets(empty_bag):
     assert pq.read_table(trk_path).schema is not None
 
 
-def test_pipeline_force_reruns_chunk(empty_bag):
-    """force=True rewrites the output even if it already exists."""
+def test_complete_chunk_is_skipped_unless_forced(empty_bag):
+    import time
+
     from wato_common.artifact_store import detections_2d_path, local_path
 
     bag_id, chunk_id, _ = empty_bag
+    path = local_path(detections_2d_path(bag_id, chunk_id))
     run(ComponentConfig(), bag_id=bag_id)
-    mtime1 = os.path.getmtime(local_path(detections_2d_path(bag_id, chunk_id)))
-
-    import time
+    mtime = os.path.getmtime(path)
 
     time.sleep(0.05)
+    run(ComponentConfig(), bag_id=bag_id)
+    assert os.path.getmtime(path) == mtime
+
     run(ComponentConfig(), bag_id=bag_id, force=True)
-    mtime2 = os.path.getmtime(local_path(detections_2d_path(bag_id, chunk_id)))
-
-    assert mtime2 > mtime1
-
-
-def test_pipeline_skips_complete_chunk(empty_bag):
-    """Without force=True, an already-complete chunk is skipped."""
-    from wato_common.artifact_store import detections_2d_path, local_path
-
-    bag_id, chunk_id, _ = empty_bag
-    run(ComponentConfig(), bag_id=bag_id)
-    mtime1 = os.path.getmtime(local_path(detections_2d_path(bag_id, chunk_id)))
-
-    import time
-
-    time.sleep(0.05)
-    run(ComponentConfig(), bag_id=bag_id)
-    mtime2 = os.path.getmtime(local_path(detections_2d_path(bag_id, chunk_id)))
-
-    assert mtime2 == mtime1
+    assert os.path.getmtime(path) > mtime
 
 
 def test_force_clears_previous_masks_and_depth(empty_bag):

@@ -10,12 +10,11 @@ Output:
   - frame_index.parquet        (one row per (sweep_id, cam_id))
 
 For each LiDAR sweep, find the nearest camera frame per camera. Drop any
-camera whose offset to the sweep exceeds `max_cam_offset_ms`. Look up the ego
-pose at the SWEEP timestamp and embed it; a sweep that falls in an untrusted
-stretch of the pose stream (samples too far apart, or a jump) gets
-valid_pose=False and a `pose_drop_reason` (see PoseLookup.at).  The embedded
-pose is the sweep's: a component projecting into a camera image looks the
-pose up at `camera_timestamp_ns` itself.
+camera whose offset to the sweep exceeds `max_cam_offset_ms`. A sweep that
+falls in an untrusted stretch of the pose stream (samples too far apart, or a
+jump) gets valid_pose=False and a `pose_drop_reason` (see PoseLookup.at).
+Consumers read the result through wato_common.artifacts.frame_index, which
+poses each camera frame at its own time.
 """
 
 from __future__ import annotations
@@ -25,13 +24,12 @@ from dataclasses import dataclass
 from wato_common.artifact_store import (
     calibration_path,
     camera_frames_path,
-    frame_index_path,
     lidar_sweeps_path,
 )
-from wato_common.geometry import flatten_se3
-from wato_common.io.parquet_io import read_rows, write_table
+from wato_common.artifacts import frame_index as frame_index_artifact
+from wato_common.io.parquet_io import read_rows
 from wato_common.pose_lookup import PoseLookup
-from wato_common.schemas import FRAME_INDEX_SCHEMA, FrameIndexRow
+from wato_common.schemas import FrameIndexRow
 
 
 @dataclass
@@ -62,8 +60,7 @@ def build(
         max_cam_offset_ms=max_cam_offset_ms,
     )
 
-    out_uri = frame_index_path(bag_id, chunk_id)
-    write_table([r.model_dump() for r in rows], FRAME_INDEX_SCHEMA, out_uri)
+    out_uri = frame_index_artifact.write(bag_id, chunk_id, rows)
 
     valid = sum(1 for r in rows if r.valid_camera)
     dropped = sum(1 for r in rows if not r.valid_camera)
@@ -138,11 +135,6 @@ def _build_rows(
                     camera_offset_ms=float(offset_ns / 1e6) if nearest else None,
                     valid_camera=valid_cam,
                     camera_drop_reason=drop_reason,
-                    pose_timestamp_ns=pose.pose_timestamp_ns if pose.valid else None,
-                    world_T_ego_flat=flatten_se3(pose.world_T_ego)
-                    if pose.valid
-                    else None,
-                    pose_interp_error=pose.interp_error_ns if pose.valid else None,
                     valid_pose=pose.valid,
                     pose_drop_reason=pose.drop_reason,
                     calibration_path=calib_uri,

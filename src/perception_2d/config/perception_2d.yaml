@@ -8,12 +8,13 @@ discovery:
   #                 Florence-2, pooled into one concept set per camera.
   backend: "fixed"
   model: "microsoft/Florence-2-large-ft"
-  task: "<DENSE_REGION_CAPTION>"
   min_confidence: 0.3
   sample_every_k: 10   # florence2 only: run discovery on every k-th frame
   # Used when backend: "fixed".  Empty → falls back to the prompts.yaml taxonomy.
-  fixed_classes: ["car", "truck", "bus", "motorcycle", "bicycle", "pedestrian",
-                  "traffic cone", "barrier"]
+  # No traffic cone or barrier: no detector tried finds them on WATO
+  # (docs/perception_2d_measurements.md), and a class listed but never detected
+  # would be labelled absent from every image.
+  fixed_classes: ["car", "truck", "bus", "motorcycle", "bicycle", "pedestrian"]
 
 detection:
   # Box source for SAM2:
@@ -31,10 +32,9 @@ detection:
     conf: 0.25            # min box confidence
     iou: 0.7              # NMS IoU
     imgsz: 1280           # inference size; WATO frames are 1280x1024
-    # COCO class → taxonomy class; anything unmapped is dropped. COCO has no
-    # traffic cone or barrier, so this backend never detects those two classes
-    # (logged at startup). COCO labels a cyclist "person" (→ pedestrian) plus a
-    # separate "bicycle".
+    # COCO class → taxonomy class; anything unmapped is dropped, and a taxonomy
+    # class nothing maps to is never detected (logged at startup). COCO labels a
+    # cyclist "person" (→ pedestrian) plus a separate "bicycle".
     class_map:
       person: pedestrian
       bicycle: bicycle
@@ -77,9 +77,63 @@ tracking:
   # re-detected object starts a new masklet.
   drop_lost_after_frames: 1
   duplicate_mask_iou: 0.7
+  # Drop a mask's specks: 8-connected components smaller than this fraction of
+  # its largest one (the largest always stays, so distant objects survive).
+  # Each speck would lift to 3D as whatever lies behind it. 0 disables.
+  island_fraction: 0.1
+  # A track owning < collapse_fraction of its own mask once contested pixels go
+  # to the surest track, collapse_after_frames images in a row, has latched
+  # onto part of another track's object and ends. Real objects whose
+  # neighbours' masks bleed over them own 15-80%. 0 disables.
+  collapse_fraction: 0.05
+  collapse_after_frames: 3
+  # What SAM2 segments through a vehicle's windows (the driver as a
+  # pedestrian): a contained_classes mask >= containment_fraction inside a
+  # container_classes mask and ending above that mask's bottom (an object in
+  # front of a vehicle stands on the road, below it) for
+  # containment_after_frames images in a row is part of the vehicle: not
+  # recorded, and ended. Vehicles aren't contained: distant cars sit inside a
+  # neighbour's bleeding mask (docs/perception_2d_measurements.md). [] disables.
+  contained_classes: ["pedestrian"]
+  container_classes: ["car", "truck", "bus"]
+  containment_fraction: 0.9
+  containment_after_frames: 3
+  # Detector support on keyframes: a box matching a track's mask bbox
+  # (iou_match_threshold) supports it, since SAM2 alone follows whatever its
+  # mask becomes (the sky, the road). A track's keep-alive rises by one per
+  # supported keyframe (up to support_keyframes) and falls by one per keyframe
+  # its mask's bbox covers >= support_min_area of the image with no supporting
+  # box; at 0 it ends (0 disables). Only large masks count: the detector boxes
+  # a real mask over 0.3% of the image at 89-97% of keyframes, but a distant
+  # car often only once (docs/perception_2d_measurements.md). Its class is the
+  # one its boxes' scores sum highest for (COCO flips the shuttle between truck
+  # and bus).
+  support_keyframes: 5
+  support_min_area: 0.01
+  # A box scoring >= birth_score starts a track; a weaker one starts it
+  # tentatively, its masks held back until boxes support it at
+  # confirm_keyframes keyframes in a row (its own counts), dropped at the first
+  # keyframe without. Off (0): COCO YOLO boxes real distant cars once at
+  # 0.25-0.4, and confirmation kept only 26-48% of them.
+  birth_score: 0.0
+  confirm_keyframes: 3
+  # A track backed by exactly one box scoring >= reprompt_score that backs no
+  # other track, whose mask bbox has drifted below reprompt_below_iou from it,
+  # is re-prompted with the box there. 0 disables.
+  reprompt_score: 0.8
+  reprompt_below_iou: 0.7
   # SAM2 precision on CUDA: bfloat16 (upstream's; flash attention), float16 or
   # float32. The detector and DINOv2 always run float32.
   autocast_dtype: "bfloat16"
+
+# The vehicle's own body (rack, hood, antenna) as each camera sees it. A
+# detection box or a track's mask at least max_fraction inside it is the
+# vehicle and never becomes or stays a track; every mask loses its pixels.
+# Per vehicle: perception_2d.wato.yaml carries the WATO rig's. Empty here.
+ego_mask:
+  image_size: [0, 0]   # [width, height] the polygons are drawn on
+  max_fraction: 0.5
+  polygons: {}         # cam_id: [[[x, y], ...], ...]; unlisted = sees no car
 
 depth:
   enabled: true
@@ -90,7 +144,6 @@ depth:
   min_lidar_anchors: 30
   ransac_n_iter: 200
   ransac_inlier_threshold_m: 0.5
-  use_static_anchors_only: true   # unused: anchors are always static
   fallback_window: 5
   sky_mask_top_fraction: 0.3
   output_dtype: "float16"

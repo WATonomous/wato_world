@@ -1,4 +1,4 @@
-"""Pass 2 — per-sweep dynamic-mask resolution + static/dynamic cloud build."""
+"""Pass 2 — per-sweep dynamic candidates + static/dynamic cloud build."""
 
 from __future__ import annotations
 
@@ -7,11 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from wato_common.artifacts.lidar_sweeps import write_dynamic_mask
-from wato_common.artifact_store import (
-    aw_dynamic_mask_path,
-    dynamic_mask_path,
-    local_path,
-)
+from wato_common.artifact_store import dynamic_mask_path
 from wato_lidar_preprocessing.voxel import keys_in_sorted
 
 from .io_helpers import load_world_xyz_intensity
@@ -34,48 +30,36 @@ class SweepMaskResult:
     dyn_sweep_id: np.ndarray | None = None
 
 
-def apply_classification_to_sweep(
+def near_ego_mask(
+    xyz: np.ndarray, sweep_origin: np.ndarray, min_range_m: float
+) -> np.ndarray:
+    """True for points within min_range_m horizontal range of the sensor.
+
+    Within this radius returns are ego self-returns / near clutter, so a
+    dynamic verdict is unreliable (cfg.dynamic_min_range_m).
+    """
+    d_xy = np.hypot(xyz[:, 0] - sweep_origin[0], xyz[:, 1] - sweep_origin[1])
+    return d_xy < min_range_m
+
+
+def dynamic_candidates(
     row: dict,
-    sweep_id: int,
     keys: np.ndarray,
-    static_arr: np.ndarray,
     dynamic_arr: np.ndarray,
     xyz_cache_i: np.ndarray | None,
-    intensity_cache_i: np.ndarray | None,
     ground_mask_cache_i: np.ndarray | None,
     sweep_origin: np.ndarray | None,
-    bag_id: str,
-    chunk_id: str,
-    any_intensity: bool,
     *,
     dynamic_min_range_m: float = 0.0,
-    write_aw_snapshot: bool = False,
-) -> SweepMaskResult:
-    """Compute dynamic mask for one sweep, save it, return per-sweep stats.
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Return (mask, xyz): the points the voxel verdict calls dynamic.
 
-    `keys` is always full-length (matches xyz from the world NPZ) so the
-    saved mask is length-aligned with the downstream xyz array.
-
-    A point is dynamic IFF its voxel key is in `dynamic_arr`, it is not
+    A point is a candidate IFF its voxel key is in `dynamic_arr`, it is not
     Patchwork++ ground, and it lies beyond dynamic_min_range_m of
-    `sweep_origin`. Never-observed voxels are not dynamic.
-
-    write_aw_snapshot (union only) also saves aw_dynamic_mask.npy: union
-    overwrites dynamic_mask.npy, and keep_aw_dynamic needs AW's own verdict to
-    re-fuse.
+    `sweep_origin`. Never-observed voxels are not dynamic. `keys` is always
+    full-length, so the mask aligns with the world NPZ. xyz stays None for a
+    sweep with no candidates and no cache, which skips the read.
     """
-    n = keys.shape[0]
-    has_intensity = bool(row.get("has_intensity", False))
-    dyn_uri = dynamic_mask_path(bag_id, chunk_id, sweep_id)
-
-    if n == 0:
-        mask = np.zeros(0, dtype=bool)
-        write_dynamic_mask(bag_id, chunk_id, sweep_id, mask)
-        if write_aw_snapshot:
-            np.save(local_path(aw_dynamic_mask_path(bag_id, chunk_id, sweep_id)), mask)
-        return SweepMaskResult(n_static=0, n_dynamic=0, mask_uri=dyn_uri)
-
-    # AW verdict: explicit membership in the carved-dynamic voxel set.
     mask = keys_in_sorted(keys, dynamic_arr)
 
     # Patchwork++ ground mask is authoritative: ground points must never
@@ -84,18 +68,36 @@ def apply_classification_to_sweep(
     if ground_mask_cache_i is not None:
         mask &= ~ground_mask_cache_i
 
-    # Resolve xyz/intensity once — needed by the near-range gate below and by
-    # the cloud build at the end. Uses the in-memory cache when available.
     xyz = xyz_cache_i
-    intensity = intensity_cache_i
+    if mask.any() and xyz is None:
+        xyz, _ = load_world_xyz_intensity(row["world_path"])
 
-    # Near-range dynamic exclusion. Only loads xyz if a point is still a
-    # dynamic candidate (mask.any()), so all-static sweeps skip the read.
     if dynamic_min_range_m > 0.0 and sweep_origin is not None and mask.any():
-        if xyz is None:
-            xyz, intensity = load_world_xyz_intensity(row["world_path"])
-        d_xy = np.hypot(xyz[:, 0] - sweep_origin[0], xyz[:, 1] - sweep_origin[1])
-        mask &= d_xy >= dynamic_min_range_m
+        mask &= ~near_ego_mask(xyz, sweep_origin, dynamic_min_range_m)
+    return mask, xyz
+
+
+def apply_classification_to_sweep(
+    row: dict,
+    sweep_id: int,
+    keys: np.ndarray,
+    static_arr: np.ndarray,
+    mask: np.ndarray,
+    xyz_cache_i: np.ndarray | None,
+    intensity_cache_i: np.ndarray | None,
+    ground_mask_cache_i: np.ndarray | None,
+    bag_id: str,
+    chunk_id: str,
+    any_intensity: bool,
+) -> SweepMaskResult:
+    """Save one sweep's final dynamic mask, return its stats and cloud slices."""
+    n = keys.shape[0]
+    has_intensity = bool(row.get("has_intensity", False))
+    dyn_uri = dynamic_mask_path(bag_id, chunk_id, sweep_id)
+
+    write_dynamic_mask(bag_id, chunk_id, sweep_id, mask)
+    if n == 0:
+        return SweepMaskResult(n_static=0, n_dynamic=0, mask_uri=dyn_uri)
 
     n_dyn = int(mask.sum())
 
@@ -112,16 +114,13 @@ def apply_classification_to_sweep(
         is_static &= ~ground_mask_cache_i
         n_static = int(is_static.sum())
 
-    write_dynamic_mask(bag_id, chunk_id, sweep_id, mask)
-    if write_aw_snapshot:
-        np.save(local_path(aw_dynamic_mask_path(bag_id, chunk_id, sweep_id)), mask)
-
     result = SweepMaskResult(n_static=n_static, n_dynamic=n_dyn, mask_uri=dyn_uri)
 
     if n_static == 0 and n_dyn == 0:
         return result
 
-    # xyz may already be resolved (cache hit, or loaded by the near-range gate).
+    xyz = xyz_cache_i
+    intensity = intensity_cache_i
     if xyz is None:
         xyz, intensity = load_world_xyz_intensity(row["world_path"])
 
