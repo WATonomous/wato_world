@@ -1,6 +1,6 @@
 """Cross-camera instances: one object's masklets merged into one instance.
 
-perception_2d tracks objects per camera, and `global_object_id` is only
+perception_2d tracks objects per camera, and cross-camera identity is only
 assigned by `tracking`, which runs after lifting — but proposal_generation
 groups LiDAR points by lifted instance to fit one box per object, so a car
 seen by two cameras must be one instance here. The evidence is geometric:

@@ -57,8 +57,9 @@ proposals through `wato_common.artifacts.motion_proposals`.
 Each point is placed in the world at its own time: the ego pose is interpolated
 (`wato_common.pose_lookup`) at every per-point timestamp, composed with
 `ego_T_lidar`. Coordinates are float64. Patchwork++ runs per sweep in sensor
-frame first and its mask rides along as `ground_mask`. Sweeps ingest marked
-`valid_pose=False` are skipped, as is a LiDAR whose extrinsic is missing; both
+frame first and its mask rides along as `ground_mask`. A sweep whose own time
+has no trusted pose (`PoseLookup.at`: outside the pose span, or in a gap or
+jump ingest marked) is skipped, as is a LiDAR whose extrinsic is missing; both
 get no world file.
 
 Per-point times come from, in order:
@@ -170,8 +171,8 @@ re-runs when `motion_clusters.parquet` is older than any input, or with
 ## Inputs
 
 From ingest: `chunks/index.parquet`, and per chunk `lidar_sweeps.parquet` + raw
-sweeps, `poses.parquet`, `frame_index.parquet` (`valid_pose`), plus
-`calibration.json`. `sweep_id` must be chunk-unique across LiDARs; chunks
+sweeps, `poses.parquet`, plus `calibration.json` (not `frame_index.parquet`:
+it pairs sweeps with cameras, which no step here needs). `sweep_id` must be chunk-unique across LiDARs; chunks
 ingested before that restart it per LiDAR and must be re-ingested.
 
 ## Outputs

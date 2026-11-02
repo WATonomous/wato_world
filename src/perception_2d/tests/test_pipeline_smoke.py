@@ -16,8 +16,11 @@ import pyarrow.parquet as pq
 import pytest
 from PIL import Image as PILImage
 
-from wato_common.artifacts import calibration
+from wato_common.artifact_store import poses_path
+from wato_common.artifacts import calibration, frame_index
 from wato_common.artifacts.calibration import Calibration, CameraCalibration
+from wato_common.io.parquet_io import write_table
+from wato_common.schemas import POSES_SCHEMA, FrameIndexRow
 from wato_perception_2d.config import ComponentConfig
 from wato_perception_2d.pipeline import run
 
@@ -30,8 +33,8 @@ from wato_perception_2d.pipeline import run
 def _make_bag(tmp_path, monkeypatch, *, valid_camera: bool):
     """Create the minimum artifact tree for one bag / one chunk / one camera.
 
-    valid_camera=False makes load_frame_index drop the frame, so the pipeline
-    takes the model-free empty-output path.
+    valid_camera=False makes FrameIndex drop the frame, so the pipeline takes
+    the model-free empty-output path.
     """
     monkeypatch.setenv("ARTIFACT_ROOT_URI", f"file://{tmp_path}")
 
@@ -64,23 +67,44 @@ def _make_bag(tmp_path, monkeypatch, *, valid_camera: bool):
     img_path = str(frames_dir / "000000.jpg")
     PILImage.fromarray(np.zeros((480, 640, 3), dtype=np.uint8)).save(img_path)
 
-    pose_flat = np.eye(4, dtype=np.float64).ravel().tolist()
-    frame_tbl = pa.table(
-        {
-            "frame_id": ["f0"],
-            "bag_id": [bag_id],
-            "chunk_id": [chunk_id],
-            "sweep_id": [0],
-            "cam_id": ["cam_front"],
-            "image_path": [img_path],
-            "camera_seq": [0],
-            "camera_timestamp_ns": [0],
-            "world_T_ego_flat": pa.array([pose_flat], type=pa.list_(pa.float64())),
-            "valid_camera": [valid_camera],
-            "valid_pose": [True],
-        }
+    write_table(
+        [
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "timestamp_ns": 0,
+                **dict.fromkeys(("x", "y", "z", "qx", "qy", "qz"), 0.0),
+                "qw": 1.0,
+                "world_T_ego_flat": np.eye(4).ravel().tolist(),
+                "source": "/odom",
+                "valid": True,
+                "interval_drop_reason": None,
+            }
+        ],
+        POSES_SCHEMA,
+        poses_path(bag_id, chunk_id),
     )
-    pq.write_table(frame_tbl, str(chunks_dir / "frame_index.parquet"))
+    frame_index.write(
+        bag_id,
+        chunk_id,
+        [
+            FrameIndexRow(
+                frame_id="f0",
+                bag_id=bag_id,
+                chunk_id=chunk_id,
+                sweep_id=0,
+                lidar_id="lidar_top",
+                lidar_path="",
+                reference_timestamp_ns=0,
+                cam_id="cam_front",
+                image_path=img_path,
+                camera_seq=0,
+                camera_timestamp_ns=0,
+                valid_camera=valid_camera,
+                valid_pose=True,
+            )
+        ],
+    )
 
     lidar_tbl = pa.table(
         {

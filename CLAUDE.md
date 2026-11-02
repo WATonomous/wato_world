@@ -45,8 +45,8 @@ are usable is `docs/drive_bag_survey.md`.
   `src/common/src/wato_common/`.
 - **One module per cross-component artifact.** Anything one component writes
   and another reads is encoded, written and read by its module in
-  `wato_common/artifacts/` (`calibration`, `lidar_sweeps`, `motion_proposals`,
-  `masklets`, `depth`, `lifted_labels`), round-trip tested in
+  `wato_common/artifacts/` (`calibration`, `frame_index`, `lidar_sweeps`,
+  `motion_proposals`, `masklets`, `depth`, `lifted_labels`), round-trip tested in
   `src/common/tests/test_artifacts_*.py`. Producers call the write half,
   consumers the read half; nobody else `np.load`s or re-derives the encoding.
   Consumer images install only `src/common` + their own package, so both halves
@@ -89,18 +89,19 @@ doesn't load; the trim-bag end-to-end test skips).
 ## Cross-component contracts
 
 - **`frame_index` has one row per (LiDAR sweep, camera)**, so an image repeats
-  once per sweep it is nearest to (~4.9× on the 3-LiDAR WATO rig). Per-image
-  work collapses rows by `(cam_id, camera_seq)` first: perception_2d
-  `_one_frame_per_image` (keeping the matched `sweep_ids` for depth anchors),
-  semantic_lifting `load_sweep_frames` (one shared frame per image, its depth
-  and mask raster cached across the sweeps it is paired with). Feeding rows straight to SAM2 got the
-  process SIGKILLed on a 30 s WATO chunk.
+  once per sweep it is nearest to (~4.9× on the 3-LiDAR WATO rig). Consumers
+  read it only through `wato_common.artifacts.frame_index.FrameIndex`: each
+  image once (`by_camera()`, `for_sweep()`), with every sweep it is paired with
+  (`sweep_ids`, perception_2d's depth anchors) and its pose at the image's own
+  time (`world_T_ego`, None in an untrusted stretch). Feeding rows straight to
+  SAM2 got the process SIGKILLed on a 30 s WATO chunk. lidar_preprocessing
+  doesn't read it: it checks each sweep's pose with `PoseLookup` itself.
 - **Every pose is looked up at its datum's own time**: a sweep's, a deskewed
   point's, a camera frame's, all interpolated from `poses.parquet` through
   `wato_common.pose_lookup.PoseLookup`, which honours ingest's per-stretch
-  verdicts. `frame_index.world_T_ego` is the SWEEP's pose; projecting into an
-  image uses `camera_timestamp_ns` (up to 44 ms apart on WATO, 120 ms on
-  nuScenes).
+  verdicts. frame_index stores no pose; projecting into an image uses
+  `FrameIndex`'s `CameraFrame.world_T_ego`, looked up at the image's time, not
+  the sweep's (up to 44 ms apart on WATO, 120 ms on nuScenes).
 - **`sweep_id` is one counter per chunk across all LiDARs**, so per-sweep files
   and joins key on `sweep_id` alone. Chunks ingested before that restart it per
   LiDAR (the three WATO scanners overwrite each other's world files) and must be
@@ -118,7 +119,7 @@ doesn't load; the trim-bag end-to-end test skips).
   association code is `wato_common/tracking/`, for the `tracking` component to
   reuse.
 - **Lifted instances are chunk-local merged masklets.** `tracking` (the owner
-  of `global_object_id`) runs after semantic_lifting, so lifting merges one
+  of cross-camera identity) runs after semantic_lifting, so lifting merges one
   object's per-camera masklets itself from the LiDAR points they both claim;
   `lifted_labels` name the instance by its smallest masklet_id and
   `lifted_instances.parquet` lists its masklets and cameras.

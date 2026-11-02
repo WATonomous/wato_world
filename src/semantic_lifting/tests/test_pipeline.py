@@ -22,6 +22,7 @@ from wato_common.artifacts import (
     ArtifactFormatError,
     calibration,
     depth,
+    frame_index,
     lidar_sweeps,
     lifted_labels,
     masklets,
@@ -34,7 +35,6 @@ from wato_common.artifacts.calibration import (
 from wato_common.io.parquet_io import write_table
 from wato_common.schemas import (
     CHUNK_SCHEMA,
-    FRAME_INDEX_SCHEMA,
     POSES_SCHEMA,
     PROCESSED_SWEEPS_SCHEMA,
     FrameIndexRow,
@@ -103,7 +103,9 @@ def _stage_chunk(
         POSES_SCHEMA,
         poses_path(BAG, CHUNK),
     )
-    write_table(
+    frame_index.write(
+        BAG,
+        CHUNK,
         [
             FrameIndexRow(
                 frame_id=f"f{i}",
@@ -114,16 +116,14 @@ def _stage_chunk(
                 lidar_path="",
                 reference_timestamp_ns=100 * MS,
                 cam_id=cam,
+                image_path=f"/img/{cam}/{SEQ:06d}.jpg",
                 camera_seq=SEQ,
                 camera_timestamp_ns=100 * MS,
                 valid_camera=True,
-                world_T_ego_flat=np.eye(4).flatten().tolist(),
                 valid_pose=True,
-            ).model_dump()
+            )
             for i, (cam, _) in enumerate(cams)
         ],
-        FRAME_INDEX_SCHEMA,
-        frame_index_path(BAG, CHUNK),
     )
     calibration.write(
         BAG,
@@ -249,6 +249,23 @@ def test_points_behind_a_nearer_lidar_return_take_no_label():
     run(ComponentConfig(), bag_id=BAG)
     labels = lifted_labels.read_sweep(BAG, CHUNK, SWEEP, n_points=len(near))
     assert labels.point_indices.tolist() == [5]
+
+
+def test_a_return_outside_every_mask_still_hides_points_inside_one():
+    """Point 0 (20 m) lands just inside the mask's left edge (pixel 21); a
+    return at 5 m lands one z-buffer cell to its left (pixel 15), outside the
+    mask. It hides point 0 all the same: an occluder needs no label, so the
+    z-buffer holds every projected return. The depth map (30 m everywhere)
+    is behind both."""
+    points = np.array([[20.0, 4.4, 0.0], [5.0, 1.7, 0.0]])
+    _stage_chunk(points=points, depth_m=30.0)
+    run(ComponentConfig(), bag_id=BAG)
+
+    (stats,) = lifted_labels.read_stats(BAG, CHUNK)
+    assert stats.n_points_in_any_mask == 1
+    assert stats.n_points_failed_visibility == 1
+    labels = lifted_labels.read_sweep(BAG, CHUNK, SWEEP, n_points=len(points))
+    assert labels.point_indices.size == 0
 
 
 def test_a_far_depth_map_surface_does_not_occlude():

@@ -8,7 +8,7 @@ each; 956 masklets), sampling every 6th sweep in time order unless stated.
 
 ## Voting: class first
 
-Masklets are per-camera and `global_object_id` stays null until `tracking`,
+Masklets are per-camera and no cross-camera id exists until `tracking`,
 which runs after lifting. Voting on `(instance_id, class)` therefore split
 every point two cameras saw: in 40 sweeps, 2,994 of 15,034 labeled points (20%)
 were "disagreements" with confidence ≈ 0.5, and every one was the same class

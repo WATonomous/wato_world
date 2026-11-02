@@ -40,7 +40,7 @@ Under `data/artifacts/raw/<bag_id>/`:
 | `chunks/<chunk_id>/camera_frames.parquet` | One row per decoded image |
 | `chunks/<chunk_id>/lidar_sweeps.parquet` | One row per sweep `.npz` (format: `wato_common.artifacts.lidar_sweeps`) |
 | `chunks/<chunk_id>/poses.parquet` | Pose samples over the chunk window ± (`max_bracket_ms` + 1 s), each with `interval_drop_reason` for the stretch to the next sample |
-| `chunks/<chunk_id>/frame_index.parquet` | One row per (LiDAR sweep, camera): nearest image + the pose at the sweep's time |
+| `chunks/<chunk_id>/frame_index.parquet` | One row per (LiDAR sweep, camera): nearest image + whether the sweep's time has a trusted pose (format: `wato_common.artifacts.frame_index`) |
 | `chunks/<chunk_id>/quality.json` | Per-chunk metrics and tags |
 | `chunks/<chunk_id>/manifest.json` | Provenance, hashed inputs, outputs |
 
@@ -49,11 +49,10 @@ Contracts every consumer relies on:
 - **`sweep_id` is one counter per chunk across all LiDARs** (record order), so
   `(bag_id, chunk_id, sweep_id)` names one sweep on a multi-LiDAR rig.
 - **`frame_index` repeats an image once per sweep it is nearest to** (~4.9× on
-  the 3-LiDAR WATO rig). Per-image work collapses rows by
-  `(cam_id, camera_seq)` first.
-- **`frame_index.world_T_ego` is the sweep's pose.** Projecting into an image
-  looks the pose up at `camera_timestamp_ns` through
-  `wato_common.pose_lookup.PoseLookup`.
+  the 3-LiDAR WATO rig). Consumers read it through
+  `wato_common.artifacts.frame_index.FrameIndex`, which hands out each image
+  once with its `sweep_ids` and the pose at the image's own time; it stores no
+  pose itself.
 
 ## Ingesting a new bag
 
@@ -197,9 +196,10 @@ downstream decides. Two independent flags:
   (none in the chunk), or `offset_<N>ms_exceeds_threshold` (nearest image
   farther than `max_cam_offset_ms`; the image is still recorded).
 - **`valid_pose`** / `pose_drop_reason`: `no_pose_samples`,
-  `outside_pose_span`, `pose_gap_<ms>ms`, `pose_jump_<mps>mps`. Invalid rows
-  leave `world_T_ego_flat`, `pose_timestamp_ns` and `pose_interp_error` null.
-  The same reasons apply when a consumer looks up a camera frame's pose.
+  `outside_pose_span`, `pose_gap_<ms>ms`, `pose_jump_<mps>mps`, for the
+  sweep's time. The same reasons apply when `FrameIndex` looks up a camera
+  frame's pose (`world_T_ego` None) and when lidar_preprocessing checks a
+  sweep's.
 
 `quality.json` rolls them into tags: `POSE_MISSING` (pose-valid fraction below
 `min_pose_availability`), `POSE_JUMPS`, `CAMERA_DROPS`, `STATIONARY`,

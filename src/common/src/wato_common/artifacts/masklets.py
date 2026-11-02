@@ -56,14 +56,8 @@ class MaskletRecord:
     det_score: float = 0.0  # detector (x SAM2 mask) confidence
     discovery_score: float = 0.0
     centroid_depth_m: float = 0.0
-    global_object_id: Optional[str] = None  # cross-camera identity
     dino_feature_path: Optional[str] = None
     tracker_backend: str = "sam2"
-
-    @property
-    def instance_id(self) -> str:
-        """Identity to label with: the cross-camera id once one is assigned."""
-        return self.global_object_id or self.masklet_id
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +106,6 @@ def write(bag_id: str, chunk_id: str, records: list[MaskletRecord]) -> None:
             frames_present=encode_int_list(list(r.frames_present)),
             mask_path=_masklet_dir(bag_id, chunk_id, r.masklet_id),
             dino_feature_path=r.dino_feature_path,
-            global_object_id=r.global_object_id,
             raw_phrase=r.raw_phrase,
             det_score=r.det_score,
             discovery_score=r.discovery_score,
@@ -150,7 +143,6 @@ def _record(row: dict) -> MaskletRecord:
         det_score=float(det_score if det_score is not None else row["score"]),
         discovery_score=float(row.get("discovery_score") or 0.0),
         centroid_depth_m=float(row.get("centroid_depth_m") or 0.0),
-        global_object_id=row.get("global_object_id"),
         dino_feature_path=row.get("dino_feature_path"),
         tracker_backend=row.get("tracker_backend") or "sam2",
     )

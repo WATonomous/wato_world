@@ -3,8 +3,9 @@
 Per chunk, sweeps in time order:
   Pass 1 — for each sweep, for each camera frame ingest paired with it
   (frame_index):
-    a. Skip the frame when it has no masklets, or no depth artifact
-       (perception_2d writes none when its depth fit failed).
+    a. Skip the frame when its time has no trusted pose, it has no masklets,
+       or no depth artifact (perception_2d writes none when its depth fit
+       failed).
     b. Project the sweep's world-frame points with the camera's pose at the
        frame's own time (points are world-registered upstream, so no
        sweep-pose / ego-motion term).
@@ -50,13 +51,14 @@ from wato_common.artifact_store import (
 )
 from wato_common.artifacts import ArtifactFormatError, lifted_labels
 from wato_common.artifacts.calibration import Calibration
+from wato_common.artifacts.frame_index import CameraFrame, FrameIndex
 from wato_common.artifacts.lidar_sweeps import ProcessedSweeps, WorldSweep
 from wato_common.artifacts.masklets import MaskletIndex, MaskletRecord
 from wato_common.schemas import ProcessedSweepMeta
 from wato_semantic_lifting.config import ComponentConfig
 from wato_semantic_lifting.frames import FrameCache
 from wato_semantic_lifting.instances import CoClaims, merge_masklets
-from wato_semantic_lifting.io import CameraFrameRef, load_chunks, load_sweep_frames
+from wato_semantic_lifting.io import load_chunks
 from wato_semantic_lifting.projection import (
     compute_cam_T_world,
     pixel_indices,
@@ -111,7 +113,7 @@ class _ChunkLifter:
         )
 
     def sweep(
-        self, sweep: ProcessedSweepMeta, world: WorldSweep, refs: list[CameraFrameRef]
+        self, sweep: ProcessedSweepMeta, world: WorldSweep, refs: list[CameraFrame]
     ) -> _SweepVotes:
         if world.ground_mask is None:
             raise ArtifactFormatError(
@@ -130,6 +132,8 @@ class _ChunkLifter:
         for ref in refs:
             if n == 0:
                 break
+            if ref.world_T_ego is None:
+                continue  # untrusted pose at the frame's time
             frame = self.frames.get(ref)
             if frame is None:
                 continue
@@ -232,7 +236,7 @@ def _process_chunk(
         lifted_labels.write_stats(bag_id, chunk_id, [])
         return
 
-    frames_by_sweep = load_sweep_frames(bag_id, chunk_id)
+    frame_index = FrameIndex.load(bag_id, chunk_id)
     masklets = MaskletIndex.load(bag_id, chunk_id)
     lifter = _ChunkLifter(cfg, bag_id, chunk_id, calibration, masklets)
 
@@ -241,7 +245,7 @@ def _process_chunk(
     collected = []
     for s in sorted(sweeps.rows, key=lambda r: (r.reference_timestamp_ns, r.sweep_id)):
         world = sweeps.world(s.sweep_id)
-        sv = lifter.sweep(s, world, frames_by_sweep.get(s.sweep_id, []))
+        sv = lifter.sweep(s, world, frame_index.for_sweep(s.sweep_id))
         co_claims.add(s.sweep_id, sv.votes, world.xyz)
         collected.append(sv)
 

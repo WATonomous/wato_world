@@ -3,8 +3,7 @@
 Per camera: a detector boxes keyframes, SAM2's video predictor tracks each box
 into a masklet (one per physical object), DINOv2 embeds each masklet, and Depth
 Anything V2 gives a metric depth map per image, fitted to static LiDAR.
-Cross-camera identity is left to the `tracking` component (`global_object_id`
-stays null).
+Cross-camera identity is left to the `tracking` component.
 
 ## Running
 
@@ -86,9 +85,10 @@ Two passes, so the heavy models never share VRAM:
    float32.
 
 **One entry per image.** `frame_index` repeats an image once per sweep it is
-nearest to (~4.9× on WATO, ~1.7× on nuScenes), so both passes collapse rows by
-`camera_seq` first (`pipeline._one_frame_per_image`). Every frame-counted
-setting counts images.
+nearest to (~4.9× on WATO, ~1.7× on nuScenes); both passes read it through
+`wato_common.artifacts.frame_index.FrameIndex`, which hands out each image once
+with every sweep it is paired with (depth anchors on all of them) and the pose
+at the image's own time. Every frame-counted setting counts images.
 
 Model loading and inference are fail-loud: a detector, SAM2, DINOv2 or DA-V2
 failure stops the run instead of leaving a camera with fewer masklets or no

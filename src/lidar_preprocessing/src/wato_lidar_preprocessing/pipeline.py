@@ -26,7 +26,6 @@ from wato_common import manifest as common_manifest
 from wato_common.artifact_store import (
     chunks_index_path,
     dynamic_map_path,
-    frame_index_path,
     global_iwu_path,
     ground_path,
     lidar_proc_index_path,
@@ -132,7 +131,6 @@ def _write_chunk_manifest(
     inputs = {
         "lidar_sweeps": lidar_sweeps_path(bag_id, chunk_id),
         "poses": poses_path(bag_id, chunk_id),
-        "frame_index": frame_index_path(bag_id, chunk_id),
     }
     outputs = {
         "static_map": static_map_path(bag_id, chunk_id),

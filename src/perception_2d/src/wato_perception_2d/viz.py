@@ -27,20 +27,20 @@ Needs DISPLAY (or WSLg) forwarded into the container, or run it on the host:
 from __future__ import annotations
 
 import logging
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict
 from typing import Optional
 
 import numpy as np
 
 from wato_common.artifact_store import chunks_index_path
 from wato_common.artifacts import depth as depth_artifact
+from wato_common.artifacts.frame_index import CameraFrame, FrameIndex
 from wato_common.io.parquet_io import read_rows
-from wato_perception_2d.io import CameraFrameInfo, load_frame_index
 
 log = logging.getLogger(__name__)
 
 # A frame entry to display: a camera frame that has a depth artifact.
-_Entry = CameraFrameInfo
+_Entry = CameraFrame
 
 _FIT_LABELS = {0: "ransac", 1: "fallback", 2: "none"}
 # turbo reversed → near (small metres) reads warm/red, far reads cool/blue.
@@ -81,25 +81,21 @@ def _depth_to_norm(
 
 
 def _entries_for_camera(
-    bag_id: str, chunk_id: str, cam_id: str, frames: list[CameraFrameInfo]
+    bag_id: str, chunk_id: str, cam_id: str, frames: list[CameraFrame]
 ) -> list[_Entry]:
-    """Frames of one camera that have a depth npz on disk, sorted by sequence."""
-    out: list[_Entry] = []
-    for f in sorted(frames, key=lambda x: x.camera_seq):
-        if f.cam_id != cam_id:
-            continue
-        if depth_artifact.exists(bag_id, chunk_id, cam_id, f.camera_seq):
-            out.append(f)
-    return out
+    """One camera's frames (camera_seq order) that have a depth npz on disk."""
+    return [
+        f
+        for f in frames
+        if depth_artifact.exists(bag_id, chunk_id, cam_id, f.camera_seq)
+    ]
 
 
 def _cameras_with_depth(
     bag_id: str, chunk_id: str
-) -> tuple[list[str], dict[str, list[CameraFrameInfo]]]:
+) -> tuple[list[str], dict[str, list[CameraFrame]]]:
     """Return (cam_ids that have ≥1 depth artifact, frames grouped by camera)."""
-    by_cam: dict[str, list[CameraFrameInfo]] = defaultdict(list)
-    for f in load_frame_index(bag_id, chunk_id):
-        by_cam[f.cam_id].append(f)
+    by_cam = FrameIndex.load(bag_id, chunk_id).by_camera()
     cams = sorted(
         c for c in by_cam if _entries_for_camera(bag_id, chunk_id, c, by_cam[c])
     )
@@ -154,7 +150,11 @@ def _cap_side(arr: np.ndarray, max_side: int, *, nearest: bool) -> np.ndarray:
 class _FrameStore:
     """LRU-cached decode of (image, depth) → display arrays for one camera."""
 
-    def __init__(self, entries: list[_Entry], max_side: int) -> None:
+    def __init__(
+        self, bag_id: str, chunk_id: str, entries: list[_Entry], max_side: int
+    ) -> None:
+        self.bag_id = bag_id
+        self.chunk_id = chunk_id
         self.entries = entries
         self.max_side = max_side
         self._cache: "OrderedDict[int, dict]" = OrderedDict()
@@ -178,10 +178,9 @@ class _FrameStore:
             self._cache.popitem(last=False)
         return decoded
 
-    @staticmethod
-    def _decode_depth(base: np.ndarray, frame: CameraFrameInfo) -> dict:
+    def _decode_depth(self, base: np.ndarray, frame: CameraFrame) -> dict:
         d = depth_artifact.read_frame(
-            frame.bag_id, frame.chunk_id, frame.cam_id, frame.camera_seq
+            self.bag_id, self.chunk_id, frame.cam_id, frame.camera_seq
         )
         if d is None:
             raise FileNotFoundError(
@@ -242,7 +241,7 @@ class DepthViewer:
         bag_id: str,
         chunk_id: str,
         cameras: list[str],
-        frames_by_cam: dict[str, list[CameraFrameInfo]],
+        frames_by_cam: dict[str, list[CameraFrame]],
         initial_cam: str,
         max_side: int = 1280,
     ) -> None:
@@ -266,7 +265,7 @@ class DepthViewer:
         entries = _entries_for_camera(
             self.bag_id, self.chunk_id, cam_id, self.frames_by_cam[cam_id]
         )
-        return _FrameStore(entries, self.max_side)
+        return _FrameStore(self.bag_id, self.chunk_id, entries, self.max_side)
 
     # -- lifecycle ----------------------------------------------------------
     def show(self) -> None:

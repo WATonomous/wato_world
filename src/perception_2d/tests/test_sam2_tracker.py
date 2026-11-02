@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 from PIL import Image as PILImage
 
-from wato_perception_2d.io import CameraFrameInfo
+from wato_common.artifacts.frame_index import CameraFrame
 from wato_perception_2d.models.detector import Detection
 from wato_perception_2d.models.sam2_tracker import track_camera
 
@@ -138,18 +138,15 @@ class _ConstDetector:
         return list(self._dets)
 
 
-def _frames(n: int) -> list[CameraFrameInfo]:
+def _frames(n: int) -> list[CameraFrame]:
     return [
-        CameraFrameInfo(
-            frame_id=f"f{i}",
-            bag_id="bag0",
-            chunk_id="chunk0",
-            sweep_id=i,
+        CameraFrame(
             cam_id="cam_front",
-            image_path=f"/tmp/{i}.png",
             camera_seq=i,
-            camera_timestamp_ns=None,
-            valid_camera=True,
+            timestamp_ns=i,
+            image_path=f"/tmp/{i}.png",
+            sweep_ids=(i,),
+            world_T_ego=None,
         )
         for i in range(n)
     ]

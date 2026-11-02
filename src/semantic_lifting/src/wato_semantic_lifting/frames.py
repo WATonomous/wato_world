@@ -1,8 +1,8 @@
 """Per-camera-frame inputs to lifting, built once and shared across sweeps.
 
-frame_index pairs every camera frame with each sweep it is nearest to (~4.9
-sweeps per frame on the 3-LiDAR WATO rig), so a frame's pooled depth and
-mask raster are cached instead of being re-read for every sweep.
+A camera frame is paired with every sweep it is nearest to (~4.9 sweeps per
+frame on the 3-LiDAR WATO rig), so a frame's pooled depth and mask raster are
+cached instead of being re-read for every sweep.
 """
 
 from __future__ import annotations
@@ -15,8 +15,8 @@ import numpy as np
 
 from wato_common.artifact_store import depth_2d_path, local_path
 from wato_common.artifacts import ArtifactFormatError, depth
+from wato_common.artifacts.frame_index import CameraFrame
 from wato_common.artifacts.masklets import MaskletIndex
-from wato_semantic_lifting.io import CameraFrameRef
 from wato_semantic_lifting.projection import label_raster
 from wato_semantic_lifting.visibility import pooled_occluder
 
@@ -57,7 +57,7 @@ class FrameCache:
         self._cache: OrderedDict[tuple[str, int], Optional[FrameData]] = OrderedDict()
         self.n_no_depth = 0  # distinct frames with masklets but no depth artifact
 
-    def get(self, ref: CameraFrameRef) -> Optional[FrameData]:
+    def get(self, ref: CameraFrame) -> Optional[FrameData]:
         """The frame's data; None when it has no masklets (nothing to vote
         for) or no depth artifact (perception_2d's depth fit failed)."""
         key = (ref.cam_id, ref.camera_seq)
@@ -70,7 +70,7 @@ class FrameCache:
             self._cache.popitem(last=False)
         return data
 
-    def _load(self, ref: CameraFrameRef) -> Optional[FrameData]:
+    def _load(self, ref: CameraFrame) -> Optional[FrameData]:
         records = self.masklets.at(ref.cam_id, ref.camera_seq)
         if not records:
             return None

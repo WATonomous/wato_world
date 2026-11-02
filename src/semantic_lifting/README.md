@@ -70,13 +70,14 @@ owns its format:
 | Artifact | Producer | Read through |
 |---|---|---|
 | `calibration.json` (`K`, `ego_T_cam`) | ingest | `wato_common.artifacts.calibration` |
-| `frame_index.parquet`, `poses.parquet` | ingest | `io.load_sweep_frames`: ingest's sweep ↔ camera pairing, camera pose at the camera's own timestamp (`wato_common.pose_lookup`) |
+| `frame_index.parquet`, `poses.parquet` | ingest | `wato_common.artifacts.frame_index.FrameIndex`: ingest's sweep ↔ camera pairing, each frame once with its pose at the camera's own timestamp |
 | `lidar_proc_index.parquet`, `lidar_proc/<sweep_id:06d>_world.npz` | lidar_preprocessing | `wato_common.artifacts.lidar_sweeps.ProcessedSweeps` |
 | `tracklets_2d.parquet`, `masks_2d/` | perception_2d | `wato_common.artifacts.masklets.MaskletIndex` |
 | `depth_2d/<cam>/<camera_seq:06d>.npz` | perception_2d | `wato_common.artifacts.depth` |
 
-A camera frame with no depth artifact is skipped: perception_2d writes none
-when its LiDAR-anchored depth fit failed. Depth `0` (fitted inverse depth ≤ 0)
+A camera frame whose time falls in an untrusted stretch of the pose stream is
+skipped, as is one with no depth artifact: perception_2d writes none when its
+LiDAR-anchored depth fit failed. Depth `0` (fitted inverse depth ≤ 0)
 is farther than the fit can represent and never occludes. Anything else
 missing or malformed upstream (a world NPZ, a calibration entry, a mask PNG a
 masklet lists) raises and stops the run.

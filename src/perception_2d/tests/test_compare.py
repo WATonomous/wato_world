@@ -7,12 +7,12 @@ import csv
 import os
 
 import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
-from wato_common.artifact_store import frame_index_path, local_path
-from wato_common.artifacts import masklets
+from wato_common.artifact_store import poses_path
+from wato_common.artifacts import frame_index, masklets
+from wato_common.io.parquet_io import write_table
+from wato_common.schemas import POSES_SCHEMA, FrameIndexRow
 from wato_perception_2d import compare
 from wato_perception_2d.config import ComponentConfig
 
@@ -52,21 +52,43 @@ def _write_images(root, monkeypatch):
         p = os.path.join(str(root), f"img_{s}.png")
         Image.fromarray(np.full((H, W, 3), 90, np.uint8)).save(p)
         paths.append(p)
-    path = local_path(frame_index_path(BAG, CHUNK))
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    pq.write_table(
-        pa.table(
+    write_table(
+        [
             {
-                "frame_id": [str(s) for s in FRAMES],
-                "sweep_id": list(FRAMES),
-                "cam_id": [CAM] * len(FRAMES),
-                "image_path": paths,
-                "camera_seq": list(FRAMES),
-                "camera_timestamp_ns": [s * 50_000_000 for s in FRAMES],
-                "valid_camera": [True] * len(FRAMES),
+                "bag_id": BAG,
+                "chunk_id": CHUNK,
+                "timestamp_ns": 0,
+                **dict.fromkeys(("x", "y", "z", "qx", "qy", "qz"), 0.0),
+                "qw": 1.0,
+                "world_T_ego_flat": np.eye(4).ravel().tolist(),
+                "source": "/odom",
+                "valid": True,
+                "interval_drop_reason": None,
             }
-        ),
-        path,
+        ],
+        POSES_SCHEMA,
+        poses_path(BAG, CHUNK),
+    )
+    frame_index.write(
+        BAG,
+        CHUNK,
+        [
+            FrameIndexRow(
+                frame_id=str(s),
+                bag_id=BAG,
+                chunk_id=CHUNK,
+                sweep_id=s,
+                lidar_id="lidar_top",
+                lidar_path="",
+                reference_timestamp_ns=s * 50_000_000,
+                cam_id=CAM,
+                image_path=p,
+                camera_seq=s,
+                camera_timestamp_ns=s * 50_000_000,
+                valid_camera=True,
+            )
+            for s, p in zip(FRAMES, paths)
+        ],
     )
 
 

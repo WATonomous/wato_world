@@ -106,7 +106,7 @@ artifacts, runs the UniLiPs Eq.1 occlusion test, and outputs per-LiDAR-point
 labels with cross-camera confidence.  `proposal_generation` reads these and
 groups LiDAR points by `instance_id` to form per-instance point clouds for
 the SLF silhouette-fit stage. An instance is one object's masklets merged
-across cameras (chunk-local; `tracking`'s `global_object_id` comes later), so
+across cameras (chunk-local; `tracking`'s cross-camera ids come later), so
 L_mask compares against every masklet in its `masklet_ids`, each in its own
 camera.
 

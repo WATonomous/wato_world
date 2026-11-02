@@ -64,8 +64,8 @@ import numpy as np
 from scipy import ndimage
 
 from wato_common.artifacts import masklets
+from wato_common.artifacts.frame_index import CameraFrame
 from wato_perception_2d.fusion.masklet import Masklet
-from wato_perception_2d.io import CameraFrameInfo
 from wato_perception_2d.models.detector import Concept, Detection
 from wato_perception_2d.models.embeddings import extract_dino_features
 
@@ -378,7 +378,7 @@ def _owned_masks(
 _JPEG_EXTS = (".jpg", ".jpeg")
 
 
-def _prepare_frame_dir(frames: list[CameraFrameInfo], images: list[np.ndarray]) -> str:
+def _prepare_frame_dir(frames: list[CameraFrame], images: list[np.ndarray]) -> str:
     """A temp dir of sequential ``00000000.jpg`` frames for SAM2's video loader.
 
     SAM2's ``init_state`` reads a directory of JPEGs whose names are integers (it
@@ -625,7 +625,7 @@ class _Support:
 def track_camera(
     predictor,
     detector,
-    frames: list[CameraFrameInfo],
+    frames: list[CameraFrame],
     images: list[np.ndarray],
     concepts: list[Concept],
     *,
@@ -789,7 +789,7 @@ def track_camera(
 def _track_window(
     predictor,
     detector,
-    frames: list[CameraFrameInfo],
+    frames: list[CameraFrame],
     images: list[np.ndarray],
     concepts: list[Concept],
     *,

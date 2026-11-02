@@ -138,7 +138,8 @@ contributed each label — was designed but is not written.)
 
 **As implemented**, the file is `lifted_labels/<sweep_id:06d>.npz` with
 `point_indices`, `instance_ids` and `classes` (unicode strings; the instance id
-is the masklet's `global_object_id`, else its `masklet_id`), `confidences`,
+is the smallest `masklet_id` among the masklets merged into the instance,
+`instances.py`), `confidences`,
 `n_supporting_cameras`, `n_disagreeing_cameras` — see
 `wato_common.artifacts.lifted_labels`. The table below is the original design.
 
@@ -188,7 +189,8 @@ camera frame).
 **As implemented**, lifting does no matching of its own: ingest already pairs
 every sweep with each camera's nearest frame in `frame_index` (within its
 `max_cam_offset_ms`, 60 ms on WATO, with a `camera_drop_reason` when it
-doesn't), and `io.load_sweep_frames` takes that pairing as is. One owner for
+doesn't), and `wato_common.artifacts.frame_index.FrameIndex` hands that
+pairing over as is. One owner for
 the decision; a separate lifting window had drifted to 50 ms.
 
 ### Step 2: ego-motion compensation (UniLiPs-borrowed)
@@ -211,9 +213,9 @@ done upstream: lidar_preprocessing writes every point in world coordinates,
 each at its own measurement time. Lifting therefore only needs
 `cam_T_world = inv(ego_T_cam) ∘ inv(world_T_ego(t_frame))`, with
 `world_T_ego(t_frame)` looked up at `camera_timestamp_ns` through
-`wato_common.pose_lookup` (`io.load_sweep_frames`). `frame_index.world_T_ego` is
-the sweep's pose and is not used here: on the WATO rig it misplaced a point
-30 m away by 17 cm median, up to 87 cm.
+`wato_common.pose_lookup` (`FrameIndex` does it for every frame). The sweep's
+pose would be wrong here: on the WATO rig it misplaced a point 30 m away by
+17 cm median, up to 87 cm.
 
 Note: this only compensates ego motion, not scene motion. Dynamic objects
 will still project to slightly the wrong pixel by `Δt × v_object`. Mitigated
@@ -307,7 +309,7 @@ For each LiDAR point that received votes from one or more cameras, reduce:
   confidence = 0.
 
 **As implemented**, votes are reduced by **class** first, then instance:
-masklets are per-camera and `global_object_id` is only assigned by `tracking`,
+masklets are per-camera and a cross-camera id is only assigned by `tracking`,
 which runs after lifting, so voting on `instance_id` made two cameras on the
 same car always disagree (on chunk 0000 of `may_30_ring_road_test_5_2`, every
 one of 2,994 "disagreeing" points in 40 sweeps was a same-class pair). The
@@ -317,8 +319,8 @@ unanimous; `n_supporting_cameras` / `n_disagreeing_cameras` count cameras
 voting the winning / another class. Unvoted points are not written.
 
 **Cross-camera instances (as implemented, `instances.py`).** The design
-assumed `global_object_id` from a cross-camera merge upstream; nothing assigns
-it before lifting (`tracking` runs after), yet proposal_generation groups
+assumed a cross-camera id from a merge upstream; nothing assigns one before
+lifting (`tracking` runs after), yet proposal_generation groups
 points by instance to fit one box per object. So lifting merges masklets
 itself, from geometry it already has: two same-class masklets from different
 cameras that claim the same visible LiDAR points. Merge when, over the chunk,
@@ -464,7 +466,7 @@ src/semantic_lifting/
     ├── __init__.py
     ├── cli.py                       Chunk-level CLI runner
     ├── config.py                    Pydantic config schemas
-    ├── io.py                        Chunks; frame_index pairing with camera-time poses
+    ├── io.py                        Chunk list
     ├── pipeline.py                  Per-chunk orchestration
     ├── frames.py                    Per-frame pooled depth + mask raster, cached across sweeps
     ├── projection.py                cam_T_world, projection (wato_common.geometry), mask raster
@@ -516,8 +518,8 @@ implementation. Single source of truth for the projection math.
 2. `visibility.py` — synthetic depth map with known occlusion, verify
    visibility test returns expected results.
 3. `voting.py` — synthetic vote sets with known winners, verify reduction.
-4. `io.py` / `projection.py` — frame_index pairing, poses at camera time,
-   cam_T_world.
+4. `projection.py` — cam_T_world (the frame_index pairing and camera-time
+   poses are tested with `wato_common.artifacts.frame_index`).
 
 **Integration tests:**
 

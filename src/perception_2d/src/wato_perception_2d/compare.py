@@ -49,9 +49,10 @@ from typing import Iterator, Optional
 import numpy as np
 
 from wato_common.artifacts import masklets
+from wato_common.artifacts.frame_index import FrameIndex
 from wato_common.storage import artifact_root
 from wato_perception_2d.config import ComponentConfig
-from wato_perception_2d.io import load_chunks, load_frame_index
+from wato_perception_2d.io import load_chunks
 
 log = logging.getLogger(__name__)
 
@@ -409,7 +410,7 @@ def _write_sheets(
             if chunk not in images:
                 images[chunk] = {
                     (f.cam_id, f.camera_seq): f.image_path
-                    for f in load_frame_index(bag_id, chunk)
+                    for f in FrameIndex.load(bag_id, chunk).frames
                 }
             draw.text(
                 (3, k * row_px + 3),

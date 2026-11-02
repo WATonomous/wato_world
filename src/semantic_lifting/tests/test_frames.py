@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 
 from wato_common.artifacts import ArtifactFormatError, depth, masklets
+from wato_common.artifacts.frame_index import CameraFrame
 from wato_semantic_lifting.frames import FrameCache
-from wato_semantic_lifting.io import CameraFrameRef
 
 BAG, CHUNK, CAM = "b", "0000", "CAM_FRONT"
 
@@ -17,8 +17,8 @@ def artifact_root(tmp_path, monkeypatch):
     monkeypatch.setenv("ARTIFACT_ROOT_URI", f"file://{tmp_path}")
 
 
-def _ref(seq: int) -> CameraFrameRef:
-    return CameraFrameRef(CAM, seq, seq * 100, np.eye(4))
+def _ref(seq: int) -> CameraFrame:
+    return CameraFrame(CAM, seq, seq * 100, f"/img/{seq}.jpg", (seq,), np.eye(4))
 
 
 def _depth(seq: int, shape=(4, 6)) -> None:

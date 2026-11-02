@@ -34,9 +34,9 @@ from typing import Optional
 import numpy as np
 
 from wato_common.artifacts import masklets
-from wato_common.pose_lookup import PoseLookup
+from wato_common.artifacts.frame_index import CameraFrame, FrameIndex
 from wato_perception_2d.config import ComponentConfig
-from wato_perception_2d.io import CameraFrameInfo, load_chunks, load_frame_index
+from wato_perception_2d.io import load_chunks
 
 log = logging.getLogger(__name__)
 
@@ -119,16 +119,13 @@ def format_block(
     return "\n".join(lines) + "\n"
 
 
-def _positions(
-    frames: list[CameraFrameInfo], poses: PoseLookup
-) -> dict[int, Optional[np.ndarray]]:
+def _positions(frames: list[CameraFrame]) -> dict[int, Optional[np.ndarray]]:
     """camera_seq → the vehicle's position when the image was taken (None
     without a valid pose)."""
-    out: dict[int, Optional[np.ndarray]] = {}
-    for f in frames:
-        p = poses.at(f.camera_timestamp_ns) if f.camera_timestamp_ns else None
-        out[f.camera_seq] = p.world_T_ego[:3, 3] if p is not None and p.valid else None
-    return out
+    return {
+        f.camera_seq: None if f.world_T_ego is None else f.world_T_ego[:3, 3]
+        for f in frames
+    }
 
 
 def _travel(seqs: list[int], pos: dict[int, Optional[np.ndarray]]) -> float:
@@ -146,7 +143,7 @@ def run(
     """
     from PIL import Image, ImageDraw
 
-    from wato_perception_2d.pipeline import _ego_mask, _one_frame_per_image
+    from wato_perception_2d.pipeline import _ego_mask
 
     os.makedirs(out_dir, exist_ok=True)
     body: dict[str, np.ndarray] = {}
@@ -156,18 +153,8 @@ def run(
         chunk_id = str(chunk["chunk_id"])
         if not masklets.exists(bag_id, chunk_id):
             continue
-        try:
-            poses = PoseLookup.load(bag_id, chunk_id)
-        except FileNotFoundError:
-            poses = PoseLookup([])
-        rows: dict[str, list[CameraFrameInfo]] = {}
-        for f in load_frame_index(bag_id, chunk_id):
-            rows.setdefault(f.cam_id, []).append(f)
-        by_cam = {
-            cam: _one_frame_per_image(sorted(fs, key=lambda f: f.camera_seq))
-            for cam, fs in rows.items()
-        }
-        pos = {cam: _positions(fs, poses) for cam, fs in by_cam.items()}
+        by_cam = FrameIndex.load(bag_id, chunk_id).by_camera()
+        pos = {cam: _positions(fs) for cam, fs in by_cam.items()}
         for cam, fs in by_cam.items():
             last = None
             for f in fs:

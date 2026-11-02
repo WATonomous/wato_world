@@ -281,9 +281,9 @@ and for downstream Segment-Lift-Fit.
   stricter anchor set — a known follow-up.)
 - **Camera-time pose**: the static points are world-frame (each deskewed at
   its own time), so they are projected with the ego pose when the *image* was
-  taken — looked up at the frame's `camera_timestamp_ns` through
-  `wato_common.pose_lookup` — not `frame_index.world_T_ego`, which is the
-  LiDAR sweep's pose. The two are up to ~44 ms apart on the WATO rig and
+  taken (`CameraFrame.world_T_ego`, which `wato_common.artifacts.frame_index`
+  looks up at the frame's `camera_timestamp_ns`) — not the LiDAR sweep's
+  pose. The two are up to ~44 ms apart on the WATO rig and
   ~120 ms on nuScenes; using the sweep's pose misplaced a point 30 m away by
   15–17 cm median and up to 0.9–1.3 m. A frame whose time falls in an
   untrusted stretch of the pose stream gets no anchors.
@@ -331,9 +331,9 @@ component uses for cross-camera / cross-chunk re-identification.
 perception_2d's deliverable is **per-camera** masklets + masks + metric depth +
 DINOv2 embeddings. Resolving the same physical object across the 12 cameras is a
 3D/4D problem that belongs in the downstream `tracking` component (gated by the
-DINOv2 features persisted here). `global_object_id` is left **null** for
-`tracking` to populate. (The earlier SAM3 plan did cross-camera merge inside
-perception_2d; that has been removed.)
+DINOv2 features persisted here); perception_2d writes no cross-camera id.
+(The earlier SAM3 plan did cross-camera merge inside perception_2d; that has
+been removed.)
 
 ---
 
@@ -369,7 +369,6 @@ the tracked detection.
 | `frames_present` | str | JSON list[int] of `camera_seq` where the mask exists |
 | `mask_path` | str | Directory of per-frame mask PNGs |
 | `dino_feature_path` | str? | DINOv2 embedding `.npy` (null if not extracted) |
-| `global_object_id` | str? | **null** — populated downstream by `tracking` |
 | `raw_phrase` | str | Raw detector label before canonicalisation |
 | `det_score` | float | Detector (× SAM2 mask) confidence |
 | `discovery_score` | float | Detector / Florence-2 discovery confidence |

@@ -49,7 +49,7 @@ flowchart TD
 
     BAG --> ingest
     ingest -- "frame_index · images · poses\ncalibration" --> perception_2d
-    ingest -- "frame_index · lidar_sweeps · poses" --> lidar_prep
+    ingest -- "lidar_sweeps · poses" --> lidar_prep
     lidar_prep -- "world sweeps · dynamic masks" --> perception_2d
     lidar_prep -- "world sweeps" --> semantic_lifting
     perception_2d -- "masks_2d · depth_2d · tracklets_2d" --> semantic_lifting
@@ -63,11 +63,11 @@ flowchart TD
 ```
 
 `frame_index.parquet` (written by **ingest**) aligns every LiDAR sweep with the
-nearest image per camera. Every pose is looked up from `poses.parquet` through
-`wato_common.pose_lookup` at the timestamp of the data being placed — a point,
-a sweep, a camera frame — and honours ingest's verdict on which stretches of
-the pose stream are trustworthy. `frame_index.world_T_ego` is the sweep's pose
-only.
+nearest image per camera; consumers read it as one entry per image through
+`wato_common.artifacts.frame_index`. Every pose is looked up from
+`poses.parquet` through `wato_common.pose_lookup` at the timestamp of the data
+being placed — a point, a sweep, a camera frame — and honours ingest's verdict
+on which stretches of the pose stream are trustworthy.
 
 **ingest**, **lidar_preprocessing** and **perception_2d** are implemented end-to-end (and
 **semantic_lifting**'s core lifting algorithm). The remaining components are stubs.

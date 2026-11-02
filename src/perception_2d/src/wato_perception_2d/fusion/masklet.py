@@ -25,5 +25,4 @@ class Masklet:
     frames_present: list[int]  # camera_seq values where the mask exists
     mask_paths: list[str]  # parallel to frames_present
     dino_feature: Optional[np.ndarray] = None  # (D,) float32 DINOv2 embedding
-    global_object_id: Optional[str] = None
     tracker_backend: str = "sam2"  # which tracker produced this masklet
