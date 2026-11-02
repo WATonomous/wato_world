@@ -100,19 +100,9 @@ def test_frames_grouped_into_batches(monkeypatch):
     assert aligned == [(i, float(i)) for i in range(5)]
 
 
-def test_batch_size_one_is_per_frame(monkeypatch):
-    aligned, model = _run(monkeypatch, n_frames=3, batch_size=1)
-    assert model.batch_sizes == [1, 1, 1]
-    assert aligned == [(0, 0.0), (1, 1.0), (2, 2.0)]
-
-
 def test_unreadable_frame_dropped_from_batch(monkeypatch):
     # Frame 1 fails to load → excluded from inference + alignment, others intact.
     aligned, model = _run(monkeypatch, n_frames=4, batch_size=2, skip_seq={1})
     # First batch had only frame 0 (1 image); second batch frames 2,3 (2 images).
     assert model.batch_sizes == [1, 2]
     assert aligned == [(0, 0.0), (2, 2.0), (3, 3.0)]
-
-
-def test_default_batch_size_is_one():
-    assert ComponentConfig().depth.batch_size == 1

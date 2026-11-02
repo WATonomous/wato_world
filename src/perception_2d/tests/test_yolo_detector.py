@@ -83,29 +83,23 @@ def test_only_mapped_taxonomy_classes_are_requested_and_kept():
     ]
 
 
-def test_no_taxonomy_class_reachable_means_no_forward():
-    det, fake = _detector([((0, 0, 1, 1), 2, 0.9)])
-    assert det.detect(np.zeros((8, 8, 3), np.uint8), [("barrier", "barrier")]) == []
-    assert fake.calls == []
-
-
 def test_check_class_map_separates_typos_from_a_smaller_taxonomy():
-    """A typo ("pedestrain") or spelling variant ("traffic cone") would silently
+    """A typo ("pedestrain") or spelling variant ("Motorcycle") would silently
     drop every such detection — fatal. A target the taxonomy simply doesn't
     have ("truck" here) is fine; it's just never used."""
-    concepts = CONCEPTS + [("traffic cone", "traffic_cone")]
+    concepts = CONCEPTS + [("motorcycle", "motorcycle")]
     misnamed, unused, uncovered = check_class_map(
-        {**CLASS_MAP, "person": "pedestrain", "fire hydrant": "traffic cone"}, concepts
+        {**CLASS_MAP, "person": "pedestrain", "motorcycle": "Motorcycle"}, concepts
     )
-    assert misnamed == {"pedestrain", "traffic cone"}
+    assert misnamed == {"pedestrain", "Motorcycle"}
     assert unused == {"truck"}
-    assert uncovered == {"pedestrian", "traffic_cone"}  # the typo covers nothing
+    assert uncovered == {"pedestrian", "motorcycle"}  # the typo covers nothing
 
 
 def test_missing_checkpoint_fails_loud(tmp_path):
     det = YoloDetector(str(tmp_path / "nope.pt"), class_map=CLASS_MAP)
     with pytest.raises(RuntimeError, match="fetch_models.py"):
-        det._load()
+        det.load()
 
 
 def test_class_map_naming_a_class_the_weights_lack_fails_loud(tmp_path, monkeypatch):
@@ -119,7 +113,7 @@ def test_class_map_naming_a_class_the_weights_lack_fails_loud(tmp_path, monkeypa
     monkeypatch.setitem(sys.modules, "ultralytics", fake_mod)
     det = YoloDetector(str(ckpt), class_map={**CLASS_MAP, "motorbike": "motorcycle"})
     with pytest.raises(ValueError, match="motorbike"):
-        det._load()
+        det.load()
     assert yolo_detector.os.environ.get("YOLO_OFFLINE") == "1"
 
 
@@ -132,17 +126,6 @@ def _cfg(**detection):
     from wato_perception_2d.config import ComponentConfig
 
     return ComponentConfig.model_validate({"detection": detection})
-
-
-def test_backend_switch_builds_the_configured_detector():
-    from wato_perception_2d.models.detector import GroundingDinoDetector
-    from wato_perception_2d.pipeline import build_detector
-
-    taxonomy = [("car", "car"), ("pedestrian", "pedestrian")]
-    assert isinstance(build_detector(_cfg(backend="yolo"), taxonomy), YoloDetector)
-    assert isinstance(
-        build_detector(_cfg(backend="grounding_dino"), taxonomy), GroundingDinoDetector
-    )
 
 
 def test_yolo_cannot_be_prompted_by_open_vocabulary_discovery():

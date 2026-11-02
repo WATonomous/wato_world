@@ -8,6 +8,7 @@ torch/DINOv2 raises.
 
 from __future__ import annotations
 
+import functools
 import logging
 from typing import Optional
 
@@ -35,6 +36,25 @@ def _get_model(model_name: str, device: str):
         model.eval().to(device)
         _MODEL_CACHE[key] = model
     return model
+
+
+@functools.cache
+def check_model(model_name: str) -> None:
+    """Raise unless the pinned DINOv2 and its weights load from TORCH_HOME.
+
+    Loads on the CPU and drops the model, so it can run before the depth pass
+    without taking VRAM. A missing pinned repo otherwise surfaces as a GitHub
+    download error (HTTP 403 once rate-limited) at the first embedding.
+    """
+    import torch
+
+    try:
+        torch.hub.load(torch_hub_repo(), model_name)
+    except Exception as exc:
+        raise RuntimeError(
+            f"DINOv2 {model_name!r} ({torch_hub_repo()}) did not load from "
+            f"TORCH_HOME: {exc}. Fetch it with scripts/fetch_models.py."
+        ) from exc
 
 
 def _mask_crop(image_rgb: np.ndarray, mask: np.ndarray) -> Optional[np.ndarray]:

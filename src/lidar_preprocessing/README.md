@@ -21,8 +21,9 @@ ground maps, and recall-oriented motion proposals.
 `--no-auto-reduce` and run the bag-level steps once every chunk is done:
 `python -m wato_lidar_preprocessing reduce | iwu | proposals --bag <bag>`.
 
-WATO bags must be ingested with `ingest.wato.yaml` / `ingest.wato_6cam.yaml`
-(per-corner LiDAR topics), then processed with `lidar_preprocessing.wato.yaml`.
+WATO bags must be ingested with `ingest.wato.yaml` / `ingest.wato_6cam.yaml` /
+`ingest.wato_no_lidar_nw.yaml` (per-corner LiDAR topics), then processed with
+`lidar_preprocessing.wato.yaml`.
 
 ## Steps
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections import deque
 
 import numpy as np
+import pytest
 
 from wato_common.geometry import PoseSample, invert_se3
 from wato_common.pose_lookup import PoseLookup, interval_drop_reasons
@@ -84,11 +85,9 @@ def test_projection_uses_the_pose_at_camera_time(monkeypatch):
     )
 
 
-def test_camera_time_in_an_untrusted_stretch_gets_no_anchors(monkeypatch):
-    seen, _ = _run(monkeypatch, _frame(camera_ms=600))  # inside the 1 s dropout
-    assert seen == []
-
-
-def test_frame_without_camera_time_gets_no_anchors(monkeypatch):
-    seen, _ = _run(monkeypatch, _frame(camera_ms=None))
+@pytest.mark.parametrize("camera_ms", [600, None])  # inside the 1 s dropout; unknown
+def test_frame_without_a_trusted_pose_at_camera_time_gets_no_anchors(
+    monkeypatch, camera_ms
+):
+    seen, _ = _run(monkeypatch, _frame(camera_ms=camera_ms))
     assert seen == []

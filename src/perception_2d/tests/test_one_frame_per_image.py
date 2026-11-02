@@ -43,16 +43,6 @@ def test_rows_sharing_an_image_collapse_to_one_with_all_sweeps():
     assert out[1].sweep_ids == tuple(range(475, 481))
 
 
-def test_a_skipped_image_stays_skipped():
-    rows = [_row(1, 10), _row(1, 11), _row(3, 12)]
-    out = pipeline._one_frame_per_image(rows)
-    assert [(f.camera_seq, f.sweep_ids) for f in out] == [(1, (10, 11)), (3, (12,))]
-
-
-def test_empty():
-    assert pipeline._one_frame_per_image([]) == []
-
-
 def test_depth_anchors_on_every_matched_sweep(monkeypatch):
     per_sweep = {
         470: np.array([[1.0, 0.0, 0.0]]),

@@ -42,7 +42,8 @@ topics:
   # 8-camera panoramic ring (nn/ne/ee/se/ss/sw/ww/nw), 1280x1024 at ~12 Hz.
   # The four camera_lower_{ne,nw,se,sw} cameras are recorded and calibrated
   # too; add them the same way to ingest them. Recordings without
-  # camera_pano_ee / camera_pano_ww use ingest.wato_6cam.yaml.
+  # camera_pano_ee / camera_pano_ww use ingest.wato_6cam.yaml; recordings
+  # with an empty /lidar_nw/velodyne_points use ingest.wato_no_lidar_nw.yaml.
   #
   # rectified: the car's rectify node (wato_monorepo perception_bringup
   # template_camera_load.yaml) publishes rectified images, described by

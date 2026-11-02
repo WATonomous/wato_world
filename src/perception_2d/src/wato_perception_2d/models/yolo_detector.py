@@ -5,10 +5,9 @@ Selected with ``detection.backend: yolo``. Same contract as
 prompt SAM2 (sam2_tracker.py). The weights are COCO-trained, so the class
 vocabulary is fixed: ``detection.yolo.class_map`` maps COCO names to taxonomy
 classes, and a detection is kept only when its class maps to a class in the
-taxonomy (the concepts). Taxonomy classes COCO has no counterpart for
-(traffic_cone, barrier) are never detected by this backend — the pipeline logs
-which at startup. The prompt text of a concept is ignored; only its canonical
-class matters.
+taxonomy (the concepts). Taxonomy classes COCO has no counterpart for are never
+detected by this backend — the pipeline logs which at startup. The prompt text
+of a concept is ignored; only its canonical class matters.
 
 Inference traps handled here, each of which gives plausible-looking wrong output
 rather than an error:
@@ -50,7 +49,7 @@ def check_class_map(
     Returns ``(misnamed, unused, uncovered)``:
 
     * misnamed — targets that aren't taxonomy classes but nearly match one
-      ("pedestrain", "traffic cone" vs "traffic_cone"): every such detection
+      ("pedestrain", "Motorcycle" vs "motorcycle"): every such detection
       would be silently dropped, so the pipeline refuses to start;
     * unused — other targets outside the taxonomy (a smaller taxonomy just
       doesn't use them);
@@ -111,7 +110,12 @@ class YoloDetector:
         except ImportError:
             return "cpu"
 
-    def _load(self) -> None:
+    def load(self) -> None:
+        """Load the weights and check ``class_map`` against them; idempotent.
+
+        The weights stay on the CPU until the first detect() (Ultralytics moves
+        them at predict time), so the pipeline calls this before the depth pass.
+        """
         if self._model is not None:
             return
         if not os.path.isfile(self._checkpoint):
@@ -163,7 +167,7 @@ class YoloDetector:
             RuntimeError: if ultralytics / the checkpoint is unavailable.
         """
         wanted = {cls for _, cls in concepts}
-        self._load()
+        self.load()
         ids = sorted(i for i, cls in self._ids.items() if cls in wanted)
         if not ids:
             return []

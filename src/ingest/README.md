@@ -26,6 +26,7 @@ replaces calibration from the bag. Individual steps can be rerun with
 | `ingest.yaml` | `/odom` | `base_link` | nuScenes (default) |
 | `ingest.wato.yaml` | `/world_modeling/liso/odometry` | `base_footprint` | WATO bags with eidos topics |
 | `ingest.wato_6cam.yaml` | same | same | WATO recordings without `camera_pano_ee` / `camera_pano_ww` (May 30 ring-road tests 2–3, `ring_road_corrected`). Must otherwise match `ingest.wato.yaml`; a test checks it. |
+| `ingest.wato_no_lidar_nw.yaml` | same | same | WATO recordings whose `/lidar_nw/velodyne_points` is empty (`sensors_2026_07_07-23_01_24_2`). Must otherwise match `ingest.wato.yaml`; a test checks it. |
 
 ## Outputs
 

@@ -218,6 +218,16 @@ def depth_2d_path(bag_id: str, chunk_id: str, cam_id: str, frame_seq: int) -> st
     return _join(depth_2d_dir(bag_id, chunk_id), cam_id, f"{frame_seq:06d}.npz")
 
 
+def compare_dir(bag_id: str) -> str:
+    """perception_2d compare's review files; read by people, not components."""
+    return _join(bag_root(bag_id), "compare")
+
+
+def ego_mask_dir(bag_id: str) -> str:
+    """perception_2d ego-mask's evidence and draft; read by people, not components."""
+    return _join(bag_root(bag_id), "ego_mask")
+
+
 def depth_stats_path(bag_id: str, chunk_id: str) -> str:
     """Parquet of DepthFrameRow rows — one per (cam, frame). Not written yet."""
     return _join(chunk_root(bag_id, chunk_id), "depth_stats.parquet")

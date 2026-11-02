@@ -18,12 +18,11 @@ fi
 MODULE="$1"
 shift 1
 
-# If the next argument is a known CLI subcommand (e.g. "viz", "reduce",
-# "validate-bag", "trim-bag"),
-# pass it as-is rather than treating it as the bag path.
+# If the next argument is a known CLI subcommand, pass it as-is rather than
+# treating it as the bag path.
 SUBCMD="run"
 case "${1:-}" in
-    viz|reduce|validate-bag|trim-bag) SUBCMD="$1"; shift 1 ;;
+    viz|reduce|validate-bag|trim-bag|ego-mask|compare) SUBCMD="$1"; shift 1 ;;
 esac
 
 # Accept both positional and flag-style bag argument:

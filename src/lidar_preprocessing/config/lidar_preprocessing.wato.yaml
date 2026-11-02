@@ -1,7 +1,8 @@
 lidar_preprocessing:
   # ====================================================================
   # WATO 3-Velodyne rig (VLP-32C centre + 2× VLP-16 corners). Ingest with
-  # ingest.wato.yaml / ingest.wato_6cam.yaml (per-corner LiDAR topics).
+  # ingest.wato.yaml / ingest.wato_6cam.yaml / ingest.wato_no_lidar_nw.yaml
+  # (per-corner LiDAR topics; per_lidar entries for absent LiDARs are unused).
   #   ./watod run lidar_preprocessing --bag <wato_bag> \
   #       --config /ws/src/lidar_preprocessing/config/lidar_preprocessing.wato.yaml
   # ====================================================================

@@ -12,9 +12,11 @@ Large + SAM2 + DINOv2 don't fit together on ~6 GB):
     keyframes, SAM2's video predictor masks and tracks each box, DINOv2 embeds
     each masklet → tracklets_2d.parquet + detections_2d.parquet + mask PNGs.
 
-Model loading is fail-loud, and SAM2 + the detector are import-checked before
-the depth pass. Cross-camera identity is left to the `tracking` component
-(global_object_id stays null).
+Model loading and inference are fail-loud: a detector, SAM2 or DINOv2 failure
+stops the run rather than leaving a camera with fewer masklets or no
+embeddings. SAM2 + the detector are import-checked, and the SAM2, YOLO and
+DINOv2 weights load-checked, before the depth pass. Cross-camera identity is
+left to the `tracking` component (global_object_id stays null).
 """
 
 from __future__ import annotations
@@ -73,6 +75,7 @@ from wato_perception_2d.models.detector import (
     detector_importable,
 )
 from wato_perception_2d.models.discovery import Florence2Discovery
+from wato_perception_2d.models.embeddings import check_model as check_dino_model
 from wato_perception_2d.models.yolo_detector import (
     YoloDetector,
     check_class_map,
@@ -109,6 +112,31 @@ def _load_image(path: str) -> Optional[np.ndarray]:
     except Exception as exc:  # noqa: BLE001
         log.warning("Failed to load image %s: %s", path, exc)
         return None
+
+
+def _ego_mask(cfg: ComponentConfig, cam_id: str, width: int, height: int):
+    """(H, W) bool region of ``cam_id``'s images showing the ego vehicle, or
+    None when the camera has no polygons (it doesn't see the car).
+
+    Raises ValueError when the polygons were drawn on a different image size.
+    """
+    polygons = cfg.ego_mask.polygons.get(cam_id)
+    if not polygons:
+        return None
+    if tuple(cfg.ego_mask.image_size) != (width, height):
+        raise ValueError(
+            f"ego_mask polygons are drawn on {cfg.ego_mask.image_size[0]}x"
+            f"{cfg.ego_mask.image_size[1]} images but {cam_id}'s are "
+            f"{width}x{height}"
+        )
+    from PIL import Image as PILImage
+    from PIL import ImageDraw
+
+    canvas = PILImage.new("1", (width, height))
+    draw = ImageDraw.Draw(canvas)
+    for poly in polygons:
+        draw.polygon([(float(x), float(y)) for x, y in poly], fill=1)
+    return np.asarray(canvas, dtype=bool)
 
 
 def _chunk_complete(bag_id: str, chunk_id: str) -> bool:
@@ -261,10 +289,10 @@ def _cam_partial_path(bag_id: str, chunk_id: str, cam_id: str) -> str:
 def _load_cam_partial(
     bag_id: str, chunk_id: str, cam_id: str
 ) -> Optional[list[Masklet]]:
-    """Return cached per-camera masklets if a usable partial exists.
+    """Return cached per-camera masklets if a readable partial exists.
 
-    An empty cached list counts as no cache: zero masklets is almost always a
-    silent failure, and trusting it would skip the camera on every resume.
+    An empty list is a real result (an empty road): tracking failures raise
+    instead of returning fewer masklets.
     """
     p = _cam_partial_path(bag_id, chunk_id, cam_id)
     if not os.path.exists(p):
@@ -279,26 +307,13 @@ def _load_cam_partial(
         except OSError:
             pass
         return None
-    if not cached:
-        return None
     return cached
 
 
 def _save_cam_partial(
     bag_id: str, chunk_id: str, cam_id: str, cam_masklets: list[Masklet]
 ) -> None:
-    """Persist per-camera masklets so abort doesn't lose this camera's work.
-
-    Skips writing an empty result (a likely silent failure) so the next run
-    re-attempts this camera rather than trusting an empty cache.
-    """
-    if not cam_masklets:
-        log.info(
-            "%s produced 0 masklets — skipping partial save so the next run "
-            "re-attempts this camera instead of trusting an empty cache",
-            cam_id,
-        )
-        return
+    """Persist per-camera masklets so abort doesn't lose this camera's work."""
     p = _cam_partial_path(bag_id, chunk_id, cam_id)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     tmp = p + ".tmp"
@@ -353,6 +368,25 @@ def _inference_ctx():
         import contextlib
 
         return contextlib.nullcontext()
+
+
+def _check_tracking_weights(cfg: ComponentConfig, detector: Detector) -> None:
+    """Raise unless the tracking pass's weights are there, before the depth pass.
+
+    The tracking pass loads them after a chunk's depth pass (~25 min on a WATO
+    chunk), which is where a missing checkpoint would otherwise surface. None of
+    this takes VRAM: YOLO and DINOv2 load on the CPU. GroundingDINO loads
+    straight onto the GPU, so it is left to its first detect().
+    """
+    if not os.path.isfile(cfg.segmentation.checkpoint):
+        raise RuntimeError(
+            f"SAM2 checkpoint {cfg.segmentation.checkpoint!r} not found. Fetch it "
+            "with scripts/fetch_models.py."
+        )
+    if isinstance(detector, YoloDetector):
+        detector.load()
+    if cfg.embeddings.every_k_frames > 0:
+        check_dino_model(cfg.embeddings.model)
 
 
 def _process_chunk(
@@ -411,6 +445,7 @@ def _process_chunk(
             f"detection. Install {backend_pkg} and fetch the checkpoint "
             "(scripts/fetch_models.py)."
         )
+    _check_tracking_weights(cfg, detector)
 
     calib = Calibration.load(bag_id)
     calibration = {cam_id: calib.camera(cam_id) for cam_id in calib.cameras}
@@ -630,6 +665,13 @@ def _run_tracking_pass(
                 concepts = _discover_concepts_florence2(discovery, valid_images, cfg)
             else:
                 concepts = fixed_concepts
+            ego = (
+                _ego_mask(
+                    cfg, cam_id, valid_images[0].shape[1], valid_images[0].shape[0]
+                )
+                if valid_images
+                else None
+            )
 
             cam_masklets = track_camera(
                 predictor,
@@ -651,6 +693,21 @@ def _run_tracking_pass(
                 drop_lost_after_frames=cfg.tracking.drop_lost_after_frames,
                 duplicate_mask_iou=cfg.tracking.duplicate_mask_iou,
                 autocast_dtype=cfg.tracking.autocast_dtype,
+                ego_mask=ego,
+                ego_max_fraction=cfg.ego_mask.max_fraction,
+                island_fraction=cfg.tracking.island_fraction,
+                collapse_fraction=cfg.tracking.collapse_fraction,
+                collapse_after_frames=cfg.tracking.collapse_after_frames,
+                contained_classes=tuple(cfg.tracking.contained_classes),
+                container_classes=tuple(cfg.tracking.container_classes),
+                containment_fraction=cfg.tracking.containment_fraction,
+                containment_after_frames=cfg.tracking.containment_after_frames,
+                birth_score=cfg.tracking.birth_score,
+                confirm_keyframes=cfg.tracking.confirm_keyframes,
+                support_keyframes=cfg.tracking.support_keyframes,
+                support_min_area=cfg.tracking.support_min_area,
+                reprompt_score=cfg.tracking.reprompt_score,
+                reprompt_below_iou=cfg.tracking.reprompt_below_iou,
             )
             log.info(
                 "chunk %s / %s: %d masklets from %d frames",

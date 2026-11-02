@@ -2,6 +2,8 @@
 # Versioned alongside the perception_2d image; its hash is in perception_2d's manifests.
 # whenever this file changes meaningfully.
 
+# No traffic_cone / barrier: no detector tried finds them on WATO
+# (docs/perception_2d_measurements.md).
 primary_taxonomy:
   - name: car
     synonyms: ["car", "sedan", "suv", "hatchback", "wagon", "coupe"]
@@ -15,10 +17,6 @@ primary_taxonomy:
     synonyms: ["bicycle", "bike", "cyclist"]
   - name: pedestrian
     synonyms: ["pedestrian", "person", "walker", "jogger"]
-  - name: traffic_cone
-    synonyms: ["traffic cone", "road cone", "pylon"]
-  - name: barrier
-    synonyms: ["barrier", "jersey barrier", "construction barrier"]
 
 # Open-vocabulary discovery: anything detected in this list is routed through the
 # rare-class branch.

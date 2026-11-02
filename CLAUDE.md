@@ -72,7 +72,7 @@ are usable is `docs/drive_bag_survey.md`.
 ./watod build                 # pull bases from ghcr, build ACTIVE_MODULES (watod-config.sh)
 ./watod up                    # docker compose up -d
 ./watod -t ingest_dev         # shell into a running dev container
-./watod run <component> --bag <bag> [flags]   # also: validate-bag, trim-bag, reduce, viz
+./watod run <component> --bag <bag> [flags]   # also: validate-bag, trim-bag, reduce, viz, ego-mask, compare
 ./watod test <component>      # src/common/tests, then the component's, in its dev image
 ./watod down all
 ./watod build-base            # only when ghcr lacks the bases (first-time setup)
@@ -138,12 +138,19 @@ Details: `src/ingest/README.md`; measurements: `docs/ingest_measurements.md`.
 - **Profiles.** `ingest.yaml` (nuScenes); `ingest.wato.yaml` (8 rectified pano
   cameras, per-corner LiDARs, eidos `liso/odometry`, `ego_frame:
   base_footprint`); `ingest.wato_6cam.yaml` = `ingest.wato.yaml` without
-  `PANO_EE` / `PANO_WW` (`ring_road_corrected`, May 30 tests 2–3); a test fails
-  if any other value drifts. lidar_preprocessing's `.wato.yaml` pairs with them
-  (`per_lidar`: `lidar_cc` vlp32c, `lidar_ne`/`lidar_nw` vlp16;
+  `PANO_EE` / `PANO_WW` (`ring_road_corrected`, May 30 tests 2–3);
+  `ingest.wato_no_lidar_nw.yaml` = `ingest.wato.yaml` without `lidar_nw`
+  (`sensors_2026_07_07-23_01_24_2`, whose `lidar_nw` topic is empty); a test
+  fails if any other value drifts. lidar_preprocessing's `.wato.yaml` pairs
+  with them (`per_lidar`: `lidar_cc` vlp32c, `lidar_ne`/`lidar_nw` vlp16;
   `frame_sync.canonical_lidar: lidar_cc`; `header_stamp_at: sweep_end`, from the
   car's `timestamp_first_packet: false`, since WATO Velodyne `time` fields are
-  all zero and deskew synthesizes times from azimuth).
+  all zero and deskew synthesizes times from azimuth). So does
+  `perception_2d.wato.yaml` = `perception_2d.yaml` + the rig's per-camera
+  `ego_mask` polygons (roof rack, hood, antenna; a test fails on any other
+  drift): without it the rack is tracked as a truck. `./watod run perception_2d
+  ego-mask` drafts a new rig's polygons from a run without them and, after a
+  run with them, reports body masklets they miss.
 - **WATO LiDAR: ingest the per-corner topics**, not `/lidar/all/points_merged`:
   classify's ray traversal assumes one sensor origin per sweep, and merged
   clouds leak static structure into `dynamic_map.npz`.
@@ -275,3 +282,8 @@ Postgres / any database (`psycopg`, `sqlalchemy`, `PG_DSN`, `PG_PORT`,
 `watod-config.local.sh.example`. MF-MOS, with `--seg mos|union`, `union/` and
 torch/CUDA in the lidar_preprocessing image: Step B is the AW classifier, CPU
 only, and bit 3 of Step F's `source_bits` stays unused.
+The `traffic_cone` / `barrier` classes and SAM 3 (as segmenter or detector):
+no detector tried finds cones or barriers on WATO
+(`docs/perception_2d_measurements.md`), a class never detected is labelled
+absent everywhere, and SAM 3's case rested on those classes; perception_2d's
+detector-support rules already port its track rules onto SAM2.

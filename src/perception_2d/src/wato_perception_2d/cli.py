@@ -67,6 +67,111 @@ def run_cmd(bag_id: str, chunk_id: str | None, config_path: str, force: bool) ->
     )
 
 
+@main.command("ego-mask")
+@click.option("--bag", "bag_id", required=True, help="bag_id or bag path.")
+@click.option(
+    "--config",
+    "config_path",
+    default="/ws/src/perception_2d/config/perception_2d.yaml",
+    help="config whose ego_mask polygons are checked (the run's config).",
+)
+@click.option(
+    "--out",
+    "out_dir",
+    default=None,
+    help="output directory (default: the bag's ego_mask/ artifact dir).",
+)
+@click.option(
+    "--margin-px", default=6, type=int, help="dilation of the draft polygons."
+)
+def ego_mask_cmd(
+    bag_id: str, config_path: str, out_dir: str | None, margin_px: int
+) -> None:
+    """Draft or check a vehicle's ego mask from this bag's perception_2d output.
+
+    Per camera: the median image over the drive, an overlay of the masklets
+    that held still at the image border (the vehicle's own body) and the
+    config's polygons, and a draft ego_mask block (ego_mask.yaml). See
+    wato_perception_2d.ego_mask.
+    """
+    from wato_common.artifact_store import ego_mask_dir, local_path
+    from wato_perception_2d import ego_mask
+
+    bag_id = _resolve_bag_id(bag_id)
+    out = out_dir or local_path(ego_mask_dir(bag_id))
+    uncovered = ego_mask.run(
+        load_config(config_path), bag_id=bag_id, out_dir=out, margin_px=margin_px
+    )
+    missed = {cam: f for cam, f in uncovered.items() if f > 0.05}
+    click.echo(f"wrote {out}")
+    if missed:
+        click.echo(
+            "body pixels outside the config's polygons: "
+            + ", ".join(f"{cam} {100 * f:.0f}%" for cam, f in sorted(missed.items()))
+        )
+
+
+@main.command("compare")
+@click.option("--bag", "bag_id", required=True, help="bag_id or bag path.")
+@click.option(
+    "--baseline",
+    required=True,
+    help="artifact root of the baseline run (a path or a file:// URI).",
+)
+@click.option(
+    "--chunk",
+    "chunk_ids",
+    multiple=True,
+    help="chunk_id to compare; repeatable (default: every chunk both runs have).",
+)
+@click.option(
+    "--config",
+    "config_path",
+    default="/ws/src/perception_2d/config/perception_2d.yaml",
+    help="the current run's config (its ego mask pre-marks junk).",
+)
+@click.option(
+    "--out",
+    "out_dir",
+    default=None,
+    help="output directory (default: the bag's compare/ artifact dir).",
+)
+@click.option(
+    "--every", default=5, type=int, help="sample every n-th image of each camera."
+)
+def compare_cmd(
+    bag_id: str,
+    baseline: str,
+    chunk_ids: tuple[str, ...],
+    config_path: str,
+    out_dir: str | None,
+    every: int,
+) -> None:
+    """Review what this run removed against a baseline run of the same bag.
+
+    Lists the baseline masklets whose masks no current mask matches, as
+    picture sheets and review.csv; give each a verdict (real, junk, covered,
+    unsure) and run it again for the per-class loss. See
+    wato_perception_2d.compare.
+    """
+    from wato_common.artifact_store import compare_dir, local_path
+    from wato_perception_2d import compare
+
+    bag_id = _resolve_bag_id(bag_id)
+    out = out_dir or local_path(compare_dir(bag_id))
+    uri = baseline if "://" in baseline else f"file://{Path(baseline).resolve()}"
+    summary = compare.run(
+        load_config(config_path),
+        bag_id=bag_id,
+        baseline_uri=uri,
+        out_dir=out,
+        chunk_ids=list(chunk_ids),
+        every=every,
+    )
+    click.echo(f"wrote {out}")
+    click.echo(compare.format_summary(summary), nl=False)
+
+
 @main.command("viz")
 @click.option("--bag", "bag_id", required=True, help="bag_id or bag path.")
 @click.option(

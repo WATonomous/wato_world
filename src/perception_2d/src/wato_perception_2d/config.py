@@ -26,7 +26,6 @@ class DiscoveryConfig(BaseModel):
     #               concept set per camera stream, then fed to the detector.
     backend: str = "fixed"
     model: str = "microsoft/Florence-2-large-ft"
-    task: str = "<DENSE_REGION_CAPTION>"
     min_confidence: float = 0.3
     # Run Florence-2 on every k-th frame when backend == "florence2".
     sample_every_k: int = 10
@@ -124,9 +123,65 @@ class TrackingConfig(BaseModel):
     # frame (a jump with no empty frame); the track whose mask changed most
     # since its previous frame is the one that ends. > 1 disables.
     duplicate_mask_iou: float = 0.7
+    # Drop a mask's specks: 8-connected components smaller than this fraction
+    # of its largest one (the largest always stays). 0 disables.
+    island_fraction: float = 0.1
+    # A track left owning less than this fraction of its own mask once
+    # contested pixels go to the surest track, for collapse_after_frames images
+    # in a row, has latched onto another track's object, and ends. 0 disables.
+    collapse_fraction: float = 0.05
+    collapse_after_frames: int = 3
+    # A contained_classes track whose mask lies at least containment_fraction
+    # inside a container_classes track's and ends above that track's bottom, for
+    # containment_after_frames images in a row, is part of that vehicle (the
+    # driver or cabin seen through its windows): not recorded, and ended.
+    # Taxonomy class names; empty disables.
+    contained_classes: list[str] = Field(default_factory=list)
+    container_classes: list[str] = Field(default_factory=list)
+    containment_fraction: float = 0.9
+    containment_after_frames: int = 3
+    # Detector support, on keyframes (a box matching a track's mask bbox at
+    # iou_match_threshold supports it). A track's keep-alive rises by one per
+    # supported keyframe (up to support_keyframes) and falls by one per
+    # keyframe its mask's bbox covers >= support_min_area of the image with no
+    # support; at 0 it ends (0 disables). A box scoring >= birth_score starts a
+    # track; a weaker one starts it tentatively, its masks held back until
+    # boxes support it at confirm_keyframes keyframes in a row, dropped at the
+    # first without (birth_score 0: every box starts a track). A track's class
+    # is the one its boxes' scores sum highest for.
+    birth_score: float = 0.0
+    confirm_keyframes: int = 3
+    support_keyframes: int = 5
+    support_min_area: float = 0.01
+    # A track backed by exactly one box scoring >= reprompt_score that backs no
+    # other track, whose mask bbox has drifted below reprompt_below_iou from
+    # it, is re-prompted with the box. 0 disables.
+    reprompt_score: float = 0.8
+    reprompt_below_iou: float = 0.7
     # Precision for SAM2 calls on CUDA: "bfloat16" (upstream's setting; enables
     # flash attention), "float16", or "float32". Detector + DINOv2 stay float32.
     autocast_dtype: Literal["bfloat16", "float16", "float32"] = "bfloat16"
+
+
+class EgoMaskConfig(BaseModel):
+    """The vehicle's own body (rack, hood, antenna) as each camera sees it.
+
+    Without it the detector boxes the rack as a truck on every keyframe and
+    SAM2 tracks it for the whole chunk. Per vehicle, so it lives in the
+    vehicle's config (perception_2d.wato.yaml); empty = no camera sees the car.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # (width, height) of the rectified images the polygons are drawn on; a
+    # camera whose images differ is an error, not a silently misplaced mask.
+    image_size: tuple[int, int] = (0, 0)
+    # A detection box, or a track's mask, at least this fraction inside the
+    # region is the vehicle itself.
+    max_fraction: float = 0.5
+    # cam_id → polygons, each a list of [x, y] pixel vertices. Cameras not
+    # listed don't see the vehicle.
+    polygons: dict[str, list[list[tuple[int, int]]]] = Field(default_factory=dict)
 
 
 class DepthConfig(BaseModel):
@@ -139,9 +194,6 @@ class DepthConfig(BaseModel):
     min_lidar_anchors: int = 30  # min anchor pairs to attempt a disparity fit
     ransac_n_iter: int = 200
     ransac_inlier_threshold_m: float = 0.5
-    # Unused: anchors are always static LiDAR (a mover's points are ~75 cm off
-    # at 25 ms of desync).
-    use_static_anchors_only: bool = True
     fallback_window: int = 5
     sky_mask_top_fraction: float = 0.3
     output_dtype: str = "float16"  # stored depth-map dtype (disparity_to_depth)
@@ -184,8 +236,6 @@ _FALLBACK_CONCEPTS: list[tuple[str, str]] = [
     ("motorcycle", "motorcycle"),
     ("bicycle", "bicycle"),
     ("pedestrian", "pedestrian"),
-    ("traffic cone", "traffic_cone"),
-    ("barrier", "barrier"),
 ]
 
 
@@ -196,11 +246,11 @@ class ComponentConfig(BaseModel):
     detection: DetectionConfig = Field(default_factory=DetectionConfig)
     segmentation: SegmentationConfig = Field(default_factory=SegmentationConfig)
     tracking: TrackingConfig = Field(default_factory=TrackingConfig)
+    ego_mask: EgoMaskConfig = Field(default_factory=EgoMaskConfig)
     depth: DepthConfig = Field(default_factory=DepthConfig)
     embeddings: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
 
     prompts_path: str = "/config/prompts.yaml"
-    upstream_versions: dict[str, str] = Field(default_factory=dict)
 
     def concept_prompts(self) -> list[tuple[str, str]]:
         """Return (text_prompt, canonical_class) concepts for the fixed backend.

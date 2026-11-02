@@ -269,7 +269,13 @@ def test_other_message_types_are_not_poses():
 # Shipped configs
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
-    "name", ["ingest.yaml", "ingest.wato.yaml", "ingest.wato_6cam.yaml"]
+    "name",
+    [
+        "ingest.yaml",
+        "ingest.wato.yaml",
+        "ingest.wato_6cam.yaml",
+        "ingest.wato_no_lidar_nw.yaml",
+    ],
 )
 def test_shipped_profiles_load(name):
     cfg = load_config(str(CONFIG_DIR / name))
@@ -283,6 +289,13 @@ def test_wato_6cam_profile_is_the_wato_profile_without_ee_ww():
     del full["topics"]["cameras"]["PANO_EE"]
     del full["topics"]["cameras"]["PANO_WW"]
     assert six == full
+
+
+def test_wato_no_lidar_nw_profile_is_the_wato_profile_without_lidar_nw():
+    full = load_config(str(CONFIG_DIR / "ingest.wato.yaml")).model_dump()
+    no_nw = load_config(str(CONFIG_DIR / "ingest.wato_no_lidar_nw.yaml")).model_dump()
+    del full["topics"]["lidars"]["lidar_nw"]
+    assert no_nw == full
 
 
 def test_old_max_pose_gap_key_is_rejected():
