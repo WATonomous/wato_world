@@ -9,7 +9,8 @@ Per chunk, sweeps in time order:
     b. Project the sweep's world-frame points with the camera's pose at the
        frame's own time (points are world-registered upstream, so no
        sweep-pose / ego-motion term).
-    c. Look up the mask each point lands in (innermost mask wins).
+    c. Look up the mask each non-ground point lands in (innermost mask wins);
+       Patchwork++ ground (the world sweep's ground_mask) takes no label.
     d. Keep the in-mask points that pass the visibility test (UniLiPs Eq. 1)
        against the depth map up close and the sweep's own LiDAR returns.
     e. Each such point gets one vote from this camera, weighted by the
@@ -118,12 +119,14 @@ class _ChunkLifter:
         if world.ground_mask is None:
             raise ArtifactFormatError(
                 local_path(sweep.world_path),
-                "no ground_mask: the LiDAR occlusion test needs it (ground must "
-                "not hide what stands on it); lidar_preprocessing writes it "
-                "with Patchwork++",
+                "no ground_mask: lifting needs it (ground neither occludes nor "
+                "takes a label); lidar_preprocessing writes it with Patchwork++",
             )
         xyz = world.xyz
-        can_occlude = ~world.ground_mask
+        # Ground can't occlude: it sits in front of an object's lower edge in the
+        # image without hiding it. Nor can it take a label: a mask reaching past
+        # that edge, or one covering the road, would paint the road its class.
+        not_ground = ~world.ground_mask
         vis_cfg = self.cfg.visibility
         n = int(xyz.shape[0])
         in_mask = np.zeros(n, dtype=bool)
@@ -146,7 +149,7 @@ class _ChunkLifter:
             idx = np.flatnonzero(valid)
             ui, vi = pixel_indices(uv[idx], W, H)
             label = frame.labels[vi, ui]
-            hit = label >= 0
+            hit = (label >= 0) & not_ground[idx]
             if not hit.any():
                 continue
             # Every projected return can occlude, not only the in-mask ones.
@@ -154,7 +157,7 @@ class _ChunkLifter:
                 ui,
                 vi,
                 d_cam[idx],
-                can_occlude[idx],
+                not_ground[idx],
                 (W, H),
                 vis_cfg.lidar_cell_px,
                 vis_cfg.lidar_neighborhood_cells,

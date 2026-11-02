@@ -52,8 +52,8 @@ pseudo-labels match performance of detectors trained on GT labels.
 | Camera extrinsics | `calibration.json` → `ego_T_cam` (via TF chain) | ingest output |
 | LiDAR world-frame points | `lidar_proc/<sweep>_world.npz` | lidar_preprocessing output |
 | Dynamic object points | `lidar_proc/<sweep>_dynamic_mask.npy` (precision verdict) and `lidar_proc/<sweep>_motion_proposals.npz` + `motion_clusters.parquet` (recall: clustered, boxed, motion-scored) | lidar_preprocessing output |
-| Ground plane height | `ground.npz` → `height_grid`, `grid_origin`, `cell_size` | lidar_preprocessing output |
-| Surface normals | `ground.npz` → `normal_grid` | lidar_preprocessing output |
+| Ground plane height | `ground.npz` → `GroundGrid.height_at` (`wato_common.artifacts.ground`) | lidar_preprocessing output |
+| Surface normals | `ground.npz` → `GroundGrid.normal_at` | lidar_preprocessing output |
 
 Step C (`ground/`) was built precisely to produce the height grid and surface
 normal grid that the SLF ground alignment loss term consumes.
@@ -197,13 +197,16 @@ shape.  The paper suggests fusing both:
   in bird's-eye view).
 - If match: use SLF shape, LiDAR position (LiDAR has better position accuracy).
 - If no match: use LiDAR proposal as-is.
-- Output to `proposals.parquet`: `(center_xyz, wlh, heading, score, source)`.
+- Output to `proposals.parquet` (`wato_common.artifacts.proposals`): each
+  source's boxes and the fused boxes, which list their sources in
+  `member_proposal_ids`.
 
 ---
 
 ## Summary of actionable steps
 
-1. Define `proposals.parquet` schema in `src/common/src/wato_common/schemas.py`.
+1. `proposals.parquet` schema: `schemas.ProposalRow`, written and read
+   through `wato_common.artifacts.proposals` (exists).
 2. Add `masks_2d/` artifact path to `src/common/src/wato_common/artifact_store.py`.
 3. Build `shape_prior.py` in `proposal_generation`: load mesh library, voxelize
    SDF grids, run PCA, save `shape_prior.npz`.

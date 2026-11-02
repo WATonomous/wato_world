@@ -578,7 +578,8 @@ class LiftedStatsRow(BaseModel):
     chunk_id: str
     n_points_total: int
     n_points_labeled: int
-    # Points inside a mask in at least one camera, before the visibility test.
+    # Non-ground points inside a mask in at least one camera, before the
+    # visibility test (ground is never labeled).
     n_points_in_any_mask: int
     # Of those, points the visibility test rejected in every such camera
     # (= n_points_in_any_mask - n_points_labeled).
@@ -638,38 +639,56 @@ LIFTED_STATS_SCHEMA = pa.schema(
 
 
 # ---------------------------------------------------------------------------
-# proposal_generation — 3D box proposals (one per LiDAR sweep × object).
+# proposal_generation — 3D box proposals (one per frame × object × source).
 # ---------------------------------------------------------------------------
 
 
 class ProposalRow(BaseModel):
-    """One row per 3D box proposal for a single sweep.
+    """One row per 3D box proposal for one object in one frame.
 
-    supporting_cam_ids and supporting_masklet_ids are JSON-encoded lists.
-    provenance identifies the source: "lidar_detector", "slf", "lidar_mos"
-    (lidar_preprocessing Step F motion clusters — MotionClusterRow shares the
-    box columns), or "fused".
+    A frame is lidar_preprocessing's frame_sync group: a canonical-LiDAR sweep
+    plus the other LiDARs' sweeps matched to it (each sweep its own frame on a
+    bag without a canonical LiDAR). sweep_id is the frame's reference sweep —
+    the canonical LiDAR's, or the lone sweep of one frame_sync matched to no
+    canonical sweep — so per-sweep joins key on sweep_id alone.
+
+    Every source's proposals are rows, and so are fusion's: provenance
+    "lidar_detector", "slf", "lidar_mos" (lidar_preprocessing Step F motion
+    clusters; MotionClusterRow shares the box columns) or "fused". A fused row
+    lists the source rows it merges in member_proposal_ids; source rows stay
+    so each source's reliability can be measured. tracking reads the fused
+    rows. List columns are JSON-encoded.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    proposal_id: str
+    proposal_id: str  # unique within the chunk
     bag_id: str
     chunk_id: str
-    sweep_id: int
+    sweep_id: int  # the frame's reference sweep
+    # lidar_proc_index's frame_id; None for a sweep matched to no canonical
+    # sweep (MotionClusterRow writes -1 for those).
+    frame_id: Optional[int]
+    sweep_ids: str  # JSON list[int]: the frame's sweeps, sweep_id among them
+    reference_timestamp_ns: int  # the reference sweep's
     cx: float
     cy: float
     cz: float
     w: float
     l: float  # noqa: E741 — domain term: length, matches parquet w/l/h column triplet
     h: float
-    heading: float  # radians, world frame
-    cls: str  # "vehicle" | "pedestrian" | "cyclist"
+    # Radians, world frame. lidar_mos rows keep MotionClusterRow's undirected
+    # (mod pi) heading.
+    heading: float
+    # perception_2d's class (e.g. "car", "truck", "pedestrian"), carried by
+    # semantic_lifting; None when no lifted instance supports the box.
+    cls: Optional[str]
     score: float
     provenance: str  # "lidar_detector" | "slf" | "lidar_mos" | "fused"
     lidar_point_count: Optional[int] = None
     supporting_cam_ids: str = "[]"  # JSON list[str] of cam_id
     supporting_masklet_ids: str = "[]"  # JSON list[str] of masklet_id
+    member_proposal_ids: str = "[]"  # JSON list[str]; fused rows only
 
 
 PROPOSAL_SCHEMA = pa.schema(
@@ -678,6 +697,9 @@ PROPOSAL_SCHEMA = pa.schema(
         pa.field("bag_id", pa.string()),
         pa.field("chunk_id", pa.string()),
         pa.field("sweep_id", pa.int64()),
+        pa.field("frame_id", pa.int64()),
+        pa.field("sweep_ids", pa.string()),
+        pa.field("reference_timestamp_ns", pa.int64()),
         pa.field("cx", pa.float64()),
         pa.field("cy", pa.float64()),
         pa.field("cz", pa.float64()),
@@ -691,6 +713,7 @@ PROPOSAL_SCHEMA = pa.schema(
         pa.field("lidar_point_count", pa.int64()),
         pa.field("supporting_cam_ids", pa.string()),
         pa.field("supporting_masklet_ids", pa.string()),
+        pa.field("member_proposal_ids", pa.string()),
     ]
 )
 
@@ -736,7 +759,7 @@ class TrackRow(BaseModel):
     l: float  # noqa: E741 — domain term: length, matches parquet w/l/h column triplet
     h: float
     heading: float  # radians, world frame
-    cls: str  # "vehicle" | "pedestrian" | "cyclist"
+    cls: Optional[str]  # as ProposalRow.cls: perception_2d's class, or None
     score: float
     supporting_cam_ids: str = "[]"  # JSON list[str]
     supporting_masklet_ids: str = "[]"  # JSON list[str]

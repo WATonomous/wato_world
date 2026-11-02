@@ -55,6 +55,7 @@ from wato_lidar_preprocessing.motion_proposals import (
 from wato_lidar_preprocessing.motion_proposals._core import _Sources
 
 from ._staging import (
+    flat_ground_grid,
     grid_points,
     meta_row,
     write_chunks,
@@ -297,7 +298,7 @@ def test_compute_sweep_bits_voxel_sources_and_height_floor():
         voxel_size=VOXEL,
         dynamic_keys=np.sort(keys[[0, 2]]),
         ambiguous_keys=np.sort(keys[[1]]),
-        ground_grid=(np.zeros((400, 400), np.float32), np.array([-100.0, -100.0]), 0.5),
+        ground_grid=flat_ground_grid(0.0),
     )
     bits = compute_sweep_bits(xyz, None, ORIGIN, src, _cfg())
     assert bits.tolist() == [int(AW_DYNAMIC), int(AW_AMBIGUOUS), 0, 0]

@@ -141,7 +141,8 @@ semantic_lifting      reads: frame_index, poses, lidar_proc/*_world.npz, masks_2
 
 proposal_generation   reads: lidar_proc/*_world.npz, lifted_labels, motion_clusters, ground.npz, calibration
   └─ chunks/<chunk>/
-       ├─ proposals.parquet          (3D box proposals: center, size, heading, score, provenance)
+       ├─ proposals.parquet          (3D boxes per frame_sync frame: every source's rows plus
+       │                              the fused rows that list them; tracking reads the fused)
        └─ proposal_masks/            (projected 2D mask used during SLF fitting)
 
 tracking              reads: proposals, tracklets_2d, lidar_proc/*_world.npz  (builds on wato_common.tracking)

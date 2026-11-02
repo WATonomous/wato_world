@@ -68,7 +68,9 @@ from wato_common.artifact_store import (
     motion_clusters_path,
     static_map_path,
 )
+from wato_common.artifacts import ground as ground_artifact
 from wato_common.artifacts import motion_proposals as proposals_artifact
+from wato_common.artifacts.ground import GroundGrid
 from wato_common.artifacts.lidar_sweeps import read_dynamic_mask
 from wato_common.artifacts.motion_proposals import (
     ATTACH_BITS,
@@ -88,7 +90,6 @@ from wato_lidar_preprocessing.classify.dynamic_filter import persistence_keep
 from wato_lidar_preprocessing.classify.io_helpers import load_world_full
 from wato_lidar_preprocessing.classify.masking import near_ego_mask
 from wato_lidar_preprocessing.config import ComponentConfig
-from wato_lidar_preprocessing.ground import height_above_ground, load_ground_grid
 from wato_lidar_preprocessing.iwu import load_global_iwu
 from wato_lidar_preprocessing.voxel import keys_in_sorted, voxel_indices
 
@@ -143,7 +144,7 @@ class _Sources:
     voxel_size: float = 0.0
     dynamic_keys: np.ndarray | None = None
     ambiguous_keys: np.ndarray | None = None
-    ground_grid: tuple | None = None
+    ground_grid: GroundGrid | None = None
     evicted_tree: cKDTree | None = None
     mapped_tree: cKDTree | None = None
     missing: list[str] = field(default_factory=list)
@@ -231,8 +232,21 @@ def _load_sources(
         src.missing.append("UNMAPPED (no static map to compare against)")
 
     if cfg.motion_proposals.min_height_above_ground_m > 0.0:
-        src.ground_grid = load_ground_grid(bag_id, chunk_id)
+        src.ground_grid = _load_ground_grid(bag_id, chunk_id)
     return src
+
+
+def _load_ground_grid(bag_id: str, chunk_id: str) -> GroundGrid | None:
+    """Step C's grid, or None (warned) when there is none: no height floor."""
+    try:
+        return ground_artifact.read(bag_id, chunk_id)
+    except FileNotFoundError:
+        log.warning("chunk %s: ground.npz not found — no height grid", chunk_id)
+    except ground_artifact.GroundUnavailableError as exc:
+        log.warning(
+            "chunk %s: ground.npz status=%r — no height grid", chunk_id, exc.status
+        )
+    return None
 
 
 def _load_seg_mask(bag_id: str, chunk_id: str, sweep_id: int, n: int):
@@ -267,7 +281,7 @@ def compute_sweep_bits(
     if src.ground_grid is not None and live.any():
         idx = np.flatnonzero(live)
         low = (
-            height_above_ground(xyz[idx], src.ground_grid)
+            src.ground_grid.height_above(xyz[idx])
             < cfg.motion_proposals.min_height_above_ground_m
         )
         live[idx[low]] = False

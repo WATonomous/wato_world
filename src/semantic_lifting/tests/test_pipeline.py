@@ -67,10 +67,13 @@ def _stage_chunk(
     depth_m: float = 10.0,
     points: np.ndarray = POINTS,
     ground_mask: bool = True,
+    ground: tuple[int, ...] = (),
 ) -> None:
     """One sweep of `points`; per (camera, det_score) one frame, all cameras
     looking along ego +x, a masklet m_<camera> over the pixels points 0-2 land
-    on, and a depth map of depth_m everywhere (None: no depth artifact)."""
+    on, and a depth map of depth_m everywhere (None: no depth artifact).
+    The sweep's ground_mask marks the points in `ground` (ground_mask=False:
+    the sweep has none)."""
     write_table(
         [
             {
@@ -139,6 +142,8 @@ def _stage_chunk(
     )
 
     os.makedirs(local_path(lidar_proc_dir(BAG, CHUNK)), exist_ok=True)
+    is_ground = np.zeros(len(points), bool)
+    is_ground[list(ground)] = True
     world_uri = lidar_sweeps.write_world(
         BAG,
         CHUNK,
@@ -148,7 +153,7 @@ def _stage_chunk(
             y=points[:, 1],
             z=points[:, 2],
             origin=np.zeros(3),
-            ground_mask=np.zeros(len(points), bool) if ground_mask else None,
+            ground_mask=is_ground if ground_mask else None,
         ),
     )
     mask_uri = lidar_sweeps.write_dynamic_mask(
@@ -281,6 +286,20 @@ def test_a_far_depth_map_surface_does_not_occlude():
         1,
         2,
     ]
+
+
+def test_ground_inside_a_mask_takes_no_label():
+    """Point 2 lands inside the mask but is Patchwork++ ground: a mask reaching
+    past an object's lower edge, or covering the road, doesn't make the road
+    its class. It isn't a visibility failure either: it was never a candidate."""
+    _stage_chunk(ground=(2,))
+    run(ComponentConfig(), bag_id=BAG)
+
+    (stats,) = lifted_labels.read_stats(BAG, CHUNK)
+    assert stats.n_points_in_any_mask == stats.n_points_labeled == 2
+    assert stats.n_points_failed_visibility == 0
+    labels = lifted_labels.read_sweep(BAG, CHUNK, SWEEP, n_points=len(POINTS))
+    assert labels.point_indices.tolist() == [0, 1]
 
 
 def test_a_sweep_without_a_ground_mask_stops_the_run():

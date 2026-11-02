@@ -115,6 +115,26 @@ Before the per-frame cache and array votes: 440 ms per sweep (a third of it a
 reads repeated for every sweep a frame is paired with). After: ~70 ms per sweep,
 2 m 12 s for the chunk including the LiDAR occluder.
 
+## Ground
+
+`sensors_2026_07_07_23_01_24_2_with_eidos_mcap`, all 11 chunks (not the
+`may_30` chunk above). With ground labelable, 1,512,549 of 6,935,255 labeled
+points (21.8%) were Patchwork++ ground. Their height above the chunk's
+`ground.npz` height grid (every 10th sweep of chunks 0000, 0004, 0009; 88,647
+points): median 0.00 m, p25–p75 −0.02 to +0.04 m, 8.9% above 0.3 m, 5.0% above
+0.5 m — the road surface, with a tail of curbs and the lowest returns on
+objects. On camera overlays they come from masks whose lower edge reaches onto
+the road and from masks covering the road outright. The visibility and
+instance counts in the other sections include ground points.
+
+Leaving ground unlabeled changes no non-ground label (every sweep of chunks
+0000 and 0009 keeps the same labeled non-ground points). It splits 37 of chunk
+0009's 157 cross-camera instances, none of chunk 0000's 20: 12 whose parts sit
+> 5 m apart in the sweeps both claim points in (different objects whose masks
+reached the same road), 5 within 2 m over ≥ 5 such sweeps (one object, merge
+lost), 20 with too few shared sweeps or 2–5 m apart to judge. The `instances.*`
+thresholds were set with ground claims counted.
+
 ## Instances
 
 Per-camera masklets of one object, merged from the visible LiDAR points they

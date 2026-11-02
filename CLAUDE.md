@@ -46,7 +46,8 @@ are usable is `docs/drive_bag_survey.md`.
 - **One module per cross-component artifact.** Anything one component writes
   and another reads is encoded, written and read by its module in
   `wato_common/artifacts/` (`calibration`, `frame_index`, `lidar_sweeps`,
-  `motion_proposals`, `masklets`, `depth`, `lifted_labels`), round-trip tested in
+  `motion_proposals`, `ground`, `masklets`, `depth`, `lifted_labels`,
+  `proposals`), round-trip tested in
   `src/common/tests/test_artifacts_*.py`. Producers call the write half,
   consumers the read half; nobody else `np.load`s or re-derives the encoding.
   Consumer images install only `src/common` + their own package, so both halves
@@ -123,6 +124,13 @@ doesn't load; the trim-bag end-to-end test skips).
   object's per-camera masklets itself from the LiDAR points they both claim;
   `lifted_labels` name the instance by its smallest masklet_id and
   `lifted_instances.parquet` lists its masklets and cameras.
+- **Proposals are per frame and per source.** One `ProposalRow` per object per
+  frame_sync frame, keyed on the frame's reference `sweep_id` (the canonical
+  LiDAR's; `frame_id` is None for a sweep matched to none). Every source's rows
+  (`lidar_mos`, `slf`, `lidar_detector`) stay beside the `fused` rows that list
+  them in `member_proposal_ids`, so each source's reliability can be measured;
+  tracking reads the fused rows. `cls` is perception_2d's class (`car`,
+  `truck`, ...), None when no lifted instance supports the box.
 - **Sensor physics lives in `sensor_model.py`** (profiles `vlp32c`, `vlp16`,
   `hdl32e`), never in YAML.
 

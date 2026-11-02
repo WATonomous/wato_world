@@ -11,8 +11,6 @@ from pydantic import BaseModel, ConfigDict
 class ComponentConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    upstream_versions: dict[str, str] = {}
-
 
 def load_config(path: str) -> ComponentConfig:
     with open(path, "r", encoding="utf-8") as fh:

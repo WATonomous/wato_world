@@ -18,6 +18,12 @@ cameras — then, within it, the highest-scoring instance. Masklets are
 per-camera, so two cameras on one car agree on its class even though their
 masklet ids differ.
 
+**Ground is never labeled.** Points lidar_preprocessing's Patchwork++ marks as
+ground (the world sweep's `ground_mask`) get no vote: a mask's lower edge, or a
+mask covering the road, reaches onto the road around an object. On the WATO rig
+they would otherwise be 22% of labels, almost all on the road surface itself
+(`docs/semantic_lifting_measurements.md`, "Ground").
+
 **Instances.** Before votes are resolved, one object's masklets are merged
 across cameras into one instance (`instances.py`): two same-class masklets
 from different cameras merge when they claim at least 20 of the same visible
@@ -109,5 +115,6 @@ The sweep ↔ camera window is ingest's
 - Dynamic points get no special handling: a moving object's points project
   where it was when the LiDAR hit it, up to ~1 m from where the camera saw it.
   Measured and deferred (`docs/semantic_lifting_measurements.md`).
-- A sweep's world NPZ must carry `ground_mask` (ground never occludes); a sweep
+- A sweep's world NPZ must carry `ground_mask` (ground never occludes and is
+  never labeled); a sweep
   without one stops the run.

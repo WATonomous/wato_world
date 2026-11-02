@@ -11,10 +11,10 @@ from wato_common.artifact_store import (
     chunks_index_path,
     global_ground_path,
     global_static_map_path,
-    ground_path,
     local_path,
     static_map_path,
 )
+from wato_common.artifacts import ground as ground_artifact
 from wato_common.io.parquet_io import write_table
 from wato_common.schemas import CHUNK_SCHEMA
 from wato_lidar_preprocessing.config import ComponentConfig
@@ -144,18 +144,14 @@ def test_voxel_snap_empty():
 
 
 def _write_ground_chunk(bag_id: str, chunk_id: str, ground_xyz: np.ndarray):
-    """Write a minimal ground.npz that reduce_ground_map can ingest."""
-    path = local_path(ground_path(bag_id, chunk_id))
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    # The other fields (height_grid etc.) aren't read by reduce — only ground_xyz.
-    np.savez_compressed(
-        path,
-        height_grid=np.zeros((1, 1), dtype=np.float32),
-        normal_grid=np.zeros((1, 1, 3), dtype=np.float32),
-        grid_origin=np.zeros(2, dtype=np.float64),
-        cell_size=np.float32(0.5),
-        ground_xyz=ground_xyz,
+    """Write a ground.npz that reduce_ground_map can ingest."""
+    # The grid isn't read by reduce — only ground_xyz.
+    normals = np.zeros((1, 1, 3), dtype=np.float32)
+    normals[..., 2] = 1.0
+    grid = ground_artifact.GroundGrid(
+        np.zeros((1, 1), dtype=np.float32), normals, np.zeros(2), 0.5
     )
+    ground_artifact.write(bag_id, chunk_id, grid, ground_xyz)
 
 
 def test_reduce_ground_merges_two_chunks(tmp_env):

@@ -16,7 +16,6 @@ from wato_common.artifact_store import (
     dynamic_mask_path,
     ensure_local_dir,
     global_static_map_path,
-    ground_path,
     lidar_proc_dir,
     lidar_proc_index_path,
     lidar_proc_summary_path,
@@ -24,6 +23,7 @@ from wato_common.artifact_store import (
     local_path,
     static_map_path,
 )
+from wato_common.artifacts import ground as ground_artifact
 from wato_common.io.parquet_io import write_table
 from wato_common.schemas import (
     CHUNK_SCHEMA,
@@ -151,18 +151,23 @@ def write_static_map(
     )
 
 
-def write_flat_ground(bag_id: str, chunk_id: str, z: float = 0.0) -> None:
+def flat_ground_grid(z: float = 0.0) -> ground_artifact.GroundGrid:
+    """Level ground at height z over [-100, 100) m in x and y."""
     cell = 0.5
     n = int(200 / cell)
-    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
-    np.savez_compressed(
-        local_path(ground_path(bag_id, chunk_id)),
+    normals = np.zeros((n, n, 3), dtype=np.float32)
+    normals[..., 2] = 1.0
+    return ground_artifact.GroundGrid(
         height_grid=np.full((n, n), z, dtype=np.float32),
+        normal_grid=normals,
         grid_origin=np.array([-100.0, -100.0]),
-        cell_size=np.float32(cell),
-        ground_xyz=np.empty((0, 3)),
-        status=np.array("ok"),
+        cell_size=cell,
     )
+
+
+def write_flat_ground(bag_id: str, chunk_id: str, z: float = 0.0) -> None:
+    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
+    ground_artifact.write(bag_id, chunk_id, flat_ground_grid(z), np.empty((0, 3)))
 
 
 def write_summary(bag_id: str, chunk_id: str) -> None:

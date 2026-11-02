@@ -293,7 +293,10 @@ vote = (instance_id, class_id, score = det_score × depth_confidence[u,v])
 **As implemented**, `score = max(det_score, 1e-3)`: the depth artifact carries
 no per-pixel confidence. Each frame's masks are painted once into a label
 raster (largest first, so the innermost wins) and cached across the sweeps the
-frame is paired with (`frames.py`).
+frame is paired with (`frames.py`). Patchwork++ ground points (the world
+sweep's `ground_mask`) are never looked up: a mask's lower edge or a
+road-covering mask would otherwise label the road (22% of labels on the WATO
+rig; `docs/semantic_lifting_measurements.md`, "Ground").
 
 ### Step 6: cross-camera vote reduction
 
