@@ -750,15 +750,20 @@ def decode_int_list(s: str) -> list[int]:
     return json.loads(s) if s else []
 
 
-# ---------------------------------------------------------------------------
-# tracking — per-sweep track state (bag-level, spans all chunks).
+# tracking — tracks over each chunk's fused proposals (bag-level files).
 # ---------------------------------------------------------------------------
 
 
 class TrackRow(BaseModel):
-    """One row per (track_id, sweep_id) in tracks.parquet.
+    """One row per (track, frame) in tracks.parquet: the fused proposal the
+    track took in that frame.
 
-    supporting_cam_ids and supporting_masklet_ids are JSON-encoded lists.
+    track_id is unique in the bag ("<chunk_id>-<n>" while tracks are
+    chunk-local). The box is the proposal's, as measured; label_refinement
+    refines it. cls is the track's class (TrackSummaryRow), on every row.
+    owned marks the frames this chunk labels: neighbouring chunks share 6 s,
+    and each instant belongs to the chunk on its side of the shared span's
+    midpoint (src/tracking/README.md). List columns are JSON-encoded.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -766,16 +771,19 @@ class TrackRow(BaseModel):
     track_id: str
     bag_id: str
     chunk_id: str
-    sweep_id: int
+    sweep_id: int  # the frame's reference sweep (ProposalRow.sweep_id)
+    reference_timestamp_ns: int
+    proposal_id: str  # the fused ProposalRow
     cx: float
     cy: float
     cz: float
     w: float
     l: float  # noqa: E741 — domain term: length, matches parquet w/l/h column triplet
     h: float
-    heading: float  # radians, world frame
+    heading: float  # radians, world frame, undirected (mod pi) as proposed
     cls: Optional[str]  # as ProposalRow.cls: perception_2d's class, or None
     score: float
+    owned: bool
     supporting_cam_ids: str = "[]"  # JSON list[str]
     supporting_masklet_ids: str = "[]"  # JSON list[str]
     dino_feature_path: Optional[str] = None
@@ -787,6 +795,8 @@ TRACK_SCHEMA = pa.schema(
         pa.field("bag_id", pa.string()),
         pa.field("chunk_id", pa.string()),
         pa.field("sweep_id", pa.int64()),
+        pa.field("reference_timestamp_ns", pa.int64()),
+        pa.field("proposal_id", pa.string()),
         pa.field("cx", pa.float64()),
         pa.field("cy", pa.float64()),
         pa.field("cz", pa.float64()),
@@ -796,6 +806,7 @@ TRACK_SCHEMA = pa.schema(
         pa.field("heading", pa.float64()),
         pa.field("cls", pa.string()),
         pa.field("score", pa.float64()),
+        pa.field("owned", pa.bool_()),
         pa.field("supporting_cam_ids", pa.string()),
         pa.field("supporting_masklet_ids", pa.string()),
         pa.field("dino_feature_path", pa.string()),
@@ -803,17 +814,67 @@ TRACK_SCHEMA = pa.schema(
 )
 
 
-# ---------------------------------------------------------------------------
-# label_refinement — per-sweep refined track state.
+class TrackSummaryRow(BaseModel):
+    """One row per track in track_summaries.parquet: what tracking concluded
+    about the whole track, and the evidence it concluded it from."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    track_id: str
+    bag_id: str
+    chunk_id: str
+    n_frames: int
+    first_timestamp_ns: int
+    last_timestamp_ns: int
+    # "moving" | "parked" | "unknown" (too short to tell)
+    motion_state: str
+    cls: Optional[str]  # score-weighted vote over its frames' classes
+    # Frames whose box was strong: two sources agreed, or a confident lift.
+    n_strong: int
+    frac_two_source: float  # frames whose fused box merged lidar_mos + lifted
+    frac_lidar_mos: float  # frames with a gated Step F cluster (motion evidence)
+    net_displacement_m: float  # BEV, Kalman-filtered, first → last few frames
+    centre_var_m2: float  # mean of the x and y variances of its box centres
+    median_points: float  # LiDAR points per frame
+
+
+TRACK_SUMMARY_SCHEMA = pa.schema(
+    [
+        pa.field("track_id", pa.string()),
+        pa.field("bag_id", pa.string()),
+        pa.field("chunk_id", pa.string()),
+        pa.field("n_frames", pa.int64()),
+        pa.field("first_timestamp_ns", pa.int64()),
+        pa.field("last_timestamp_ns", pa.int64()),
+        pa.field("motion_state", pa.string()),
+        pa.field("cls", pa.string()),
+        pa.field("n_strong", pa.int64()),
+        pa.field("frac_two_source", pa.float64()),
+        pa.field("frac_lidar_mos", pa.float64()),
+        pa.field("net_displacement_m", pa.float64()),
+        pa.field("centre_var_m2", pa.float64()),
+        pa.field("median_points", pa.float64()),
+    ]
+)
+
+
+# label_refinement — refined boxes per track and frame (bag-level).
 # ---------------------------------------------------------------------------
 
 
 class RefinedTrackRow(BaseModel):
-    """One row per (track_id, sweep_id) in refined_labels.parquet.
+    """One row per (track, frame) in refined_labels.parquet: the track's box
+    in that frame after refinement.
 
-    The LabelFormer produces a single (w, l, h) shared across all frames of a
-    track, so w/l/h will be identical for every row of the same track_id.
-    Per-frame pose corrections are applied to cx/cy/cz/heading.
+    Every row of a track shares one size (w, l, h). A parked track has one box
+    on every frame; a moving one a pose per frame. heading_directed marks a
+    heading taken from the track's motion (its front is known); otherwise
+    heading is undirected (mod pi), as proposed. size_source says where the
+    size came from: "aggregate" (fit to the parked track's points over every
+    frame), "percentile" (a high percentile of its densest frames' boxes).
+    confidence is an uncalibrated ranking until labels calibrate it. owned is
+    tracks.parquet's. The residual columns are null unless the step that
+    measures them ran.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -822,6 +883,7 @@ class RefinedTrackRow(BaseModel):
     bag_id: str
     chunk_id: str
     sweep_id: int
+    reference_timestamp_ns: int
     cx: float
     cy: float
     cz: float
@@ -829,10 +891,15 @@ class RefinedTrackRow(BaseModel):
     l: float  # noqa: E741 — domain term: length, matches parquet w/l/h column triplet
     h: float
     heading: float  # radians, world frame
-    cls: str
+    heading_directed: bool
+    cls: Optional[str]
+    motion_state: str  # the track's (TrackSummaryRow.motion_state)
+    size_source: str
     confidence: float
+    owned: bool
     residual_silhouette: Optional[float] = None
     residual_lidar_fit: Optional[float] = None
+    # RMS distance [m] between the anchored and the smoothed centres (moving).
     residual_smoothness: Optional[float] = None
 
 
@@ -842,6 +909,70 @@ REFINED_TRACK_SCHEMA = pa.schema(
         pa.field("bag_id", pa.string()),
         pa.field("chunk_id", pa.string()),
         pa.field("sweep_id", pa.int64()),
+        pa.field("reference_timestamp_ns", pa.int64()),
+        pa.field("cx", pa.float64()),
+        pa.field("cy", pa.float64()),
+        pa.field("cz", pa.float64()),
+        pa.field("w", pa.float64()),
+        pa.field("l", pa.float64()),
+        pa.field("h", pa.float64()),
+        pa.field("heading", pa.float64()),
+        pa.field("heading_directed", pa.bool_()),
+        pa.field("cls", pa.string()),
+        pa.field("motion_state", pa.string()),
+        pa.field("size_source", pa.string()),
+        pa.field("confidence", pa.float64()),
+        pa.field("owned", pa.bool_()),
+        pa.field("residual_silhouette", pa.float64()),
+        pa.field("residual_lidar_fit", pa.float64()),
+        pa.field("residual_smoothness", pa.float64()),
+    ]
+)
+
+
+# ---------------------------------------------------------------------------
+# evaluation — ground-truth boxes (bag-level), imported to score the pipeline.
+# ---------------------------------------------------------------------------
+
+
+class GtBoxRow(BaseModel):
+    """One row per ground-truth box in gt_boxes.parquet.
+
+    Imported from outside the pipeline (nuScenes keyframe annotations, hand
+    labels) and read only by evaluation; no component consumes it.
+    timestamp_ns is the instant the box describes, instance_id names one object
+    across the bag, and heading is directed (a labelled box has a front, unlike
+    the pipeline's undirected cluster boxes).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    bag_id: str
+    source: str  # who labelled it: "nuscenes_markers" | "sustechpoints"
+    timestamp_ns: int
+    instance_id: str
+    cx: float
+    cy: float
+    cz: float
+    w: float
+    l: float  # noqa: E741 — domain term: length, matches parquet w/l/h column triplet
+    h: float
+    heading: float  # radians, world frame, directed
+    # The pipeline's class (ProposalRow.cls taxonomy); None for a category
+    # outside it (cones, barriers, strollers, ...), kept so it can be ignored
+    # rather than scored as a miss.
+    cls: Optional[str]
+    source_class: str  # the labeller's own category, e.g. "vehicle.car"
+    # "moving" | "parked" over the object's whole life; None when unknown.
+    motion_state: Optional[str]
+
+
+GT_BOX_SCHEMA = pa.schema(
+    [
+        pa.field("bag_id", pa.string()),
+        pa.field("source", pa.string()),
+        pa.field("timestamp_ns", pa.int64()),
+        pa.field("instance_id", pa.string()),
         pa.field("cx", pa.float64()),
         pa.field("cy", pa.float64()),
         pa.field("cz", pa.float64()),
@@ -850,9 +981,7 @@ REFINED_TRACK_SCHEMA = pa.schema(
         pa.field("h", pa.float64()),
         pa.field("heading", pa.float64()),
         pa.field("cls", pa.string()),
-        pa.field("confidence", pa.float64()),
-        pa.field("residual_silhouette", pa.float64()),
-        pa.field("residual_lidar_fit", pa.float64()),
-        pa.field("residual_smoothness", pa.float64()),
+        pa.field("source_class", pa.string()),
+        pa.field("motion_state", pa.string()),
     ]
 )

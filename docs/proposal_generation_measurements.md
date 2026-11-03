@@ -138,3 +138,79 @@ median point falls below 0.5 × mask depth, i.e. that such a test would empty:
 The depth map's error past ~30 m (it overestimates far masks) makes the test
 unsafe there, and under 30 m it removes about a quarter of the hidden boxes.
 "Hidden" is itself judged with the depth map, so part of it is depth-map error.
+
+## Against ground truth (nuScenes scene-0061)
+
+`scripts/eval_proposals.py`, `proposal_generation.yaml`, 37 annotated
+instants, matched class-agnostically within 2 m (nuScenes-style, by score);
+annotations with no non-ground point in the sweep are ignored. 1,087 annotated
+boxes in the taxonomy: 740 pedestrian, 160 car, 113 truck, 36 motorcycle,
+32 bicycle, 6 bus. Errors are medians on matched boxes, prediction − ground
+truth.
+
+| Source | Recall | Precision | IoU | Centre (m) | Δl | Δw | Δh | Δz |
+|---|---|---|---|---|---|---|---|---|
+| lidar_mos | 0.02 | 0.89 | 0.31 | 0.20 | −0.39 | −0.28 | −0.16 | −0.04 |
+| lifted | 0.33 | 0.70 | 0.12 | 0.29 | −0.53 | −0.52 | −0.30 | −0.29 |
+| fused | 0.33 | 0.70 | 0.12 | 0.28 | −0.52 | −0.51 | −0.30 | −0.29 |
+
+| fused, by range | 0–15 | 15–30 | 30–50 | 50+ |
+|---|---|---|---|---|
+| recall | 0.72 | 0.36 | 0.08 | 0.01 |
+| precision | 0.81 | 0.73 | 0.31 | 0.25 |
+
+| fused, by class | car | pedestrian | truck | motorcycle | bicycle | bus |
+|---|---|---|---|---|---|---|
+| recall | 0.53 | 0.25 | 0.55 | 0.39 | 0.19 | 0 |
+| IoU | 0.19 | 0.07 | 0.37 | 0.09 | 0.15 | – |
+| Δl / Δw (m) | −0.64 / −0.38 | −0.38 / −0.53 | −0.76 / −0.57 | −1.09 / −0.54 | −0.13 / +0.24 | – |
+
+- Boxes are too small and too low wherever they match: cars 0.6 m short and
+  0.4 m narrow; pedestrian boxes are slivers of the visible side (0.5 m
+  narrower than the annotation), hence IoU 0.07 at a 0.19 m centre error.
+- Recall falls off a cliff past 30 m, and so does precision.
+- lidar_mos boxes are precise (0.89) but rare: one per frame, 14 tracks.
+- 0.89 of lidar_mos rows pair with a lifted box here (WATO: 0.11–0.56).
+
+Recall at 0.5 / 1 / 2 / 4 m: fused 0.21 / 0.29 / 0.33 / 0.36.
+
+## Track shapes (WATO, no ground truth)
+
+`scripts/eval_proposals.py` without ground truth, all 11 chunks: the gated
+lidar_mos rows form 1,050 Step F tracks (track_hint_id). By their median box,
+209 are wall-shaped (length > 4 × width, LISO's limit) and 179 small
+(footprint < 0.35 m²); 537 have a camera class on some frame, 32 a pedestrian.
+
+## Shape gates, height cap, nested boxes
+
+Each fix on and off. nuScenes scene-0061 is scored against ground truth
+(within 2 m); WATO (all 11 chunks) has no ground truth, so its numbers are
+counts.
+
+| nuScenes scene-0061 | lidar_mos hits (prec.) | lifted recall / prec. | pedestrian recall |
+|---|---|---|---|
+| all off | 28 (0.89) | 0.33 / 0.70 | 0.25 |
+| track shape gates | 27 (0.89) | 0.33 / 0.70 | 0.25 |
+| pedestrian radius 0.5 / 0.7 / 1.0 / 1.5 m | 28 | 0.30 / 0.32 / 0.32 / 0.33 | 0.21 / 0.24 / 0.25 / 0.26 |
+| car height cap 3 m | 28 | 0.33 / 0.70 | 0.25 |
+| nested ≥ 0.3 / 0.5 / 0.7 | 28 | 0.32 / 0.71 (all three) | 0.25 |
+
+The scene has 2 wall-shaped Step F tracks and no tall car boxes, so the gates
+and the cap change nothing there; a smaller pedestrian radius only loses
+pedestrians (their boxes are thin from few points, not bleed), so no class gets
+one.
+
+| WATO | off | on |
+|---|---|---|
+| lidar_mos tracks | 1,050 | 765 |
+| wall-shaped / small tracks | 209 / 179 | 6 / 40 |
+| tracks with a camera class / pedestrian | 538 / 32 | 496 / 30 |
+| lifted rows | 85,063 | 76,826 |
+| fused pairs | 10,055 | 9,891 |
+| car box height p50 / p90 / p99 (chunk 0005) | 1.42 / 2.99 / 4.98 m | 1.40 / 2.58 / 3.82 m |
+
+On chunk 0005, 2 of the 46 lidar_mos tracks the gates drop had a camera class
+on any frame, both thin strips (1.55 × 0.23 m, 1.10 × 0.22 m): no side-on car
+among them. The 846 lifted rows dropped there are all cars, a median 8 points
+at 47 m, inside a car box with more points. Whether they were hidden cars or
+real far ones needs the WATO labels.

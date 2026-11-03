@@ -14,14 +14,22 @@ corner sweeps matched to it on WATO, one sweep on a single-LiDAR bag:
 - **`lidar_mos`**: each Step F cluster passing the gates (`motion_score > 1`,
   `n_sources ≥ 2`, `frac_persistent < 0.5`; `docs/research/lidar_mos_guidance.md`)
   is one box: Step F's, with its bottom lowered to the ground grid (it stopped
-  at Step F's 0.25 m height floor). It takes a class when ≥ 30% of its points
-  carry a lifted label, by a confidence-weighted vote; otherwise `cls` is None.
-  Its Step F features are kept as evidence (`motion_score`, `n_sources`,
-  `frac_persistent`, `track_life`).
+  at Step F's 0.25 m height floor). Shape gates judge the cluster by its Step F
+  track's median box (`track_hint_id`): a track longer than 4 × its width is a
+  wall strip and is dropped; a track under 0.35 m² or 0.5 m³ keeps a box only
+  on frames where a lifted label classes it (a pedestrian is that small). It
+  takes a class when ≥ 30% of its points carry a lifted label, by a
+  confidence-weighted vote; otherwise `cls` is None. Its Step F features are
+  kept as evidence (`motion_score`, `n_sources`, `frac_persistent`,
+  `track_life`).
 - **`lifted`**: each semantic_lifting instance's labelled points in the frame.
   Masklets bleed onto background, so only the largest group of points chained
-  within 2 m is the object; with ≥ 5 points it is boxed (`fit_bev_box`, bottom
-  to the ground) and takes the instance's class and cameras. Evidence:
+  within the class's radius (2 m; less for pedestrians and two-wheelers) is the
+  object, minus points above the class's height cap (cars: 3 m over the
+  ground); with ≥ 5 points it is boxed (`fit_bev_box`, bottom to the ground)
+  and takes the instance's class and cameras. A box with ≥ 30% of its
+  footprint inside a same-class box with more points is dropped: a car hidden
+  behind another is boxed on its occluder's edge returns. Evidence:
   `lift_confidence`, the points' mean lifting confidence.
 - **`fused`**: a lidar_mos and a lifted box sharing ≥ 5 LiDAR points, ≥ 30%
   of the smaller one's, are one object (greedy, most shared first, one to one):

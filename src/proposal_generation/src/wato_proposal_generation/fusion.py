@@ -17,7 +17,8 @@ from wato_common.artifacts.ground import GroundGrid
 from wato_common.artifacts.lidar_sweeps import Frame
 from wato_common.artifacts.proposals import FUSED, Proposal
 from wato_common.tracking import fit_bev_box
-from wato_proposal_generation.boxes import SourceBox, proposal, to_ground
+from wato_common.geometry.objects import to_ground
+from wato_proposal_generation.boxes import SourceBox, proposal
 from wato_proposal_generation.config import FusionConfig
 from wato_proposal_generation.frame_points import FramePoints
 

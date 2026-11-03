@@ -344,10 +344,12 @@ def test_fill_box_reaches_ground():
     assert f.cz + f.h / 2 == pytest.approx(1.8)
 
 
-def test_box_fill_needs_motion_life_and_low_persistence():
-    assert should_box_fill(2.0, 10, 0.0)
-    assert not should_box_fill(0.9, 10, 0.0)  # Chen's criterion
-    assert not should_box_fill(2.0, 2, 0.0)  # too short a track
+def test_box_fill_needs_motion_life_low_persistence_and_no_wall_shape():
+    assert should_box_fill(2.0, 10, 0.0, 2.2)
+    assert not should_box_fill(0.9, 10, 0.0, 2.2)  # Chen's criterion
+    assert not should_box_fill(2.0, 2, 0.0, 2.2)  # too short a track
     # Sliding-window wall fragment: displacement beats its size, but its
-    # points dwell in the same voxels.
-    assert not should_box_fill(1.46, 49, 1.0)
+    # points dwell in the same voxels...
+    assert not should_box_fill(1.46, 49, 1.0, 2.2)
+    # ...or, when they don't, its box is a strip (1.6 x 0.1 m on scene-0061).
+    assert not should_box_fill(1.46, 49, 0.1, 16.0)

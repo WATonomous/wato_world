@@ -137,3 +137,42 @@ Measured before the Step B changes above; re-measure.
   than it is long: a 1.6×0.1 m fragment drifted 3 m with `frac_persistent` 1.0,
   while the clear movers sat at ≤ 0.11. The cost: a pedestrian-sized track at
   0.52 went unfilled (its row keeps its `motion_score`).
+
+## Step F against ground truth (nuScenes scene-0061)
+
+`scripts/eval_motion_proposals.py`, default config, 37 annotated instants
+(every keyframe sweep matched at 0 ms). A non-ground point is moving iff it is
+inside an annotated box whose object moves faster than 0.5 m/s at that instant
+(`wato_common.eval.motion.instant_speeds`); 8,785 such points, mostly cars
+(6,860) and pedestrians (1,788).
+
+| Verdict | IoU_MOS | Recall | Precision |
+|---|---|---|---|
+| AW_DYNAMIC | 0.27 | 0.52 | 0.35 |
+| AW_AMBIGUOUS | 0.01 | 0.01 | 0.01 |
+| IWU_EVICTED | 0.31 | 0.48 | 0.47 |
+| SEG_DYNAMIC | 0.29 | 0.32 | 0.73 |
+| UNMAPPED | 0.21 | 0.38 | 0.33 |
+| any bit | 0.25 | 0.78 | 0.27 |
+| clustered | 0.35 | 0.77 | 0.39 |
+| clusters with motion_score > 1 | 0.22 | 0.23 | 0.93 |
+| gated (+ n_sources ≥ 2, frac_persistent < 0.5) | 0.22 | 0.22 | 0.94 |
+| BOX_FILL | 0.22 | 0.22 | 0.94 |
+| `dynamic_mask` (Step B) | 0.24 | 0.32 | 0.49 |
+
+Gated recall: 0.25 on cars, 0.12 on pedestrians, 0 on the one moving truck;
+0.23 / 0.25 / 0 / 0 by range band (0–15 / 15–30 / 30–50 / 50+ m).
+
+- **The candidates are fine; the motion test drops most movers.** Clustering
+  keeps 77% of moving points, motion_score > 1 keeps 23%. The other two gates
+  cost almost nothing.
+- **Why:** of the 4,754 moving points in clusters scored ≤ 1 (161 clusters,
+  point-weighted medians), the track lasted 4 frames (p25 1) and the object
+  really moved 0.41 m in that time (GT speed × duration), against a cluster
+  whose longest side was 3.5 m (p75 8 m: clusters merge neighbours).
+  "Further than its own size" can't pass on a 0.2 s track. 58% of those
+  points' clusters did move ≥ 0.5 m net. 80% of them are on cars.
+- What passes is precise (0.94): the gated rows are a clean seed.
+
+One scene with 5 moving cars and 42 moving pedestrians; WATO not measured
+against ground truth yet.

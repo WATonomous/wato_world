@@ -5,6 +5,7 @@ the artifacts' read/write halves live in wato_common.artifacts.motion_proposals.
 """
 
 from wato_lidar_preprocessing.motion_proposals._core import (
+    BOX_FILL_MAX_ASPECT,
     BOX_FILL_MAX_PERSISTENT,
     BOX_FILL_MIN_TRACK_LIFE,
     MOVING_SCORE,
@@ -19,6 +20,7 @@ from wato_lidar_preprocessing.motion_proposals._core import (
 )
 
 __all__ = [
+    "BOX_FILL_MAX_ASPECT",
     "BOX_FILL_MAX_PERSISTENT",
     "BOX_FILL_MIN_TRACK_LIFE",
     "MOVING_SCORE",

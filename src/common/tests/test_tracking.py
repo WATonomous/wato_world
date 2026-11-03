@@ -13,6 +13,7 @@ from wato_common.tracking import (
     BoxKalmanFilter,
     MultiObjectTracker,
     associate,
+    bev_inside_fraction,
     box_corners_3d,
     cost_terms,
     fit_bev_box,
@@ -85,6 +86,15 @@ def test_iou_rotated_boxes_symmetric():
     b = _box(cx=0.5, cy=0.3, heading=-0.4)
     assert iou_3d(a, b) == pytest.approx(iou_3d(b, a), rel=1e-9)
     assert 0.0 < iou_3d(a, b) < 1.0
+
+
+def test_bev_inside_fraction_is_the_share_of_the_first_box():
+    big = _box()  # 4 x 2
+    small = _box(cx=2.0, l=2.0, w=1.0)  # 2 x 1, half of it past big's end
+    assert bev_inside_fraction(small, big) == pytest.approx(0.5)
+    assert bev_inside_fraction(big, small) == pytest.approx(1.0 / 8.0)
+    assert bev_inside_fraction(small, _box(cx=50.0)) == 0.0
+    assert bev_inside_fraction(big, big) == pytest.approx(1.0)
 
 
 def test_points_in_box_respects_heading():
@@ -173,3 +183,44 @@ def test_tracker_retires_after_n_old_and_births_new_id():
     second = trk.step(0.3, [_box()])[0]
     assert first != second
     assert len(trk.all_tracks()) == 2
+
+
+def test_strong_detections_are_matched_before_weak_ones():
+    trk = MultiObjectTracker()
+    trk.step(0.0, [_box(cx=0.0)])
+    # Frame 2: a weak box fits the track better than the strong one, but both
+    # are within the gates; strong-first gives the track to the strong box.
+    weak, strong = _box(cx=0.1), _box(cx=0.8)
+    ids = trk.step(0.1, [weak, strong], strong=[False, True])
+    assert ids[1] == 0 and ids[0] == 1
+    # Without the flags, the nearer (weak) box wins.
+    trk2 = MultiObjectTracker()
+    trk2.step(0.0, [_box(cx=0.0)])
+    assert trk2.step(0.1, [weak, strong])[0] == 0
+
+
+def test_a_shared_key_breaks_a_near_tie_but_never_opens_a_gate():
+    trk = MultiObjectTracker(key_bonus=1.0)
+    trk.step(0.0, [_box(cx=0.0), _box(cx=3.0)], keys=["a", "b"])
+    # Two boxes between the tracks; keys pull each to its own track although
+    # geometry alone would swap them.
+    ids = trk.step(0.1, [_box(cx=1.6), _box(cx=1.4)], keys=["a", "b"])
+    assert ids == [0, 1]
+    # A key never makes an out-of-gate pair match (T_d = 2 m).
+    far = trk.step(0.2, [_box(cx=30.0)], keys=["a"])
+    assert far == [2]
+
+
+def test_a_shared_key_can_open_the_shape_gates_but_not_the_distance_gate():
+    # A one-sided box whose visible face changed: same object, IoU ~ 0.
+    a = _box(cx=0.0, l=4.0, w=0.3)
+    b = _box(cx=0.0, cy=0.9, l=0.3, w=1.8)
+    closed = MultiObjectTracker()
+    closed.step(0.0, [a], keys=["k"])
+    assert closed.step(0.1, [b], keys=["k"]) == [1]
+    opened = MultiObjectTracker(key_opens_shape_gates=True)
+    opened.step(0.0, [a], keys=["k"])
+    assert opened.step(0.1, [b], keys=["k"]) == [0]
+    # Without the shared key the shape gates still hold.
+    assert opened.step(0.2, [_box(cx=0.0, cy=0.9, l=0.3, w=1.8)], keys=["other"]) == [1]
+    assert opened.step(0.3, [_box(cx=5.0)], keys=["k"]) == [2]

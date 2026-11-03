@@ -271,11 +271,22 @@ def tracks_path(bag_id: str) -> str:
     return _join(bag_root(bag_id), "tracks.parquet")
 
 
+def track_summaries_path(bag_id: str) -> str:
+    return _join(bag_root(bag_id), "track_summaries.parquet")
+
+
 # ---------------------------------------------------------------------------
 # label_refinement artifacts (bag-level).
 # ---------------------------------------------------------------------------
 def refined_labels_path(bag_id: str) -> str:
     return _join(bag_root(bag_id), "refined_labels.parquet")
+
+
+# ---------------------------------------------------------------------------
+# evaluation artifacts (bag-level) — imported ground truth, not pipeline output.
+# ---------------------------------------------------------------------------
+def gt_boxes_path(bag_id: str) -> str:
+    return _join(bag_root(bag_id), "gt_boxes.parquet")
 
 
 # ---------------------------------------------------------------------------

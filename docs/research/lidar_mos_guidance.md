@@ -138,7 +138,7 @@ is carved only through ground or background rays that cross its vacated space.
 | Chen relabels non-moving clusters static | Soft features only; nothing dropped | This is a proposal source; downstream thresholds. |
 | Chen's coarse stage: ERASOR | Union of AW / IWU / seg / unmapped bits | See above. |
 | Chen: moving iff trajectory > max side | `motion_score` = **net** displacement of the Kalman-**filtered** centre (median of first/last 3 frames) ÷ max side | Path length accumulates visibility jitter, which is the velocity-gate failure measured on `main`. |
-| Chen box fill: every moving box | Only if `track_life ≥ 3` and `frac_persistent < 0.5`; box grown down to the ground | Wall-sliding fragments pass the size-normalised test (measured below). Growing the box down restores wheels and feet removed by the 0.25 m height floor. |
+| Chen box fill: every moving box | Only if `track_life ≥ 3`, `frac_persistent < 0.5` and the track's median box is at most 4 × as long as wide; box grown down to the ground | Wall-sliding fragments pass the size-normalised test (measured below), and not all of them dwell; a strip's shape gives it away (LISO's length/width limit). Growing the box down restores wheels and feet removed by the 0.25 m height floor. |
 | HDBSCAN with ε ∈ {2, 1, 0.5, 0.25} | sklearn HDBSCAN (it integrates over ε itself) on a 0.1 m-deduplicated seed grid | Same clusters, bounded runtime. |
 
 ---
@@ -204,8 +204,9 @@ variant's Step F took 113 s, because it produced more clusters.
 
 - **proposal_generation**: each `motion_clusters.parquet` row is a
   `ProposalRow` with `provenance="lidar_mos"`; the box columns share names.
-  Useful gates are `motion_score > 1`, `n_sources ≥ 2` and
-  `frac_persistent < 0.5`. Rows with a class-less box still need a class from
+  Useful gates are `motion_score > 1`, `n_sources ≥ 2`,
+  `frac_persistent < 0.5` and a track (`track_hint_id`) whose median box is at
+  most 4 × as long as wide. Rows with a class-less box still need a class from
   semantic_lifting's labels.
 - **tracking**: build on `wato_common.tracking` (Chen cost, Kalman, Hungarian)
   rather than a second motion model. `track_hint_id` is chunk-local and **not**
@@ -218,11 +219,14 @@ variant's Step F took 113 s, because it produced more clusters.
 
 ## Gaps and open questions
 
-1. **Ground-truth recall.** Build nuScenes MOS ground truth from annotated
-   boxes (points inside boxes with speed > 0.5 m/s) and report recall and
-   IoU_MOS (Chen Eq. 9) per bit. The on-static metric only measures leakage,
-   not what is missed. This is also the evidence `sensor_model.py` says would
-   move its probabilities.
+1. **Ground-truth recall.** Measured on nuScenes scene-0061
+   (`scripts/eval_motion_proposals.py`; numbers in
+   `docs/lidar_preprocessing_measurements.md`, "Step F against ground truth"):
+   the bits find most moving points (any bit: recall 0.78), but the
+   motion_score > 1 test keeps 0.23 of them, at precision 0.93. Missed movers
+   sit on Step F tracks too short (median 4 frames) to move further than their
+   box. Still to do: the evidence `sensor_model.py` says would move its
+   probabilities.
 2. **WATO rig.** Every number above is from nuScenes HDL-32E. Re-measure on a
    3-Velodyne bag with `.wato.yaml`. That bag has per-frame fusion, VLP-16
    corners, and a sweep rate of 20 Hz.

@@ -1,0 +1,23 @@
+# label_refinement (nuScenes and other single-LiDAR bags). Every field is
+# documented in src/wato_label_refinement/config.py.
+label_refinement:
+  frames:
+    canonical_lidar: null        # as proposal_generation's frames.canonical_lidar
+
+  parked:                        # one box from the points of every frame
+    region_margin_m: 0.3         # around the rectangle enclosing its boxes
+    region_max_centre_offset_m: 1.0  # ...those within this of their median centre
+    cluster_radius_m: 0.5        # accumulated points are dense
+    voxel_m: 0.05
+    min_points: 30               # fewer: refined like a moving track
+    aggregate_classes: [car, truck, bus]  # people and two-wheelers move on the spot
+
+  moving:                        # one size, corner-anchored, smoothed path
+    size_percentile: 90.0        # of the densest frames' l, w, h
+    densest_fraction: 0.5
+    size_percentile_by_class:    # small objects: their high percentile is bleed
+      pedestrian: 50.0
+      bicycle: 50.0
+      motorcycle: 50.0
+    heading_min_speed_mps: 0.5   # heading from velocity at or above this
+    smooth_window_s: 1.0

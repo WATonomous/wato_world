@@ -45,7 +45,8 @@ motion_score = BEV distance between the median Kalman-filtered centre of the
 first and of the last few frames of the track (net, not path length — jitter
 does not accumulate), divided by the largest box side the track ever showed.
 Chen's criterion is motion_score > 1. BOX_FILL additionally requires the
-cluster's points not to dwell (frac_persistent < 0.5), which catches the
+cluster's points not to dwell (frac_persistent < 0.5) and the track not to be
+wall-shaped (median length ≤ 4 × median width), which together catch the
 sliding-window wall fragments size-normalised displacement alone lets through.
 """
 
@@ -109,6 +110,11 @@ BOX_FILL_MIN_TRACK_LIFE = 3
 # pedestrian-sized track at 0.52) lose the fill — the row keeps its score
 # either way; only the painting is gated.
 BOX_FILL_MAX_PERSISTENT = 0.5
+# ...and whose track is not wall-shaped: a track whose median box is longer
+# than this many widths is a strip of structure (LISO's length/width limit).
+# On WATO ~20% of gated tracks are (docs/proposal_generation_measurements.md),
+# some with frac_persistent under 0.5; pedestrians and cyclists sit well under.
+BOX_FILL_MAX_ASPECT = 4.0
 # Frames medianed at each end of a track for its net displacement. Enough to
 # reject one bad fit at either end; small enough for short tracks.
 _ENDPOINT_FRAMES = 3
@@ -166,6 +172,7 @@ class _Cluster:
     track_life: int = 1
     net_displacement_m: float = 0.0
     motion_score: float = 0.0
+    track_aspect: float = 1.0  # median length / median width over the track
     frac_persistent: float = 0.0
     box_filled: bool = False
 
@@ -461,24 +468,30 @@ def _score_tracks(
                 max(o.measured.l, o.measured.w, o.measured.h) for o in track.history
             )
             net, score = track_motion(xy, max_side)
+            aspect = float(np.median([o.measured.l for o in track.history])) / max(
+                float(np.median([o.measured.w for o in track.history])), 1e-6
+            )
             for cid in cids:
                 c = clusters[cid]
                 c.track_key = (stream, next_hint)
                 c.track_life = len(track.history)
                 c.net_displacement_m = net
                 c.motion_score = score
+                c.track_aspect = aspect
             next_hint += 1
 
 
 def should_box_fill(
-    motion_score: float, track_life: int, frac_persistent: float
+    motion_score: float, track_life: int, frac_persistent: float, track_aspect: float
 ) -> bool:
     """Chen's criterion (motion_score > 1) on a real track whose points
-    don't dwell — the only clusters BOX_FILL paints."""
+    don't dwell and whose box isn't a wall strip — the only clusters BOX_FILL
+    paints."""
     return (
         motion_score > MOVING_SCORE
         and track_life >= BOX_FILL_MIN_TRACK_LIFE
         and frac_persistent < BOX_FILL_MAX_PERSISTENT
+        and track_aspect <= BOX_FILL_MAX_ASPECT
     )
 
 
@@ -637,7 +650,9 @@ def process_chunk(cfg: ComponentConfig, bag_id: str, chunk_id: str) -> ProposalR
     fill_by_sweep: dict[int, list[_Cluster]] = {}
     if mp.box_fill:
         for c in clusters:
-            if should_box_fill(c.motion_score, c.track_life, c.frac_persistent):
+            if should_box_fill(
+                c.motion_score, c.track_life, c.frac_persistent, c.track_aspect
+            ):
                 c.box_filled = True
                 for sid in c.sweep_ids:
                     fill_by_sweep.setdefault(sid, []).append(c)
@@ -734,6 +749,7 @@ def _write_clusters(bag_id: str, chunk_id: str, clusters: list[_Cluster]) -> Non
 
 
 __all__ = [
+    "BOX_FILL_MAX_ASPECT",
     "BOX_FILL_MAX_PERSISTENT",
     "BOX_FILL_MIN_TRACK_LIFE",
     "MOVING_SCORE",

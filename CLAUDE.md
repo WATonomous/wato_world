@@ -34,11 +34,18 @@ proposal_generation → tracking → label_refinement / open_vocab_discovery →
 
 ingest, lidar_preprocessing, perception_2d and semantic_lifting are implemented
 end to end; proposal_generation has its first sources (Step F clusters,
-lifted instances, fusion; no SLF or LiDAR detector yet); the rest are stubs
-raising NotImplementedError. Each implemented component's README is its
+lifted instances, fusion; no LiDAR detector yet); tracking has a per-chunk v0
+(tracks and a parked / moving state per track; no stitching across chunks or
+ReID yet); label_refinement has a training-free v0 (one box per parked
+vehicle, one size and a smoothed path per moving track; no SLF yet); the rest
+are stubs raising NotImplementedError. Each implemented component's README is its
 reference.
 Measurements behind defaults are in `docs/*_measurements.md`; which recordings
-are usable is `docs/drive_bag_survey.md`.
+are usable is `docs/drive_bag_survey.md`. Scoring against ground truth: import
+it into `gt_boxes` (`src/ingest/scripts/`: nuScenes annotations from a converted
+bag, or boxes drawn in SUSTechPOINTS), then run a stage's `scripts/eval_*.py`,
+which share `wato_common.eval`; the nuScenes scene is
+`NuScenes_v1_0_mini_scene_0061_0_mcap`.
 
 ## Conventions
 
@@ -49,7 +56,9 @@ are usable is `docs/drive_bag_survey.md`.
   and another reads is encoded, written and read by its module in
   `wato_common/artifacts/` (`calibration`, `frame_index`, `lidar_sweeps`,
   `motion_proposals`, `ground`, `masklets`, `depth`, `lifted_labels`,
-  `proposals`), round-trip tested in
+  `proposals`, `tracks`, `refined_labels`; `gt_boxes` is imported ground
+  truth that only evaluation reads),
+  round-trip tested in
   `src/common/tests/test_artifacts_*.py`. Producers call the write half,
   consumers the read half; nobody else `np.load`s or re-derives the encoding.
   Consumer images install only `src/common` + their own package, so both halves
@@ -147,6 +156,12 @@ doesn't load; the trim-bag end-to-end test skips).
   so proposal_generation's config restates it (`frames.canonical_lidar`,
   `lidar_cc` in `.wato.yaml`) and `ProcessedSweeps.frames` raises
   `CanonicalLidarError` on a mismatch.
+- **Tracks are chunk-local for now.** tracking tracks each chunk's fused rows
+  (`track_id` `<chunk_id>-<n>`) and writes bag-level `tracks.parquet` +
+  `track_summaries.parquet`; `owned` marks each chunk's half of the shared
+  span, so consumers read only owned frames. A track's `motion_state`
+  (moving / parked / unknown) is judged on the whole track
+  (`src/tracking/README.md`), not by Step F's per-cluster `motion_score`.
 - **Sensor physics lives in `sensor_model.py`** (profiles `vlp32c`, `vlp16`,
   `hdl32e`), never in YAML.
 
@@ -245,14 +260,14 @@ labels aren't comparable.
 
 | Surface | Where | Mechanism |
 |---|---|---|
-| Python deps | `docker/requirements/{ingest,lidar_preprocessing,perception_2d,semantic_lifting,proposal_generation}.txt` | exact `==` for the full transitive closure, installed `--no-deps` |
+| Python deps | `docker/requirements/{ingest,lidar_preprocessing,perception_2d,semantic_lifting,proposal_generation,tracking,label_refinement}.txt` | exact `==` for the full transitive closure, installed `--no-deps` |
 | `sam2` | `docker/perception_2d.Dockerfile` | `ARG SAM2_COMMIT` (no PyPI release) |
 | Model weights | `src/perception_2d/src/wato_perception_2d/model_registry.py` | HF `revision=`, torch.hub `repo:<sha>`, raw `.pt` from an HF commit loaded by path |
-| Component bases | `docker/{ingest,lidar_preprocessing,perception_2d,semantic_lifting,proposal_generation}.Dockerfile` | `base:<tag>@sha256:...` |
+| Component bases | `docker/{ingest,lidar_preprocessing,perception_2d,semantic_lifting,proposal_generation,tracking,label_refinement}.Dockerfile` | `base:<tag>@sha256:...` |
 | Upstream bases | `docker/base/inject_*.Dockerfile` | `ubuntu` / `nvcr.io` by digest, `ARG UV_VERSION` |
 | `mcap` CLI | `docker/ingest.Dockerfile` | `ARG MCAP_CLI_VERSION` + `MCAP_CLI_SHA256` |
 
-Unpinned: the other four Dockerfiles, all stubs (mutable `base:<tag>`, no
+Unpinned: the other two Dockerfiles, both stubs (mutable `base:<tag>`, no
 lockfile, no `WATO_BASE_IMAGE`, no manifest) — pin each when it stops being
 one; and ingest's ROS 2 Jazzy apt packages (no apt lockfile;
 noted in `docker/requirements/ingest.txt`).
@@ -276,9 +291,11 @@ common packages at its own versions, and uv's default then refuses PyPI.
 `/opt/watonomous/requirements.lock.txt`; `manifest.py` writes one manifest per
 (bag, chunk) per component with content-hashed inputs (> 64 MB: size + mtime),
 so a changed input marks the outputs stale. ingest writes `manifest.json`;
-lidar_preprocessing, perception_2d, semantic_lifting and proposal_generation
-write `manifest_<component>.json` (semantic_lifting and proposal_generation
-hash their upstreams' manifests in place of their per-sweep files).
+lidar_preprocessing, perception_2d, semantic_lifting, proposal_generation,
+tracking and label_refinement write `manifest_<component>.json`
+(semantic_lifting and proposal_generation hash their upstreams' manifests in
+place of their per-sweep files; tracking's and label_refinement's outputs are
+bag-level, so each chunk's manifest names the same files).
 
 - `WATO_GIT_COMMIT` is baked in at build time (`watod-setup-env.sh` →
   `modules/.env` → build arg): deploy images have no `.git`.

@@ -220,3 +220,25 @@ SLAM converges).
 `pipeline.py` sequences; `cli.py` parses options and prints. Bag-level
 validation and discovery go in `inputs/`, message decoding in `decoders/`,
 tables derived from decoded artifacts in `artifacts/`.
+
+## Ground truth (evaluation only)
+
+Scripts under `scripts/` import labels into `gt_boxes.parquet`
+(`wato_common.artifacts.gt_boxes`), which only evaluation reads. Each object's
+parked / moving state is judged from its boxes over time
+(`wato_common.eval.motion`).
+
+- `import_nuscenes_gt.py <bag.mcap> --bag <bag_id>`: a converted nuScenes bag
+  carries every sample's boxes on `/markers/annotations` (CUBE markers in
+  `map`, the frame the nuScenes profile's `/odom` is in). The category isn't in
+  the message, so it is read back from the devkit colour; an unknown colour
+  stops the import. Needs ROS (the ingest image).
+- `export_sustechpoints.py <bag_id> --chunk <id>` writes a chunk as a
+  [SUSTechPOINTS](https://github.com/naurril/SUSTechPOINTS) scene (points in
+  the ego frame at each frame's time, every 10th frame by default) under
+  `<bag>/labelling/sustechpoints/`; `import_sustechpoints.py <bag_id>` reads the
+  drawn boxes back into the world frame. Keep one `obj_id` per object across
+  frames, and label chunks that don't neighbour each other.
+
+The world sweeps' paths in `lidar_proc_index.parquet` are container paths, so
+run the SUSTechPOINTS scripts in a dev container.

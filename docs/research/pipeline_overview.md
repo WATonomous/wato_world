@@ -146,13 +146,14 @@ proposal_generation   reads: lidar_proc_index, lidar_proc/*_world.npz, motion_pr
        │                              the fused rows that list them; tracking reads the fused)
        └─ proposal_masks/            (planned: projected 2D mask used during SLF fitting)
 
-tracking              reads: proposals, tracklets_2d, lidar_proc/*_world.npz  (builds on wato_common.tracking)
+tracking              reads: proposals (fused rows + their members)  (builds on wato_common.tracking)
   └─ per-bag/
-       └─ tracks.parquet             (track_id, chunk_id, sweep_id, box params, class)
+       ├─ tracks.parquet             (track_id, chunk_id, sweep_id, proposal_id, box, owned)
+       └─ track_summaries.parquet    (per track: moving / parked / unknown, class, evidence)
 
-label_refinement      reads: tracks, lidar_proc/*_world.npz, motion_proposals / dynamic_mask
+label_refinement      reads: tracks, lidar_proc/*_world.npz, ground.npz, poses
   └─ per-bag/
-       └─ refined_labels.parquet     (track_id, per-frame refined box + confidence)
+       └─ refined_labels.parquet     (track_id, per-frame refined box, one size per track)
 ```
 
 ---
@@ -163,26 +164,22 @@ Done: `ingest`; `lidar_preprocessing` (Steps A–F: deskew, classify, ground, re
 DA-V2 / DINOv2); `semantic_lifting` core (UniLiPs Eq. 1 lifting + cross-camera
 voting); `proposal_generation` first sources (gated `motion_clusters.parquet`
 rows as `lidar_mos`, boxes around lifted instances as `lifted`, fused on shared
-LiDAR points; `docs/proposal_generation_measurements.md`). Next:
+LiDAR points, with track-shape gates, a car height cap and a nested-box
+filter); `tracking` v0 (per chunk, parked / moving per track); `label_refinement`
+v0 (training-free: one box per parked vehicle from its accumulated points, one
+size + corner anchor + smoothed path per moving track). Ground truth for
+scoring all of it: nuScenes scenes imported into `gt_boxes`, WATO boxes drawn
+in SUSTechPOINTS. Measurements: `docs/*_measurements.md`. Next:
 
-1. **`proposal_generation`** — the remaining sources
-   - SLF: fit shapes to the 2D masks, using the ground plane from `ground.npz`
-     (lifted-only boxes cover one side of far cars today)
-   - LiDAR detector (CenterPoint or similar), deferred until the comparison
-     class is chosen (`novelty_positioning.md`)
-   - Per-source reliability in place of the placeholder scores
-
-2. **`tracking`** — once proposals exist
-   - 3D Kalman filter on proposals across chunks — build on
-     `wato_common.tracking` (the model lidar_preprocessing's Step F uses)
-   - Masklet association using DINOv2 embeddings from `perception_2d`
-   - Output: full-bag `tracks.parquet`
-
-3. **`label_refinement`** — once tracking is done
-   - Crop per-track LiDAR points using track boxes (+ motion proposals /
-     dynamic masks)
-   - Run LabelFormer trajectory-level self-attention
-   - Output: `refined_labels.parquet` (the final auto-labels)
+1. **`label_refinement`** — SLF per track: fit one car shape to the track's
+   masks in every frame and camera, with heading from its motion (box SDF first,
+   a mesh PCA prior after). Measured against the refined boxes on far cars.
+2. **`tracking`** — stitch tracks across the 6 s chunk overlaps (match boxes at
+   identical timestamps, split ownership at the midpoint); DINOv2 ReID where
+   tracks still break.
+3. **`proposal_generation`** — LiDAR detector (CenterPoint or similar),
+   deferred until the comparison class is chosen (`novelty_positioning.md`);
+   per-source reliability in place of the placeholder scores.
 
 ---
 

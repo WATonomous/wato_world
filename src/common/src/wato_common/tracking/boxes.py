@@ -142,6 +142,16 @@ def _polygon_area(poly: np.ndarray) -> float:
     return 0.5 * abs(float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
 
 
+def bev_inside_fraction(a: Box3D, b: Box3D) -> float:
+    """Share of a's BEV footprint that lies inside b's (0 to 1; not symmetric)."""
+    if math.hypot(a.cx - b.cx, a.cy - b.cy) > 0.5 * (
+        math.hypot(a.l, a.w) + math.hypot(b.l, b.w)
+    ):
+        return 0.0
+    inter = _polygon_area(_clip_polygon(bev_corners(a), bev_corners(b)))
+    return inter / max(max(a.l, MIN_EXTENT_M) * max(a.w, MIN_EXTENT_M), 1e-12)
+
+
 def box_volume(box: Box3D) -> float:
     return (
         max(box.l, MIN_EXTENT_M) * max(box.w, MIN_EXTENT_M) * max(box.h, MIN_EXTENT_M)

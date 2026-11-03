@@ -74,16 +74,61 @@ INSTANCES = {
 
 def test_gate_keeps_only_moving_multi_source_transient_clusters():
     cfg = LidarMosConfig()
-    kept = lidar_mos.gate(
-        [
-            _cluster(0),
-            _cluster(1, motion_score=0.9),
-            _cluster(2, n_sources=1),
-            _cluster(3, frac_persistent=0.6),
-        ],
-        cfg,
-    )
+    clusters = [
+        _cluster(0),
+        _cluster(1, motion_score=0.9),
+        _cluster(2, n_sources=1),
+        _cluster(3, frac_persistent=0.6),
+    ]
+    kept = lidar_mos.gate(clusters, lidar_mos.track_shapes(clusters), cfg)
     assert [c.cluster_id for c in kept] == [0]
+
+
+def test_gate_drops_wall_shaped_tracks_by_their_median_box():
+    # Track 1 is a 3 x 0.3 m strip in two of its three frames: wall-shaped,
+    # although one frame's cluster looks like a car. Track 2 is a pedestrian.
+    clusters = [
+        _cluster(0, track_hint_id=1, l=3.0, w=0.3),
+        _cluster(1, track_hint_id=1, l=3.2, w=0.3),
+        _cluster(2, track_hint_id=1, l=4.0, w=1.8),
+        _cluster(3, track_hint_id=2, l=0.6, w=0.5),
+        # No track: judged on its own box.
+        _cluster(4, track_hint_id=-1, l=5.0, w=1.0),
+    ]
+    shapes = lidar_mos.track_shapes(clusters)
+    assert shapes[1].l == pytest.approx(3.2) and shapes[1].w == pytest.approx(0.3)
+    kept = lidar_mos.gate(clusters, shapes, LidarMosConfig())
+    assert [c.cluster_id for c in kept] == [3]
+    loose = LidarMosConfig(max_aspect_ratio=float("inf"))
+    assert len(lidar_mos.gate(clusters, shapes, loose)) == 5
+
+
+def test_small_tracks_keep_a_box_only_when_a_lifted_label_classes_it():
+    ped = _cluster(0, track_hint_id=7, l=0.6, w=0.5, h=1.4)  # 0.3 m², 0.42 m³
+    shapes = lidar_mos.track_shapes([ped])
+    unlabelled = _points(np.zeros((6, 3)), cluster_id=[0] * 6)
+    assert (
+        lidar_mos.proposals(
+            FRAME, [ped], unlabelled, None, INSTANCES, shapes, LidarMosConfig()
+        )
+        == []
+    )
+    instances = {"mP": LiftedInstance("mP", "pedestrian", ("mP",), ("CAM_A",), 10, 1)}
+    labelled = _points(
+        np.zeros((6, 3)),
+        instance_id=["mP"] * 6,
+        cls=["pedestrian"] * 6,
+        cluster_id=[0] * 6,
+    )
+    [box] = lidar_mos.proposals(
+        FRAME, [ped], labelled, None, instances, shapes, LidarMosConfig()
+    )
+    assert box.proposal.cls == "pedestrian"
+    off = LidarMosConfig(min_footprint_m2=0.0, min_volume_m3=0.0)
+    assert (
+        len(lidar_mos.proposals(FRAME, [ped], unlabelled, None, INSTANCES, shapes, off))
+        == 1
+    )
 
 
 def test_by_frame_rejects_clusters_stamped_off_the_frames():
@@ -103,8 +148,9 @@ def test_cluster_class_is_a_confidence_weighted_vote_with_a_floor():
         cls=["car", "car", "car", "truck", "", ""],
         cluster_id=[0] * 6,
     )
+    shapes = lidar_mos.track_shapes([_cluster()])
     [box] = lidar_mos.proposals(
-        FRAME, [_cluster()], fp, None, INSTANCES, LidarMosConfig()
+        FRAME, [_cluster()], fp, None, INSTANCES, shapes, LidarMosConfig()
     )
     p = box.proposal
     assert p.cls == "car" and p.supporting_cam_ids == ("CAM_A",)
@@ -112,7 +158,9 @@ def test_cluster_class_is_a_confidence_weighted_vote_with_a_floor():
     assert (p.motion_score, p.n_sources, p.track_life) == (1.5, 2, 5)
 
     strict = LidarMosConfig(min_labeled_fraction=0.9)
-    [box] = lidar_mos.proposals(FRAME, [_cluster()], fp, None, INSTANCES, strict)
+    [box] = lidar_mos.proposals(
+        FRAME, [_cluster()], fp, None, INSTANCES, shapes, strict
+    )
     assert box.proposal.cls is None and box.proposal.supporting_masklet_ids == ()
 
 
@@ -134,6 +182,60 @@ def test_lifted_box_keeps_the_largest_group_and_skips_small_ones():
     assert p.lidar_point_count == 30 and not boxes[0].members[30]
     assert p.cx == pytest.approx(10.0, abs=0.5) and p.l <= 4.0
     assert p.cls == "car" and p.lift_confidence == pytest.approx(0.9)
+
+
+def test_lifted_radius_is_per_class():
+    # A pedestrian 1.5 m from a wall its mask bled onto: one group at 2 m.
+    rng = np.random.default_rng(1)
+    ped = rng.uniform([-0.25, -0.25, 0.3], [0.25, 0.25, 1.7], size=(20, 3))
+    wall = rng.uniform([1.5, -1.0, 0.3], [1.6, 1.0, 2.0], size=(40, 3))
+    xyz = np.concatenate([ped, wall])
+    instances = {"mP": LiftedInstance("mP", "pedestrian", ("mP",), ("CAM_A",), 10, 1)}
+    fp = _points(xyz, instance_id=["mP"] * 60, cls=["pedestrian"] * 60)
+    [wide] = lifted.proposals(FRAME, fp, None, instances, LiftedConfig())
+    assert wide.proposal.lidar_point_count == 60
+    per_class = LiftedConfig(cluster_radius_by_class_m={"pedestrian": 0.7})
+    [box] = lifted.proposals(FRAME, fp, None, instances, per_class)
+    # The wall is the larger group now; what matters is the two are split.
+    assert box.proposal.lidar_point_count in (20, 40)
+
+
+def test_lifted_height_cap_leaves_out_points_above_it():
+    rng = np.random.default_rng(2)
+    car = rng.uniform([-2, -1, 0.0], [2, 1, 1.5], size=(40, 3))
+    pole = np.column_stack([np.full(10, 1.5), np.zeros(10), np.linspace(1.6, 6.0, 10)])
+    fp = _points(np.concatenate([car, pole]), instance_id=["mA"] * 50, cls=["car"] * 50)
+    [tall] = lifted.proposals(FRAME, fp, None, INSTANCES, LiftedConfig())
+    assert tall.proposal.h > 5.0
+    capped = LiftedConfig(max_height_m={"car": 3.0})
+    [box] = lifted.proposals(FRAME, fp, None, INSTANCES, capped)
+    assert box.proposal.h <= 3.0 and box.proposal.lidar_point_count < 50
+    # A class without a cap is untouched.
+    assert LiftedConfig(max_height_m={"truck": 3.0}).max_height_m.get("car") is None
+
+
+def test_lifted_box_inside_a_same_class_box_with_more_points_is_dropped():
+    rng = np.random.default_rng(3)
+    front = rng.uniform([-2, -1, 0.3], [2, 1, 1.5], size=(40, 3)) + [10, 0, 0]
+    hidden = rng.uniform([-0.5, -0.5, 0.3], [0.5, 0.5, 1.0], size=(8, 3)) + [11, 0, 0]
+    beside = rng.uniform([-2, -1, 0.3], [2, 1, 1.5], size=(30, 3)) + [10, 5, 0]
+    instances = {
+        "mA": LiftedInstance("mA", "car", ("mA",), ("CAM_A",), 10, 1),
+        "mH": LiftedInstance("mH", "car", ("mH",), ("CAM_A",), 10, 1),
+        "mS": LiftedInstance("mS", "car", ("mS",), ("CAM_A",), 10, 1),
+    }
+    fp = _points(
+        np.concatenate([front, hidden, beside]),
+        instance_id=["mA"] * 40 + ["mH"] * 8 + ["mS"] * 30,
+        cls=["car"] * 78,
+    )
+    boxes = lifted.proposals(FRAME, fp, None, instances, LiftedConfig(min_points=5))
+    assert [b.proposal.proposal_id for b in boxes] == [
+        "lifted-mA-000004",
+        "lifted-mS-000004",
+    ]
+    off = LiftedConfig(min_points=5, max_nested_fraction=1.1)
+    assert len(lifted.proposals(FRAME, fp, None, instances, off)) == 3
 
 
 def test_missing_lifted_instance_names_the_fix():

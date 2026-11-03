@@ -17,6 +17,7 @@ from wato_common.tracking.association import (
 from wato_common.tracking.boxes import (
     MIN_EXTENT_M,
     bev_corners,
+    bev_inside_fraction,
     box_corners_3d,
     box_volume,
     fit_bev_box,
@@ -36,6 +37,7 @@ __all__ = [
     "TrackObservation",
     "associate",
     "bev_corners",
+    "bev_inside_fraction",
     "box_corners_3d",
     "box_volume",
     "cost_terms",

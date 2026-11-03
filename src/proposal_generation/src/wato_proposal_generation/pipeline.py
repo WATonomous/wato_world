@@ -88,9 +88,9 @@ def process_chunk(cfg: ComponentConfig, bag_id: str, chunk_id: str) -> dict[str,
     sweeps = ProcessedSweeps.load(bag_id, chunk_id)
     frames = sweeps.frames(cfg.frames.canonical_lidar)
     ground = _ground(bag_id, chunk_id)
-    gated = lidar_mos.gate(
-        motion_proposals.read_clusters(bag_id, chunk_id), cfg.lidar_mos
-    )
+    clusters = motion_proposals.read_clusters(bag_id, chunk_id)
+    shapes = lidar_mos.track_shapes(clusters)
+    gated = lidar_mos.gate(clusters, shapes, cfg.lidar_mos)
     clusters_at = lidar_mos.by_frame(gated, frames)
     gated_ids = np.array(sorted(c.cluster_id for c in gated), dtype=np.int64)
     instances = {
@@ -106,6 +106,7 @@ def process_chunk(cfg: ComponentConfig, bag_id: str, chunk_id: str) -> dict[str,
             fp,
             ground,
             instances,
+            shapes,
             cfg.lidar_mos,
         )
         lifts = lifted.proposals(frame, fp, ground, instances, cfg.lifted)
