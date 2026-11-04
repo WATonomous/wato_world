@@ -1,12 +1,24 @@
 # Segment-Lift-and-Fit (SLF) Alignment Guidance
 
 **Paper**: "Segment, Lift, and Fit: Automatic 3D Shape Labeling from 2D Prompts"
-**Reference**: themoonlight.io/en/review/segment-lift-and-fit-automatic-3d-shape-labeling-from-2d-prompts
+**Reference**: [Li et al., ECCV 2024, primary paper](https://www.ecva.net/papers/eccv_2024/papers_ECCV/papers/11297.pdf).
+For verified equations, implementation differences and current fixes, use
+[the primary-source review](slf_projection_implementation_review.md). The
+planning sections below are historical and are not a paper specification.
 
 SLF turns per-camera 2D instance masks into full 3D bounding boxes (position,
-orientation, and shape) using a gradient-descent fitting loop.  It is the
-primary design for the `proposal_generation` component's geometry side
-(complementing the LiDAR detector side).
+orientation, and shape) using a gradient-descent fitting loop.
+
+**Where it lives here.** Not per frame in `proposal_generation`, as this guide
+first planned, but per track in `label_refinement` (`slf.py`, `views.py`;
+`src/label_refinement/README.md`): one shape fit to every view of the track,
+over its whole life, after Phase 3's training-free refinement placed its
+boxes. A track sees an object from more sides than any one frame, and the
+fit only has to decide the size the LiDAR can't see. The shape is a rounded
+box for now (the "simpler scaffold" of gap 3 below); the car mesh prior of gap
+2 is next. Measurements: `docs/label_refinement_measurements.md`. The gaps
+below are the original plan, kept for the mesh prior; the implemented parts
+are marked.
 
 ---
 
@@ -203,7 +215,17 @@ shape.  The paper suggests fusing both:
 
 ---
 
-## Summary of actionable steps
+## Status
+
+Implemented in label_refinement (box shape): the differentiable renderer
+(soft silhouettes from the SDF's minimum along each pixel's ray), the fitting
+loop (Adam, SLF's lr 0.1 and 150 steps), multi-camera aggregation over a
+track's views, occlusion maps from nearer tracked objects' masks, and a gate
+on how much better the fit explains the masks. Not yet: the PCA mesh prior
+(gap 2), per-frame pose refinement (Phase 3's placement is kept), and the
+fusion with a LiDAR detector (gap 6), which waits on the detector.
+
+## Summary of the original plan (superseded where Status says so)
 
 1. `proposals.parquet` schema: `schemas.ProposalRow`, written and read
    through `wato_common.artifacts.proposals` (exists).

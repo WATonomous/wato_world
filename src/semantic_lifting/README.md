@@ -10,7 +10,9 @@ behind the defaults: `docs/semantic_lifting_measurements.md`.
 
 For each sweep, every camera frame ingest paired with it (`frame_index`) is
 used; the points are already world-registered, so they are projected with the
-camera's pose at the frame's own time. A point inside a mask that passes the
+camera's pose at the frame's own time through the shared
+[camera model](../../docs/camera_geometry_contract.md), with full K and the
+stored image's lens model. A point inside a mask that passes the
 visibility test (below) gets one vote from that camera: the innermost (smallest) mask
 it lands in, weighted by the masklet's `det_score`. Votes are resolved per
 point by **class** first — the class with the highest summed score across
@@ -67,6 +69,31 @@ points coloured by lifted instance (or class) over grey unlabeled context, in
 the world frame, with a slider over the chunk's sweeps in time order. The page
 is `wato_common.viz.point_cloud_html`, the same viewer as lidar_preprocessing's
 `viz`.
+
+## Check camera alignment
+
+`python -m wato_semantic_lifting.calibration_audit <bag_id> --cache <directory>
+--out <directory> [--canonical-lidar lidar_cc]` runs an offline parameter sweep
+against fixed observed track returns and their own masks. It needs tracking
+artifacts as well as lifting's inputs. It separates training and validation
+by linked track ID and tests camera rotation, translation, intrinsics and
+image-pose time offsets. `--evaluate-only` scores the recorded calibration;
+`--candidate <json>` scores an authored one. `--check-min-inside <fraction>`
+fails when validation car containment remains below the requested threshold.
+
+The output includes an **experimental** authored calibration with only the
+rotation candidates supported by separate tracks, plus full per-camera
+scores. It leaves source calibration and labels intact. Mask containment is
+a proxy, so a candidate still needs independent validation; depth fitting and
+downstream stages must be rerun before a production calibration change.
+
+Audit caches include the sampling/model version. Caches predating shared
+lens-aware geometry are rejected; choose a new cache directory to resample.
+Commands, WATO results and limitations: [camera projection measurements](../../docs/camera_projection_measurements.md).
+The [independent calibration investigation](../../docs/wato_alignment_root_cause.md)
+shows why these label-derived correspondences can preserve a wrong surface
+association. Its image/ego-motion check estimates NN orientation without
+masks or labels, then replays actual lifting to test object ownership.
 
 ## Inputs
 

@@ -159,3 +159,13 @@ both claim (whole chunk, after the visibility change).
   their members alone, so merging adds little on top.
 - Result: 692 instances from 883 voting masklets; 108 span cameras (up to 6)
   and carry 69% of labeled points.
+
+## Camera calibration audit
+
+The July 7 WATO bag's camera rotations, translations, intrinsics and timing
+were swept against fixed car returns and their supporting masks. Small NN/SS
+rotation corrections improve the original 400-view median from 0.70 to 0.73
+and help votes through the actual visibility code, but leave substantial
+misalignment and excessive SLF heights. No production calibration was changed.
+The [camera projection measurements](camera_projection_measurements.md) record
+the track split, rejected candidates, downstream checks and replay commands.

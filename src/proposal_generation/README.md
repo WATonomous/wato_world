@@ -2,8 +2,9 @@
 
 3D box proposals from what upstream already produces: lidar_preprocessing's
 Step F moving-object clusters and semantic_lifting's labelled instances, one
-box per source and one fused box per object, per frame. CPU only. SLF (fitting
-shapes to camera masks) and a LiDAR detector are later sources.
+box per source and one fused box per object, per frame. CPU only. A LiDAR
+detector is a later source; SLF (fitting shapes to camera masks) runs per
+track in label_refinement.
 Measurements behind the defaults: `docs/proposal_generation_measurements.md`.
 
 ## How a proposal is made
@@ -27,10 +28,13 @@ corner sweeps matched to it on WATO, one sweep on a single-LiDAR bag:
   within the class's radius (2 m; less for pedestrians and two-wheelers) is the
   object, minus points above the class's height cap (cars: 3 m over the
   ground); with ≥ 5 points it is boxed (`fit_bev_box`, bottom to the ground)
-  and takes the instance's class and cameras. A box with ≥ 30% of its
-  footprint inside a same-class box with more points is dropped: a car hidden
-  behind another is boxed on its occluder's edge returns. Evidence:
-  `lift_confidence`, the points' mean lifting confidence.
+  and takes the instance's class and cameras. Two filters then drop a box that
+  is another object's. A fragment: ≥ 80% of its points within 0.3 m of the
+  points of a box with ≥ 5× as many, any class (a small mask beside a big one
+  claims a few of the big object's edge returns, which box as a thin column
+  beside it). A nested box: ≥ 30% of its footprint inside a same-class box
+  with more points (a car hidden behind another, boxed on its occluder's edge
+  returns). Evidence: `lift_confidence`, the points' mean lifting confidence.
 - **`fused`**: a lidar_mos and a lifted box sharing ≥ 5 LiDAR points, ≥ 30%
   of the smaller one's, are one object (greedy, most shared first, one to one):
   a box fit to both point sets, with the lifted class. Every other box is
@@ -40,7 +44,7 @@ corner sweeps matched to it on WATO, one sweep on a single-LiDAR bag:
 Scores are placeholders until per-source reliability is measured: lidar_mos
 `min(1, motion_score / 2)`, lifted `lift_confidence`, fused the members' mean.
 Boxes are yaw-only and undirected (heading mod π). Neighbouring chunks overlap
-by 6 s and both label the shared span; tracking stitches them.
+by 6 s and both label the shared span; tracking links them.
 
 ## Run
 
@@ -75,8 +79,11 @@ Under `chunks/<chunk_id>/viz/`:
   the reference LiDAR, every 10th frame.
 - `--view camera` → `proposals_cam_<show>/<cam>/<seq>.jpg`: boxes projected
   into every 10th image of each camera (`--camera` to pick), with the ego pose
-  at the image's own time. Boxes are at the sweep's time, up to 44 ms off on
-  WATO, so a moving car's box sits a little off it.
+  at the image's own time. Each image shows the single nearest proposal frame
+  among its paired sweeps' frames (earlier time wins a tie), including an empty
+  frame. Combining several frame times would draw a moving object at several
+  positions. Boxes retain their reference sweep time; object motion to the
+  image time is not compensated, so a moving car can still appear offset.
 
 `--show sources` colours lidar_mos orange and lifted cyan; `--show fused`
 colours the fused boxes by class (grey: none).
@@ -98,6 +105,10 @@ No artifact records lidar_preprocessing's canonical LiDAR, so the config states
 it (`frames.canonical_lidar`). A run fails with `CanonicalLidarError` when it
 doesn't match: a frame without exactly one sweep from it, or a Step F cluster
 not stamped with its frame's reference time.
+
+Camera overlays use the shared full-intrinsic/lens
+[camera model](../../docs/camera_geometry_contract.md) and check image
+dimensions against calibration. Viewing leaves stored proposal geometry intact.
 
 ## Output
 

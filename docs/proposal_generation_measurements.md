@@ -214,3 +214,49 @@ on any frame, both thin strips (1.55 × 0.23 m, 1.10 × 0.22 m): no side-on car
 among them. The 846 lifted rows dropped there are all cars, a median 8 points
 at 47 m, inside a car box with more points. Whether they were hidden cars or
 real far ones needs the WATO labels.
+
+## Fragments
+
+A second track on an object, at the same time, was 43% of scene-1100's
+false-positive track frames (`docs/tracking_measurements.md`, "Duplicate
+tracks"). The ones beside a car parked behind the ego are each a separate
+low-score SAM2 masklet (0.33-0.39, about 2,000 px) beside the car's 118,000-px
+mask, zero pixel overlap, labelled car or pedestrian. Each claims 6-8 of the
+car's edge returns, which box as a 0.2 × 0.1 × 1.5 m column beside the car for
+100-245 frames. The filter: drop a lifted box with ≥ `fragment_min_fraction` of
+its points within `fragment_radius_m` of the points of a box with ≥
+`fragment_min_ratio` × as many, any class.
+
+| fused, within 2 m | scene-0061 hits / false pos. | scene-1100 hits / false pos. |
+|---|---|---|
+| off | 352 / 145 | 372 / 143 |
+| fraction 0.5, ratio 2, 0.3 m | 349 / 141 | 372 / 88 |
+| fraction 0.8, ratio 2, 0.3 m | 351 / 142 | 372 / 89 |
+| fraction 0.95, ratio 2, 0.3 m | 352 / 143 | 372 / 107 |
+| **fraction 0.8, ratio 5, 0.3 m** | **352 / 144** | **372 / 89** |
+| fraction 0.8, ratio 2, 0.5 m | 349 / 141 | 372 / 89 |
+
+Ratio 5 keeps every hit on both scenes and removes 54 of scene-1100's 143
+false positives (precision 0.72 → 0.81). Downstream on scene-1100: track
+frames' precision 0.73 → 0.81 (0.81 → 0.97 under 15 m), duplicate false
+positives 59 → 8. On WATO it changes almost nothing: 2,669 tracks instead of
+2,672.
+
+## Camera-overlay alignment
+
+The camera viewer previously drew proposals from every LiDAR frame paired
+with an image. On three WATO chunks, that mixed proposal times on 41% of
+images, showing moving objects at several positions. It now selects one
+nearest reference frame. A separate 3,761-view check finds that lifted boxes
+with 5–19 returns have median dimensions 1.54 × 0.38 × 1.16 m: their sparse
+observed geometry also explains poor mask overlap. The
+[camera-box alignment diagnosis](camera_box_alignment_diagnosis.md) separates
+the viewer bug, partial geometry, ownership ambiguity, motion and calibration,
+and records before/after images and replay commands.
+
+The supplied PANO_NN image 50 in chunk 0005 is a different, isolated case:
+one proposal time and 287/173 near-car returns. Its fitted tops omit visible
+upper shape; grounding adds 0.55–0.59 m, creating the large downward wireframe
+extension. Current-sweep road fits agree with the ground grid to within
+2.1 cm. The [exact-frame diagnosis](nn50_box_alignment.md) records the
+point-coverage, grounding and radius experiments and their limitations.

@@ -34,18 +34,21 @@ proposal_generation → tracking → label_refinement / open_vocab_discovery →
 
 ingest, lidar_preprocessing, perception_2d and semantic_lifting are implemented
 end to end; proposal_generation has its first sources (Step F clusters,
-lifted instances, fusion; no LiDAR detector yet); tracking has a per-chunk v0
-(tracks and a parked / moving state per track; no stitching across chunks or
-ReID yet); label_refinement has a training-free v0 (one box per parked
-vehicle, one size and a smoothed path per moving track; no SLF yet); the rest
-are stubs raising NotImplementedError. Each implemented component's README is its
+lifted instances, fusion; no LiDAR detector yet); tracking has a v0 (tracks
+per chunk linked across chunks, a parked / moving state per track; no ReID
+yet); label_refinement has a v0 (one box per parked vehicle, one size and a
+smoothed path per moving track, then SLF's box shape fit per track to its
+masks and points, PyTorch on the GPU); the rest are stubs raising
+NotImplementedError. Each implemented component's README is its
 reference.
 Measurements behind defaults are in `docs/*_measurements.md`; which recordings
 are usable is `docs/drive_bag_survey.md`. Scoring against ground truth: import
 it into `gt_boxes` (`src/ingest/scripts/`: nuScenes annotations from a converted
 bag, or boxes drawn in SUSTechPOINTS), then run a stage's `scripts/eval_*.py`,
 which share `wato_common.eval`; the nuScenes scene is
-`NuScenes_v1_0_mini_scene_0061_0_mcap`.
+`NuScenes_v1_0_mini_scene_0061_0_mcap`, and the same scene ingested as two
+chunks, `NuScenes_v1_0_mini_scene_0061_2chunk`, scores a chunk seam
+(`docs/tracking_measurements.md`).
 
 ## Conventions
 
@@ -125,9 +128,11 @@ doesn't load; the trim-bag end-to-end test skips).
   3 × `chunk_overlap_seconds`. `sweep_id`, `camera_seq`, masklet,
   lifted-instance and `track_hint_id` ids are chunk-local: match a sweep or
   image across chunks by `(lidar_id, reference_timestamp_ns)` /
-  `(cam_id, camera_timestamp_ns)`. `tracking` stitches across the span and gives
-  each instant in it to one chunk (split at the midpoint):
-  `src/tracking/README.md`.
+  `(cam_id, camera_timestamp_ns)` (a sweep decoded into both chunks has
+  identical world points in both). Each instant of the span belongs to one
+  chunk, split at the midpoint (`wato_common.chunk_spans`): tracking marks its
+  rows by it (`owned`), and every `eval_*.py` scores an instant once, in its
+  owner. tracking links tracks across the span: `src/tracking/README.md`.
 - **lidar_preprocessing has two dynamic artifacts.** `*_dynamic_mask.npy` /
   `dynamic_map.npz` is Step B's *precision* verdict after its point filter
   (`~mask` is trusted static: perception_2d's depth anchors), read through
@@ -148,20 +153,25 @@ doesn't load; the trim-bag end-to-end test skips).
 - **Proposals are per frame and per source.** One `ProposalRow` per object per
   frame_sync frame, keyed on the frame's reference `sweep_id` (the canonical
   LiDAR's; `frame_id` is None for a sweep matched to none). Every source's rows
-  (`lidar_mos`, `lifted` today; `slf`, `lidar_detector` later) stay beside the
+  (`lidar_mos`, `lifted` today; `lidar_detector` later) stay beside the
   `fused` rows that list them in `member_proposal_ids`, so each source's
-  reliability can be measured; tracking reads the fused rows. `cls` is
+  reliability can be measured; tracking reads the fused rows. SLF is not a
+  proposal source: it fits one shape per track in label_refinement. `cls` is
   perception_2d's class (`car`, `truck`, ...), None when no lifted instance
   supports the box. No artifact records lidar_preprocessing's canonical LiDAR,
   so proposal_generation's config restates it (`frames.canonical_lidar`,
   `lidar_cc` in `.wato.yaml`) and `ProcessedSweeps.frames` raises
   `CanonicalLidarError` on a mismatch.
-- **Tracks are chunk-local for now.** tracking tracks each chunk's fused rows
-  (`track_id` `<chunk_id>-<n>`) and writes bag-level `tracks.parquet` +
-  `track_summaries.parquet`; `owned` marks each chunk's half of the shared
-  span, so consumers read only owned frames. A track's `motion_state`
-  (moving / parked / unknown) is judged on the whole track
-  (`src/tracking/README.md`), not by Step F's per-cluster `motion_score`.
+- **Tracks are bag-level.** tracking tracks each chunk's fused rows, links
+  each chunk's tracks to the next chunk's that agree in their shared span, and
+  writes bag-level `tracks.parquet` + `track_summaries.parquet`. A linked
+  track (`track_id` `<chunk_id>-<n>`, after its first chunk) has rows from each
+  of its chunks, so a shared-span instant can have two rows; `owned` marks the
+  one its chunk labels, consumers read only owned rows, and
+  `tracks.per_instant` keeps one row per instant. A track's `motion_state`
+  (moving / parked / unknown) is judged on the whole linked track
+  (`src/tracking/README.md`), not by Step F's per-cluster `motion_score`;
+  label_refinement refines it whole.
 - **Sensor physics lives in `sensor_model.py`** (profiles `vlp32c`, `vlp16`,
   `hdl32e`), never in YAML.
 
@@ -214,9 +224,12 @@ Details: `src/ingest/README.md`; measurements: `docs/ingest_measurements.md`.
   recordings; raw bgr8 `image_rect` on Feb 15 / Mar 9 — repoint the image
   topics), described by `CameraInfo.P[:3,:3]` with no distortion, so those
   cameras are `rectified: true` and ingest writes `K = P[:3,:3]`,
-  `distortion = []` (raw CameraInfo kept). Consumers just project with `K`
-  through `wato_common.artifacts.calibration`, whose accessors raise on a
-  missing extrinsic.
+  `distortion = []` (raw CameraInfo kept). Projection and inverse rays use
+  `CameraCalibration.model`, including full K and the stored image's lens
+  model. When changing projection, depth anchors, SLF rays or image geometry,
+  follow `docs/camera_geometry_contract.md` for supported models and image
+  normalization constraints. Accepted SLF boxes use the fitter's evaluated
+  positions for every frame without another smoothing pass.
 - **Before ingest, `validate-bag` / `trim-bag`.** Judged on log time. trim-bag
   uses the pinned `mcap` CLI (rosbag2's writer would empty custom-type schemas)
   and writes to `data/bags/trimmed/`, the only read-write mount under
@@ -282,9 +295,11 @@ docker run --rm --entrypoint uv \
 ```
 
 Verify a lock still reproduces by diffing that output, sorted, against
-`sort docker/requirements/<c>.txt | grep -v '^#'`. perception_2d needs
-`--index-strategy unsafe-first-match`: `download.pytorch.org/whl/cu128` mirrors
-common packages at its own versions, and uv's default then refuses PyPI.
+`sort docker/requirements/<c>.txt | grep -v '^#'`. perception_2d and
+label_refinement (torch) need `--index-strategy unsafe-first-match`:
+`download.pytorch.org/whl/cu128` mirrors common packages at its own versions,
+and uv's default then refuses PyPI. Adding a dependency, resolve it with the
+current lock as constraints (`-c`) so nothing already pinned moves.
 
 **Provenance** (`wato_common/`): `provenance.py` reads `WATO_GIT_COMMIT`,
 `WATO_GIT_DIRTY`, `WATO_BUILD_TIME`, `WATO_BASE_IMAGE` and the hash of

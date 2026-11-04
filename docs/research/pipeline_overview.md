@@ -67,7 +67,7 @@ LiDAR streams using:
   to the other
 
 ### Segment-Lift-and-Fit (SLF)
-Drives **`proposal_generation`**.
+Drives **`label_refinement`** (per track, `segment_lift_fit_guidance.md`).
 
 SLF turns a 2D mask (from SAM) into a 3D bounding box via three stages:
 1. Segment — SAM produces per-camera 2D masks from point/box prompts
@@ -142,18 +142,20 @@ semantic_lifting      reads: frame_index, poses, lidar_proc/*_world.npz, masks_2
 proposal_generation   reads: lidar_proc_index, lidar_proc/*_world.npz, motion_proposals, motion_clusters,
                              ground.npz, lifted_labels, lifted_instances (calibration, frame_index: viewers)
   └─ chunks/<chunk>/
-       ├─ proposals.parquet          (3D boxes per frame_sync frame: lidar_mos + lifted rows plus
-       │                              the fused rows that list them; tracking reads the fused)
-       └─ proposal_masks/            (planned: projected 2D mask used during SLF fitting)
+       └─ proposals.parquet          (3D boxes per frame_sync frame: lidar_mos + lifted rows plus
+                                      the fused rows that list them; tracking reads the fused)
 
 tracking              reads: proposals (fused rows + their members)  (builds on wato_common.tracking)
   └─ per-bag/
-       ├─ tracks.parquet             (track_id, chunk_id, sweep_id, proposal_id, box, owned)
+       ├─ tracks.parquet             (track_id linked across chunks; per chunk's frame:
+       │                              chunk_id, sweep_id, proposal_id, box, owned)
        └─ track_summaries.parquet    (per track: moving / parked / unknown, class, evidence)
 
-label_refinement      reads: tracks, lidar_proc/*_world.npz, ground.npz, poses
+label_refinement      reads: tracks, lidar_proc/*_world.npz, ground.npz, poses,
+                             masklets + masks_2d, frame_index, calibration (SLF)
   └─ per-bag/
-       └─ refined_labels.parquet     (track_id, per-frame refined box, one size per track)
+       └─ refined_labels.parquet     (track_id, per-frame refined box, one size per track,
+                                      size_source aggregate / percentile / slf)
 ```
 
 ---
@@ -164,18 +166,20 @@ Done: `ingest`; `lidar_preprocessing` (Steps A–F: deskew, classify, ground, re
 DA-V2 / DINOv2); `semantic_lifting` core (UniLiPs Eq. 1 lifting + cross-camera
 voting); `proposal_generation` first sources (gated `motion_clusters.parquet`
 rows as `lidar_mos`, boxes around lifted instances as `lifted`, fused on shared
-LiDAR points, with track-shape gates, a car height cap and a nested-box
-filter); `tracking` v0 (per chunk, parked / moving per track); `label_refinement`
-v0 (training-free: one box per parked vehicle from its accumulated points, one
-size + corner anchor + smoothed path per moving track). Ground truth for
+LiDAR points, with track-shape gates, a car height cap and fragment and
+nested-box filters); `tracking` v0 (per chunk, linked across chunk seams,
+parked / moving per track); `label_refinement` v0 (one box per parked vehicle
+from its accumulated points, one size + corner anchor + smoothed path per
+moving track, then SLF: a rounded-box shape fit per track to its masks and
+LiDAR points). Ground truth for
 scoring all of it: nuScenes scenes imported into `gt_boxes`, WATO boxes drawn
 in SUSTechPOINTS. Measurements: `docs/*_measurements.md`. Next:
 
-1. **`label_refinement`** — SLF per track: fit one car shape to the track's
-   masks in every frame and camera, with heading from its motion (box SDF first,
-   a mesh PCA prior after). Measured against the refined boxes on far cars.
-2. **`tracking`** — stitch tracks across the 6 s chunk overlaps (match boxes at
-   identical timestamps, split ownership at the midpoint); DINOv2 ReID where
+1. **`label_refinement`** — SLF's car mesh prior (a PCA SDF over a vehicle
+   mesh library, replacing the box for cars); per-frame pose in the fit; the
+   confidence calibrated on labels.
+2. **`tracking`** — merge the duplicate tracks one chunk sometimes keeps on one
+   object (most of the seam breaks left after linking); DINOv2 ReID where
    tracks still break.
 3. **`proposal_generation`** — LiDAR detector (CenterPoint or similar),
    deferred until the comparison class is chosen (`novelty_positioning.md`);
