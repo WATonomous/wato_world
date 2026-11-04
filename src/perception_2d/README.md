@@ -40,7 +40,8 @@ Two passes, so the heavy models never share VRAM:
    space, `1/depth = scale·disparity + shift`, by RANSAC with inliers judged in
    metres. The anchors are the static (`~dynamic_mask`) world-frame points of
    every sweep the image matched, projected with the ego pose at the image's
-   own `camera_timestamp_ns`. With too few anchors, a recent frame's fit is
+   own `camera_timestamp_ns`, through the shared full-intrinsic/lens
+   [camera model](../../docs/camera_geometry_contract.md). With too few anchors, a recent frame's fit is
    reused; a frame with no usable fit is not written.
 2. **Tracking.** The detector runs every `redetect_every_k` images. A box
    matching a track (box IoU with its mask bbox ≥ `iou_match_threshold`)

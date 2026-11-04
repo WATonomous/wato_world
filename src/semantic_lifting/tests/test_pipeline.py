@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -231,6 +232,23 @@ def test_points_inside_a_mask_are_labeled():
     assert labels.instance_ids.tolist() == [f"m_{CAM}"] * 3
     (inst,) = lifted_labels.read_instances(BAG, CHUNK)
     assert inst.masklet_ids == (f"m_{CAM}",) and inst.n_points_labeled == 3
+
+
+def test_lifting_uses_the_calibrated_raw_image_distortion():
+    # Optical x/z = .4. Brown k1=.5 gives xd=.432, u=53.6→pixel 54.
+    # Ignoring distortion would hit pixel 52, which has no instance mask.
+    _stage_chunk(points=np.array([[10.0, -4.0, 0.0]]))
+    c = Calibration.load(BAG)
+    cam = replace(
+        c.camera(CAM), distortion=(0.5, 0, 0, 0, 0), distortion_model="plumb_bob"
+    )
+    calibration.write(BAG, replace(c, cameras={CAM: cam}))
+    mask = np.zeros((H, W), bool)
+    mask[24, 54] = True
+    masklets.write_mask(BAG, CHUNK, f"m_{CAM}", SEQ, mask)
+    run(ComponentConfig(), bag_id=BAG)
+    labels = lifted_labels.read_sweep(BAG, CHUNK, SWEEP)
+    assert labels.point_indices.tolist() == [0]
 
 
 def test_points_behind_a_nearer_surface_take_no_label():

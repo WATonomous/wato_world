@@ -8,7 +8,9 @@ from wato_common.geometry.projection import (
     lift_pixel_to_world,
     project_lidar_to_image,
     project_points,
+    project_with_depth,
 )
+from wato_common.geometry.camera_model import CameraModel
 from wato_common.geometry.transforms import (
     flatten_se3,
     invert_se3,
@@ -20,6 +22,7 @@ from wato_common.geometry.transforms import (
 )
 
 __all__ = [
+    "CameraModel",
     "PoseSample",
     "batch_interpolate_poses",
     "flatten_se3",
@@ -30,6 +33,7 @@ __all__ = [
     "lift_pixel_to_world",
     "project_lidar_to_image",
     "project_points",
+    "project_with_depth",
     "quat_to_matrix",
     "slerp",
     "split_se3",

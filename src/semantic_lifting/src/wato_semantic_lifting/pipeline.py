@@ -143,7 +143,10 @@ class _ChunkLifter:
             cam = self.calibration.camera(ref.cam_id)
             W, H = frame.size
             uv, d_cam, valid = project_and_clip(
-                xyz, cam.K, compute_cam_T_world(ref.world_T_ego, cam.ego_T_cam), (W, H)
+                xyz,
+                cam.model_for_image((W, H)),
+                compute_cam_T_world(ref.world_T_ego, cam.ego_T_cam),
+                (W, H),
             )
             n_cameras += 1
             idx = np.flatnonzero(valid)

@@ -65,6 +65,23 @@ def build_calibration(
 
     cameras: dict[str, CameraCalibration] = {}
     for cam_id, info in camera_infos.items():
+        # CameraInfo K/P describe the full sensor. This artifact currently
+        # carries image-space calibration without ROI/binning metadata, so
+        # accepting an unnormalized subwindow would shift every projection.
+        roi = info.get("roi", {})
+        if (
+            any(
+                int(info.get(name, 0)) not in (0, 1)
+                for name in ("binning_x", "binning_y")
+            )
+            or any(int(roi.get(name, 0)) != 0 for name in ("x_offset", "y_offset"))
+            or int(roi.get("width", 0)) not in (0, int(info["width"]))
+            or int(roi.get("height", 0)) not in (0, int(info["height"]))
+        ):
+            raise CalibrationError(
+                f"camera {cam_id}: CameraInfo binning/ROI needs image-space "
+                "intrinsics; pass --calibration normalized for the recorded images"
+            )
         frame_id = info["frame_id"]
         ego_T_cam = _resolve_chain(static_transforms, ego_frame, frame_id)
         if ego_T_cam is None:
@@ -260,6 +277,12 @@ def freeze_from_bag(bag_path: str, bag_id: str, cfg: IngestConfig) -> str:
                         "height": int(msg.height),
                         "P": list(msg.p),
                         "R": list(msg.r),
+                        "binning_x": int(getattr(msg, "binning_x", 0)),
+                        "binning_y": int(getattr(msg, "binning_y", 0)),
+                        "roi": {
+                            name: int(getattr(getattr(msg, "roi", None), name, 0))
+                            for name in ("x_offset", "y_offset", "width", "height")
+                        },
                     }
             elif mt == "PointCloud2":
                 lidar_id = lidar_topic_to_id[topic]
@@ -337,8 +360,8 @@ def require_complete(calib: Calibration, cfg: IngestConfig) -> None:
     """Raise CalibrationError unless every configured sensor is calibrated.
 
     Each camera needs ego_T_cam (K is required to read the file at all); each
-    LiDAR needs ego_T_lidar.  Without them nothing downstream can place that
-    sensor's data in the ego or world frame.
+    LiDAR needs ego_T_lidar. Camera models and rigid extrinsics must also be
+    valid. Without them downstream cannot place sensor data correctly.
     """
     problems: list[str] = []
     for cam_id in cfg.topics.cameras:
@@ -349,6 +372,11 @@ def require_complete(calib: Calibration, cfg: IngestConfig) -> None:
             problems.append(
                 f"camera {cam_id}: no transform {calib.ego_frame} -> {c.frame_id}"
             )
+        else:
+            try:
+                _ = c.model
+            except ValueError as exc:
+                problems.append(str(exc))
     for lidar_id in cfg.topics.lidars:
         lid = calib.lidars.get(lidar_id)
         if lid is None:

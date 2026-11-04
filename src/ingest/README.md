@@ -143,13 +143,17 @@ Built from the bag unless `--calibration` is given:
   and P's focal length is ~2% lower). A rectified camera with unset `P`, a
   stereo baseline, or a non-identity `R` is refused. The raw CameraInfo is kept
   under `camera_info`.
+  Nontrivial CameraInfo binning/ROI is refused until an authored calibration
+  describes the stored images. Supported raw lens models and image-size
+  checks are in the [camera contract](../../docs/camera_geometry_contract.md).
 - **LiDAR frame_id** from the first PointCloud2 per LiDAR.
 - **Extrinsics** by a BFS over the `tf_static` topic from `ego_frame` to each
   sensor frame, in either edge direction, composing multi-hop chains.
 
 `require_complete` then stops ingest unless every camera has `ego_T_cam` and
 every LiDAR has `ego_T_lidar`. An authored file is parsed by the same reader
-and rejected, naming the field, if it lacks one.
+and rejected, naming the field, if it lacks one. Camera intrinsics, rigid
+extrinsics and declared lens models are validated before image processing.
 
 ## Poses
 

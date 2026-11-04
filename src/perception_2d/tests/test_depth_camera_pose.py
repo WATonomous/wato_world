@@ -84,3 +84,33 @@ def test_depth_anchors_on_every_paired_sweep(monkeypatch):
     seen, _ = _run(monkeypatch, _frame(np.eye(4), sweep_ids=(470, 471, 472)), per_sweep)
     ((points, _),) = seen
     assert points[:, 0].tolist() == [1.0, 2.0, 3.0]
+
+
+def test_depth_alignment_uses_the_raw_image_lens_model(monkeypatch):
+    monkeypatch.setattr(
+        pipeline, "load_static_lidar_points", lambda *args: np.array([[2.0, 0.0, 1.0]])
+    )
+    seen = []
+
+    def capture_fit(depth, disparity, **kwargs):
+        seen.append((depth, disparity))
+        return {"fit_status": 2}
+
+    monkeypatch.setattr(pipeline, "ransac_disparity_fit", capture_fit)
+    cfg = ComponentConfig()
+    cfg.depth.sky_mask_top_fraction = 0
+    camera = CameraCalibration(
+        "cam_front",
+        np.array([[1.0, 0, 1], [0, 1.0, 2], [0, 0, 1]]),
+        np.eye(4),
+        distortion=(0.25, 0, 0, 0, 0),
+        distortion_model="plumb_bob",
+    )
+    disparity = np.arange(1, 65, dtype=np.float32).reshape(8, 8)
+    pipeline._align_and_write_depth(
+        cfg, "bag", "0000", "cam_front", _frame(np.eye(4)), disparity, camera, deque()
+    )
+    # x/z=2, k1=.25: distorted x=4, pixel (5,2). Bare K gives (3,2).
+    assert len(seen) == 1
+    np.testing.assert_allclose(seen[0][0], [1])
+    np.testing.assert_allclose(seen[0][1], [disparity[2, 5]])

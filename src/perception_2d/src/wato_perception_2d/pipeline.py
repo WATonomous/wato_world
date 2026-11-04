@@ -235,7 +235,7 @@ def _align_and_write_depth(
         d_lidar, disp = build_anchor_pairs(
             static_pts,
             disparity,
-            calib.K,
+            calib.model_for_image((W, H)),
             cam_T_world,
             (W, H),
             sky_mask_top_fraction=cfg.depth.sky_mask_top_fraction,
