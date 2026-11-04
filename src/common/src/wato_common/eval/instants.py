@@ -2,7 +2,9 @@
 
 Every evaluation script scores at these instants: the frame nearest each
 ground-truth timestamp (within max_offset_ns), the ego position then (for range
-bands), and the ground-truth boxes as Scored. A box with no non-ground LiDAR
+bands), and the ground-truth boxes as Scored. Neighbouring chunks share 6 s,
+so a script passes each chunk its owned window (wato_common.chunk_spans) and
+scores every instant once, in the chunk that labels it. A box with no non-ground LiDAR
 point in the frame becomes ignore-GT (cls None), as the nuScenes benchmark
 drops such boxes; so does one outside the taxonomy.
 """
@@ -63,9 +65,11 @@ def labelled_instants(
     canonical_lidar: Optional[str],
     gt: dict[int, list[GtBox]],
     max_offset_ns: int,
+    window: tuple[float, float] = (-math.inf, math.inf),
 ) -> list[LabelledInstant]:
-    """The chunk's labelled instants, in time order. An instant whose frame
-    has no valid pose is skipped (no range to band it by)."""
+    """The chunk's labelled instants in window ([lo, hi) on the frame's
+    time), in time order. An instant whose frame has no valid pose is skipped
+    (no range to band it by)."""
     sweeps = ProcessedSweeps.load(bag_id, chunk_id)
     frames = sweeps.frames(canonical_lidar)
     if not frames or not gt:
@@ -76,6 +80,8 @@ def labelled_instants(
     for t_gt, boxes in sorted(gt.items()):
         k = int(np.argmin(np.abs(f_t - t_gt)))
         if abs(int(f_t[k]) - t_gt) > max_offset_ns:
+            continue
+        if not window[0] <= f_t[k] < window[1]:
             continue
         pose = poses.at(frames[k].reference_timestamp_ns)
         if not pose.valid:

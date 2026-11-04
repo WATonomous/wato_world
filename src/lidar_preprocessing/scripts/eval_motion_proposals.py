@@ -32,6 +32,7 @@ from collections import defaultdict
 import numpy as np
 
 from wato_common.artifact_store import bag_root, chunks_index_path, local_path
+from wato_common.chunk_spans import owned_windows
 from wato_common.artifacts import gt_boxes, motion_proposals
 from wato_common.artifacts.lidar_sweeps import ProcessedSweeps
 from wato_common.artifacts.motion_proposals import BIT_NAMES
@@ -97,7 +98,9 @@ def main() -> None:
             f"{args.bag_id}: no gt_boxes.parquet — import ground truth first"
         )
     gt = _gt_with_speeds(args.bag_id)
-    chunks = [r["chunk_id"] for r in read_rows(chunks_index_path(args.bag_id))]
+    index = read_rows(chunks_index_path(args.bag_id))
+    windows = owned_windows(index)
+    chunks = [r["chunk_id"] for r in index]
     if args.chunk:
         chunks = [c for c in chunks if c == args.chunk]
 
@@ -130,6 +133,8 @@ def main() -> None:
             k = int(np.argmin(np.abs(f_t - t_gt)))
             if abs(int(f_t[k]) - t_gt) > max_off:
                 continue
+            if not windows[cid][0] <= f_t[k] < windows[cid][1]:
+                continue  # a shared-span instant is scored in its owner
             n_instants += 1
             for sid in frames[k].sweep_ids:
                 world, seg = sweeps.world_and_dynamic_mask(sid)

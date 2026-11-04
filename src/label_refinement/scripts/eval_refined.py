@@ -21,6 +21,7 @@ from collections import defaultdict
 
 from wato_common.artifact_store import bag_root, chunks_index_path, local_path
 from wato_common.artifacts import refined_labels, tracks
+from wato_common.chunk_spans import owned_windows
 from wato_common.eval.boxes import Scored, Tally, tally_frame
 from wato_common.eval.instants import box_of, gt_by_time, labelled_instants
 from wato_common.io.parquet_io import read_rows
@@ -52,10 +53,17 @@ def main() -> None:
     bands: dict[str, dict[str, Tally]] = {k: {} for k in sources}
     by_class: dict[str, dict[str, Tally]] = {k: {} for k in sources}
     n = 0
-    for row in read_rows(chunks_index_path(args.bag_id)):
+    index = read_rows(chunks_index_path(args.bag_id))
+    windows = owned_windows(index)
+    for row in index:
         cid = row["chunk_id"]
         for inst in labelled_instants(
-            args.bag_id, cid, args.canonical_lidar, gt, int(args.max_offset_ms * 1e6)
+            args.bag_id,
+            cid,
+            args.canonical_lidar,
+            gt,
+            int(args.max_offset_ms * 1e6),
+            window=windows[cid],
         ):
             n += 1
             for k in sources:

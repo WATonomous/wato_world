@@ -35,6 +35,7 @@ import numpy as np
 from wato_common.artifact_store import bag_root, chunks_index_path, local_path
 from wato_common.artifacts import motion_proposals, proposals
 from wato_common.artifacts.lidar_sweeps import Frame, ProcessedSweeps
+from wato_common.chunk_spans import owned_windows
 from wato_common.eval.boxes import (
     DISTANCE_THRESHOLDS_M,
     Scored,
@@ -172,7 +173,9 @@ def main() -> None:
     ap.add_argument("--out", default=None, help="JSON path (default: <bag>/eval/)")
     args = ap.parse_args()
 
-    chunks = [r["chunk_id"] for r in read_rows(chunks_index_path(args.bag_id))]
+    index = read_rows(chunks_index_path(args.bag_id))
+    windows = owned_windows(index)
+    chunks = [r["chunk_id"] for r in index]
     if args.chunk:
         chunks = [c for c in chunks if c == args.chunk]
     gt = gt_by_time(args.bag_id)
@@ -189,7 +192,12 @@ def main() -> None:
         clusters = motion_proposals.read_clusters(args.bag_id, cid)
         out["chunks"][cid] = proxy(rows, clusters, frames, poses)
         instants = labelled_instants(
-            args.bag_id, cid, args.canonical_lidar, gt, int(args.max_offset_ms * 1e6)
+            args.bag_id,
+            cid,
+            args.canonical_lidar,
+            gt,
+            int(args.max_offset_ms * 1e6),
+            window=windows[cid],
         )
         n_instants += len(instants)
         offsets += [
