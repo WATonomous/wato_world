@@ -46,3 +46,46 @@ def test_camera_overlay_draws_the_box_in_front_of_the_camera():
     img = np.asarray(Image.open(files[0]).convert("RGB")).astype(int)
     # Car A at x = 10 is in view: something other than the grey backdrop.
     assert (np.abs(img - 40).sum(axis=2) > 120).any()
+
+
+@pytest.mark.parametrize("image_ms, expected_ms", [(190, 200), (110, 100), (150, 100)])
+def test_camera_overlay_uses_one_nearest_frame_when_sweeps_span_frames(
+    monkeypatch, image_ms, expected_ms
+):
+    """One image may pair to scanners belonging to different canonical ticks."""
+    from dataclasses import replace
+    from wato_common.artifacts.frame_index import FrameIndex
+    from wato_proposal_generation.viz import camera
+
+    index = FrameIndex.load(BAG, CHUNK)
+    image = replace(
+        index.frames[0], timestamp_ns=image_ms * 1_000_000, sweep_ids=(0, 3)
+    )
+    monkeypatch.setattr(camera.FrameIndex, "load", lambda *args: FrameIndex([image]))
+    drawn = []
+    original = camera.draw_boxes
+
+    def capture(img, boxes, *args):
+        drawn.extend(boxes)
+        return original(img, boxes, *args)
+
+    monkeypatch.setattr(camera, "draw_boxes", capture)
+    files = camera.write_camera(CFG, BAG, CHUNK, every=1, show="fused")
+    assert len(files) == 1
+    assert {p.reference_timestamp_ns for p in drawn} == {expected_ms * 1_000_000}
+
+
+def test_camera_overlay_does_not_fall_back_to_an_older_nonempty_frame():
+    from dataclasses import replace
+    from wato_common.artifacts.frame_index import FrameIndex
+    from wato_proposal_generation.viz import camera, data
+
+    image = replace(
+        FrameIndex.load(BAG, CHUNK).frames[0],
+        timestamp_ns=190_000_000,
+        sweep_ids=(0, 3),
+    )
+    view = data.load(CFG, BAG, CHUNK, "fused")
+    view = replace(view, by_frame={0: view.by_frame[0]})
+    ref_of = {s: f.reference_sweep_id for f in view.frames for s in f.sweep_ids}
+    assert camera._boxes_for(image, view, ref_of) == []

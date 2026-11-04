@@ -1,9 +1,10 @@
 """Camera overlays: each shown box projected into the images that see it.
 
-An image shows the boxes of the frames its paired sweeps belong to, projected
-with the ego pose at the image's own time (FrameIndex's world_T_ego). The boxes
-are at the sweep's time, up to 44 ms away on WATO, so a moving car's box sits a
-little off it. JPEG, since a chunk's images are large.
+An image shows one proposal frame: the nearest reference time among the frames
+its paired sweeps belong to. Combining all paired frames draws a moving object
+at several positions on one image. Projection uses the ego pose at the image's
+own time (FrameIndex's world_T_ego). Object motion from the reference sweep to
+the image is not compensated. JPEG, since a chunk's images are large.
 
     python -m wato_proposal_generation viz --view camera --bag BAG --chunk 0005
 """
@@ -18,7 +19,7 @@ from PIL import Image, ImageDraw
 
 from wato_common.artifacts.calibration import Calibration
 from wato_common.artifacts.frame_index import CameraFrame, FrameIndex
-from wato_common.geometry import invert_se3, project_points
+from wato_common.geometry import CameraModel, invert_se3, project_points
 from wato_common.tracking import box_corners_3d
 from wato_proposal_generation.boxes import box_of
 from wato_proposal_generation.config import ComponentConfig
@@ -35,7 +36,7 @@ EDGES = (
 def draw_boxes(
     img: Image.Image,
     boxes: list,
-    K: np.ndarray,
+    K: np.ndarray | CameraModel,
     cam_T_world: np.ndarray,
     show: str,
 ) -> int:
@@ -62,8 +63,22 @@ def draw_boxes(
 
 
 def _boxes_for(frame: CameraFrame, view: data.ChunkView, ref_of_sweep: dict) -> list:
-    refs = sorted({ref_of_sweep[s] for s in frame.sweep_ids if s in ref_of_sweep})
-    return [p for r in refs for p in view.by_frame.get(r, [])]
+    """One image's nearest paired proposal frame, including an empty frame.
+
+    A camera image can pair to several canonical ticks, and the corner sweep
+    nearest that image can belong to a different tick from the centre sweep.
+    Select by the canonical reference timestamp, with earlier time winning ties.
+    """
+    refs = {ref_of_sweep[s] for s in frame.sweep_ids if s in ref_of_sweep}
+    if not refs:
+        return []
+
+    def order(sid):
+        timestamp = view.sweeps.get(sid).reference_timestamp_ns
+        return abs(timestamp - frame.timestamp_ns), timestamp, sid
+
+    nearest = min(refs, key=order)
+    return view.by_frame.get(nearest, [])
 
 
 def write_camera(
@@ -93,7 +108,7 @@ def write_camera(
             img = Image.open(frame.image_path).convert("RGB")
             cam_T_world = invert_se3(cam.ego_T_cam) @ invert_se3(frame.world_T_ego)
             boxes = _boxes_for(frame, view, ref_of_sweep)
-            n = draw_boxes(img, boxes, cam.K, cam_T_world, show)
+            n = draw_boxes(img, boxes, cam.model_for_image(img.size), cam_T_world, show)
             ImageDraw.Draw(img).text(
                 (10, 10),
                 f"{cam_id} seq {frame.camera_seq} · {n} {show} boxes",
