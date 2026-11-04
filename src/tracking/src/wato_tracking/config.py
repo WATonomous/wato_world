@@ -70,6 +70,22 @@ class FilterConfig(BaseModel):
     min_strong: int = 1
 
 
+class StitchConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # A track of chunk k and one of chunk k+1 are one object when, at the
+    # instants of their shared span both saw, their boxes' centres are within
+    # max_centre_dist_m at no fewer than min_agreeing_frames instants, and at
+    # no less than min_agreement of the instants the shorter of the two saw
+    # there (SUSHI's shared-frame link); one to one, the pairs agreeing at the
+    # most instants in total win. Both chunks decode the same sweeps there, so
+    # the same object's box is usually identical in both
+    # (docs/tracking_measurements.md).
+    max_centre_dist_m: float = 1.0
+    min_agreement: float = 0.5
+    min_agreeing_frames: int = 3
+
+
 class ComponentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -77,6 +93,7 @@ class ComponentConfig(BaseModel):
     strong: StrongConfig = Field(default_factory=StrongConfig)
     motion: MotionConfig = Field(default_factory=MotionConfig)
     filter: FilterConfig = Field(default_factory=FilterConfig)
+    stitch: StitchConfig = Field(default_factory=StitchConfig)
 
 
 def load_config(path: str) -> ComponentConfig:

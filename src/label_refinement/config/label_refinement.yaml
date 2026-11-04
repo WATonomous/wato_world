@@ -19,5 +19,47 @@ label_refinement:
       pedestrian: 50.0
       bicycle: 50.0
       motorcycle: 50.0
+    centred_classes: [pedestrian]  # grow about the observed centre, not from the near corner
     heading_min_speed_mps: 0.5   # heading from velocity at or above this
     smooth_window_s: 1.0
+
+  slf:                           # a box shape fit per track to its masks and points
+    enabled: true
+    classes: [car, truck, bus, pedestrian, bicycle, motorcycle]
+    device: auto                 # CUDA if torch sees a GPU, else CPU
+    max_views: 16                # images with the track's mask, spread over its life
+    min_views: 3
+    min_mask_px: 64
+    crop_px: 48                  # >=2; crop_px x crop_px rays over box and mask
+    crop_margin: 0.2
+    ray_samples: 32              # >=2 samples along each ray
+    edge_px: 1.0                 # >0; the silhouette's soft edge
+    corner_radius_frac: 0.2
+    occluder_margin_m: 0.5       # a nearer object's mask hides the track
+    point_margin_m: 0.15         # LiDAR returns on the observed box, grown by this
+    max_points: 2048
+    batch_tracks: 32             # tracks fit at once (as if alone)
+    iterations: 150              # Adam, SLF's settings
+    lr: 0.1
+    weight_mask: 1.0
+    weight_lidar_per_m: 2.0
+    lidar_robust_m: 0.05
+    enclosing_classes: [pedestrian]  # their returns need only be inside the box
+    weight_size_prior: 0.01      # a weak pull to the class's mean size
+    size_prior_sigma: 0.25
+    size_prior_m:                # l, w, h (nuScenes means, CenterPoint's anchors)
+      car: [4.63, 1.97, 1.74]
+      truck: [6.94, 2.51, 2.84]
+      bus: [11.19, 2.94, 3.47]
+      pedestrian: [0.73, 0.67, 1.77]
+      bicycle: [1.70, 0.60, 1.28]
+      motorcycle: [2.11, 0.77, 1.47]
+    weight_offset: 0.01
+    offset_sigma_m: 0.3
+    min_size_m: 0.1
+    max_size_m: 20.0
+    min_silhouette_gain: 0.15    # kept only if it explains the masks this much better,
+    min_silhouette_gain_by_class:  # but a pedestrian's always (the prior gives its depth)
+      pedestrian: -1.0
+    max_residual_silhouette: 0.8
+    max_residual_lidar_m: 0.3

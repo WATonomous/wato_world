@@ -1,22 +1,27 @@
 """tracking pipeline orchestrator.
 
-Per chunk:
-  1. The chunk's fused proposals as per-frame detections (detections.py).
-  2. Tracks over them (tracker.py).
-  3. Per track: class, parked / moving / unknown, kept or dropped (summary.py).
-  4. Each kept track's frames, with `owned` set on the frames in the chunk's
-     own half of each 6 s overlap.
-Then every chunk's tracks go to tracks.parquet + track_summaries.parquet
-(wato_common.artifacts.tracks), bag-level. Track ids are chunk-local
-("<chunk_id>-<n>") until tracks are stitched across chunks.
+1. Per chunk: its fused proposals as per-frame detections (detections.py), and
+   tracks over them (tracker.py), named "<chunk_id>-<n>".
+2. Each chunk's tracks linked to the next chunk's across the span they share
+   (stitch.py). A chain of linked tracks is one track of the bag, named after
+   its first.
+3. Per track, over one observation per instant (the owning chunk's where both
+   saw it): class, parked / moving / unknown, kept or dropped (summary.py). A
+   track with no owned frame is dropped too: the chunks that label its
+   instants didn't see it.
+4. Every kept track's frames from every chunk, `owned` set on those in their
+   chunk's own half of each shared span (wato_common.chunk_spans).
+Then tracks.parquet + track_summaries.parquet (wato_common.artifacts.tracks),
+bag-level.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import logging
-import math
 from typing import Optional
 
+from wato_common import chunk_spans
 from wato_common import manifest as common_manifest
 from wato_common.artifact_store import (
     chunk_root,
@@ -27,78 +32,107 @@ from wato_common.artifact_store import (
 )
 from wato_common.artifacts import proposals, tracks
 from wato_common.artifacts.tracks import TrackFrame, TrackSummary
-from wato_tracking import detections, summary, tracker
+from wato_tracking import detections, stitch, summary, tracker
 from wato_tracking.config import ComponentConfig
 from wato_tracking.io import load_chunks
+from wato_tracking.tracker import Observation
 
 log = logging.getLogger(__name__)
 
 
-def ownership(chunks: list[dict]) -> dict[str, tuple[float, float]]:
-    """chunk_id -> [lo, hi) of the instants it labels: each shared span is
-    split at its midpoint, (t_end(k) + t_start(k+1)) / 2."""
-    rows = sorted(chunks, key=lambda r: r["t_start_ns"])
-    out = {}
-    for i, r in enumerate(rows):
-        lo = (rows[i - 1]["t_end_ns"] + r["t_start_ns"]) / 2 if i > 0 else -math.inf
-        hi = (
-            (r["t_end_ns"] + rows[i + 1]["t_start_ns"]) / 2
-            if i + 1 < len(rows)
-            else math.inf
-        )
-        out[r["chunk_id"]] = (lo, hi)
+def track_chunk(
+    cfg: ComponentConfig, bag_id: str, chunk_id: str
+) -> list[list[Observation]]:
+    """The chunk's tracks, each its observations in time order."""
+    det_frames = detections.frames(proposals.read(bag_id, chunk_id), cfg.strong)
+    out = tracker.run(det_frames, cfg.association)
+    log.info("chunk %s: %d frames, %d tracks", chunk_id, len(det_frames), len(out))
     return out
 
 
-def process_chunk(
-    cfg: ComponentConfig, bag_id: str, chunk_id: str, owned: tuple[float, float]
+def _frame(
+    track_id: str, chunk_id: str, o: Observation, window: tuple[float, float]
+) -> TrackFrame:
+    """The observation as a row; cls is set once the track's class is known."""
+    p = o.det.proposal
+    return TrackFrame(
+        track_id=track_id,
+        chunk_id=chunk_id,
+        sweep_id=p.sweep_id,
+        reference_timestamp_ns=p.reference_timestamp_ns,
+        proposal_id=p.proposal_id,
+        cx=p.cx,
+        cy=p.cy,
+        cz=p.cz,
+        w=p.w,
+        l=p.l,
+        h=p.h,
+        heading=p.heading,
+        cls=None,
+        score=p.score,
+        owned=window[0] <= p.reference_timestamp_ns < window[1],
+        supporting_cam_ids=p.supporting_cam_ids,
+        supporting_masklet_ids=p.supporting_masklet_ids,
+    )
+
+
+def link_and_summarize(
+    cfg: ComponentConfig,
+    index: list[dict],
+    per_chunk: dict[str, list[list[Observation]]],
 ) -> tuple[list[TrackFrame], list[TrackSummary]]:
-    rows = proposals.read(bag_id, chunk_id)
-    det_frames = detections.frames(rows, cfg.strong)
-    frames_out: list[TrackFrame] = []
+    """Every chunk's tracks (per_chunk, by chunk_id) as the bag's tracks."""
+    order = [r["chunk_id"] for r in sorted(index, key=lambda r: r["t_start_ns"])]
+    windows = chunk_spans.owned_windows(index)
+    obs_of: dict[str, tuple[str, list[Observation]]] = {}
+    chunk_tracks: list[list[stitch.ChunkTrack]] = []
+    for cid in order:
+        ts = []
+        for n, obs in enumerate(per_chunk[cid]):
+            tid = f"{cid}-{n}"
+            obs_of[tid] = (cid, obs)
+            centres = {
+                o.frame.t_ns: (o.det.proposal.cx, o.det.proposal.cy) for o in obs
+            }
+            ts.append(stitch.ChunkTrack(tid, cid, centres))
+        chunk_tracks.append(ts)
+    joined = stitch.chains(chunk_tracks, chunk_spans.shared_spans(index), cfg.stitch)
+
+    frames: list[TrackFrame] = []
     summaries: list[TrackSummary] = []
-    n_dropped = 0
-    for obs in tracker.run(det_frames, cfg.association):
-        s = summary.summarize(f"{chunk_id}-{len(summaries)}", chunk_id, obs, cfg.motion)
-        if not summary.keep(s, cfg.filter):
-            n_dropped += 1
+    n_weak = n_unowned = n_linked = 0
+    for chain in joined:
+        tid = chain[0].track_id
+        rows, obs_at = [], {}
+        for member in chain:
+            cid, obs = obs_of[member.track_id]
+            for o in obs:
+                rows.append(_frame(tid, cid, o, windows[cid]))
+                obs_at[(cid, o.det.proposal.sweep_id)] = o
+        if not any(f.owned for f in rows):
+            n_unowned += 1
             continue
+        line = [obs_at[(f.chunk_id, f.sweep_id)] for f in tracks.per_instant(rows)]
+        s = summary.summarize(tid, line, cfg.motion)
+        if not summary.keep(s, cfg.filter):
+            n_weak += 1
+            continue
+        n_linked += len(chain) > 1
         summaries.append(s)
-        for o in obs:
-            p = o.det.proposal
-            frames_out.append(
-                TrackFrame(
-                    track_id=s.track_id,
-                    chunk_id=chunk_id,
-                    sweep_id=p.sweep_id,
-                    reference_timestamp_ns=p.reference_timestamp_ns,
-                    proposal_id=p.proposal_id,
-                    cx=p.cx,
-                    cy=p.cy,
-                    cz=p.cz,
-                    w=p.w,
-                    l=p.l,
-                    h=p.h,
-                    heading=p.heading,
-                    cls=s.cls,
-                    score=p.score,
-                    owned=owned[0] <= p.reference_timestamp_ns < owned[1],
-                    supporting_cam_ids=p.supporting_cam_ids,
-                    supporting_masklet_ids=p.supporting_masklet_ids,
-                )
-            )
+        frames += [dataclasses.replace(f, cls=s.cls) for f in rows]
     states = {
         st: sum(s.motion_state == st for s in summaries) for st in tracks.MOTION_STATES
     }
     log.info(
-        "chunk %s: %d frames, %d tracks kept (%s), %d short weak tracks dropped",
-        chunk_id,
-        len(det_frames),
+        "%d tracks kept (%s), %d of them linked across chunks; dropped: %d short "
+        "weak, %d with no owned frame",
         len(summaries),
         ", ".join(f"{n} {st}" for st, n in states.items()),
-        n_dropped,
+        n_linked,
+        n_weak,
+        n_unowned,
     )
-    return frames_out, summaries
+    return frames, summaries
 
 
 def _write_chunk_manifest(
@@ -133,51 +167,36 @@ def run(
     cfg: ComponentConfig,
     *,
     bag_id: str,
-    chunk_id: Optional[str] = None,
     force: bool = False,
     config_path: Optional[str] = None,
 ) -> None:
-    """Track every chunk of the bag (or one chunk, replacing only its tracks).
+    """Track every chunk of the bag and link the tracks across chunks.
 
     Skips when the bag's tracks exist unless force=True.
     """
-    chunks = load_chunks(bag_id)
-    if not chunks:
+    index = load_chunks(bag_id)
+    if not index:
         raise FileNotFoundError(
             f"No chunks found for bag {bag_id!r} — run ingest first."
         )
-    windows = ownership(chunks)
-    todo = [c["chunk_id"] for c in chunks]
-    if chunk_id:
-        if chunk_id not in windows:
-            raise ValueError(f"chunk_id {chunk_id!r} not found for bag {bag_id!r}")
-        todo = [chunk_id]
     if tracks.exists(bag_id) and not force:
         log.info("bag %s already tracked — skipping (use --force)", bag_id)
         return
-    missing = [c for c in todo if not proposals.exists(bag_id, c)]
+    chunk_ids = [r["chunk_id"] for r in index]
+    missing = [c for c in chunk_ids if not proposals.exists(bag_id, c)]
     if missing:
         raise FileNotFoundError(
             f"bag {bag_id!r}: no proposals.parquet for chunks {missing} "
             "(run proposal_generation)"
         )
-
-    frames: list[TrackFrame] = []
-    summaries: list[TrackSummary] = []
-    if chunk_id and tracks.exists(bag_id):
-        old_frames, old_summaries = tracks.read(bag_id)
-        frames = [f for f in old_frames if f.chunk_id != chunk_id]
-        summaries = [s for s in old_summaries if s.chunk_id != chunk_id]
-    for cid in todo:
-        f, s = process_chunk(cfg, bag_id, cid, windows[cid])
-        frames += f
-        summaries += s
+    per_chunk = {cid: track_chunk(cfg, bag_id, cid) for cid in chunk_ids}
+    frames, summaries = link_and_summarize(cfg, index, per_chunk)
     tracks.write(bag_id, frames, summaries)
-    for cid in todo:
+    for cid in chunk_ids:
         _write_chunk_manifest(bag_id, cid, config_path)
     log.info(
         "tracking complete for bag %s: %d chunks, %d tracks",
         bag_id,
-        len(todo),
+        len(chunk_ids),
         len(summaries),
     )

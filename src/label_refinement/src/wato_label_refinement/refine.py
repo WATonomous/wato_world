@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence
 
 import numpy as np
 
@@ -36,6 +36,24 @@ class Refined:
     boxes: list[Box3D]  # one per input frame, in input order
     heading_directed: list[bool]
     residual_smoothness: Optional[float]
+    velocity: np.ndarray  # (N, 2) m/s of the smoothed path, input order
+
+
+@dataclass(frozen=True)
+class Anchor:
+    """A box's extent along one axis of a refined heading, about its centre,
+    and which end is nearer the ego: what anchored_centre places a box of a
+    given size by."""
+
+    lo: float
+    hi: float
+    near_lo: bool
+
+    def offset(self, size: float) -> float:
+        """The refined centre's offset along the axis for that size."""
+        if self.hi - self.lo >= size:
+            return (self.lo + self.hi) / 2
+        return self.lo + size / 2 if self.near_lo else self.hi - size / 2
 
 
 def enclosing_region(
@@ -61,6 +79,14 @@ def enclosing_region(
     )
 
 
+def one_per_voxel(points: np.ndarray, voxel_m: float) -> np.ndarray:
+    """The first point in each voxel_m cell, in input order: a parked car's
+    frames see the same surface again and again."""
+    q = np.floor(points / voxel_m).astype(np.int64)
+    _, first = np.unique(q, axis=0, return_index=True)
+    return points[np.sort(first)]
+
+
 def refine_parked(
     points: np.ndarray, ground: Optional[GroundGrid], cfg: ParkedConfig
 ) -> Optional[Box3D]:
@@ -68,9 +94,7 @@ def refine_parked(
     few points for it."""
     if points.shape[0] < cfg.min_points:
         return None
-    q = np.floor(points / cfg.voxel_m).astype(np.int64)
-    _, first = np.unique(q, axis=0, return_index=True)
-    p = points[np.sort(first)]
+    p = one_per_voxel(points, cfg.voxel_m)
     group = p[largest_group(p, cfg.cluster_radius_m)]
     if group.shape[0] < cfg.min_points:
         return None
@@ -103,28 +127,37 @@ def _undirected_mean(headings: np.ndarray) -> float:
     )
 
 
+def axes(heading: float) -> tuple[np.ndarray, np.ndarray]:
+    """The box's length (u) and width (v) unit axes in BEV."""
+    c, s = math.cos(heading), math.sin(heading)
+    return np.array([c, s]), np.array([-s, c])
+
+
+def anchors(observed: Box3D, heading: float, ego_xy) -> tuple[Anchor, Anchor]:
+    """The observed box's anchors along the length and width axes of
+    `heading`."""
+    u_axis, v_axis = axes(heading)
+    centre = np.array([observed.cx, observed.cy])
+    rel = bev_corners(observed) - centre
+    ego = np.asarray(ego_xy, float) - centre
+    out = []
+    for axis in (u_axis, v_axis):
+        ext = rel @ axis
+        lo, hi = float(ext.min()), float(ext.max())
+        out.append(Anchor(lo, hi, bool(ego @ axis < (lo + hi) / 2)))
+    return out[0], out[1]
+
+
 def anchored_centre(
     observed: Box3D, length: float, width: float, heading: float, ego_xy
 ) -> np.ndarray:
     """Where a length x width box at `heading` sits when its corner nearest the
     ego is the observed box's. Along an axis the observed box spans at least
     the refined size, the observed centre is kept."""
-    c, s = math.cos(heading), math.sin(heading)
-    u_axis, v_axis = np.array([c, s]), np.array([-s, c])
+    au, av = anchors(observed, heading, ego_xy)
+    u_axis, v_axis = axes(heading)
     centre = np.array([observed.cx, observed.cy])
-    rel = bev_corners(observed) - centre
-    u, v = rel @ u_axis, rel @ v_axis
-    ego = np.asarray(ego_xy, float) - centre
-    out = []
-    for ext, size, e in ((u, length, ego @ u_axis), (v, width, ego @ v_axis)):
-        lo, hi = float(ext.min()), float(ext.max())
-        if hi - lo >= size:
-            out.append((lo + hi) / 2)
-        elif e < (lo + hi) / 2:
-            out.append(lo + size / 2)
-        else:
-            out.append(hi - size / 2)
-    return centre + out[0] * u_axis + out[1] * v_axis
+    return centre + au.offset(length) * u_axis + av.offset(width) * v_axis
 
 
 def refine_moving(
@@ -132,14 +165,20 @@ def refine_moving(
     boxes: list[Box3D],
     n_points: np.ndarray,
     ego_xy: np.ndarray,
-    ground: Optional[GroundGrid],
+    grounds: Sequence[Optional[GroundGrid]],
     cfg: MovingConfig,
     cls: Optional[str] = None,
+    size: Optional[tuple[float, float, float]] = None,
+    offset: tuple[float, float] = (0.0, 0.0),
 ) -> Refined:
     """Boxes for a moving (or unknown) track, one per frame in input order.
 
-    ego_xy: (N, 2) ego position at each frame's time; cls picks the size
-    percentile.
+    ego_xy: (N, 2) ego position at each frame's time; grounds: each frame's
+    ground grid (its chunk's), None to keep the boxes' median bottom; cls
+    picks the size percentile and whether the box is corner-anchored or keeps
+    its observed centre (cfg.centred_classes). size (l, w, h) replaces the
+    percentile size and offset (along the length and width axes) moves every
+    centre: SLF's fit (slf.py).
     """
     n = len(boxes)
     order = np.argsort(t_ns, kind="stable")
@@ -153,6 +192,8 @@ def refine_moving(
     width = float(np.percentile(ws, q))
     height = float(np.percentile(hs, q))
     length, width = max(length, width), min(length, width)
+    if size is not None:
+        length, width, height = size
     still_heading = _undirected_mean(np.array([boxes[i].heading for i in dense]))
 
     t = (t_ns[order] - t_ns[order][0]) * 1e-9
@@ -162,9 +203,18 @@ def refine_moving(
     directed = speed >= cfg.heading_min_speed_mps
     heading = np.where(directed, np.arctan2(vel[:, 1], vel[:, 0]), still_heading)
 
+    centred = cls in cfg.centred_classes
     anchored = np.array(
         [
-            anchored_centre(boxes[i], length, width, float(heading[j]), ego_xy[i])
+            (
+                np.array([boxes[i].cx, boxes[i].cy])
+                if centred
+                else anchored_centre(
+                    boxes[i], length, width, float(heading[j]), ego_xy[i]
+                )
+            )
+            + offset[0] * axes(float(heading[j]))[0]
+            + offset[1] * axes(float(heading[j]))[1]
             for j, i in enumerate(order)
         ]
     )
@@ -180,6 +230,7 @@ def refine_moving(
     flags = [False] * n
     for j, i in enumerate(order):
         cx, cy = smooth[j]
+        ground = grounds[i]
         bottom = (
             float(ground.height_at(np.array([[cx, cy]]))[0])
             if ground is not None
@@ -197,4 +248,11 @@ def refine_moving(
             else wrap_heading_half_pi(float(heading[j])),
         )
         flags[i] = bool(directed[j])
-    return Refined(boxes=out, heading_directed=flags, residual_smoothness=residual)
+    velocity = np.zeros((n, 2))
+    velocity[order] = vel
+    return Refined(
+        boxes=out,
+        heading_directed=flags,
+        residual_smoothness=residual,
+        velocity=velocity,
+    )

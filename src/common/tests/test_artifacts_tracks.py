@@ -53,7 +53,6 @@ def _frame(sweep_id=4, **overrides) -> tr.TrackFrame:
 def _summary(**overrides) -> tr.TrackSummary:
     fields = dict(
         track_id="0000-0",
-        chunk_id="0000",
         n_frames=2,
         first_timestamp_ns=4_000,
         last_timestamp_ns=6_000,
@@ -71,11 +70,14 @@ def _summary(**overrides) -> tr.TrackSummary:
 
 
 def _bag():
+    # Sweep 6 of chunk 0000 is in the span chunk 0001 owns; 0001 saw the same
+    # instant as its sweep 1. Two rows, one instant.
     frames = [
         _frame(4),
         _frame(
             6, owned=False, cls=None, supporting_cam_ids=(), supporting_masklet_ids=()
         ),
+        _frame(1, chunk_id="0001", reference_timestamp_ns=6_000),
     ]
     return frames, [_summary()]
 
@@ -88,6 +90,14 @@ def test_round_trip():
     assert tr.read(BAG) == (frames, summaries)
     tr.write(BAG, [], [])
     assert tr.read(BAG) == ([], [])
+
+
+def test_per_instant_keeps_the_owned_frame_of_a_shared_instant():
+    frames, _ = _bag()
+    one = tr.per_instant(frames)
+    assert [(f.chunk_id, f.sweep_id) for f in one] == [("0000", 4), ("0001", 1)]
+    # An instant only the non-owner saw keeps that chunk's frame.
+    assert tr.per_instant(frames[:2]) == frames[:2]
 
 
 def test_records_track_the_row_schemas():
@@ -113,8 +123,11 @@ def test_records_track_the_row_schemas():
         (lambda fs, ss: (fs, ss + [_summary(track_id="0000-1")]), "no frames"),
         (lambda fs, ss: (fs + [_frame(4, proposal_id="x")], ss), "two frames at one"),
         (
-            lambda fs, ss: ([fs[0], dataclasses.replace(fs[1], chunk_id="0001")], ss),
-            "chunk_id",
+            lambda fs, ss: (
+                fs[:1] + [dataclasses.replace(fs[1], owned=True)] + fs[2:],
+                ss,
+            ),
+            "two owned frames at one instant",
         ),
         (lambda fs, ss: (fs, [dataclasses.replace(ss[0], n_frames=3)]), "n_frames"),
         (

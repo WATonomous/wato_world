@@ -11,9 +11,14 @@ On disk, per bag:
   track_summaries.parquet
       one TrackSummaryRow per track (schemas.TRACK_SUMMARY_SCHEMA).
 
+A track can span chunks: its rows come from every chunk it was linked across,
+so an instant of a shared span can have one row per chunk (schemas.TrackRow).
+`per_instant` gives one frame per instant, the owned one where there is one.
+
 Invariants, checked on write and on read: a track has one summary and at
-least one frame; its frames have distinct sweep_ids and the summary's chunk_id,
-n_frames and first / last timestamps match them; motion_state is one of
+least one frame; its frames have distinct (chunk_id, sweep_id), at most one
+owned frame per reference_timestamp_ns, and the summary's n_frames (distinct
+instants) and first / last timestamps match them; motion_state is one of
 MOTION_STATES.
 """
 
@@ -75,7 +80,6 @@ class TrackSummary:
     schemas.TrackSummaryRow."""
 
     track_id: str
-    chunk_id: str
     n_frames: int
     first_timestamp_ns: int
     last_timestamp_ns: int
@@ -108,15 +112,14 @@ def _problem(frames: list[TrackFrame], summaries: list[TrackSummary]) -> Optiona
         where = f"track {tid!r}"
         if not fs:
             return f"{where} has no frames"
-        if len({f.sweep_id for f in fs}) != len(fs):
-            return f"{where} has two frames at one sweep_id"
-        if any(f.chunk_id != s.chunk_id for f in fs):
-            return (
-                f"{where}: a frame's chunk_id differs from its summary's {s.chunk_id!r}"
-            )
-        if s.n_frames != len(fs):
-            return f"{where}: n_frames {s.n_frames} but {len(fs)} frames"
+        if len({(f.chunk_id, f.sweep_id) for f in fs}) != len(fs):
+            return f"{where} has two frames at one (chunk_id, sweep_id)"
+        owned = [f.reference_timestamp_ns for f in fs if f.owned]
+        if len(set(owned)) != len(owned):
+            return f"{where} has two owned frames at one instant"
         t = [f.reference_timestamp_ns for f in fs]
+        if s.n_frames != len(set(t)):
+            return f"{where}: n_frames {s.n_frames} but {len(set(t))} instants"
         if (s.first_timestamp_ns, s.last_timestamp_ns) != (min(t), max(t)):
             return f"{where}: first/last timestamps don't match its frames"
     return None
@@ -156,6 +159,17 @@ def read(bag_id: str) -> tuple[list[TrackFrame], list[TrackSummary]]:
     if problem is not None:
         raise ArtifactFormatError(local_path(tracks_path(bag_id)), problem)
     return frames, summaries
+
+
+def per_instant(frames: list[TrackFrame]) -> list[TrackFrame]:
+    """One track's frames, one per instant in time order: the owned frame
+    where the track has one, else the one chunk's that saw it then."""
+    best: dict[int, TrackFrame] = {}
+    for f in frames:
+        t = f.reference_timestamp_ns
+        if t not in best or (f.owned and not best[t].owned):
+            best[t] = f
+    return [best[t] for t in sorted(best)]
 
 
 def exists(bag_id: str) -> bool:

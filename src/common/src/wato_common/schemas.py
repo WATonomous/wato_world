@@ -655,7 +655,8 @@ class ProposalRow(BaseModel):
     Every source's proposals are rows, and so are fusion's: provenance
     "lidar_mos" (lidar_preprocessing Step F motion clusters; MotionClusterRow
     shares the box columns), "lifted" (a box around one semantic_lifting
-    instance's points), "slf", "lidar_detector" or "fused". A fused row lists
+    instance's points), "lidar_detector" or "fused". (SLF fits shapes per
+    track in label_refinement, not per frame here.) A fused row lists
     the source rows it merges in member_proposal_ids; source rows stay so each
     source's reliability can be measured. tracking reads the fused rows. List
     columns are JSON-encoded. The evidence columns at the end are null except
@@ -686,7 +687,7 @@ class ProposalRow(BaseModel):
     # semantic_lifting; None when no lifted instance supports the box.
     cls: Optional[str]
     score: float
-    # "lidar_mos" | "lifted" | "slf" | "lidar_detector" | "fused"
+    # "lidar_mos" | "lifted" | "lidar_detector" | "fused"
     provenance: str
     lidar_point_count: Optional[int] = None
     supporting_cam_ids: str = "[]"  # JSON list[str] of cam_id
@@ -755,15 +756,18 @@ def decode_int_list(s: str) -> list[int]:
 
 
 class TrackRow(BaseModel):
-    """One row per (track, frame) in tracks.parquet: the fused proposal the
-    track took in that frame.
+    """One row per (track, chunk, frame) in tracks.parquet: the fused proposal
+    the track took in that chunk's frame.
 
-    track_id is unique in the bag ("<chunk_id>-<n>" while tracks are
-    chunk-local). The box is the proposal's, as measured; label_refinement
-    refines it. cls is the track's class (TrackSummaryRow), on every row.
-    owned marks the frames this chunk labels: neighbouring chunks share 6 s,
-    and each instant belongs to the chunk on its side of the shared span's
-    midpoint (src/tracking/README.md). List columns are JSON-encoded.
+    track_id is unique in the bag: a track is one object over every chunk it
+    was linked across ("<chunk_id>-<n>", named after its first chunk). sweep_id
+    and proposal_id are chunk_id's (every id restarts per chunk). Neighbouring
+    chunks share 6 s, so an instant there can have one row per chunk; owned
+    marks the row of the chunk that labels it, the chunk on its side of the
+    shared span's midpoint (wato_common.chunk_spans), so a track has at most
+    one owned row per instant. The box is the proposal's, as measured;
+    label_refinement refines it. cls is the track's class (TrackSummaryRow),
+    on every row. List columns are JSON-encoded.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -816,14 +820,16 @@ TRACK_SCHEMA = pa.schema(
 
 class TrackSummaryRow(BaseModel):
     """One row per track in track_summaries.parquet: what tracking concluded
-    about the whole track, and the evidence it concluded it from."""
+    about the whole track, and the evidence it concluded it from.
+
+    Judged over one frame per instant (the owned row where the track has one),
+    so an instant both chunks saw counts once."""
 
     model_config = ConfigDict(extra="forbid")
 
     track_id: str
     bag_id: str
-    chunk_id: str
-    n_frames: int
+    n_frames: int  # distinct instants
     first_timestamp_ns: int
     last_timestamp_ns: int
     # "moving" | "parked" | "unknown" (too short to tell)
@@ -842,7 +848,6 @@ TRACK_SUMMARY_SCHEMA = pa.schema(
     [
         pa.field("track_id", pa.string()),
         pa.field("bag_id", pa.string()),
-        pa.field("chunk_id", pa.string()),
         pa.field("n_frames", pa.int64()),
         pa.field("first_timestamp_ns", pa.int64()),
         pa.field("last_timestamp_ns", pa.int64()),
@@ -863,18 +868,20 @@ TRACK_SUMMARY_SCHEMA = pa.schema(
 
 
 class RefinedTrackRow(BaseModel):
-    """One row per (track, frame) in refined_labels.parquet: the track's box
-    in that frame after refinement.
+    """One row per tracks.parquet row in refined_labels.parquet: the track's
+    box in that chunk's frame after refinement.
 
     Every row of a track shares one size (w, l, h). A parked track has one box
-    on every frame; a moving one a pose per frame. heading_directed marks a
+    on every frame; a moving one a pose per instant (an instant's rows from
+    both chunks of a shared span get the same box). heading_directed marks a
     heading taken from the track's motion (its front is known); otherwise
     heading is undirected (mod pi), as proposed. size_source says where the
     size came from: "aggregate" (fit to the parked track's points over every
-    frame), "percentile" (a high percentile of its densest frames' boxes).
-    confidence is an uncalibrated ranking until labels calibrate it. owned is
-    tracks.parquet's. The residual columns are null unless the step that
-    measures them ran.
+    frame), "percentile" (a high percentile of its densest frames' boxes),
+    "slf" (a box shape fit to the track's masks and points, which replaced
+    either where it passed SLF's gates). confidence is an uncalibrated ranking
+    until labels calibrate it. owned is tracks.parquet's. The residual
+    columns are null unless the step that measures them ran.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -897,6 +904,9 @@ class RefinedTrackRow(BaseModel):
     size_source: str
     confidence: float
     owned: bool
+    # Of the written box, on the views SLF fit (null where SLF didn't run):
+    # mean 1 − IoU of its silhouette with the masks, and median |SDF| [m] at
+    # its LiDAR returns (outside only, for a class whose box encloses them).
     residual_silhouette: Optional[float] = None
     residual_lidar_fit: Optional[float] = None
     # RMS distance [m] between the anchored and the smoothed centres (moving).

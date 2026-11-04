@@ -35,7 +35,7 @@ from wato_common.schemas import (
 )
 
 FUSED = "fused"
-SOURCES = ("lidar_mos", "lifted", "slf", "lidar_detector")
+SOURCES = ("lidar_mos", "lifted", "lidar_detector")
 PROVENANCES = SOURCES + (FUSED,)
 
 _LIST_FIELDS = {

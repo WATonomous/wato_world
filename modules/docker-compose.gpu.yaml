@@ -21,9 +21,6 @@ services:
               capabilities: [gpu]
   perception_2d_dev: *gpu-defaults
 
-  tracking: *gpu-defaults
-  tracking_dev: *gpu-defaults
-
   label_refinement: *gpu-defaults
   label_refinement_dev: *gpu-defaults
 

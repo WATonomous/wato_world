@@ -1,15 +1,20 @@
 # label_refinement
 
-Training-free refinement of tracking's tracks: one box per parked vehicle from
-its points over every frame, and one size, a corner anchor and a smoothed path
-per moving track. CPU only. SLF (fitting a shape to the camera masks per
-track) and a learned refiner (LabelFormer) come later. Measurements:
-`docs/label_refinement_measurements.md`.
+Per-track refinement of tracking's tracks: one box per parked vehicle from its
+points over every frame, one size, a corner anchor and a smoothed path per
+moving track (Phase 3, training-free), then SLF: a box shape fit to the
+track's camera masks and LiDAR points, which replaces the size where it
+explains the masks better. SLF runs in PyTorch on the GPU (a CPU path for
+tests and GPU-less hosts); a learned refiner (LabelFormer) and a car mesh
+prior for SLF come later. Measurements: `docs/label_refinement_measurements.md`.
 
 ## How a track is refined
 
 What a track is comes from tracking (`track_summaries.parquet`): parked,
-moving or unknown, and its class.
+moving or unknown, and its class. A track linked across chunks is refined
+whole, over one frame per instant (`tracks.per_instant`: the owned frame where
+both chunks of a shared span saw it), each frame against its own chunk's world
+sweeps, poses and ground grid (a parked box: its chunk with the most frames).
 
 - **Parked vehicle** (car, truck, bus; 3D Auto Labeling's static path). Every
   frame sees the car from another side, and it doesn't move, so its points over
@@ -29,13 +34,59 @@ moving or unknown, and its class.
     slower, the mean of its denser frames' headings, mod π.
   - Each frame's box is placed on the observed box's corner nearest the ego
     and extends away from it (OYSTER, CPD); along an axis the observed box
-    already spans at full size, its centre is kept.
+    already spans at full size, its centre is kept. A pedestrian's box keeps
+    its observed centre: a person's returns surround it.
   - Centres are smoothed by the same 1 s local linear fit;
     `residual_smoothness` is the RMS distance it moved them. A mover's points
     are not stacked: 3DAL found aligning them by noisy boxes hurt.
 
 Every row of a track has one size. `confidence` is the median score of the
 track's proposals, an uncalibrated ranking until labels calibrate it.
+
+## SLF: a shape fit per track
+
+An adaptation of Segment, Lift and Fit (Li et al., ECCV 2024), with a rounded box for the shape, on
+tracks of `slf.classes` (all six classes):
+
+- **Views.** The images in which one of the track's masklets has a mask, at
+  the camera's pose at the image's own time; up to 16 spread over the track's
+  life (the largest projected box in each stretch), at least 3. Each is a
+  48 × 48 grid of rays over the box's and the mask's bounding rectangle. Pixels
+  of a nearer tracked object's mask are left out (the track may continue
+  behind it); a mover's box moves by its velocity to the image's time.
+  Projection and inverse rays use the shared full-intrinsic/lens model:
+  [camera contract](../../docs/camera_geometry_contract.md).
+- **Shape and pose.** One length, width and height for the track. Each
+  frame starts at Phase 3's smoothed position and follows size changes from a vehicle's
+  near corner (the far faces are what the LiDAR doesn't see and the
+  silhouette does), a parked box's or a pedestrian's centre. One small offset
+  along the box's axes is shared by the track; heading and bottom are Phase
+  3's.
+  Fitting uses a local origin per track before float32 conversion, so large
+  map coordinates retain centimetre precision.
+- **Fit.** Adam over log size and the offset, 150 steps at lr 0.1 (SLF's),
+  32 tracks per fit, each on its own loss (the GPU's cost is launching each
+  step, so a batch takes about as long as one track), minimising: Dice between each view's soft silhouette (the SDF's minimum
+  along each ray) and its mask; a robust |SDF| at the LiDAR returns on the
+  observed boxes (they lie on a vehicle's surface; a pedestrian's need only be
+  inside its box); a weak pull to the class's mean size (nuScenes', as
+  CenterPoint's anchors) and of the offset to zero.
+- **Gates.** The fit replaces Phase 3's geometry (`size_source` `slf`, the
+  exact fitted size and evaluated positions for every frame) only if it lowers the silhouette
+  residual (mean 1 − IoU over the views) by ≥ 0.15: where Phase 3's box
+  already matches the masks the fit mostly shrinks it to masks drawn tight. A
+  pedestrian's fit is kept whatever the gain: its masks are a few pixels wide
+  and its returns a sliver, and the prior gives the depth and width neither
+  shows. Every kept fit needs a silhouette residual ≤ 0.8 and a median |SDF| ≤
+  0.3 m. `residual_silhouette` and `residual_lidar_fit` are the written box's
+  on the views, kept or not; null where SLF didn't run.
+
+Accepted positions are written directly: another smoother or ground lookup
+would change the geometry the quality gates evaluated. Heading and bottom
+remain Phase 3's constraints. The learned shape space, full pose fit and
+first-intersection LiDAR term of the paper are not implemented; the
+[primary-source review](../../docs/research/slf_projection_implementation_review.md)
+separates these adaptations from implementation bugs.
 
 ## Run
 
@@ -48,22 +99,27 @@ python /ws/src/label_refinement/scripts/eval_refined.py <bag_id> [--canonical-li
 tracking must have run. The bag is skipped if `refined_labels.parquet` exists
 unless `--force`. Each chunk gets `manifest_label_refinement.json`.
 `eval_refined.py` scores the owned refined boxes and the track boxes they came
-from against `gt_boxes.parquet`, side by side.
+from against `gt_boxes.parquet`, side by side, each labelled instant once, in
+the chunk that owns it.
 
 ## Inputs and output
 
 Reads `tracks.parquet` + `track_summaries.parquet`
 (`wato_common.artifacts.tracks`), the world sweeps
-(`wato_common.artifacts.lidar_sweeps`), `ground.npz` and `poses.parquet`.
+(`wato_common.artifacts.lidar_sweeps`), `ground.npz` and `poses.parquet`, and
+for SLF perception_2d's masklets and masks (`wato_common.artifacts.masklets`),
+`frame_index.parquet` (`FrameIndex`) and `calibration.json`.
 The config's `frames.canonical_lidar` must be the one lidar_preprocessing ran
 with (`lidar_cc` in `.wato.yaml`): a track frame's points are its frame's
 sweeps.
 
 Writes bag-level `refined_labels.parquet` through
-`wato_common.artifacts.refined_labels`: one `RefinedTrackRow` per (track,
-frame), with `owned` carried from tracks.parquet. `size_source` is
-`aggregate` (parked, from its points) or `percentile`.
+`wato_common.artifacts.refined_labels`: one `RefinedTrackRow` per
+tracks.parquet row, with `owned` carried from it; the two rows of an instant
+both chunks saw get the same box. `size_source` is `aggregate` (parked, from
+its points), `percentile` or `slf`.
 
 Configuration: `config/label_refinement.yaml` and `.wato.yaml` (the canonical
 LiDAR only; a test fails on any other drift); every field is documented in
-[`config.py`](src/wato_label_refinement/config.py).
+[`config.py`](src/wato_label_refinement/config.py). `slf.enabled: false` gives
+Phase 3 alone; `slf.device` picks the GPU (`auto`) or the CPU.

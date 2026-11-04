@@ -1,6 +1,7 @@
-"""label_refinement's per-track refinement, and the pipeline on a staged chunk.
+"""label_refinement's per-track refinement, and the pipeline on staged chunks.
 
-Staged scene, one LiDAR, 10 frames at 10 Hz, ego at the origin, ground at z 0:
+Staged scene, one LiDAR, 10 frames at 10 Hz, ego at the origin, ground at z 0
+(as one chunk, or as two sharing frame 5):
   P  a parked 4.4 x 1.8 m car at (10, 5); each frame sees one face of it
      (its rear in the first half, its left side in the second), so each
      frame's box covers that face only
@@ -33,12 +34,18 @@ from wato_common.schemas import (
 )
 from wato_common.tracking import fit_bev_box
 from wato_label_refinement import refine
-from wato_label_refinement.config import ComponentConfig, MovingConfig, ParkedConfig
+from wato_label_refinement.config import (
+    ComponentConfig,
+    MovingConfig,
+    ParkedConfig,
+    SlfConfig,
+)
 from wato_label_refinement.pipeline import run
 
 BAG, CHUNK = "b", "0000"
 MS = 1_000_000
 N = 10
+PHASE3 = ComponentConfig(slf=SlfConfig(enabled=False))
 
 
 @pytest.fixture(autouse=True)
@@ -67,26 +74,31 @@ def _t(k):
     return (100 + 100 * k) * MS
 
 
-def _stage():
-    os.makedirs(local_path(lidar_proc_dir(BAG, CHUNK)), exist_ok=True)
+def _stage_chunk(chunk, ks, owned, ground_z=0.0, masklets=False):
+    """Chunk `chunk` sees frames ks (its sweeps numbered from 0); returns its
+    track frames, owned where owned(k)."""
+    os.makedirs(local_path(lidar_proc_dir(BAG, chunk)), exist_ok=True)
     normals = np.zeros((40, 40, 3), np.float32)
     normals[..., 2] = 1.0
     ground.write(
         BAG,
-        CHUNK,
+        chunk,
         ground.GroundGrid(
-            np.zeros((40, 40), np.float32), normals, np.array([-50.0, -50.0]), 2.5
+            np.full((40, 40), ground_z, np.float32),
+            normals,
+            np.array([-50.0, -50.0]),
+            2.5,
         ),
         np.empty((0, 3)),
     )
     meta, frames = [], []
-    for k in range(N):
+    for sid, k in enumerate(ks):
         p, m = _parked_face(k), _mover_face(k)
         xyz = np.concatenate([p, m])
         uri = lidar_sweeps.write_world(
             BAG,
-            CHUNK,
-            k,
+            chunk,
+            sid,
             lidar_sweeps.WorldSweep(
                 x=xyz[:, 0],
                 y=xyz[:, 1],
@@ -98,10 +110,10 @@ def _stage():
         meta.append(
             ProcessedSweepMeta(
                 bag_id=BAG,
-                chunk_id=CHUNK,
-                sweep_id=k,
+                chunk_id=chunk,
+                sweep_id=sid,
                 lidar_id="lidar_top",
-                frame_id=k,
+                frame_id=sid,
                 reference_timestamp_ns=_t(k),
                 n_points_total=len(xyz),
                 n_points_static=len(xyz),
@@ -112,15 +124,15 @@ def _stage():
                 deskewed=True,
             ).model_dump()
         )
-        for tid, pts, owned in (("0000-0", p, True), ("0000-1", m, k < N - 1)):
+        for tid, pts in (("0000-0", p), ("0000-1", m)):
             b = fit_bev_box(pts)
             frames.append(
                 TrackFrame(
                     track_id=tid,
-                    chunk_id=CHUNK,
-                    sweep_id=k,
+                    chunk_id=chunk,
+                    sweep_id=sid,
                     reference_timestamp_ns=_t(k),
-                    proposal_id=f"fused-{k:06d}-{tid[-1]}",
+                    proposal_id=f"fused-{sid:06d}-{tid[-1]}",
                     cx=b.cx,
                     cy=b.cy,
                     cz=b.cz,
@@ -130,15 +142,17 @@ def _stage():
                     heading=b.heading,
                     cls="car",
                     score=0.5,
-                    owned=owned,
+                    owned=owned(tid, k),
+                    supporting_cam_ids=("CAM_A",) if masklets else (),
+                    supporting_masklet_ids=(f"m{tid[-1]}",) if masklets else (),
                 )
             )
-    write_table(meta, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(BAG, CHUNK))
+    write_table(meta, PROCESSED_SWEEPS_SCHEMA, lidar_proc_index_path(BAG, chunk))
     write_table(
         [
             dict(
                 bag_id=BAG,
-                chunk_id=CHUNK,
+                chunk_id=chunk,
                 timestamp_ns=t * MS,
                 x=0.0,
                 y=0.0,
@@ -155,13 +169,15 @@ def _stage():
             for t in (0, 2000)
         ],
         POSES_SCHEMA,
-        poses_path(BAG, CHUNK),
+        poses_path(BAG, chunk),
     )
+    return frames
 
+
+def _write_tracks(frames):
     def summary(tid, state):
         return TrackSummary(
             track_id=tid,
-            chunk_id=CHUNK,
             n_frames=N,
             first_timestamp_ns=_t(0),
             last_timestamp_ns=_t(N - 1),
@@ -180,9 +196,25 @@ def _stage():
     )
 
 
+def _stage():
+    # The mover's last frame is another chunk's to label.
+    _write_tracks(
+        _stage_chunk(CHUNK, range(N), lambda tid, k: tid == "0000-0" or k < N - 1)
+    )
+
+
+def _stage_two_chunks():
+    # Chunk 0000 sees frames 0-5, chunk 0001 frames 5-9 (as its sweeps 0-4),
+    # standing on ground 0.5 m higher; 0001 labels frame 5 on.
+    _write_tracks(
+        _stage_chunk("0000", range(6), lambda tid, k: k < 5)
+        + _stage_chunk("0001", range(5, N), lambda tid, k: True, ground_z=0.5)
+    )
+
+
 def test_parked_car_gets_one_box_from_every_frames_points():
     _stage()
-    run(ComponentConfig(), bag_id=BAG)
+    run(PHASE3, bag_id=BAG)
     out = refined_labels.read(BAG)
     parked = [b for b in out if b.track_id == "0000-0"]
     assert len(parked) == N and len({(b.cx, b.cy) for b in parked}) == 1
@@ -196,7 +228,7 @@ def test_parked_car_gets_one_box_from_every_frames_points():
 
 def test_moving_car_gets_one_size_its_heading_and_its_far_side_back():
     _stage()
-    run(ComponentConfig(), bag_id=BAG)
+    run(PHASE3, bag_id=BAG)
     moving = sorted(
         (b for b in refined_labels.read(BAG) if b.track_id == "0000-1"),
         key=lambda b: b.sweep_id,
@@ -212,6 +244,141 @@ def test_moving_car_gets_one_size_its_heading_and_its_far_side_back():
     assert m.cx == pytest.approx(-10.0 + N // 2, abs=0.3)
     assert (m.cy - m.w / 2, m.cy + m.w / 2) == pytest.approx((-5.4, -5.1), abs=0.1)
     assert m.residual_smoothness is not None and m.residual_smoothness < 0.2
+
+
+def test_a_track_across_two_chunks_is_refined_whole():
+    _stage_two_chunks()
+    run(PHASE3, bag_id=BAG)
+    out = refined_labels.read(BAG)
+    parked = [b for b in out if b.track_id == "0000-0"]
+    # Every row, both chunks' copies of frame 5 included, gets one box: the
+    # rear seen by chunk 0000 and the side by 0001 make one footprint.
+    assert len(parked) == N + 1 and len({(b.cx, b.cy, b.cz) for b in parked}) == 1
+    assert parked[0].l == pytest.approx(4.4, abs=0.3)
+    assert parked[0].w == pytest.approx(1.8, abs=0.3)
+    moving = [b for b in out if b.track_id == "0000-1"]
+    assert len({(b.w, b.l, b.h) for b in moving}) == 1
+    at5 = [b for b in moving if b.reference_timestamp_ns == _t(5)]
+    assert sorted((b.chunk_id, b.owned) for b in at5) == [
+        ("0000", False),
+        ("0001", True),
+    ]
+    assert at5[0].cx == at5[1].cx and at5[0].cz == at5[1].cz
+    # Each frame sits on its own chunk's ground.
+    bottom = {b.chunk_id: b.cz - b.h / 2 for b in moving if b.owned}
+    assert bottom == pytest.approx({"0000": 0.0, "0001": 0.5}, abs=1e-6)
+
+
+# A camera at the ego, 1.5 m up, looking at the mover's side (bearing ~243°).
+CAM_POS = np.array([0.0, 0.0, 1.5])
+CAM_K = np.array([[300.0, 0.0, 600.0], [0.0, 300.0, 400.0], [0.0, 0.0, 1.0]])
+CAM_W, CAM_H = 1200, 800
+
+
+def _ego_T_cam():
+    z = np.array([-0.5, -1.0, 0.0]) / math.sqrt(1.25)
+    y = np.array([0.0, 0.0, -1.0])
+    x = np.cross(y, z)
+    t = np.eye(4)
+    t[:3, :3] = np.column_stack([x, y, z])
+    t[:3, 3] = CAM_POS
+    return t
+
+
+def _true_box(tid, k):
+    if tid == "0000-0":
+        return np.array([7.8, 3.2, 0.0]), np.array([12.2, 6.8, 1.5])  # parked
+    x = -10.0 + k
+    return np.array([x - 2.2, -6.9, 0.0]), np.array([x + 2.2, -5.1, 1.5])
+
+
+def _stage_camera():
+    from wato_common.artifacts import calibration, frame_index, masklets
+    from wato_common.artifacts.calibration import (
+        Calibration,
+        CameraCalibration,
+        LidarCalibration,
+    )
+    from wato_common.schemas import FrameIndexRow
+
+    calibration.write(
+        BAG,
+        Calibration(
+            cameras={
+                "CAM_A": CameraCalibration(
+                    "CAM_A", CAM_K, _ego_T_cam(), width=CAM_W, height=CAM_H
+                )
+            },
+            lidars={"lidar_top": LidarCalibration("lidar_top", np.eye(4))},
+        ),
+    )
+    frame_index.write(
+        BAG,
+        CHUNK,
+        [
+            FrameIndexRow(
+                frame_id=f"{k}",
+                bag_id=BAG,
+                chunk_id=CHUNK,
+                sweep_id=k,
+                lidar_id="lidar_top",
+                lidar_path="",
+                reference_timestamp_ns=_t(k),
+                cam_id="CAM_A",
+                image_path=f"/img/{k:06d}.jpg",
+                camera_seq=k,
+                camera_timestamp_ns=_t(k),
+                valid_camera=True,
+                valid_pose=True,
+            )
+            for k in range(N)
+        ],
+    )
+    # Each car's silhouette, every pixel's ray tested against its true box.
+    uu, vv = np.meshgrid(np.arange(CAM_W) + 0.5, np.arange(CAM_H) + 0.5)
+    d = (
+        np.stack(
+            [
+                (uu - CAM_K[0, 2]) / CAM_K[0, 0],
+                (vv - CAM_K[1, 2]) / CAM_K[1, 1],
+                np.ones_like(uu),
+            ],
+            -1,
+        )
+        @ _ego_T_cam()[:3, :3].T
+    )
+    for tid in ("0000-0", "0000-1"):
+        for k in range(N):
+            lo, hi = _true_box(tid, k)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                t1, t2 = (lo - CAM_POS) / d, (hi - CAM_POS) / d
+            near = np.nanmax(np.minimum(t1, t2), -1)
+            far = np.nanmin(np.maximum(t1, t2), -1)
+            masklets.write_mask(
+                BAG, CHUNK, f"m{tid[-1]}", k, far >= np.maximum(near, 0)
+            )
+    masklets.write(
+        BAG,
+        CHUNK,
+        [
+            masklets.MaskletRecord(f"m{i}", "CAM_A", "car", 0.9, tuple(range(N)))
+            for i in "01"
+        ],
+    )
+
+
+def test_slf_gives_the_mover_the_width_its_lidar_never_saw():
+    _write_tracks(_stage_chunk(CHUNK, range(N), lambda tid, k: True, masklets=True))
+    _stage_camera()
+    run(ComponentConfig(), bag_id=BAG)
+    moving = [b for b in refined_labels.read(BAG) if b.track_id == "0000-1"]
+    m = moving[N // 2]
+    # Phase 3 left it 0.3 m wide (no frame saw more than the near side).
+    assert m.size_source == "slf"
+    assert m.w == pytest.approx(1.8, abs=0.4) and m.l == pytest.approx(4.4, abs=0.5)
+    # Still on its near side's points, grown away from the ego.
+    assert m.cy + m.w / 2 == pytest.approx(-5.1, abs=0.25)
+    assert m.residual_silhouette is not None and m.residual_silhouette < 0.3
 
 
 def test_anchored_centre_extends_away_from_the_ego():
@@ -250,7 +417,7 @@ def test_size_is_a_high_percentile_of_the_densest_frames():
         boxes,
         n_points,
         np.zeros((10, 2)),
-        None,
+        [None] * 10,
         MovingConfig(),
     )
     lengths = [2.0 + 0.2 * i for i in range(5, 10)]

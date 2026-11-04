@@ -5,11 +5,12 @@ Written by label_refinement; read by student_training and evaluation.
 On disk, per bag:
 
   refined_labels.parquet
-      one RefinedTrackRow per (track, frame) (schemas.REFINED_TRACK_SCHEMA).
+      one RefinedTrackRow per tracks.parquet row (schemas.REFINED_TRACK_SCHEMA).
 
-Invariants, checked on write and on read: a (track_id, sweep_id) appears once;
-every row of a track has the same size (w, l, h), all positive; motion_state is
-one of tracks.MOTION_STATES and size_source one of SIZE_SOURCES.
+Invariants, checked on write and on read: a (track_id, chunk_id, sweep_id)
+appears once, and a track has at most one owned row per instant; every row of
+a track has the same size (w, l, h), all positive; motion_state is one of
+tracks.MOTION_STATES and size_source one of SIZE_SOURCES.
 """
 
 from __future__ import annotations
@@ -26,7 +27,8 @@ from wato_common.schemas import REFINED_TRACK_SCHEMA, RefinedTrackRow
 
 AGGREGATE = "aggregate"
 PERCENTILE = "percentile"
-SIZE_SOURCES = (AGGREGATE, PERCENTILE)
+SLF = "slf"
+SIZE_SOURCES = (AGGREGATE, PERCENTILE, SLF)
 
 
 @dataclass(frozen=True)
@@ -58,13 +60,18 @@ class RefinedBox:
 
 def _problem(boxes: list[RefinedBox]) -> Optional[str]:
     """The first broken invariant (module docstring), or None."""
-    seen: set[tuple[str, int]] = set()
+    seen: set[tuple[str, str, int]] = set()
+    owned: set[tuple[str, int]] = set()
     size: dict[str, tuple[float, float, float]] = {}
     for b in boxes:
-        where = f"track {b.track_id!r} at sweep {b.sweep_id}"
-        if (b.track_id, b.sweep_id) in seen:
+        where = f"track {b.track_id!r} at chunk {b.chunk_id} sweep {b.sweep_id}"
+        if (b.track_id, b.chunk_id, b.sweep_id) in seen:
             return f"{where} appears twice"
-        seen.add((b.track_id, b.sweep_id))
+        seen.add((b.track_id, b.chunk_id, b.sweep_id))
+        if b.owned:
+            if (b.track_id, b.reference_timestamp_ns) in owned:
+                return f"{where}: a second owned row at one instant"
+            owned.add((b.track_id, b.reference_timestamp_ns))
         if b.motion_state not in MOTION_STATES:
             return f"{where}: motion_state {b.motion_state!r} not in {MOTION_STATES}"
         if b.size_source not in SIZE_SOURCES:

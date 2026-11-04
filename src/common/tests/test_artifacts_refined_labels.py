@@ -46,9 +46,11 @@ def _box(sweep_id=4, **overrides) -> rl.RefinedBox:
 
 
 def _bag():
+    # Sweep 5 of chunk 0000 is chunk 0001's sweep 0: one instant, two rows.
     return [
         _box(4),
         _box(5, owned=False),
+        _box(0, chunk_id="0001", reference_timestamp_ns=5_000),
         _box(
             4,
             track_id="0000-1",
@@ -58,6 +60,17 @@ def _bag():
             heading_directed=False,
             w=1.9,
             residual_smoothness=None,
+        ),
+        _box(
+            4,
+            track_id="0000-2",
+            cls="pedestrian",
+            size_source="slf",
+            w=0.7,
+            l=0.7,
+            h=1.8,
+            residual_silhouette=0.4,
+            residual_lidar_fit=0.03,
         ),
     ]
 
@@ -88,8 +101,12 @@ def test_record_tracks_the_row_schema():
             "motion_state",
         ),
         (
-            lambda bs: [dataclasses.replace(bs[0], size_source="slf")] + bs[1:],
+            lambda bs: [dataclasses.replace(bs[0], size_source="mesh")] + bs[1:],
             "size_source",
+        ),
+        (
+            lambda bs: bs[:1] + [dataclasses.replace(bs[1], owned=True)] + bs[2:],
+            "second owned row",
         ),
         (lambda bs: [dataclasses.replace(bs[0], h=0.0)] + bs[1:], "non-positive"),
         (

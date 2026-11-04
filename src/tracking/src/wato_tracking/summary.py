@@ -54,9 +54,9 @@ def motion_state(
     return PARKED
 
 
-def summarize(
-    track_id: str, chunk_id: str, obs: list[Observation], cfg: MotionConfig
-) -> TrackSummary:
+def summarize(track_id: str, obs: list[Observation], cfg: MotionConfig) -> TrackSummary:
+    """obs: one per instant, in time order (a track linked across chunks
+    takes each chunk's Kalman-filtered centres in turn)."""
     filtered = np.array([[o.filtered.cx, o.filtered.cy] for o in obs])
     measured = np.array([[o.det.proposal.cx, o.det.proposal.cy] for o in obs])
     t = [o.frame.t_ns for o in obs]
@@ -65,7 +65,6 @@ def summarize(
     var = float(np.mean(np.var(measured, axis=0)))
     return TrackSummary(
         track_id=track_id,
-        chunk_id=chunk_id,
         n_frames=len(obs),
         first_timestamp_ns=min(t),
         last_timestamp_ns=max(t),

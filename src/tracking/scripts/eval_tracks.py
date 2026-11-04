@@ -14,6 +14,10 @@ by the frame's score). From those matches:
   matched instants hit one ground-truth object, false when most hit nothing;
   tracks matched mostly to ignore-GT (cones, unseen boxes) aren't counted.
 - **fragmentation**: distinct tracks per ground-truth object it matched.
+- **seams**: each ground-truth object matched within half a shared span on
+  both sides of a chunk seam (the midpoint where ownership changes), and
+  whether its most-matched track is the same on both sides: the share that
+  linking across chunks kept in one track.
 - **motion state**: each ground-truth object with a parked / moving state
   against its dominant track's state (moving / parked / unknown).
 """
@@ -29,6 +33,7 @@ import numpy as np
 
 from wato_common.artifact_store import bag_root, chunks_index_path, local_path
 from wato_common.artifacts import tracks
+from wato_common.chunk_spans import owned_windows, shared_spans
 from wato_common.eval.boxes import Scored, Tally, match_frame, tally_frame
 from wato_common.eval.instants import box_of, gt_by_time, labelled_instants
 from wato_common.io.parquet_io import read_rows
@@ -61,11 +66,19 @@ def main() -> None:
     ignored: Counter = Counter()  # track -> matches to ignore-GT
     gt_state: dict[tuple, str] = {}
     gt_cls: dict[tuple, str] = {}
+    matched_at: dict[tuple, list[tuple[int, str]]] = defaultdict(list)
     n_instants = 0
-    for row in read_rows(chunks_index_path(args.bag_id)):
+    index = read_rows(chunks_index_path(args.bag_id))
+    windows = owned_windows(index)
+    for row in index:
         cid = row["chunk_id"]
         for inst in labelled_instants(
-            args.bag_id, cid, args.canonical_lidar, gt, int(args.max_offset_ms * 1e6)
+            args.bag_id,
+            cid,
+            args.canonical_lidar,
+            gt,
+            int(args.max_offset_ms * 1e6),
+            window=windows[cid],
         ):
             tf = by_chunk_sweep.get((cid, inst.frame.reference_sweep_id), [])
             if not tf:
@@ -89,6 +102,9 @@ def main() -> None:
                 b = inst.boxes[j]
                 key = (b.source, b.instance_id)
                 hits[tf[i].track_id][key] += 1
+                matched_at[key].append(
+                    (inst.frame.reference_timestamp_ns, tf[i].track_id)
+                )
                 if b.motion_state is not None:
                     gt_state[key] = b.motion_state
                     gt_cls[key] = b.cls
@@ -112,6 +128,16 @@ def main() -> None:
     # Purity: the share of a track's matches on its main object; under 1 the
     # track switched between objects.
     purity = [max(c.values()) / sum(c.values()) for c in hits.values() if c]
+    crossings = kept = 0
+    for span in shared_spans(index):
+        seam = windows[span.later][0]
+        half = (span.end_ns - span.start_ns) / 2
+        for at in matched_at.values():
+            before = Counter(tid for t, tid in at if seam - half <= t < seam)
+            after = Counter(tid for t, tid in at if seam <= t < seam + half)
+            if before and after:
+                crossings += 1
+                kept += before.most_common(1)[0][0] == after.most_common(1)[0][0]
     confusion: Counter = Counter()
     summary_of = {s.track_id: s for s in summaries}
     objects = []
@@ -155,6 +181,10 @@ def main() -> None:
             objects=len(frag),
             mean_tracks_per_object=float(np.mean(frag)) if frag else None,
             share_in_one_track=float(np.mean([n == 1 for n in frag])) if frag else None,
+        ),
+        seams=dict(
+            crossings=crossings,
+            kept_in_one_track=kept / crossings if crossings else None,
         ),
         purity=dict(
             mean=float(np.mean(purity)) if purity else None,
@@ -204,6 +234,12 @@ def main() -> None:
         f"fragmentation: {fr['objects']} objects, {fr['mean_tracks_per_object'] or 0:.2f} tracks each, "
         f"{fr['share_in_one_track'] or 0:.2f} in one track"
     )
+    se = out["seams"]
+    if se["crossings"]:
+        print(
+            f"seams: {se['crossings']} objects crossing a chunk seam, "
+            f"{se['kept_in_one_track']:.2f} kept in one track"
+        )
     pu = out["purity"]
     print(
         f"purity: mean {pu['mean'] or 0:.2f}, tracks switching objects {pu['share_switched'] or 0:.2f}"

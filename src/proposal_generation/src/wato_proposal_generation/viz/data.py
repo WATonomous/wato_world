@@ -19,7 +19,6 @@ SHOW = ("sources", "fused")
 PROVENANCE_RGB = {
     "lidar_mos": (255, 140, 0),
     "lifted": (0, 200, 255),
-    "slf": (180, 90, 255),
     "lidar_detector": (255, 230, 0),
 }
 # Classes, when the fused rows are shown (semantic_lifting's viewer palette).
