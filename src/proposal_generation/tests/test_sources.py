@@ -234,8 +234,55 @@ def test_lifted_box_inside_a_same_class_box_with_more_points_is_dropped():
         "lifted-mA-000004",
         "lifted-mS-000004",
     ]
-    off = LiftedConfig(min_points=5, max_nested_fraction=1.1)
+    off = LiftedConfig(min_points=5, max_nested_fraction=1.1, fragment_min_fraction=1.1)
     assert len(lifted.proposals(FRAME, fp, None, instances, off)) == 3
+
+
+def test_a_few_points_against_a_bigger_objects_edge_are_its_fragment():
+    # A car's rear face, a 0.1 m grid; a mask beside it claims 8 of the
+    # face's edge returns (a thin column), another class's mask included.
+    gy, gz = np.meshgrid(np.arange(-0.9, 0.91, 0.1), np.arange(0.3, 1.51, 0.1))
+    face = np.column_stack([np.full(gy.size, 10.0), gy.ravel(), gz.ravel()])
+    column = np.column_stack(
+        [np.full(8, 10.05), np.full(8, 1.05), np.linspace(0.4, 1.4, 8)]
+    )
+    rng = np.random.default_rng(4)
+    walker = rng.uniform([-0.25, -0.25, 0.2], [0.25, 0.25, 1.7], size=(30, 3))
+    walker += [10.0, 2.5, 0.0]  # 1.3 m clear of the car
+    instances = {
+        "mC": LiftedInstance("mC", "car", ("mC",), ("CAM_A",), 10, 1),
+        "mF": LiftedInstance("mF", "pedestrian", ("mF",), ("CAM_A",), 10, 1),
+        "mW": LiftedInstance("mW", "pedestrian", ("mW",), ("CAM_A",), 10, 1),
+    }
+    n = len(face)
+    fp = _points(
+        np.concatenate([face, column, walker]),
+        instance_id=["mC"] * n + ["mF"] * 8 + ["mW"] * 30,
+        cls=["car"] * n + ["pedestrian"] * 38,
+    )
+    boxes = lifted.proposals(FRAME, fp, None, instances, LiftedConfig(min_points=5))
+    assert [b.proposal.proposal_id for b in boxes] == [
+        "lifted-mC-000004",
+        "lifted-mW-000004",
+    ]
+    off = LiftedConfig(min_points=5, fragment_min_fraction=1.1)
+    assert len(lifted.proposals(FRAME, fp, None, instances, off)) == 3
+
+
+def test_two_walkers_side_by_side_are_not_fragments_of_each_other():
+    rng = np.random.default_rng(5)
+    a = rng.uniform([-0.25, -0.25, 0.2], [0.25, 0.25, 1.7], size=(30, 3))
+    b = rng.uniform([-0.25, -0.25, 0.2], [0.25, 0.25, 1.7], size=(20, 3))
+    instances = {
+        k: LiftedInstance(k, "pedestrian", (k,), ("CAM_A",), 10, 1)
+        for k in ("mA", "mB")
+    }
+    fp = _points(
+        np.concatenate([a + [10, 0, 0], b + [10, 0.6, 0]]),
+        instance_id=["mA"] * 30 + ["mB"] * 20,
+        cls=["pedestrian"] * 50,
+    )
+    assert len(lifted.proposals(FRAME, fp, None, instances, LiftedConfig())) == 2
 
 
 def test_missing_lifted_instance_names_the_fix():

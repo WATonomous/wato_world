@@ -28,6 +28,9 @@ proposal_generation:
       car: 3.0                   # (bleed onto poles made 3-5 m car boxes)
     max_nested_fraction: 0.3     # a box this far inside a same-class box with
                                  # more points is a hidden car boxed on its occluder
+    fragment_radius_m: 0.3       # a box with this share of its points this close
+    fragment_min_fraction: 0.8   # to a box with this many times its points is
+    fragment_min_ratio: 5.0      # that object's edge, claimed by a mask beside it
     min_points: 5                # per frame; half of WATO's (frame, instance)
                                  # pairs have fewer
 

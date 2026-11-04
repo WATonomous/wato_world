@@ -64,6 +64,15 @@ class LiftedConfig(BaseModel):
     # returns, at the occluder's depth (docs/proposal_generation_measurements.md,
     # "Occlusion"), so point count, not depth, tells them apart. > 1 disables.
     max_nested_fraction: float = 0.3
+    # A box with at least fragment_min_fraction of its points within
+    # fragment_radius_m of the points of a box with at least
+    # fragment_min_ratio times as many is dropped, whatever either's class: a
+    # small mask beside a big one claims a few of the big object's edge
+    # points (thin "car" columns beside a car, docs/tracking_measurements.md
+    # "Duplicate tracks"). min_fraction > 1 disables.
+    fragment_radius_m: float = 0.3
+    fragment_min_fraction: float = 0.8
+    fragment_min_ratio: float = 5.0
     # Fewer points than this in a frame: no box.
     min_points: int = 5
 

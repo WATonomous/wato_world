@@ -19,6 +19,9 @@ proposal_generation:
     max_height_m:
       car: 3.0
     max_nested_fraction: 0.3
+    fragment_radius_m: 0.3
+    fragment_min_fraction: 0.8
+    fragment_min_ratio: 5.0
     min_points: 5
 
   fusion:

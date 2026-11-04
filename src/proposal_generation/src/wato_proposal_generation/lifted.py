@@ -5,8 +5,13 @@ bleed onto background (60% of unmerged masklets' points jump > 5 m between
 sweeps, docs/semantic_lifting_measurements.md), so only the largest group of
 points within the class's cluster radius of each other is the object, minus
 any above the class's height cap; the box is fit to it and lowered to the
-ground. Last, a box mostly inside a same-class box with more points is
-dropped: it is a hidden object boxed on its occluder.
+ground. Then two filters, each dropping a box that is another object's:
+- a fragment: nearly all its points lie against a much bigger instance's
+  points. A small mask beside a big one (a far car past a near car's edge, a
+  low-score duplicate) claims a few of the big object's edge points, which
+  box as a thin column beside it.
+- a nested box: one mostly inside a same-class box with more points, a hidden
+  object boxed on its occluder.
 """
 
 from __future__ import annotations
@@ -14,6 +19,8 @@ from __future__ import annotations
 from typing import Optional
 
 import numpy as np
+
+from scipy.spatial import cKDTree
 
 from wato_common.artifacts.ground import GroundGrid
 from wato_common.artifacts.lidar_sweeps import Frame
@@ -67,6 +74,36 @@ def drop_nested(boxes: list[SourceBox], max_fraction: float) -> list[SourceBox]:
     return [boxes[i] for i in sorted(kept)]
 
 
+def drop_fragments(
+    boxes: list[SourceBox],
+    xyz: np.ndarray,
+    radius_m: float,
+    min_fraction: float,
+    min_ratio: float,
+) -> list[SourceBox]:
+    """The boxes minus each one with at least min_fraction of its points
+    within radius_m of the points of boxes kept with at least min_ratio times
+    as many (any class: the mask beside a car's may say pedestrian)."""
+    order = sorted(
+        range(len(boxes)), key=lambda i: (-boxes[i].proposal.lidar_point_count, i)
+    )
+    kept: list[int] = []
+    for i in order:
+        n = boxes[i].proposal.lidar_point_count
+        bigger = [
+            k for k in kept if boxes[k].proposal.lidar_point_count >= min_ratio * n
+        ]
+        if bigger:
+            near = cKDTree(
+                xyz[np.logical_or.reduce([boxes[k].members for k in bigger])]
+            )
+            d, _ = near.query(xyz[boxes[i].members], distance_upper_bound=radius_m)
+            if np.mean(np.isfinite(d)) >= min_fraction:
+                continue
+        kept.append(i)
+    return [boxes[i] for i in sorted(kept)]
+
+
 def proposals(
     frame: Frame,
     fp: FramePoints,
@@ -103,4 +140,11 @@ def proposals(
             lift_confidence=confidence,
         )
         out.append(SourceBox(p, members))
+    out = drop_fragments(
+        out,
+        fp.xyz,
+        cfg.fragment_radius_m,
+        cfg.fragment_min_fraction,
+        cfg.fragment_min_ratio,
+    )
     return drop_nested(out, cfg.max_nested_fraction)
