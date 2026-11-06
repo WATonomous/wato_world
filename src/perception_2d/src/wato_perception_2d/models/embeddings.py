@@ -1,7 +1,7 @@
 """DINOv2 appearance-embedding extraction.
 
-Per-mask DINOv2 embeddings, persisted on each masklet for the `tracking`
-component's ReID. sam2_tracker.py calls extract_dino_features every k frames
+Per-mask DINOv2 embeddings, persisted on each masklet for a later `tracking`
+ReID (no component reads them yet). sam2_tracker.py calls extract_dino_features every k frames
 with that frame's masks in one forward. Lazy-imports torch; extraction without
 torch/DINOv2 raises.
 """

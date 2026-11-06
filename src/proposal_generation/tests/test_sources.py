@@ -334,3 +334,28 @@ def test_fuse_merges_pairs_and_keeps_every_unmatched_box():
     assert pair.cx == pytest.approx(2.0)
     assert alone.cls is None and alone.provenance == "fused"
     assert {p.proposal_id for p in rows} == {"fused-000004-0", "fused-000004-1"}
+
+
+@pytest.mark.parametrize("gap_m", [0.05, 0.1, 0.3])
+def test_a_pedestrian_beside_a_car_is_not_its_fragment(gap_m):
+    """A person standing at a car's corner has ~8x fewer points than it, but
+    a body's depth, not a sliver of the car's edge: most of its returns are
+    further than fragment_radius_m from the car's."""
+    gy, gz = np.meshgrid(np.arange(-0.9, 0.91, 0.1), np.arange(0.3, 1.51, 0.1))
+    face = np.column_stack([np.full(gy.size, 10.0), gy.ravel(), gz.ravel()])
+    rng = np.random.default_rng(6)
+    person = rng.uniform([-0.25, 0.0, 0.2], [0.25, 0.5, 1.7], size=(30, 3))
+    person += [10.0, 0.9 + gap_m, 0.0]
+    instances = {
+        "mC": LiftedInstance("mC", "car", ("mC",), ("CAM_A",), 10, 1),
+        "mP": LiftedInstance("mP", "pedestrian", ("mP",), ("CAM_A",), 10, 1),
+    }
+    n = len(face)
+    fp = _points(
+        np.concatenate([face, person]),
+        instance_id=["mC"] * n + ["mP"] * 30,
+        cls=["car"] * n + ["pedestrian"] * 30,
+    )
+    assert n >= 5 * 30  # big enough for the fragment rule to consider it
+    boxes = lifted.proposals(FRAME, fp, None, instances, LiftedConfig(min_points=5))
+    assert sorted(b.proposal.cls for b in boxes) == ["car", "pedestrian"]

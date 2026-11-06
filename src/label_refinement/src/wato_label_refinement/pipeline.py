@@ -52,7 +52,7 @@ from wato_common.artifacts.refined_labels import (
 from wato_common.artifacts.tracks import PARKED, TrackFrame, TrackSummary
 from wato_common.pose_lookup import PoseLookup
 from wato_common.schemas import Box3D
-from wato_common.tracking import points_in_box
+from wato_common.tracking import points_in_box, wrap_heading_half_pi
 from wato_label_refinement import refine, views
 from wato_label_refinement.config import ComponentConfig
 
@@ -175,7 +175,7 @@ def refine_track(
     )
 
 
-def moving(cfg, frames, summary, counts, ego, grounds, size=None, offset=(0.0, 0.0)):
+def moving(cfg, frames, summary, counts, ego, grounds):
     return refine.refine_moving(
         np.array([f.reference_timestamp_ns for f in frames], dtype=np.int64),
         [_box(f) for f in frames],
@@ -184,8 +184,6 @@ def moving(cfg, frames, summary, counts, ego, grounds, size=None, offset=(0.0, 0
         [grounds[f.chunk_id] for f in frames],
         cfg.moving,
         cls=summary.cls,
-        size=size,
-        offset=offset,
     )
 
 
@@ -211,7 +209,15 @@ def slf_problem(
     calib: Calibration,
 ):
     """The track's SLF fit (views.problem), or None when fewer than
-    slf.min_views of its views could be built."""
+    slf.min_views of its views could be built. Its heading is corrected
+    (slf.Problem.yaw_mode) for classes in slf.fit_yaw_classes: one angle for a
+    parked vehicle's one box, a correction over time for any other track."""
+    if summary.cls not in cfg.slf.fit_yaw_classes:
+        yaw_mode = "fixed"
+    elif p3.source == AGGREGATE:
+        yaw_mode = "shared"
+    else:
+        yaw_mode = "free"
     prob = views.problem(
         frames[0].track_id,
         summary.cls,
@@ -225,6 +231,7 @@ def slf_problem(
         chunks,
         calib,
         cfg.slf,
+        yaw_mode,
     )
     return prob if prob.origin.shape[0] >= cfg.slf.min_views else None
 
@@ -235,8 +242,6 @@ def apply_slf(
     summary: TrackSummary,
     p3: Phase3,
     fit,
-    counts: dict[tuple[str, str, int], int],
-    grounds: dict[str, Optional[GroundGrid]],
 ) -> tuple[Phase3, SlfOutcome]:
     """Write SLF's evaluated geometry where it passes its gates; otherwise
     keep Phase 3 and its own residuals on the views."""
@@ -260,13 +265,22 @@ def apply_slf(
         )
     length, width, height = (float(x) for x in fit.size)
     centres = np.asarray(fit.centres)
-    if centres.shape != (len(frames), 3) or not np.isfinite(centres).all():
+    headings = np.asarray(fit.headings)
+    if (
+        centres.shape != (len(frames), 3)
+        or headings.shape != (len(frames),)
+        or not np.isfinite(centres).all()
+        or not np.isfinite(headings).all()
+    ):
         raise ValueError(
-            "SLF must return a finite evaluated centre for every track frame"
+            "SLF must return a finite evaluated centre and heading for every "
+            "track frame"
         )
-    # Residuals describe these exact positions. Re-running moving() here
-    # would smooth a different trajectory and re-sample ground the fitter
-    # held fixed, invalidating both the optimization and its quality gates.
+    # Residuals describe these exact poses. Re-running moving() here would
+    # smooth a different trajectory and re-sample ground the fitter held
+    # fixed, invalidating both the optimization and its quality gates. The
+    # correction is at most max_yaw_correction_deg, so a directed heading
+    # keeps its front.
     boxes = [
         Box3D(
             cx=float(c[0]),
@@ -275,9 +289,13 @@ def apply_slf(
             w=width,
             l=length,
             h=height,
-            heading=b.heading,
+            heading=(
+                math.atan2(math.sin(h), math.cos(h))
+                if directed
+                else wrap_heading_half_pi(float(h))
+            ),
         )
-        for b, c in zip(p3.boxes, centres)
+        for c, h, directed in zip(centres, headings, p3.directed)
     ]
     new = replace(p3, boxes=boxes, source=SLF)
     return new, SlfOutcome(
@@ -490,9 +508,7 @@ def run(
     for tid, fs in line.items():
         p, outcome = p3[tid], None
         if tid in fits:
-            p, outcome = apply_slf(
-                cfg, fs, summary_of[tid], p, fits[tid], counts, grounds
-            )
+            p, outcome = apply_slf(cfg, fs, summary_of[tid], p, fits[tid])
             n_slf += outcome.accepted
         n_aggregate += p.source == AGGREGATE
         n_linked += len({f.chunk_id for f in rows_of[tid]}) > 1

@@ -195,25 +195,33 @@ def problem(
     chunks: dict[str, Chunk],
     calib: Calibration,
     cfg: SlfConfig,
+    yaw_mode: str = "fixed",
 ) -> slf.Problem:
     """The fit for one track. frames, boxes (Phase 3's), velocity (N, 2) and
-    ego_xy (N, 2) are the track's, one per instant; points maps a frame index
-    to the returns on its observed box. anchored: size changes extend from
-    the near corner relative to Phase 3's smoothed positions; else each keeps its centre
-    (a parked box, a pedestrian: refine.refine_moving's centred_classes)."""
+    ego_xy (N, 2) are the track's, one per instant in time order; points maps
+    a frame index to the returns on its observed box. anchored: size changes
+    extend from the near corner relative to Phase 3's smoothed positions; else
+    each keeps its centre (a parked box, a pedestrian: refine.refine_moving's
+    centred_classes). yaw_mode: slf.Problem's."""
     # The accepted fit writes every frame, including those with no selected
     # image. Evaluate one consistent placement for that whole output track.
     used = list(range(len(frames)))
     index = {k: i for i, k in enumerate(used)}
     heading = np.array([boxes[k].heading for k in used])
     centre = np.array([[boxes[k].cx, boxes[k].cy] for k in used])
+    t_ns = np.array([frames[k].reference_timestamp_ns for k in used], np.int64)
     lo, hi, near = (np.zeros((len(used), 2)) for _ in range(3))
+    obs_corners = np.zeros((len(used), 4, 2))
     if anchored:
         for i, k in enumerate(used):
-            a = refine.anchors(box_of(frames[k]), heading[i], ego_xy[k])
+            observed = box_of(frames[k])
+            a = refine.anchors(observed, heading[i], ego_xy[k])
             lo[i] = [a[0].lo, a[1].lo]
             hi[i] = [a[0].hi, a[1].hi]
             near[i] = [a[0].near_lo, a[1].near_lo]
+            # What the fit recomputes the anchors' extents from along a
+            # corrected heading (slf._Batch._pose), as refine.anchors does.
+            obs_corners[i] = bev_corners(observed) - [observed.cx, observed.cy]
         # Anchor size changes relative to Phase 3's already-smoothed pose.
         # At size0, zero offset must reproduce Phase 3 exactly. Starting from
         # raw observations instead would fit an unsmoothed trajectory and
@@ -327,9 +335,9 @@ def problem(
         size0=np.array([b0.l, b0.w, b0.h]),
         prior=None if prior is None else np.asarray(prior, float),
         heading=heading,
+        t_s=(t_ns - t_ns[0]) * 1e-9,
         centre_obs=centre,
-        anchor_lo=lo,
-        anchor_hi=hi,
+        obs_corners=obs_corners,
         anchor_near_lo=near.astype(bool),
         anchored=np.full(len(used), anchored),
         ground_z=ground,
@@ -343,6 +351,7 @@ def problem(
         points=pts,
         point_frame=pf,
         enclose=cls in cfg.enclosing_classes,
+        yaw_mode=yaw_mode,
     )
 
 

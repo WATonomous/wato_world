@@ -1,5 +1,5 @@
-# perception_2d: 2D detector (YOLO26 or GroundingDINO) boxes keyframes; SAM2's
-# video predictor tracks each box into a masklet. Schema: config.py.
+# perception_2d: 2D detector boxes keyframes; SAM2.1 with DAM4SAM memory
+# tracks each box into a masklet. Schema: config.py.
 
 discovery:
   # Source of the class vocabulary fed to the detector:
@@ -53,20 +53,43 @@ detection:
   redetect_every_k: 2
 
 segmentation:
+  # Official DAM4SAM memory selection, existing SAM2.1 weights, no training.
+  # Set sam2 to reproduce the previous propagation baseline.
+  backend: "dam4sam"
   # Local SAM2.1 checkpoint path (the container runs HF_HUB_OFFLINE=1).
   checkpoint: "/data/models/sam2.1_hiera_large.pt"
   config: "configs/sam2.1/sam2.1_hiera_l.yaml"  # bundled in the sam2 package
+  refinement:
+    # Experimental image-mask seeds / keyframe corrections sharing SAM2 weights.
+    # Enable with --refine-masks --force; keep a separate baseline artifact root.
+    # No WATO accuracy gain has been measured (src/perception_2d/README.md).
+    enabled: false
+    min_predicted_iou: 0.8  # SAM2 AMG default; not a calibrated correctness probability
+    min_stability: 0.95    # SAM2 AMG default; threshold stability, not temporal stability
+    stability_offset: 1.0
+    multimask_output: false  # image API recommends single output for unambiguous prompts
+    interior_point: true    # distance-interior click in the extra decoder pass
+    mask_input_refinement: true  # selected low-resolution logits; ablate separately
+    correct_shape_disagreement: false  # ablate separately after seed refinement
+    # Engineering guardrails for fresh-mask vs propagated-mask IoU; validate on WATO.
+    correction_min_mask_iou: 0.5
+    correction_below_mask_iou: 0.8
+  # Per-camera mask diagnostics under mask_quality/ (mask_quality.py). Off:
+  # they cost a GPU sync per frame and 10-20 MB of JSON per WATO chunk.
+  mask_quality: false
 
 tracking:
   # A re-detected box whose IoU with an already-tracked object's mask bbox is
   # >= this is treated as the existing object rather than starting a new track.
   iou_match_threshold: 0.5
-  # Keep the SAM2 frame stack in host RAM and stream per frame to the GPU —
-  # essential for long panoramic clips that would otherwise OOM at init_state.
+  # Stock sam2: keep the frame stack in host RAM and stream to the GPU.
+  # DAM4SAM always reads frames lazily on CPU; object memories stay on the GPU.
   offload_video_to_cpu: true
   # OOM fallback: retry the camera in windows of this many frames (fresh
-  # session each), halving a window that OOMs down to min_sub_clip_frames.
-  # Object ids reset between windows; `tracking` re-links them via DINOv2.
+  # session each), halving a window that OOMs down to min_sub_clip_frames,
+  # then raising if it still cannot fit (never publish a camera with gaps).
+  # Object ids reset between windows. `tracking` associates objects by their
+  # 3D boxes, not masklet ids; nothing reads the DINOv2 embeddings yet.
   sub_clip_frames: 150
   min_sub_clip_frames: 16
   # SAM2 latches a lost object's id onto a similar nearby object within a few
@@ -148,7 +171,8 @@ depth:
   sky_mask_top_fraction: 0.3
   output_dtype: "float16"
 
-# DINOv2 embeddings per masklet, for the `tracking` component's ReID.
+# DINOv2 embeddings per masklet, kept for a later `tracking` ReID (no
+# component reads them yet).
 embeddings:
   model: "dinov2_vitl14"
   every_k_frames: 1

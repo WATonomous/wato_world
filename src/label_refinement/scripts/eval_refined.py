@@ -9,7 +9,10 @@ there and the owned track boxes they came from (tracks.parquet, as proposed)
 are each matched to the ground truth within --distance-m
 (wato_common.eval.boxes). Reported by range band and by ground-truth class:
 recall, precision, and the errors on matched boxes (IoU, centre, size, height
-offset), so refinement's effect reads straight off the two rows.
+offset, heading modulo pi), so refinement's effect reads straight off the two
+rows. Vehicles (car, truck, bus) are also reported by their ground-truth
+motion state (by_gt_motion): a parked and a moving vehicle's heading come
+from different evidence.
 """
 
 from __future__ import annotations
@@ -25,6 +28,8 @@ from wato_common.chunk_spans import owned_windows
 from wato_common.eval.boxes import Scored, Tally, tally_frame
 from wato_common.eval.instants import box_of, gt_by_time, labelled_instants
 from wato_common.io.parquet_io import read_rows
+
+VEHICLES = ("car", "truck", "bus")
 
 
 def main() -> None:
@@ -52,6 +57,7 @@ def main() -> None:
 
     bands: dict[str, dict[str, Tally]] = {k: {} for k in sources}
     by_class: dict[str, dict[str, Tally]] = {k: {} for k in sources}
+    by_motion: dict[str, dict[str, Tally]] = {k: {} for k in sources}
     n = 0
     index = read_rows(chunks_index_path(args.bag_id))
     windows = owned_windows(index)
@@ -66,6 +72,10 @@ def main() -> None:
             window=windows[cid],
         ):
             n += 1
+            motion = [
+                f"vehicle:{b.motion_state}" if b.cls in VEHICLES else None
+                for b in inst.boxes
+            ]
             for k in sources:
                 preds = [
                     Scored(
@@ -83,6 +93,8 @@ def main() -> None:
                     list(inst.gts),
                     args.distance_m,
                     by_class=by_class[k],
+                    gt_groups=motion,
+                    by_group=by_motion[k],
                 )
 
     out = dict(
@@ -95,6 +107,10 @@ def main() -> None:
         by_class={
             k: {c: t.summary() for c, t in sorted(v.items())}
             for k, v in by_class.items()
+        },
+        by_gt_motion={
+            k: {c: t.summary() for c, t in sorted(v.items())}
+            for k, v in by_motion.items()
         },
     )
     path = args.out or os.path.join(
@@ -111,11 +127,12 @@ def main() -> None:
         f"{args.bag_id}: {n} labelled instants, matched within {args.distance_m:g} m; errors are medians, pred − gt"
     )
     print(
-        f"{'':<8} {'band / class':<14} {'n_gt':>5} {'recall':>6} {'prec':>5} {'IoU':>5} {'ctr':>5} {'dl':>6} {'dw':>6} {'dh':>6} {'dz':>6}"
+        f"{'':<8} {'band / class':<16} {'n_gt':>5} {'recall':>6} {'prec':>5} {'IoU':>5} {'ctr':>5} {'dl':>6} {'dw':>6} {'dh':>6} {'dz':>6} {'yaw':>5} {'yaw90':>5}"
     )
     for key, groups in (
         ("by_band", ["all", "0-15", "15-30", "30-50"]),
         ("by_class", ["car", "pedestrian", "truck"]),
+        ("by_gt_motion", ["vehicle:moving", "vehicle:parked"]),
     ):
         for g in groups:
             for k in sources:
@@ -124,9 +141,10 @@ def main() -> None:
                     continue
                 prec = f(s["precision"]) if key == "by_band" else "    -"
                 print(
-                    f"{k:<8} {g:<14} {s['n_gt']:>5} {f(s['recall'], '6.2f')} {prec} {f(s['median_iou'])} "
+                    f"{k:<8} {g:<16} {s['n_gt']:>5} {f(s['recall'], '6.2f')} {prec} {f(s['median_iou'])} "
                     f"{f(s['median_centre_err_m'])} {f(s['median_dl_m'], '6.2f')} {f(s['median_dw_m'], '6.2f')} "
-                    f"{f(s['median_dh_m'], '6.2f')} {f(s['median_dz_m'], '6.2f')}"
+                    f"{f(s['median_dh_m'], '6.2f')} {f(s['median_dz_m'], '6.2f')} "
+                    f"{f(s['median_yaw_err_deg'], '5.1f')} {f(s['p90_yaw_err_deg'], '5.1f')}"
                 )
     print(f"\nwrote {path}")
 

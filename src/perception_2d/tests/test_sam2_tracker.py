@@ -14,6 +14,8 @@ from PIL import Image as PILImage
 from wato_common.artifacts.frame_index import CameraFrame
 from wato_perception_2d.models.detector import Detection
 from wato_perception_2d.models.sam2_tracker import track_camera
+from wato_perception_2d.config import MaskRefinementConfig
+from wato_perception_2d.models.mask_refinement import RefinedMask
 
 
 @pytest.fixture(autouse=True)
@@ -157,6 +159,7 @@ def _track(predictor, detector, n, H, W, **kw):
         bag_id="bag0",
         chunk_id="chunk0",
         cam_id="cam_front",
+        tracker_backend="sam2",
         dino_model="dinov2_vitl14",
         dino_every_k=0,  # skip DINOv2 (no torch in test env)
         device="cpu",
@@ -226,6 +229,95 @@ def test_oom_window_recursively_halves():
     assert len(masklets) == 8  # 4 two-frame windows × 2 objects
     covered = sorted(s for m in masklets for s in m.frames_present)
     assert covered == sorted([0, 1] * 2 + [2, 3] * 2 + [4, 5] * 2 + [6, 7] * 2)
+
+
+def test_oom_at_smallest_window_stops_instead_of_publishing_gaps():
+    events: list[dict] = []
+    with pytest.raises(RuntimeError, match="camera incomplete"):
+        _track(
+            _FakePredictor(16, 16, oom_above=1),
+            _ConstDetector(_two_cars()),
+            4,
+            16,
+            16,
+            sub_clip_frames=4,
+            min_sub_clip_frames=2,
+            diagnostics=events,
+        )
+    assert events == []  # a failed camera reports nothing
+
+
+@pytest.mark.parametrize("oom", [False, True])
+def test_late_prompt_failure_reaches_caller_or_oom_retry(oom):
+    class FailingPrompt(_FakePredictor):
+        def add_new_points_or_box(self, inference_state, frame_idx, obj_id, box):
+            if obj_id == 1:
+                if oom and self._cur_n > 2:
+                    raise _OOM("CUDA out of memory during late birth")
+                if not oom:
+                    raise RuntimeError("late object failed")
+            super().add_new_points_or_box(inference_state, frame_idx, obj_id, box)
+
+    pred = FailingPrompt(16, 16)
+    if oom:
+        masks = _track(
+            pred,
+            _ConstDetector(_two_cars()),
+            4,
+            16,
+            16,
+            redetect_every_k=100,
+            sub_clip_frames=2,
+            min_sub_clip_frames=2,
+        )
+        assert len(masks) == 4  # both objects in each successful window
+    else:
+        with pytest.raises(RuntimeError, match="late object failed"):
+            _track(pred, _ConstDetector(_two_cars()), 4, 16, 16)
+
+
+def test_diagnostics_contain_only_successful_windows():
+    diagnostics: list[dict] = []
+    _track(
+        _FakePredictor(16, 16, oom_above=2),
+        _ConstDetector(_two_cars()),
+        8,
+        16,
+        16,
+        redetect_every_k=100,
+        sub_clip_frames=8,
+        min_sub_clip_frames=2,
+        diagnostics=diagnostics,
+    )
+    events = [e for e in diagnostics if e["kind"] == "mask"]
+    assert len(events) == 16  # no rows from abandoned full / half-sized attempts
+    assert {e["window_start"] for e in events} == {0, 2, 4, 6}
+    assert all(e["masklet_id"] for e in events)
+    assert sorted(e["camera_seq"] for e in events) == sorted(list(range(8)) * 2)
+
+
+def test_without_diagnostics_no_stability_is_computed(monkeypatch):
+    """Stability costs a GPU sync per frame; off by default, nothing pays it."""
+    from wato_perception_2d.models import sam2_tracker
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("stability computed with diagnostics off")
+
+    monkeypatch.setattr(sam2_tracker, "stability_scores", unexpected)
+    masks = _track(_FakePredictor(16, 16), _ConstDetector(_two_cars()), 4, 16, 16)
+    assert len(masks) == 2
+
+
+def test_masklets_carry_the_backend_that_made_them():
+    masks = _track(
+        _FakePredictor(16, 16),
+        _ConstDetector(_two_cars()),
+        2,
+        16,
+        16,
+        tracker_backend="dam4sam",
+    )
+    assert {m.tracker_backend for m in masks} == {"dam4sam"}
 
 
 @pytest.mark.parametrize("failing", ["detector", "embeddings"])
@@ -643,3 +735,143 @@ def test_no_reprompt_from_a_box_backing_two_tracks():
         **_SUPPORT,
     )
     assert [frame for frame, _, _ in pred.prompts] == [0, 0]
+
+
+class _MaskPromptPredictor(_FakePredictor):
+    def __init__(self, H, W):
+        super().__init__(H, W)
+        self.mask_prompts = []
+        self.seed_masks = {}
+
+    def add_new_mask(self, inference_state, frame_idx, obj_id, mask):
+        from wato_perception_2d.models.sam2_tracker import _mask_bbox
+
+        self.mask_prompts.append((frame_idx, obj_id, mask.copy()))
+        self._objs[obj_id] = (frame_idx, _mask_bbox(mask))
+        self.seed_masks[obj_id] = mask.copy()
+
+    def propagate_in_video(self, *args, **kwargs):
+        for f, ids, logits in super().propagate_in_video(*args, **kwargs):
+            for i, oid in enumerate(ids):
+                if oid in self.seed_masks:
+                    logits[i, 0] = np.where(self.seed_masks[oid], 4, -4)
+            yield f, ids, logits
+
+
+def _script_refiner(monkeypatch, candidates):
+    from wato_perception_2d.models import sam2_tracker
+
+    instances = []
+
+    class ScriptedRefiner:
+        def __init__(self, *args):
+            self.candidates = iter(candidates)
+            self.images = 0
+            instances.append(self)
+
+        def set_image(self, image):
+            self.images += 1
+
+        def reset(self):
+            pass
+
+        def propose(self, *args):
+            return next(self.candidates)
+
+    monkeypatch.setattr(sam2_tracker, "KeyframeMaskRefiner", ScriptedRefiner)
+    return instances
+
+
+def test_mask_seeds_share_keyframe_encoding_and_are_marked_in_diagnostics(
+    monkeypatch, tmp_path
+):
+    masks = []
+    for det in _two_cars():
+        mask = np.zeros((16, 16), dtype=bool)
+        x1, y1, x2, y2 = det.box_xyxy
+        mask[y1:y2, x1:x2] = True
+        masks.append(mask)
+    refiners = _script_refiner(
+        monkeypatch, [RefinedMask(m, 0.9, 1.0, "accepted") for m in masks]
+    )
+    pred = _MaskPromptPredictor(16, 16)
+    events: list[dict] = []
+    result = _track(
+        pred,
+        _ConstDetector(_two_cars()),
+        2,
+        16,
+        16,
+        refinement=MaskRefinementConfig(enabled=True),
+        diagnostics=events,
+    )
+    assert len(result) == 2 and len(pred.mask_prompts) == 2
+    assert pred.prompts == []  # accepted masks enter the video API directly
+    assert refiners[0].images == 1
+    frame0 = [e for e in events if e["kind"] == "mask" and e["camera_seq"] == 0]
+    assert all(e["logit_source"] == "mask_prompt" for e in frame0)
+
+
+def test_bad_seed_quality_preserves_a_weak_distant_detection(monkeypatch, tmp_path):
+    _script_refiner(
+        monkeypatch, [RefinedMask(None, None, None, "no_acceptable_candidate")]
+    )
+    det = Detection(box_xyxy=(1, 1, 4, 4), cls="car", score=0.26)
+    pred = _MaskPromptPredictor(16, 16)
+    events: list[dict] = []
+    (m,) = _track(
+        pred,
+        _ConstDetector([det]),
+        2,
+        16,
+        16,
+        refinement=MaskRefinementConfig(enabled=True),
+        diagnostics=events,
+    )
+    assert m.score == pytest.approx(0.26)
+    assert m.frames_present == [0, 1]
+    assert not pred.mask_prompts
+    assert events[0]["applied"] is False
+
+
+@pytest.mark.parametrize("major_disagreement", [False, True])
+def test_shape_correction_with_identical_bboxes_has_an_identity_guard(
+    monkeypatch, tmp_path, major_disagreement
+):
+    # The fresh silhouette and propagated rectangle have the same tight bbox.
+    # A hole changes pixel IoU without changing association or bbox-IoU drift.
+    mask = np.zeros((40, 40), dtype=bool)
+    mask[10:30, 10:30] = True
+    if major_disagreement:
+        mask[11:29, 11:29] = False  # IoU .19: abstain, potential identity error
+    else:
+        mask[14:26, 14:26] = False  # IoU .64: eligible for correction
+    _script_refiner(
+        monkeypatch,
+        [
+            RefinedMask(None, None, None, "no_acceptable_candidate"),
+            RefinedMask(mask, 0.95, 1.0, "accepted"),
+        ],
+    )
+    pred = _MaskPromptPredictor(40, 40)
+    det = Detection(box_xyxy=(10, 10, 30, 30), cls="car", score=0.9)
+    events: list[dict] = []
+    (m,) = _track(
+        pred,
+        _ConstDetector([det]),
+        4,
+        40,
+        40,
+        refinement=MaskRefinementConfig(enabled=True, correct_shape_disagreement=True),
+        reprompt_below_iou=0.7,
+        redetect_every_k=2,
+        diagnostics=events,
+    )
+    assert m.frames_present == [0, 1, 2, 3]
+    assert m.score == pytest.approx(0.9)  # mask score never replaces detector score
+    assert len(pred.mask_prompts) == (0 if major_disagreement else 1)
+    if not major_disagreement:
+        np.testing.assert_array_equal(_mask(m, 2), mask)
+    prompts = [e for e in events if e["kind"] == "prompt"]
+    assert prompts[-1]["applied"] is (not major_disagreement)
+    assert prompts[-1]["masklet_id"] == m.masklet_id

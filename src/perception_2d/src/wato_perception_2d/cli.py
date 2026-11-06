@@ -51,13 +51,26 @@ def main() -> None:
     default="/ws/src/perception_2d/config/perception_2d.yaml",
 )
 @click.option(
+    "--refine-masks/--no-refine-masks",
+    default=None,
+    help="Override segmentation.refinement.enabled (experimental; validate on annotated masks).",
+)
+@click.option(
     "--force",
     is_flag=True,
     default=False,
     help="re-run chunks even if outputs exist; discard per-camera resume caches.",
 )
-def run_cmd(bag_id: str, chunk_id: str | None, config_path: str, force: bool) -> None:
+def run_cmd(
+    bag_id: str,
+    chunk_id: str | None,
+    config_path: str,
+    refine_masks: bool | None,
+    force: bool,
+) -> None:
     cfg = load_config(config_path)
+    if refine_masks is not None:
+        cfg.segmentation.refinement.enabled = refine_masks
     run_pipeline(
         cfg,
         bag_id=_resolve_bag_id(bag_id),

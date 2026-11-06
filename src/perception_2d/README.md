@@ -1,6 +1,6 @@
 # perception_2d
 
-Per camera: a detector boxes keyframes, SAM2's video predictor tracks each box
+Per camera: a detector boxes keyframes, SAM2.1 with DAM4SAM memory tracks each box
 into a masklet (one per physical object), DINOv2 embeds each masklet, and Depth
 Anything V2 gives a metric depth map per image, fitted to static LiDAR.
 Cross-camera identity is left to the `tracking` component.
@@ -30,7 +30,10 @@ ego mask: `--config /ws/src/perception_2d/config/perception_2d.wato.yaml`.
 A chunk whose output parquets exist is skipped. Each camera's masklets are
 checkpointed, so an aborted run resumes per camera. `--force` discards those
 caches and clears the chunk's `masks_2d/` and `depth_2d/` first (mask
-directories are named by masklet id, which is new every run).
+directories are named by masklet id, which is new every run). A resume cache
+made under another effective config or mask backend (or one recording
+neither) stops the run rather than mix masks: rerun with `--force`. A finished
+chunk is recomputed only with `--force`, whatever the config.
 
 ## How a chunk runs
 
@@ -81,8 +84,10 @@ Two passes, so the heavy models never share VRAM:
      the camera's `ego_mask` polygons (the rack, hood and antenna) never
      becomes or stays a track, and every mask loses those pixels.
 
-   On CUDA OOM the camera is retried in windows of `sub_clip_frames`. SAM2
-   runs under `autocast_dtype` (bfloat16); the detector and DINOv2 stay
+   On CUDA OOM the camera is retried in windows of `sub_clip_frames`, halved
+   down to `min_sub_clip_frames`; an OOM at that floor raises rather than
+   publish a camera with gaps, and so does a failed late prompt or correction.
+   SAM2 runs under `autocast_dtype` (bfloat16); the detector and DINOv2 stay
    float32.
 
 **One entry per image.** `frame_index` repeats an image once per sweep it is
@@ -96,6 +101,82 @@ failure stops the run instead of leaving a camera with fewer masklets or no
 embeddings, both of which look like a finished chunk. SAM2 and the detector are
 import-checked, and the SAM2, YOLO and DINOv2 weights load-checked on the CPU,
 before each chunk's depth pass, so a missing checkpoint fails in seconds.
+
+## Mask propagation backend
+
+`segmentation.backend` picks how SAM2.1 Large (the same checkpoint either way)
+carries a mask from image to image:
+
+- `dam4sam` (default): the [DAM4SAM authors' multiobject
+  tracker](src/wato_perception_2d/_vendor/d4sm/README.md), vendored at a
+  pinned commit with its memory policy unchanged: a new memory every 5
+  images, three recent and three distractor slots besides the initial prompt,
+  16 object pointers. Our adapter shares one model and one image encoding per
+  frame across objects; a late detection starts its own memory and a
+  correction restarts only that object's (the authors have no correction
+  API). Forward only; frames are read lazily on CPU.
+- `sam2`: Meta's video predictor (`offload_video_to_cpu` applies to it only).
+
+On the two nuScenes GT scenes the two score the same downstream; WATO is
+unmeasured ("Mask propagation backend" in `docs/perception_2d_measurements.md`).
+Manifests and resume caches record the backend, the SAM2 and DAM4SAM commits,
+the adapter version and whether CUDA hole filling ran; each masklet records its
+`tracker_backend`.
+
+**CUDA hole filling.** Both backends fill background holes of ≤ 8 pixels in
+SAM2's 256 × 256 mask with its `sam2._C` connected-components kernel, which
+`docker/perception_2d.Dockerfile` compiles against the locked torch
+(`SAM2_BUILD_ALLOW_ERRORS=0`; `SAM2_CUDA_ARCH_LIST` sets the GPU
+architectures). SAM2 silently skips the fill when the kernel is missing or
+built for another GPU, so on CUDA the pipeline checks it first (an 8-pixel hole
+fills, a 9-pixel one stays) and stops with a rebuild message if not. On CPU
+the fill doesn't run and the masks differ.
+
+## Mask refinement (experimental, off)
+
+`--refine-masks` (`segmentation.refinement.enabled`) seeds births and box-drift
+corrections with image-predictor masks instead of boxes. Run it into a separate
+artifact root: it needs `--force`, which replaces the chunk's outputs.
+
+- At a keyframe needing a seed, SAM2's image predictor (the video model's
+  weights) encodes the image once and predicts a mask from each box. It is
+  used only if its predicted IoU ≥ `min_predicted_iou`, its threshold
+  stability ≥ `min_stability`, it lies in its box and misses the ego mask;
+  otherwise the box prompts as before, so weak distant detections survive.
+- `interior_point` / `mask_input_refinement`: one more decoder pass with a
+  click at the mask's most interior pixel and its low-resolution logits, kept
+  only if predicted IoU rises, stability doesn't fall and the click stays
+  inside.
+- `correct_shape_disagreement`: also re-check confident supported tracks
+  whose bbox still agrees, correcting only when the fresh mask's IoU with the
+  propagated one is in [`correction_min_mask_iou`,
+  `correction_below_mask_iou`) and it is at least as stable; a larger
+  disagreement may be another object, and is only recorded.
+
+The thresholds are SAM2's automatic-mask-generator defaults, not calibrated on
+WATO, and no WATO gain has been measured. With stock SAM2, memory clearing on
+correction stays off (the pinned SAM2 calls an undefined helper there).
+
+## Mask diagnostics
+
+`segmentation.mask_quality: true` writes `mask_quality/<cam_id>.json` per
+camera once its tracking succeeds: per frame and object, raw / postprocessed /
+saved pixel areas, threshold stability and DAM4SAM's memory frames; per
+refinement prompt, its scores and whether it was applied (`mask_quality.py`).
+Off by default: it costs a GPU sync per frame and 10-20 MB of JSON per WATO
+chunk. Stability (`area(logit > +offset) / area(logit > −offset)`) measures
+threshold sensitivity, not accuracy; nothing downstream reads it.
+
+`scripts/diagnose_masks.py` tracks one camera's frame range (fixed taxonomy +
+YOLO, no depth or DINOv2) into an empty artifact root, with the report and a
+`summary.json`, for comparing backends without a full run:
+
+```bash
+python3 /ws/src/perception_2d/scripts/diagnose_masks.py \
+  --config /ws/src/perception_2d/config/perception_2d.wato.yaml \
+  --bag <bag_id> --chunk 0000 --cam PANO_NN --frames 120 \
+  --backend dam4sam --output /data/artifacts/mask_diagnostic_dam4sam
+```
 
 ## Detector backends
 
@@ -130,6 +211,7 @@ In `data/artifacts/raw/<bag_id>/chunks/<chunk_id>/`:
 | `tracklets_2d.parquet`, `detections_2d.parquet`, `masks_2d/<masklet_id>/<camera_seq:06d>.png`, `masks_2d/<masklet_id>/dino_feature.npy` | `wato_common.artifacts.masklets` (consumers use `MaskletIndex`) |
 | `depth_2d/<cam_id>/<camera_seq:06d>.npz` | `wato_common.artifacts.depth`: a missing file means no usable depth; a 0 pixel means no measurement |
 | `manifest_perception_2d.json` | Provenance incl. pinned model revisions, hashed inputs |
+| `mask_quality/<cam_id>.json` | Perception-local mask diagnostics, only with `segmentation.mask_quality` (`mask_quality.py`) |
 
 Outputs from before 2026-10-15 (per-row processing) aren't comparable, and
 depth from before 2026-10-11 is rejected by the reader; rerun with `--force`.
@@ -212,7 +294,8 @@ the host:
   "Ego mask"). Under the default `perception_2d.yaml` (no ego mask) the rack is
   tracked as a truck.
 - An object occluded for longer than `drop_lost_after_frames` comes back as a
-  new masklet; `tracking` must re-link it.
+  new masklet; only `tracking`'s 3D association can rejoin it (no appearance
+  ReID reads the DINOv2 embeddings yet).
 
 Measurements behind these defaults:
 [docs/perception_2d_measurements.md](../../docs/perception_2d_measurements.md).

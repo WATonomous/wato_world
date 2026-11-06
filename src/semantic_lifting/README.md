@@ -89,11 +89,11 @@ downstream stages must be rerun before a production calibration change.
 
 Audit caches include the sampling/model version. Caches predating shared
 lens-aware geometry are rejected; choose a new cache directory to resample.
-Commands, WATO results and limitations: [camera projection measurements](../../docs/camera_projection_measurements.md).
-The [independent calibration investigation](../../docs/wato_alignment_root_cause.md)
-shows why these label-derived correspondences can preserve a wrong surface
-association. Its image/ego-motion check estimates NN orientation without
-masks or labels, then replays actual lifting to test object ownership.
+WATO results and limitations: "WATO camera alignment" in
+[the measurements](../../docs/semantic_lifting_measurements.md). Its
+correspondences come from existing labels, so they can preserve a wrong
+surface association: an independent image/ego-motion check found a larger
+NN error that this containment proxy scores as worse.
 
 ## Inputs
 

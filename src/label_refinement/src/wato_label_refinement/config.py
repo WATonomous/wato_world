@@ -70,6 +70,11 @@ class MovingConfig(BaseModel):
     # Heading from the smoothed velocity when the track moves at least this
     # fast at that instant (VESPA's 0.5 m/s); slower, the boxes' own heading.
     heading_min_speed_mps: float = 0.5
+    # ...and at least heading_speed_z standard errors of that velocity (the
+    # local linear fit's): a speed the centres' jitter explains is no heading.
+    # 0 disables. Unlike a higher min speed, it adapts to each recording's
+    # centre noise.
+    heading_speed_z: float = Field(default=3.0, ge=0)
     # Centres are smoothed by a local linear fit over this window.
     smooth_window_s: float = 1.0
 
@@ -150,6 +155,25 @@ class SlfConfig(BaseModel):
     offset_sigma_m: float = 0.3
     min_size_m: float = 0.1
     max_size_m: float = 20.0
+
+    # Heading (slf.py): Phase 3's plus a correction fit with the shape, for
+    # tracks of fit_yaw_classes (an elongated footprint's silhouette says
+    # which way it points; a pedestrian's doesn't). A parked vehicle's one
+    # box gets one angle; any other track's correction is piecewise linear in
+    # time between knots at most yaw_knot_spacing_s apart (null: one angle per
+    # track). Adam steps it at yaw_lr (radians), it is clamped to
+    # ±max_yaw_correction_deg, and weak priors pull each knot to zero
+    # (yaw_prior_sigma_deg) and neighbouring knots together
+    # (yaw_step_sigma_deg). Measurements: docs/label_refinement_measurements.md.
+    fit_yaw_classes: list[str] = Field(
+        default_factory=lambda: ["car", "truck", "bus", "bicycle", "motorcycle"]
+    )
+    yaw_knot_spacing_s: Optional[float] = Field(default=2.0, gt=0)
+    yaw_lr: float = Field(default=0.02, gt=0)
+    weight_yaw_prior: float = Field(default=0.01, ge=0)
+    yaw_prior_sigma_deg: float = Field(default=10.0, gt=0)
+    yaw_step_sigma_deg: float = Field(default=5.0, gt=0)
+    max_yaw_correction_deg: float = Field(default=30.0, ge=0, le=90)
 
     # A fit replaces Phase 3's size only if it explains the masks better than
     # Phase 3's box by at least min_silhouette_gain (the drop in the mean

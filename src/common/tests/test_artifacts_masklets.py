@@ -114,3 +114,22 @@ def test_row_without_det_score_votes_with_its_score():
     row["det_score"] = None
     write_table([row], MASKLET_SCHEMA, tracklets_2d_path(BAG, CHUNK))
     assert masklets.read(BAG, CHUNK)[0].det_score == 0.3
+
+
+def test_row_without_a_tracker_backend_raises():
+    """sam2 and dam4sam make different masks: a row naming neither is not
+    read as either."""
+    row = MaskletRow(
+        masklet_id="m0",
+        bag_id=BAG,
+        chunk_id=CHUNK,
+        cam_id="c",
+        cls="vehicle",
+        score=0.3,
+        frames_present="[1]",
+        mask_path="",
+    ).model_dump()
+    row["tracker_backend"] = None
+    write_table([row], MASKLET_SCHEMA, tracklets_2d_path(BAG, CHUNK))
+    with pytest.raises(ArtifactFormatError, match="tracker_backend"):
+        masklets.read(BAG, CHUNK)

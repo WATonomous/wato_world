@@ -37,8 +37,8 @@ end to end; proposal_generation has its first sources (Step F clusters,
 lifted instances, fusion; no LiDAR detector yet); tracking has a v0 (tracks
 per chunk linked across chunks, a parked / moving state per track; no ReID
 yet); label_refinement has a v0 (one box per parked vehicle, one size and a
-smoothed path per moving track, then SLF's box shape fit per track to its
-masks and points, PyTorch on the GPU); the rest are stubs raising
+smoothed path per moving track, then SLF's box shape and heading fit per
+track to its masks and points, PyTorch on the GPU); the rest are stubs raising
 NotImplementedError. Each implemented component's README is its
 reference.
 Measurements behind defaults are in `docs/*_measurements.md`; which recordings
@@ -49,6 +49,15 @@ which share `wato_common.eval`; the nuScenes scene is
 `NuScenes_v1_0_mini_scene_0061_0_mcap`, and the same scene ingested as two
 chunks, `NuScenes_v1_0_mini_scene_0061_2chunk`, scores a chunk seam
 (`docs/tracking_measurements.md`).
+
+perception_2d's mask tracker is `segmentation.backend`: `dam4sam` (default;
+the authors' source vendored at a pinned commit in `_vendor/d4sm/`, whose two
+copied files must stay byte-identical) or `sam2`, both on the same SAM2.1
+weights; they score the same on the nuScenes GT scenes, and WATO is
+unmeasured. CUDA runs need SAM2's compiled `sam2._C` hole-filling kernel,
+checked before the depth pass. Mask refinement (`--refine-masks`) and mask
+diagnostics (`segmentation.mask_quality`) are off by default. Details:
+`src/perception_2d/README.md`.
 
 ## Conventions
 
@@ -229,7 +238,7 @@ Details: `src/ingest/README.md`; measurements: `docs/ingest_measurements.md`.
   model. When changing projection, depth anchors, SLF rays or image geometry,
   follow `docs/camera_geometry_contract.md` for supported models and image
   normalization constraints. Accepted SLF boxes use the fitter's evaluated
-  positions for every frame without another smoothing pass.
+  positions and headings for every frame without another smoothing pass.
 - **Before ingest, `validate-bag` / `trim-bag`.** Judged on log time. trim-bag
   uses the pinned `mcap` CLI (rosbag2's writer would empty custom-type schemas)
   and writes to `data/bags/trimmed/`, the only read-write mount under
@@ -274,7 +283,7 @@ labels aren't comparable.
 | Surface | Where | Mechanism |
 |---|---|---|
 | Python deps | `docker/requirements/{ingest,lidar_preprocessing,perception_2d,semantic_lifting,proposal_generation,tracking,label_refinement}.txt` | exact `==` for the full transitive closure, installed `--no-deps` |
-| `sam2` | `docker/perception_2d.Dockerfile` | `ARG SAM2_COMMIT` (no PyPI release) |
+| `sam2` | `docker/perception_2d.Dockerfile` | `ARG SAM2_COMMIT` (no PyPI release); manifests read the installed package's commit back, so there is no second pin |
 | Model weights | `src/perception_2d/src/wato_perception_2d/model_registry.py` | HF `revision=`, torch.hub `repo:<sha>`, raw `.pt` from an HF commit loaded by path |
 | Component bases | `docker/{ingest,lidar_preprocessing,perception_2d,semantic_lifting,proposal_generation,tracking,label_refinement}.Dockerfile` | `base:<tag>@sha256:...` |
 | Upstream bases | `docker/base/inject_*.Dockerfile` | `ubuntu` / `nvcr.io` by digest, `ARG UV_VERSION` |

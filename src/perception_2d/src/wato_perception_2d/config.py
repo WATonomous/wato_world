@@ -13,7 +13,7 @@ import os
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class DiscoveryConfig(BaseModel):
@@ -84,18 +84,55 @@ class DetectionConfig(BaseModel):
     redetect_every_k: int = 2  # images; see config/perception_2d.yaml
 
 
+class MaskRefinementConfig(BaseModel):
+    """Experimental image-mask seeds; thresholds need validation on WATO."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    # SAM2 automatic-mask-generator defaults, not calibrated WATO probabilities.
+    min_predicted_iou: float = Field(default=0.8, ge=0, le=1)
+    min_stability: float = Field(default=0.95, ge=0, le=1)
+    stability_offset: float = Field(default=1.0, gt=0)
+    # False follows the image API's advice for unambiguous box prompts.
+    multimask_output: bool = False
+    # At most one extra decoder pass; ablate points and logit recurrence separately.
+    interior_point: bool = True
+    mask_input_refinement: bool = True
+    # Start with seed / existing box-drift refinement; ablate shape correction separately.
+    correct_shape_disagreement: bool = False
+    # A fresh mask must retain this much agreement before correcting an ID.
+    # These are engineering guardrails, not published optimal thresholds.
+    correction_min_mask_iou: float = Field(default=0.5, ge=0, le=1)
+    correction_below_mask_iou: float = Field(default=0.8, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def correction_range(self) -> MaskRefinementConfig:
+        if self.correction_min_mask_iou >= self.correction_below_mask_iou:
+            raise ValueError(
+                "correction_min_mask_iou must be below correction_below_mask_iou"
+            )
+        return self
+
+
 class SegmentationConfig(BaseModel):
-    """SAM2 video predictor settings."""
+    """SAM2.1 weights, propagation backend and optional image-mask refinement."""
 
     model_config = ConfigDict(extra="allow")
 
+    # Published training-free memory policy, using the same SAM2.1 weights.
+    backend: Literal["sam2", "dam4sam"] = "dam4sam"
+
     # Local SAM2.1 checkpoint path. data/models is bind-mounted read-only at
     # /data/models in the container; the checkpoint is a loose .pt (placed there
-    # by scripts/fetch_models.py), loaded via build_sam2_video_predictor — not
-    # from_pretrained, since the container runs HF_HUB_OFFLINE=1.
+    # by scripts/fetch_models.py), loaded by the selected backend with no download.
     checkpoint: str = "/data/models/sam2.1_hiera_large.pt"
     # Hydra config name bundled in the `sam2` package (matches the checkpoint).
     config: str = "configs/sam2.1/sam2.1_hiera_l.yaml"
+    refinement: MaskRefinementConfig = Field(default_factory=MaskRefinementConfig)
+    # Write per-camera mask diagnostics (mask_quality.py). Off: computing them
+    # costs a GPU sync per frame and 10-20 MB of JSON per WATO chunk.
+    mask_quality: bool = False
 
 
 class TrackingConfig(BaseModel):
@@ -106,12 +143,12 @@ class TrackingConfig(BaseModel):
     # A re-detected box whose IoU with an already-tracked object's mask bbox is
     # >= this is treated as the existing object (not a new track).
     iou_match_threshold: float = 0.5
-    # Keep the SAM2 frame stack in host RAM (stream per frame to GPU). Essential
-    # for long panoramic clips that would otherwise OOM at init_state.
+    # Stock SAM2 frame stack on CPU. DAM4SAM always loads frames lazily on CPU.
     offload_video_to_cpu: bool = True
     # OOM fallback: if the whole clip OOMs, retry in windows of this many frames
-    # (fresh session each — object ids reset between windows, re-linked downstream
-    # via DINOv2). A window that itself OOMs is recursively halved to the floor.
+    # (fresh session each — object ids reset between windows; `tracking`
+    # associates 3D boxes, not masklet ids). A window that itself OOMs is
+    # recursively halved to the floor.
     sub_clip_frames: int = 150
     min_sub_clip_frames: int = 16
     # SAM2 doesn't let go of an object it has lost: within 0-30 frames it tends
@@ -200,7 +237,7 @@ class DepthConfig(BaseModel):
 
 
 class EmbeddingConfig(BaseModel):
-    """DINOv2 appearance embeddings, persisted for the `tracking` component's ReID."""
+    """DINOv2 appearance embeddings, kept for a later `tracking` ReID (unread today)."""
 
     model_config = ConfigDict(extra="allow")
 

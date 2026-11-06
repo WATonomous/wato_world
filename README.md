@@ -31,8 +31,8 @@ flowchart TD
         PG["Step F clusters + lifted-instance boxes\nfusion on shared points\n(later: Segment-Lift-Fit, LiDAR detector)"]
     end
 
-    subgraph tracking["tracking  ·  GPU"]
-        TR["3D Kalman filter\nmasklet association\nDINOv2 ReID"]
+    subgraph tracking["tracking  ·  CPU"]
+        TR["3D Kalman filter over fused boxes\nlinked across chunks\n(later: DINOv2 ReID)"]
     end
 
     subgraph label_ref["label_refinement  ·  GPU"]
@@ -135,7 +135,7 @@ watod down all
 | `semantic_lifting` | Occlusion-aware 2D→3D label lifting (UniLiPs Eq.1) | CPU | no |
 | `lidar_preprocessing` | Motion comp, static/dynamic split, ground grid, UniLiPs IWU, recall-oriented motion proposals | CPU | no |
 | `proposal_generation` | Boxes from Step F clusters + lifted instances, fused per object (SLF, LiDAR detector later) | CPU | no |
-| `tracking` | 3D Kalman + masklet association + DINOv2 ReID | CUDA | yes (light) |
+| `tracking` | 3D Kalman over fused boxes, linked across chunks (DINOv2 ReID later) | CPU | no |
 | `label_refinement` | Multimodal LabelFormer (bootstrap → learned) | CUDA | yes |
 | `open_vocab_discovery` | Rare-class discovery branch | CUDA | yes |
 | `student_training` | BEVFusion / TransFusion student training | CUDA | yes |

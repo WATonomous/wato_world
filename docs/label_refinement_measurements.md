@@ -102,6 +102,88 @@ With the shipped gate: pedestrians 0.13 → 0.25 (57 fits kept), vehicles
   and 28 s instead of 67 s on scene-1100 (71); building the views is most of
   what is left.
 
+## Heading
+
+`eval_refined.py`'s `yaw`: |heading − ground truth's| mod π, median / p90 in
+degrees, on the cached tracks of both scenes (of 2026-11-03); vehicles split
+by the ground truth's motion state. "Fixed" is SLF with Phase 3's heading (the previous
+behaviour), "fit" the heading correction (`fit_yaw_classes`), "+ gate" with
+`heading_speed_z: 3` too (the shipped defaults).
+
+| scene-0061 | GT boxes | tracked | fixed | fit | fit + gate |
+|---|---|---|---|---|---|
+| parked vehicles | 190 | 3.6 / 25.0 | 14.4 / 65.9 | 1.3 / 65.9 | 1.3 / 57.8 |
+| moving vehicles | 89 | 22.3 / 86.4 | 3.2 / 14.2 | 3.4 / 12.9 | 3.4 / 12.9 |
+| truck | 113 | 3.5 / 19.1 | 14.4 / 36.5 | 1.4 / 36.5 | 0.8 / 16.8 |
+| car | 160 | 15.8 / 55.5 | 3.1 / 35.8 | 3.1 / 35.8 | 2.9 / 24.5 |
+
+| scene-1100 | GT boxes | tracked | fixed | fit | fit + gate |
+|---|---|---|---|---|---|
+| parked vehicles | 76 | 4.7 / 33.3 | 2.4 / 2.4 | 3.2 / 3.2 | 3.2 / 3.2 |
+| moving vehicles | 158 | 11.2 / 46.1 | 3.2 / 14.8 | 3.2 / 14.8 | 4.0 / 14.8 |
+| car | 196 | 6.9 / 47.3 | 2.4 / 14.8 | 3.2 / 14.8 | 3.2 / 14.8 |
+
+- **A fixed heading made the size absorb its error.** Scene-0061's parked
+  truck (`0000-54`, 25 labelled instants) was boxed 14.4° off from its
+  accumulated points; the fit turns it to 0.3°, truck IoU 0.44 → 0.50 and
+  centre error 0.43 → 0.35 m. On the synthetic car of `tests/test_slf.py`, a
+  10° heading error left fixed fits 4.06 × 2.39 m (silhouette residual
+  0.126); fitted, the heading returns to 0.7° and the box to 4.47 × 1.97 m
+  (0.088), and a correct start stays within 0.2°. Moving vehicles' centre
+  error on scene-0061 fell 0.63 → 0.50 m. Scene-1100's one parked car moved
+  2.4° → 3.2°.
+- **One angle per track** (`yaw_knot_spacing_s: null`) did about as well:
+  scene-0061 cars 3.9° and movers 3.6° against 3.1° and 3.4° with 2 s knots,
+  scene-1100 identical.
+- **Stepping and keeping the best step.** At Adam's fixed rate the heading
+  and size kept moving: started at the correct heading, the last step was 4°
+  off and its loss 13% above the best. Each track keeps its lowest-loss step,
+  and which end of the box is nearer the ego stays Phase 3's (letting it
+  flip as the heading crossed zero jumped the box sideways).
+- **The gate.** Parked vehicles that tracking called moving took velocity
+  headings 25-80° off: their box centres jitter as their visible faces
+  change, path length 15-50× net displacement, local speeds 0.5-1.9 m/s.
+  Requiring the speed to be ≥ 3 standard errors of the local fit's velocity
+  cut scene-0061's truck p90 36.5 → 16.8° and car p90 35.8 → 24.5°, and cost
+  scene-1100's moving vehicles 0.8° at the median (a car crawling at
+  0.26 m/s median over 19 s). At 2 standard errors the tails didn't move.
+- **What is left.** The parked-vehicle p90 is one parked car tracked as
+  moving (`0000-154`) whose heading is 67° off: undirected, it is the mean of
+  its denser frames' headings mod π, and those mix boxes whose length and
+  width are swapped (a one-face view's minimum-area fit), which a mod-π mean
+  can't undo. Its SLF fit isn't kept, and its error exceeds the 30° cap. A
+  pedestrian's heading isn't fitted (its median error is 38-69°: its
+  footprint is near-square).
+
+These are 12-19 matched vehicles per scene.
+
+**Where the heading errors came from** (diagnosed 2026-11-05, before the fit):
+
+- *The minimum-area rectangle fits the observed envelope.* An L-shaped view
+  of a 4.5 × 1.8 m car (corners (−2.25, −0.9), (2.25, −0.9), (−2.25, 0.9))
+  fits at 0°; one more return at (2.45, −0.5), 0.45 m from the edge, turns
+  it to −16.6°. MODEST's edge-closeness criterion (its released code, 0.1°
+  steps) keeps 0° there.
+- *But the criterion wasn't the parked truck's problem; its points were.* On
+  `0000-54`'s accumulated cloud (25,172 points over 264 frames, after the
+  region, voxel and largest-group selection) the minimum-area fit is 14.43°
+  off, MODEST closeness 14.42°, LISO's 5° closeness 13.32°, and minimum area
+  on the cloud cropped to the ground-truth box (15,517 points) 1.12°: other
+  structure connected to the truck survives the largest-group filter. The
+  silhouette fit corrects it without touching the points.
+- *A velocity heading follows the visible centre.* A car moving straight at
+  1 m/s whose observed box centre also drifts 0.3 m/s sideways (its visible
+  faces changing) gets a 16.7° heading from `refine_moving`'s local fit; a
+  longer window can't remove a systematic drift.
+- On the cached WATO bag, all 44,700 directed rows (of 62,234 owned
+  car / truck / bus rows) are velocity headings; WATO has no heading ground
+  truth.
+
+Not done: better parked support (lifted instances' own points rather than
+everything in the region), closeness seeds, LISO-style trajectory smoothing
+before the velocity heading. Sources and the papers' actual algorithms:
+`docs/research/box_orientation_reference_methods.md`.
+
 ## Choices
 
 - **Small classes take the median size and aren't aggregated.** With every

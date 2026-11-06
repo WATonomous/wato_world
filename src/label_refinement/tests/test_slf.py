@@ -18,6 +18,7 @@ torch = pytest.importorskip("torch")
 from wato_label_refinement import refine, slf  # noqa: E402
 from wato_label_refinement.config import SlfConfig  # noqa: E402
 from wato_common.schemas import Box3D  # noqa: E402
+from wato_common.tracking import bev_corners  # noqa: E402
 
 TRUE = np.array([4.5, 1.8, 1.5])
 CENTRE = np.array([10.0, 0.0, 0.75])
@@ -73,21 +74,24 @@ def _view(eye):
     return eye, dirs, target, depth * pitch / F_PX
 
 
-def _problem(size0, with_views=True, prior=None):
+def _problem(size0, with_views=True, prior=None, heading=0.0, yaw_mode="fixed"):
+    """heading: Phase 3's, in radians (the car's is 0)."""
     eyes = [(2.0, -4.0, 1.6), (2.0, 4.0, 1.6), (4.0, -7.0, 1.6), (4.0, 7.0, 1.6)]
     views = [_view(e) for e in eyes] if with_views else []
-    au, av = refine.anchors(OBSERVED, 0.0, (0.0, 0.0))
     gy, gz = np.meshgrid(np.linspace(-0.85, 0.85, 12), np.linspace(0.1, 1.45, 8))
     rear = np.column_stack([np.full(gy.size, 7.75), gy.ravel(), gz.ravel()])
     n = len(views)
+    centre = np.array([OBSERVED.cx, OBSERVED.cy])
     return slf.Problem(
         size0=np.asarray(size0, float),
         prior=prior,
-        heading=np.zeros(1),
-        centre_obs=np.array([[OBSERVED.cx, OBSERVED.cy]]),
-        anchor_lo=np.array([[au.lo, av.lo]]),
-        anchor_hi=np.array([[au.hi, av.hi]]),
-        anchor_near_lo=np.array([[au.near_lo, av.near_lo]]),
+        heading=np.full(1, heading),
+        t_s=np.zeros(1),
+        centre_obs=centre[None],
+        obs_corners=(bev_corners(OBSERVED) - centre)[None],
+        anchor_near_lo=np.array(
+            [[a.near_lo for a in refine.anchors(OBSERVED, heading, (0.0, 0.0))]]
+        ),
         anchored=np.array([True]),
         ground_z=np.zeros(1),
         view_frame=np.zeros(n, int),
@@ -99,6 +103,7 @@ def _problem(size0, with_views=True, prior=None):
         footprint=np.array([v[3] for v in views]),
         points=rear,
         point_frame=np.zeros(len(rear), int),
+        yaw_mode=yaw_mode,
     )
 
 
@@ -157,3 +162,77 @@ def test_fitting_is_independent_of_the_world_coordinate_origin():
     np.testing.assert_allclose(
         translated.centres - translation, baseline.centres, atol=1e-3, rtol=0
     )
+
+
+def test_a_wrong_heading_is_corrected_not_absorbed_by_the_width():
+    """With the heading fixed, a box turned 10° can only fit the silhouette by
+    growing wider (docs/label_refinement_measurements.md); fitting the heading
+    turns it back and keeps the width the car's."""
+    cfg = SlfConfig(iterations=300)
+    wrong = np.radians(10.0)
+    fixed = slf.fit(_problem([4.5, 1.8, 1.5], heading=wrong), cfg, torch.device("cpu"))
+    fitted = slf.fit(
+        _problem([4.5, 1.8, 1.5], heading=wrong, yaw_mode="shared"),
+        cfg,
+        torch.device("cpu"),
+    )
+    assert fixed.headings[0] == pytest.approx(wrong)
+    assert abs(np.degrees(fitted.headings[0])) < 2.0
+    assert abs(fitted.size[1] - TRUE[1]) < abs(fixed.size[1] - TRUE[1])
+    assert fitted.residual_silhouette < fixed.residual_silhouette
+
+
+def test_the_heading_correction_is_clamped():
+    cfg = SlfConfig(iterations=100, max_yaw_correction_deg=3.0)
+    fit = slf.fit(
+        _problem([4.5, 1.8, 1.5], heading=np.radians(10.0), yaw_mode="shared"),
+        cfg,
+        torch.device("cpu"),
+    )
+    assert np.degrees(fit.headings[0]) == pytest.approx(7.0, abs=1e-4)
+
+
+def test_knots_span_the_track_at_most_the_spacing_apart():
+    base = _problem([4.5, 1.8, 1.5])
+    t = np.array([0.0, 1.0, 2.5, 5.0])
+    free = replace(base, heading=np.zeros(4), t_s=t, yaw_mode="free")
+    n, lo, w = slf._knots(free, 2.0)
+    assert n == 4  # 5 s in 3 steps of 5/3 s
+    np.testing.assert_array_equal(lo, [0, 0, 1, 2])
+    np.testing.assert_allclose(w, [0, 0.6, 0.5, 1.0])
+    assert slf._knots(free, None)[0] == 1
+    assert slf._knots(replace(free, yaw_mode="shared"), 2.0)[0] == 1
+    assert slf._knots(replace(free, yaw_mode="fixed"), 2.0)[0] == 0
+    with pytest.raises(ValueError, match="yaw_mode"):
+        replace(free, yaw_mode="per_frame")
+
+
+def test_zero_correction_reproduces_phase_3():
+    """At the starting size and no correction, every frame's pose is Phase
+    3's, whatever the heading mode: knots on a track that needs none must not
+    move it."""
+    cfg = SlfConfig(iterations=0)
+    for mode in slf.YAW_MODES:
+        p = _problem([4.5, 1.8, 1.5], heading=0.3, yaw_mode=mode)
+        fit = slf.fit(p, cfg, torch.device("cpu"))
+        assert fit.headings == pytest.approx([0.3])
+        au, av = refine.anchors(OBSERVED, 0.3, (0.0, 0.0))
+        u, v = refine.axes(0.3)
+        expected = p.centre_obs[0] + au.offset(4.5) * u + av.offset(1.8) * v
+        assert fit.centres[0, :2] == pytest.approx(expected, abs=1e-5)
+
+
+@pytest.mark.parametrize("order", [("shared", "fixed"), ("fixed", "shared")])
+def test_tracks_with_and_without_heading_fits_batch_as_alone(order):
+    """A fixed-heading track numbered after another track's knots must not
+    index past them (a CUDA device-side assert on the GPU)."""
+    cfg = SlfConfig(iterations=40)
+    probs = [
+        _problem([4.5, 1.8, 1.5], heading=np.radians(8.0), yaw_mode=mode)
+        for mode in order
+    ]
+    together = slf.fit_many(probs, cfg, torch.device("cpu"))
+    for p, t in zip(probs, together):
+        alone = slf.fit(p, cfg, torch.device("cpu"))
+        assert t.headings == pytest.approx(alone.headings, abs=1e-4)
+        assert t.size == pytest.approx(alone.size, abs=1e-3)

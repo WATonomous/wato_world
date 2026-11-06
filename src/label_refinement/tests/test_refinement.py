@@ -397,7 +397,7 @@ def test_local_linear_recovers_a_constant_velocity():
     xy = np.column_stack([3.0 * t, -1.0 * t]) + np.random.default_rng(0).normal(
         0, 0.02, (21, 2)
     )
-    fitted, vel = refine.local_linear(t, xy, 1.0)
+    fitted, vel, _ = refine.local_linear(t, xy, 1.0)
     assert np.allclose(vel[5:-5], [3.0, -1.0], atol=0.15)
     assert np.abs(fitted - np.column_stack([3.0 * t, -t])).max() < 0.05
 
@@ -434,3 +434,68 @@ def test_a_stray_box_does_not_stretch_a_parked_region():
     region = refine.enclosing_region(car + [stray], 0.3, 1.0)
     assert region.w == pytest.approx(1.8 + 0.6, abs=0.05)
     assert refine.enclosing_region(car + [stray], 0.3, 10.0).w > 5.0
+
+
+def test_velocity_standard_error_measures_the_centres_jitter():
+    t = np.linspace(0, 2, 41)
+    line = np.column_stack([1.0 * t, np.zeros_like(t)])
+    _, _, exact = refine.local_linear(t, line, 1.0)
+    assert np.all(exact[1:-1] < 1e-9)
+    noisy = line + np.random.default_rng(1).normal(0, 0.3, line.shape)
+    _, _, se = refine.local_linear(t, noisy, 1.0)
+    # sigma / sqrt(sum dt^2) for the 21 samples 0.05 s apart within ±0.5 s.
+    dt = np.linspace(-0.5, 0.5, 21)
+    assert np.median(se) == pytest.approx(0.3 / np.sqrt(np.sum(dt**2)), rel=0.1)
+    _, _, two = refine.local_linear(np.array([0.0, 0.1]), line[:2], 1.0)
+    assert np.all(np.isinf(two))
+
+
+def _jittering(n, speed_mps, jitter_m, seed):
+    rng = np.random.default_rng(seed)
+    t = np.arange(n) * 0.05
+    return t, [
+        Box3D(
+            cx=float(speed_mps * ti + rng.normal(0, jitter_m)),
+            cy=float(rng.normal(0, jitter_m)),
+            cz=0.75,
+            w=1.8,
+            l=4.5,
+            h=1.5,
+            heading=0.0,
+        )
+        for ti in t
+    ]
+
+
+@pytest.mark.parametrize("z,expect_directed", [(0.0, True), (3.0, False)])
+def test_a_parked_cars_jitter_gives_no_heading_once_judged_against_its_noise(
+    z, expect_directed
+):
+    """A parked car whose visible faces change jitters its box centre; the
+    local fit's speed then passes heading_min_speed_mps at many frames."""
+    t, boxes = _jittering(80, 0.0, 0.3, 2)
+    cfg = MovingConfig(heading_speed_z=z)
+    r = refine.refine_moving(
+        (t * 1e9).astype(np.int64),
+        boxes,
+        np.full(80, 50),
+        np.zeros((80, 2)),
+        [None] * 80,
+        cfg,
+    )
+    assert any(r.heading_directed) is expect_directed
+
+
+def test_a_slow_real_mover_keeps_its_velocity_heading():
+    t, boxes = _jittering(80, 1.0, 0.05, 3)
+    cfg = MovingConfig(heading_speed_z=3.0)
+    r = refine.refine_moving(
+        (t * 1e9).astype(np.int64),
+        boxes,
+        np.full(80, 50),
+        np.zeros((80, 2)),
+        [None] * 80,
+        cfg,
+    )
+    assert np.mean(r.heading_directed) > 0.9
+    assert np.median([abs(b.heading) for b in r.boxes]) < np.radians(5)

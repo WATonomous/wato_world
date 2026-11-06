@@ -130,7 +130,20 @@ def exists(bag_id: str, chunk_id: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _record(row: dict) -> MaskletRecord:
+def _tracker_backend(row: dict, path: str) -> str:
+    """Which mask tracker made the masklet. Two backends make different
+    masks, so a row without one is unreadable, not "sam2"."""
+    backend = row.get("tracker_backend")
+    if not backend:
+        raise ArtifactFormatError(
+            path,
+            f"masklet {row.get('masklet_id')} has no tracker_backend; rerun "
+            "perception_2d",
+        )
+    return str(backend)
+
+
+def _record(row: dict, path: str) -> MaskletRecord:
     det_score = row.get("det_score")
     return MaskletRecord(
         masklet_id=str(row["masklet_id"]),
@@ -144,13 +157,14 @@ def _record(row: dict) -> MaskletRecord:
         discovery_score=float(row.get("discovery_score") or 0.0),
         centroid_depth_m=float(row.get("centroid_depth_m") or 0.0),
         dino_feature_path=row.get("dino_feature_path"),
-        tracker_backend=row.get("tracker_backend") or "sam2",
+        tracker_backend=_tracker_backend(row, path),
     )
 
 
 def read(bag_id: str, chunk_id: str) -> list[MaskletRecord]:
     """Every masklet in the chunk (from tracklets_2d.parquet)."""
-    return [_record(r) for r in read_rows(tracklets_2d_path(bag_id, chunk_id))]
+    path = tracklets_2d_path(bag_id, chunk_id)
+    return [_record(r, path) for r in read_rows(path)]
 
 
 def read_mask(

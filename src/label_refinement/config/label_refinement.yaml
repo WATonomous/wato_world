@@ -21,6 +21,7 @@ label_refinement:
       motorcycle: 50.0
     centred_classes: [pedestrian]  # grow about the observed centre, not from the near corner
     heading_min_speed_mps: 0.5   # heading from velocity at or above this
+    heading_speed_z: 3.0         # ...and this many standard errors of it (jitter isn't motion)
     smooth_window_s: 1.0
 
   slf:                           # a box shape fit per track to its masks and points
@@ -63,3 +64,11 @@ label_refinement:
       pedestrian: -1.0
     max_residual_silhouette: 0.8
     max_residual_lidar_m: 0.3
+    # Heading: Phase 3's plus a correction fit with the shape (slf.py)
+    fit_yaw_classes: [car, truck, bus, bicycle, motorcycle]  # not pedestrian: square footprint
+    yaw_knot_spacing_s: 2.0      # a mover's correction is piecewise linear in time; null: one angle
+    yaw_lr: 0.02                 # radians per Adam step
+    weight_yaw_prior: 0.01
+    yaw_prior_sigma_deg: 10.0    # pulls each knot to Phase 3's heading
+    yaw_step_sigma_deg: 5.0      # ...and neighbouring knots together
+    max_yaw_correction_deg: 30.0

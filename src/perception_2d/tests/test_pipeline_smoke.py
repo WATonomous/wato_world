@@ -180,6 +180,26 @@ def test_missing_tracking_weights_fail_before_the_depth_pass(
 # ---------------------------------------------------------------------------
 
 
+def test_cuda_cleanup_is_checked_before_depth(live_bag, monkeypatch):
+    from wato_perception_2d import pipeline
+
+    monkeypatch.setattr(pipeline, "sam2_importable", lambda: True)
+    monkeypatch.setattr(pipeline, "yolo_importable", lambda: True)
+    monkeypatch.setattr(pipeline, "_check_tracking_weights", lambda *args: None)
+
+    def broken_extension(device):
+        raise RuntimeError("extension kernel unavailable")
+
+    def unexpected_depth(*args, **kwargs):
+        raise AssertionError("depth started before CUDA cleanup check")
+
+    monkeypatch.setattr(pipeline, "check_sam2_cuda_extension", broken_extension)
+    monkeypatch.setattr(pipeline, "DepthAnythingV2", unexpected_depth)
+    bag_id, _, _ = live_bag
+    with pytest.raises(RuntimeError, match="extension kernel unavailable"):
+        run(ComponentConfig(), bag_id=bag_id)
+
+
 def test_pipeline_writes_valid_parquets(empty_bag):
     """Empty-frame chunk writes non-corrupt (empty) parquets, no models needed."""
     from wato_common.artifact_store import (
@@ -197,6 +217,75 @@ def test_pipeline_writes_valid_parquets(empty_bag):
     assert os.path.exists(trk_path)
     assert pq.read_table(det_path).schema is not None
     assert pq.read_table(trk_path).schema is not None
+
+
+def test_manifest_records_effective_config_including_runtime_override(empty_bag):
+    import json
+
+    bag_id, chunk_id, root = empty_bag
+    cfg = ComponentConfig()
+    cfg.segmentation.refinement.enabled = True
+    run(cfg, bag_id=bag_id)
+    path = root / "raw" / bag_id / "chunks" / chunk_id / "manifest_perception_2d.json"
+    manifest = json.loads(path.read_text())
+    assert manifest["effective_config"]["segmentation"]["refinement"]["enabled"] is True
+    from wato_perception_2d.pipeline import _default_device
+
+    from wato_perception_2d.models._sam2_runtime import installed_sam2_commit
+
+    assert manifest["mask_propagation"] == {
+        "backend": "dam4sam",
+        "sam2_commit": installed_sam2_commit(),
+        "dam4sam_commit": "67d5dfe86d8ae7b557193231c6058a46f5c0c490",
+        "adapter_version": 1,
+        "cuda_hole_filling": _default_device() == "cuda",
+    }
+
+
+def test_resume_rejects_mixed_mask_policies(empty_bag):
+    from wato_perception_2d.pipeline import _save_cam_partial, _load_cam_partial
+
+    bag_id, chunk_id, _ = empty_bag
+    cfg = ComponentConfig()
+    _save_cam_partial(bag_id, chunk_id, "cam_front", [], cfg, "cuda")
+    assert _load_cam_partial(bag_id, chunk_id, "cam_front", cfg, "cuda") == []
+    cfg.segmentation.refinement.enabled = True
+    with pytest.raises(RuntimeError, match="avoid mixing mask policies"):
+        _load_cam_partial(bag_id, chunk_id, "cam_front", cfg, "cuda")
+    cfg.segmentation.refinement.enabled = False
+    cfg.segmentation.backend = "sam2"
+    with pytest.raises(RuntimeError, match="avoid mixing mask policies"):
+        _load_cam_partial(bag_id, chunk_id, "cam_front", cfg, "cuda")
+
+
+def test_resume_rejects_masks_made_without_cuda_hole_filling(empty_bag):
+    """SAM2 skips hole filling on CPU, so a CPU camera's masks differ from a
+    CUDA run's and must not be resumed into one."""
+    from wato_perception_2d.pipeline import _save_cam_partial, _load_cam_partial
+
+    bag_id, chunk_id, _ = empty_bag
+    cfg = ComponentConfig()
+    _save_cam_partial(bag_id, chunk_id, "cam_front", [], cfg, "cpu")
+    assert _load_cam_partial(bag_id, chunk_id, "cam_front", cfg, "cpu") == []
+    with pytest.raises(RuntimeError, match="avoid mixing mask policies"):
+        _load_cam_partial(bag_id, chunk_id, "cam_front", cfg, "cuda")
+
+
+def test_resume_rejects_cache_from_before_required_cuda_cleanup(empty_bag):
+    import pickle
+    from pathlib import Path
+
+    from wato_perception_2d.pipeline import _cam_partial_path, _load_cam_partial
+
+    bag_id, chunk_id, _ = empty_bag
+    cfg = ComponentConfig()
+    path = Path(_cam_partial_path(bag_id, chunk_id, "cam_front"))
+    path.parent.mkdir(parents=True)
+    path.write_bytes(
+        pickle.dumps({"config": cfg.model_dump(mode="json"), "masklets": []})
+    )
+    with pytest.raises(RuntimeError, match="avoid mixing mask policies"):
+        _load_cam_partial(bag_id, chunk_id, "cam_front", cfg, "cuda")
 
 
 def test_complete_chunk_is_skipped_unless_forced(empty_bag):

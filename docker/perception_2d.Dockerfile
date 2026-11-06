@@ -81,5 +81,25 @@ RUN uv pip install --system --break-system-packages --no-deps \
 # an unpinned install silently changes the tracker between rebuilds. This is the
 # revision that was verified against torch 2.7.1. License: Apache 2.0.
 ARG SAM2_COMMIT=2b90b9f5ceec907a1c18123530e92e794ad901a4
-RUN uv pip install --system --break-system-packages --no-deps \
-        "sam-2 @ git+https://github.com/facebookresearch/sam2.git@${SAM2_COMMIT}"
+# Docker builds have no visible GPU. Specify architectures explicitly, including
+# Ada (RTX 4090), and PTX for newer devices. Build against the locked torch ABI;
+# build isolation can otherwise resolve a different torch just for compilation.
+ARG SAM2_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9;9.0+PTX"
+# The runtime base has no NVCC. Install only the matching compiler + core headers
+# for this build, then remove them (same pattern as pypatchworkpp's build deps).
+# cuBLAS/cuSPARSE/cuSOLVER headers already ship with our pinned PyTorch wheels.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cuda-nvcc-12-8=12.8.93-1 \
+        cuda-cudart-dev-12-8=12.8.90-1 \
+        cuda-cccl-12-8=12.8.90-1 \
+    && CPATH="$(python3 -c 'import site; from pathlib import Path; print(":".join(str(p) for root in site.getsitepackages() for p in (Path(root) / "nvidia").glob("*/include")))')" \
+       CUDA_HOME=/usr/local/cuda-12.8 \
+       TORCH_CUDA_ARCH_LIST="${SAM2_CUDA_ARCH_LIST}" \
+       SAM2_BUILD_CUDA=1 SAM2_BUILD_ALLOW_ERRORS=0 MAX_JOBS=2 \
+       uv pip install --system --break-system-packages --no-deps \
+        --no-build-isolation --no-cache --reinstall-package sam-2 \
+        "sam-2 @ git+https://github.com/facebookresearch/sam2.git@${SAM2_COMMIT}" \
+    && apt-get purge -y cuda-nvcc-12-8 cuda-cudart-dev-12-8 cuda-cccl-12-8 \
+    && apt-get -qq autoremove -y && apt-get -qq clean \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/* \
+    && python3 -c 'import torch; from sam2 import _C; assert callable(_C.get_connected_componnets)'

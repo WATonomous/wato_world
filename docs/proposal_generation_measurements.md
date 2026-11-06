@@ -242,21 +242,57 @@ frames' precision 0.73 → 0.81 (0.81 → 0.97 under 15 m), duplicate false
 positives 59 → 8. On WATO it changes almost nothing: 2,669 tracks instead of
 2,672.
 
-## Camera-overlay alignment
+## Camera-overlay alignment (WATO July 7 bag, 2026-11-03)
 
-The camera viewer previously drew proposals from every LiDAR frame paired
-with an image. On three WATO chunks, that mixed proposal times on 41% of
-images, showing moving objects at several positions. It now selects one
-nearest reference frame. A separate 3,761-view check finds that lifted boxes
-with 5–19 returns have median dimensions 1.54 × 0.38 × 1.16 m: their sparse
-observed geometry also explains poor mask overlap. The
-[camera-box alignment diagnosis](camera_box_alignment_diagnosis.md) separates
-the viewer bug, partial geometry, ownership ambiguity, motion and calibration,
-and records before/after images and replay commands.
+Boxes drawn on WATO camera images looked displaced from their objects. Three
+separate causes, measured on chunks 0000, 0004 and 0009:
 
-The supplied PANO_NN image 50 in chunk 0005 is a different, isolated case:
-one proposal time and 287/173 near-car returns. Its fitted tops omit visible
-upper shape; grounding adds 0.55–0.59 m, creating the large downward wireframe
-extension. Current-sweep road fits agree with the ground grid to within
-2.1 cm. The [exact-frame diagnosis](nn50_box_alignment.md) records the
-point-coverage, grounding and radius experiments and their limitations.
+- **The viewer mixed times (fixed).** An image is paired with several sweeps,
+  and on WATO those can belong to two frame_sync frames (the centre sweep
+  nearest an image and a corner sweep nearest it). The viewer drew every
+  paired frame's proposals, so a moving object appeared twice: on 6,542 of
+  15,939 images (41%), projected centres of the same track median 5.4 px
+  apart (p90 21.8, p99 89.1). It now draws the one nearest frame (an earlier
+  one wins a tie; an empty nearest frame stays empty).
+- **Lifted boxes are boxes around what was seen.** A lifted proposal boxes
+  its instance's largest connected group of returns; a side, a roof strip or
+  an edge becomes the whole box. Over 3,761 lifted-car views with a mask
+  (projected box rectangle vs mask rectangle):
+
+  | Returns in box | Views | Median l × w × h (m) | Median IoU | Centre offset > 0.5 |
+  |---|---:|---|---:|---:|
+  | 5–19 | 1,798 | 1.54 × 0.38 × 1.16 | 0.248 | 39.3% |
+  | 20–49 | 739 | 3.49 × 1.13 × 1.57 | 0.426 | – |
+  | 50+ | 1,224 | 3.70 × 1.55 × 1.50 | 0.622 | 8.4% |
+
+  (Offset: projected centre minus mask centroid over the mask's width and
+  height.) A cuboid may rightly reach past a foreground mask (hidden body,
+  perspective), so these are proxies, not wrong-box counts.
+- **Visibility isn't ownership.** Lifting's depth tests reject returns
+  behind a nearer surface; a foreground return on a background car's mask
+  edge *is* the nearest surface and passes. Of 1,024 masks at 5–20 m, 10.7%
+  have a box centre nearer than 0.65 × the mask's depth. Object motion
+  between sweep and image is a minor term here: shifting each box by its
+  track velocity × the time gap moved median IoU 0.620 → 0.623 (0.614 →
+  0.614 above 2 m/s).
+
+**Chunk 0005, PANO_NN image 50** (the reported screenshot, one proposal
+time). Rebuilt from stored labels, the proposals reproduce exactly. The near
+SUV (287 returns) and red car (173) have tops 47–50 px below their visible
+roofs and bottoms 76–85 px below their masks: their returns cover the lower
+and rear body, and grounding then lowers each bottom to the ground grid
+(raw z extent 1.10 → 1.65 m and 0.81 → 1.40 m). The grid is not too low:
+current-sweep road planes under both cars agree with it within 2.1 cm.
+A larger cluster radius doesn't help: the red car keeps the same 173 returns
+from 1 to 4 m, and the SUV at 2.5 m gains 7 returns but widens 1.68 → 2.75 m
+(16.2 m long at 4 m). The thin "car" beside the signpost is a 0.63 × 0.17 m
+group of 42 returns, grounded to 2.25 m tall. With NN's independently
+estimated rotation, lifting gives that mask the moving SUV's returns instead
+("WATO camera alignment" in `semantic_lifting_measurements.md`): this frame's
+root cause is the camera's orientation, and the partial shapes remain after
+it.
+
+What would fix the rest: track-consistent shape completion from the observed
+near surface, and ownership checks for weak lifted instances, measured on
+labelled WATO frames. Class dimensions or a far-range depth threshold
+without that would swap one bias for another.

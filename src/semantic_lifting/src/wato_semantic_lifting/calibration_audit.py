@@ -5,7 +5,8 @@ not ground truth; containment alone cannot identify a physical calibration.
 Fit each parameter family separately on 70% of track IDs, then evaluate on
 the other IDs. Points, masks and denominators stay fixed throughout a sweep.
 The CLI writes an experimental calibration beside its report; source artifacts
-are never rewritten. See docs/camera_projection_measurements.md for limits.
+are never rewritten. Limits: "WATO camera alignment" in
+docs/semantic_lifting_measurements.md.
 """
 
 from __future__ import annotations

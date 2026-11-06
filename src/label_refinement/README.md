@@ -30,8 +30,11 @@ sweeps, poses and ground grid (a parked box: its chunk with the most frames).
     (far frames see one face, so their boxes are small); the median for
     pedestrians, bicycles and motorcycles, whose high percentile is bleed.
   - Heading from the velocity of a local linear fit over 1 s where the track
-    moves ≥ 0.5 m/s, which also gives it a front (`heading_directed`);
-    slower, the mean of its denser frames' headings, mod π.
+    moves ≥ 0.5 m/s and that speed is ≥ 3 standard errors of the fit's
+    velocity, which also gives it a front (`heading_directed`); otherwise the
+    mean of its denser frames' headings, mod π. The second test rejects a
+    parked car's jitter: as its visible faces change, its box centre moves
+    back and forth faster than 0.5 m/s, giving headings tens of degrees off.
   - Each frame's box is placed on the observed box's corner nearest the ego
     and extends away from it (OYSTER, CPD); along an axis the observed box
     already spans at full size, its centre is kept. A pedestrian's box keeps
@@ -60,19 +63,28 @@ tracks of `slf.classes` (all six classes):
   frame starts at Phase 3's smoothed position and follows size changes from a vehicle's
   near corner (the far faces are what the LiDAR doesn't see and the
   silhouette does), a parked box's or a pedestrian's centre. One small offset
-  along the box's axes is shared by the track; heading and bottom are Phase
-  3's.
+  along the box's axes is shared by the track; the bottom is Phase 3's.
+- **Heading.** Phase 3's plus a fitted correction (≤ 30°), for cars, trucks,
+  buses and two-wheelers: with the heading fixed, a box turned 10° fits the
+  silhouette only by growing wider. A parked vehicle's one box gets one
+  angle; any other track a correction linear in time between knots ≤ 2 s
+  apart. Weak priors pull each knot to Phase 3's heading and neighbouring
+  knots together. The near-corner anchors' extents follow the corrected
+  axes; which end is nearer the ego stays Phase 3's, or the box would jump
+  sideways as the heading crossed it. A pedestrian's near-square footprint
+  says nothing about its heading, which stays Phase 3's.
   Fitting uses a local origin per track before float32 conversion, so large
   map coordinates retain centimetre precision.
 - **Fit.** Adam over log size and the offset, 150 steps at lr 0.1 (SLF's),
-  32 tracks per fit, each on its own loss (the GPU's cost is launching each
+  and the heading knots at 0.02 rad, 32 tracks per fit, each on its own loss
+  and keeping its lowest-loss step (Adam at a fixed rate doesn't settle) (the GPU's cost is launching each
   step, so a batch takes about as long as one track), minimising: Dice between each view's soft silhouette (the SDF's minimum
   along each ray) and its mask; a robust |SDF| at the LiDAR returns on the
   observed boxes (they lie on a vehicle's surface; a pedestrian's need only be
   inside its box); a weak pull to the class's mean size (nuScenes', as
   CenterPoint's anchors) and of the offset to zero.
 - **Gates.** The fit replaces Phase 3's geometry (`size_source` `slf`, the
-  exact fitted size and evaluated positions for every frame) only if it lowers the silhouette
+  exact fitted size and evaluated poses for every frame) only if it lowers the silhouette
   residual (mean 1 − IoU over the views) by ≥ 0.15: where Phase 3's box
   already matches the masks the fit mostly shrinks it to masks drawn tight. A
   pedestrian's fit is kept whatever the gain: its masks are a few pixels wide
@@ -81,10 +93,11 @@ tracks of `slf.classes` (all six classes):
   0.3 m. `residual_silhouette` and `residual_lidar_fit` are the written box's
   on the views, kept or not; null where SLF didn't run.
 
-Accepted positions are written directly: another smoother or ground lookup
-would change the geometry the quality gates evaluated. Heading and bottom
-remain Phase 3's constraints. The learned shape space, full pose fit and
-first-intersection LiDAR term of the paper are not implemented; the
+Accepted positions and headings are written directly: another smoother or
+ground lookup would change the geometry the quality gates evaluated. The
+bottom remains Phase 3's constraint. The learned shape space, a free
+per-frame pose and the first-intersection LiDAR term of the paper are not
+implemented; the
 [primary-source review](../../docs/research/slf_projection_implementation_review.md)
 separates these adaptations from implementation bugs.
 

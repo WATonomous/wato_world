@@ -1,4 +1,4 @@
-"""Detector + SAM2 video tracker — the primary (only) tracker.
+"""Detector + SAM2-family video tracking (stock SAM2 or DAM4SAM memory).
 
 For one camera stream, runs the 2D detector on keyframes and uses SAM2's video
 predictor to segment + propagate each detected box into a tracked masklet:
@@ -33,8 +33,8 @@ under ``autocast_dtype`` (bfloat16 by default); the detector and DINOv2 stay
 float32.
 
 Object ids reset between OOM windows and chunks, and a re-detected object whose
-track ended starts a new masklet; the `tracking` component re-links them (and
-across cameras) via the DINOv2 embeddings.
+track ended starts a new masklet. Cross-camera and cross-chunk identity belongs
+to downstream components; these masklet IDs are local to this tracking episode.
 
 SAM2 video predictor API (sam2 package):
     state = predictor.init_state(video_path=<jpeg_dir>, offload_video_to_cpu=True,
@@ -66,8 +66,13 @@ from scipy import ndimage
 from wato_common.artifacts import masklets
 from wato_common.artifacts.frame_index import CameraFrame
 from wato_perception_2d.fusion.masklet import Masklet
+from wato_perception_2d.config import MaskRefinementConfig
 from wato_perception_2d.models.detector import Concept, Detection
 from wato_perception_2d.models.embeddings import extract_dino_features
+from wato_perception_2d.models.mask_refinement import (
+    KeyframeMaskRefiner,
+    stability_scores,
+)
 
 log = logging.getLogger(__name__)
 
@@ -632,6 +637,7 @@ def track_camera(
     bag_id: str,
     chunk_id: str,
     cam_id: str,
+    tracker_backend: str,
     dino_model: str = "dinov2_vitl14",
     dino_every_k: int = 5,
     device: str = "cuda",
@@ -658,13 +664,16 @@ def track_camera(
     support_min_area: float = 0.01,
     reprompt_score: float = 0.8,
     reprompt_below_iou: float = 0.7,
+    refinement: Optional[MaskRefinementConfig] = None,
+    diagnostics: Optional[list[dict]] = None,
 ) -> list[Masklet]:
     """Detect + SAM2-track every taxonomy object across one camera's frames.
 
     Tries the whole clip in one SAM2 session. On a CUDA OOM it falls back to
     windows of ``sub_clip_frames`` (fresh session each); a window that itself
-    OOMs is recursively halved down to ``min_sub_clip_frames`` before being
-    skipped. Object ids reset between windows (re-linked downstream via DINOv2).
+    OOMs is recursively halved down to ``min_sub_clip_frames`` before raising.
+    Object ids reset between windows (``tracking`` associates 3D boxes, not
+    masklet ids).
 
     ``ego_mask`` is the (H, W) region of the image showing the vehicle's own
     body (None: the camera doesn't see it). A detection box, or a track's mask,
@@ -678,10 +687,27 @@ def track_camera(
     ``reprompt_below_iou`` with it, is re-prompted with that box there. 0
     disables.
 
+    ``refinement`` optionally proposes image-predictor masks for births and
+    corrections; shape-only checks are separately selectable.
+
+    ``tracker_backend`` ("sam2" / "dam4sam", the predictor's) is recorded on
+    every masklet. ``diagnostics``, when given, is extended with the camera's
+    per-frame mask events and refinement prompt events (mask_quality.py), and
+    only once every window has succeeded: a failed full-clip or halved
+    attempt adds none. Each mask event costs a GPU sync, so None skips them.
+
     Returns one Masklet per confirmed track that appeared in ≥1 frame.
     """
     if not frames or not images:
         return []
+
+    refinement = refinement or MaskRefinementConfig()
+    events: Optional[list[dict]] = [] if diagnostics is not None else None
+
+    def finish(result: list[Masklet]) -> list[Masklet]:
+        if diagnostics is not None:
+            diagnostics.extend(events)
+        return result
 
     kw = dict(
         bag_id=bag_id,
@@ -711,14 +737,32 @@ def track_camera(
         support_min_area=support_min_area,
         reprompt_score=reprompt_score,
         reprompt_below_iou=reprompt_below_iou,
+        refinement=refinement,
     )
+
+    def attempt(start: int, stop: int) -> dict[int, _Track]:
+        window_events: Optional[list[dict]] = [] if events is not None else None
+        tracks = _track_window(
+            predictor,
+            detector,
+            frames[start:stop],
+            images[start:stop],
+            concepts,
+            frame_offset=start,
+            quality_events=window_events,
+            **kw,
+        )
+        if window_events is not None:
+            events.extend(window_events)
+        return tracks
+
+    def to_masklets(tracks: dict[int, _Track]) -> list[Masklet]:
+        return _tracks_to_masklets(tracks, bag_id, chunk_id, cam_id, tracker_backend)
 
     # Attempt 1: the whole clip in one session.
     try:
-        tracks = _track_window(
-            predictor, detector, frames, images, concepts, frame_offset=0, **kw
-        )
-        return _tracks_to_masklets(tracks, bag_id, chunk_id, cam_id)
+        tracks = attempt(0, len(frames))
+        return finish(to_masklets(tracks))
     except Exception as exc:  # noqa: BLE001
         if not _is_cuda_oom(exc):
             raise
@@ -738,29 +782,18 @@ def track_camera(
 
     # Attempt 2: windowed, fresh session each, recursively halving on repeat OOM.
     def _track_range(start: int, stop: int) -> list[Masklet]:
-        fseg = frames[start:stop]
-        iseg = images[start:stop]
         try:
-            tr = _track_window(
-                predictor, detector, fseg, iseg, concepts, frame_offset=start, **kw
-            )
+            tr = attempt(start, stop)
         except Exception as exc:  # noqa: BLE001
             if not _is_cuda_oom(exc):
                 raise
             _empty_cuda_cache()
             n = stop - start
             if n <= floor:
-                log.warning(
-                    "chunk %s / %s: sub-clip [%d:%d] still OOM at the %d-frame "
-                    "floor (%s) — skipping window.",
-                    chunk_id,
-                    cam_id,
-                    start,
-                    stop,
-                    floor,
-                    exc,
-                )
-                return []
+                raise RuntimeError(
+                    f"chunk {chunk_id} / {cam_id}: sub-clip [{start}:{stop}] "
+                    f"still OOM at the {floor}-frame floor; camera incomplete"
+                ) from exc
             mid = start + n // 2
             log.warning(
                 "chunk %s / %s: sub-clip [%d:%d] OOM (%s) — halving into "
@@ -776,14 +809,14 @@ def track_camera(
                 stop,
             )
             return _track_range(start, mid) + _track_range(mid, stop)
-        out = _tracks_to_masklets(tr, bag_id, chunk_id, cam_id)
+        out = to_masklets(tr)
         _empty_cuda_cache()
         return out
 
     masklets: list[Masklet] = []
     for start in range(0, len(frames), window):
         masklets.extend(_track_range(start, min(start + window, len(frames))))
-    return masklets
+    return finish(masklets)
 
 
 def _track_window(
@@ -821,6 +854,8 @@ def _track_window(
     support_min_area: float,
     reprompt_score: float,
     reprompt_below_iou: float,
+    refinement: MaskRefinementConfig,
+    quality_events: Optional[list[dict]],
 ) -> dict[int, _Track]:
     """Detect + propagate over one (windowed) frame range in a single session.
 
@@ -831,6 +866,7 @@ def _track_window(
     objects are introduced segment-by-segment between keyframes; ``frame_offset``
     is the window's start index in the full clip, used for the DINOv2 sampling
     cadence and log lines (mask filenames use the absolute camera_seq).
+    ``quality_events`` (None: off) collects track_camera's diagnostics.
     """
     n = len(frames)
     if n == 0:
@@ -861,9 +897,12 @@ def _track_window(
     # Masks propagated into upcoming keyframes, for matching re-detections. Only
     # keyframes are kept: holding every frame's masks costs GBs on long clips.
     masks_at_kf: dict[int, dict[int, np.ndarray]] = {}
+    stability_at_kf: dict[int, dict[int, float]] = {}
+    mask_prompts: set[tuple[int, int]] = set()
     live: set[int] = set()  # obj_ids currently in the SAM2 session
     ended = _EndedTracks()  # lost / jumped objects: never recorded again
     next_obj_id = 0
+    refiner = KeyframeMaskRefiner(predictor, refinement) if refinement.enabled else None
 
     tmpdir: Optional[str] = None
     state = None
@@ -878,6 +917,31 @@ def _track_window(
             )
 
         for ki, kf in enumerate(kfs):
+            if refiner is not None:
+                refiner.reset()
+            image_ready = False
+
+            def propose(det: Detection, oid: int, action: str):
+                nonlocal image_ready
+                with amp():
+                    if not image_ready:
+                        refiner.set_image(images[kf])
+                        image_ready = True
+                    candidate = refiner.propose(det.box_xyxy, ego_mask)
+                event = {
+                    "kind": "prompt",
+                    "camera_seq": seq_by_index[kf],
+                    "window_start": frame_offset,
+                    "object_id": oid,
+                    "action": action,
+                    "det_score": float(det.score),
+                    **candidate.diagnostics(),
+                    "applied": False,
+                }
+                if quality_events is not None:
+                    quality_events.append(event)
+                return candidate, event
+
             is_last = ki == len(kfs) - 1
             stop = (n - 1) if is_last else kfs[ki + 1]  # last frame idx to reach
             record_stop = n if is_last else kfs[ki + 1]  # exclusive record bound
@@ -886,6 +950,7 @@ def _track_window(
             # vehicle's own body is the vehicle. One matching a track's mask
             # (propagated into this frame) supports it; the rest are births.
             existing = masks_at_kf.pop(kf, {})
+            old_stability = stability_at_kf.pop(kf, {})
             boxes = {oid: _mask_bbox(m) for oid, m in existing.items()}
             backing: dict[int, list[Detection]] = {}
             births: list[Detection] = []
@@ -928,8 +993,8 @@ def _track_window(
             for oid in backing:
                 obj_cls[oid] = support.label(oid)[0]
 
-            # A confident box backing one track alone, whose mask has drifted
-            # from it, re-prompts that track here.
+            # Association is unchanged. The opt-in image pass can also detect
+            # a silhouette disagreement hidden by a well-overlapping bbox.
             for oid, dets in backing.items():
                 det = dets[0]
                 if (
@@ -938,10 +1003,39 @@ def _track_window(
                     and oid not in support.tentative
                     and id(det) not in shared_box
                     and det.score >= reprompt_score
-                    and _box_iou(det.box_xyxy, boxes[oid]) < reprompt_below_iou
                 ):
-                    with amp():
-                        _add_object(predictor, state, kf, oid, det, new_segment=True)
+                    drifted = _box_iou(det.box_xyxy, boxes[oid]) < reprompt_below_iou
+                    corrected = False
+                    if refiner is not None and (
+                        drifted or refinement.correct_shape_disagreement
+                    ):
+                        candidate, event = propose(det, oid, "correction")
+                        event["trigger"] = "box_drift" if drifted else "shape_check"
+                        if candidate.mask is not None:
+                            agreement = _mask_iou(candidate.mask, existing[oid])
+                            event["propagated_mask_iou"] = agreement
+                            event["propagated_stability"] = old_stability.get(oid, 0.0)
+                            # A major disagreement could be the wrong instance.
+                            # Record it for review instead of transferring its ID.
+                            if (
+                                refinement.correction_min_mask_iou
+                                <= agreement
+                                < refinement.correction_below_mask_iou
+                                and candidate.stability >= old_stability.get(oid, 0.0)
+                            ):
+                                with amp():
+                                    predictor.add_new_mask(
+                                        state, kf, oid, candidate.mask
+                                    )
+                                mask_prompts.add((kf, oid))
+                                event["applied"] = corrected = True
+                            else:
+                                event["reason"] = "correction_guard_rejected"
+                    if drifted and not corrected:
+                        with amp():
+                            _add_object(predictor, state, kf, oid, det)
+                        if refiner is not None:
+                            event["box_fallback"] = True
 
             # Tracks that ended since the last keyframe (or just now) stopped
             # recording at once; remove them from the session here (between
@@ -967,17 +1061,21 @@ def _track_window(
                 obj_meta[oid] = (det.cls, det.score)
                 obj_cls[oid] = det.cls
                 seed_box[oid] = det.box_xyxy
+                candidate = None
+                if refiner is not None:
+                    candidate, event = propose(det, oid, "birth")
                 with amp():
-                    added = _add_object(
-                        predictor, state, kf, oid, det, new_segment=bool(live)
-                    )
-                if not added:
-                    # Mid-stream add unsupported on this build → stop introducing
-                    # new objects; existing ones still propagate to the clip end.
-                    del obj_meta[oid]
-                    break
+                    if candidate is not None and candidate.mask is not None:
+                        predictor.add_new_mask(state, kf, oid, candidate.mask)
+                        mask_prompts.add((kf, oid))
+                        event["applied"] = True
+                    else:
+                        _add_object(predictor, state, kf, oid, det)
                 live.add(oid)
                 support.born(oid, det)
+
+            if refiner is not None:
+                refiner.reset()  # release image features before video propagation
 
             # Nothing to track in this segment (e.g. an empty road at the first
             # keyframe): SAM2 refuses to propagate zero objects, so skip ahead to
@@ -997,6 +1095,19 @@ def _track_window(
                 f = int(f_idx)
                 ids = [int(o) for o in obj_ids]
                 masks = _frame_masks(mask_logits > 0, (H, W))
+                # Stability costs a GPU sync per frame: only for diagnostics,
+                # and at keyframes for refinement's correction guard.
+                stable = (
+                    stability_scores(mask_logits, refinement.stability_offset)
+                    if quality_events is not None
+                    or (refiner is not None and f in kf_set and f > kf)
+                    else None
+                )
+                raw_areas = (
+                    [int(m.sum()) if m is not None else 0 for m in masks]
+                    if quality_events is not None
+                    else None
+                )
                 # A box the ego check let through can still be segmented as the
                 # vehicle's body (a box over the rack and the road beside it),
                 # and a mask can drift onto it: such a track ends. Every other
@@ -1055,6 +1166,8 @@ def _track_window(
                 )
                 if f in kf_set and f > kf:
                     masks_at_kf[f] = dict(present)
+                    if stable is not None:
+                        stability_at_kf[f] = dict(zip(ids, map(float, stable)))
                 if f < record_stop and present:
                     _record_frame(
                         tracks,
@@ -1071,16 +1184,54 @@ def _track_window(
                         dino_every_k,
                         device,
                     )
+                if f < record_stop and quality_events is not None:
+                    saved = {oid: int(m.sum()) for oid, m in present}
+                    for oid, area, stability in zip(ids, raw_areas, stable):
+                        kept = saved.get(oid, 0)
+                        quality_events.append(
+                            {
+                                "kind": "mask",
+                                "camera_seq": seq_by_index[f],
+                                "window_start": frame_offset,
+                                "object_id": oid,
+                                "logit_source": "mask_prompt"
+                                if (f, oid) in mask_prompts
+                                else "decoder",
+                                "stability": float(stability),
+                                "raw_area": area,
+                                "postprocess_area": kept,
+                                "removed_fraction": 1 - kept / area if area else 0.0,
+                                "ended": oid in ended.ids,
+                                "tentative": oid in support.tentative,
+                                **(
+                                    {"memory": predictor.memory_diagnostics(state, oid)}
+                                    if hasattr(predictor, "memory_diagnostics")
+                                    else {}
+                                ),
+                            }
+                        )
                 if f >= stop:
                     break
         # A track still tentative at the end has only held masks, so it is
         # never written (_tracks_to_masklets skips it).
         for oid, track in tracks.items():
             track.cls, track.score = support.label(oid)
+        saved_frames = {oid: set(track.frames_present) for oid, track in tracks.items()}
+        for event in quality_events or ():
+            track = tracks.get(event["object_id"])
+            event["masklet_id"] = track.masklet_id if track is not None else None
+            if event["kind"] == "mask":
+                event["saved_area"] = (
+                    event["postprocess_area"]
+                    if event["camera_seq"] in saved_frames.get(event["object_id"], ())
+                    else 0
+                )
     finally:
         # Let queued mask PNGs land before the tracks are handed back; a failed
         # write surfaces from Future.result() in _track_to_masklet.
         writer.shutdown(wait=True)
+        if refiner is not None:
+            refiner.reset()
         if state is not None:
             try:
                 predictor.reset_state(state)
@@ -1092,41 +1243,18 @@ def _track_window(
     return tracks
 
 
-# A new object could not be added mid-stream — warn once per process, not once
-# per keyframe across every camera.
-_warned_midstream_add = False
+def _add_object(predictor, state, frame_idx: int, obj_id: int, det: Detection) -> None:
+    """Prompt with a box. The pinned SAM2 supports late births; errors raise.
 
-
-def _add_object(
-    predictor, state, frame_idx: int, obj_id: int, det: Detection, *, new_segment: bool
-) -> bool:
-    """Prompt SAM2 with one detection box; return False if a mid-stream add fails.
-
-    Adding to a session with nothing live (``new_segment=False``) must succeed
-    (the error propagates). Adding alongside live objects, some SAM2 builds
-    reject a new object after propagation has started; we isolate that (warn
-    once, return False) so existing tracks still finish — graceful degradation
-    of the re-detection feature, not garbage output.
+    In particular, an OOM must reach the window retry, and a failed correction
+    or late birth must never leave a successful-looking partial camera.
     """
-    global _warned_midstream_add
-    box = np.asarray(det.box_xyxy, dtype=np.float32)
-    try:
-        predictor.add_new_points_or_box(
-            inference_state=state, frame_idx=frame_idx, obj_id=obj_id, box=box
-        )
-        return True
-    except Exception as exc:  # noqa: BLE001
-        if not new_segment:
-            raise  # nothing live to fall back on — a real error
-        if not _warned_midstream_add:
-            _warned_midstream_add = True
-            log.warning(
-                "SAM2: could not add a new object mid-stream (%s) — new objects "
-                "entering after a clip's first keyframe will be missed until the "
-                "next OOM window / chunk. Lower nothing; this is build-dependent.",
-                exc,
-            )
-        return False
+    predictor.add_new_points_or_box(
+        inference_state=state,
+        frame_idx=frame_idx,
+        obj_id=obj_id,
+        box=np.asarray(det.box_xyxy, dtype=np.float32),
+    )
 
 
 def _record_frame(
@@ -1172,8 +1300,8 @@ def _record_frame(
             )
         )
     if dino_every_k > 0 and frame_index_abs % dino_every_k == 0:
-        # A failure raises: masklets without embeddings can't be re-linked by
-        # `tracking`, and a missing model would fail on every frame.
+        # A failure raises: a configured embedding must not go silently
+        # missing, and a missing model would fail on every frame.
         feats = extract_dino_features(
             image_rgb, [m for _, m in present], dino_model, device
         )
@@ -1204,17 +1332,21 @@ def _flush_held(
 
 
 def _tracks_to_masklets(
-    tracks: dict[int, _Track], bag_id: str, chunk_id: str, cam_id: str
+    tracks: dict[int, _Track],
+    bag_id: str,
+    chunk_id: str,
+    cam_id: str,
+    tracker_backend: str,
 ) -> list[Masklet]:
     return [
-        _track_to_masklet(t, bag_id, chunk_id, cam_id)
+        _track_to_masklet(t, bag_id, chunk_id, cam_id, tracker_backend)
         for t in tracks.values()
         if t.frames_present
     ]
 
 
 def _track_to_masklet(
-    track: _Track, bag_id: str, chunk_id: str, cam_id: str
+    track: _Track, bag_id: str, chunk_id: str, cam_id: str, tracker_backend: str
 ) -> Masklet:
     dino = (
         np.mean(track.dino_accum, axis=0).astype(np.float32)
@@ -1238,5 +1370,5 @@ def _track_to_masklet(
         frames_present=frames_present,
         mask_paths=mask_paths,
         dino_feature=dino,
-        tracker_backend="sam2",
+        tracker_backend=tracker_backend,
     )

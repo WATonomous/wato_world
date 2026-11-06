@@ -83,6 +83,9 @@ class Tally:
     dw: list[float] = field(default_factory=list)
     dh: list[float] = field(default_factory=list)
     dz: list[float] = field(default_factory=list)  # pred − gt centre height
+    # |pred − gt| heading modulo pi, degrees: front/back is not scored, since
+    # a box's footprint doesn't change under a half turn (heading_error_deg).
+    yaw_err_deg: list[float] = field(default_factory=list)
     class_agrees: list[bool] = field(default_factory=list)  # classed preds only
 
     def summary(self) -> dict:
@@ -106,10 +109,20 @@ class Tally:
             median_dw_m=med(self.dw),
             median_dh_m=med(self.dh),
             median_dz_m=med(self.dz),
+            median_yaw_err_deg=med(self.yaw_err_deg),
+            p90_yaw_err_deg=(
+                float(np.percentile(self.yaw_err_deg, 90)) if self.yaw_err_deg else None
+            ),
             class_accuracy=(
                 float(np.mean(self.class_agrees)) if self.class_agrees else None
             ),
         )
+
+
+def heading_error_deg(a: float, b: float) -> float:
+    """|a − b| modulo pi, in degrees (0 to 90)."""
+    d = (a - b) % math.pi
+    return math.degrees(min(d, math.pi - d))
 
 
 def band_of(range_m: float) -> str:
@@ -125,6 +138,8 @@ def tally_frame(
     gts: Sequence[Scored],
     max_dist_m: float,
     by_class: Optional[dict[str, Tally]] = None,
+    gt_groups: Optional[Sequence[Optional[str]]] = None,
+    by_group: Optional[dict[str, Tally]] = None,
 ) -> None:
     """Add one instant to per-band tallies (key "all" plus each range band).
 
@@ -132,7 +147,13 @@ def tally_frame(
     prediction's. by_class, when given, gets the ground-truth side per
     ground-truth class (n_gt, hits and the errors on them; false positives
     have no ground-truth class, so its precision is meaningless).
+    by_group is the same per gt_groups[j], a label per ground-truth box
+    (None: in no group), e.g. its class and motion state.
     """
+    if (gt_groups is None) != (by_group is None):
+        raise ValueError("gt_groups and by_group go together")
+    if gt_groups is not None and len(gt_groups) != len(gts):
+        raise ValueError(f"{len(gt_groups)} gt_groups for {len(gts)} gts")
     m = match_frame(preds, gts, max_dist_m)
 
     def at(key: str) -> Tally:
@@ -144,6 +165,8 @@ def tally_frame(
             at(key).n_gt += 1
         if by_class is not None:
             by_class.setdefault(gts[j].cls, Tally()).n_gt += 1
+        if gt_groups is not None and gt_groups[j] is not None:
+            by_group.setdefault(gt_groups[j], Tally()).n_gt += 1
     for i in range(len(preds)):
         if i in m.ignored_preds:
             continue
@@ -157,6 +180,8 @@ def tally_frame(
         targets = [at("all"), at(band_of(g.range_m))]
         if by_class is not None:
             targets.append(by_class.setdefault(g.cls, Tally()))
+        if gt_groups is not None and gt_groups[j] is not None:
+            targets.append(by_group.setdefault(gt_groups[j], Tally()))
         for t in targets:
             t.hits += 1
             t.centre_err_m.append(math.hypot(p.box.cx - g.box.cx, p.box.cy - g.box.cy))
@@ -165,5 +190,6 @@ def tally_frame(
             t.dw.append(p.box.w - g.box.w)
             t.dh.append(p.box.h - g.box.h)
             t.dz.append(p.box.cz - g.box.cz)
+            t.yaw_err_deg.append(heading_error_deg(p.box.heading, g.box.heading))
             if p.cls is not None:
                 t.class_agrees.append(p.cls == g.cls)

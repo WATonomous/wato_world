@@ -103,12 +103,15 @@ def refine_parked(
 
 def local_linear(
     t_s: np.ndarray, xy: np.ndarray, window_s: float
-) -> tuple[np.ndarray, np.ndarray]:
-    """(fitted centres, velocities) at each time, by a least-squares line over
-    the samples within ±window_s / 2. A sample with no neighbour keeps itself
-    and gets zero velocity."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(fitted centres, velocities, the velocities' standard errors) at each
+    time, by a least-squares line over the samples within ±window_s / 2. A
+    sample with no neighbour keeps itself and gets zero velocity; a line
+    through fewer than three samples has no residual to judge it by, so an
+    infinite standard error."""
     fitted = xy.copy()
     vel = np.zeros_like(xy)
+    se = np.full(len(t_s), np.inf)
     for i, t in enumerate(t_s):
         near = np.abs(t_s - t) <= window_s / 2
         dt = t_s[near] - t
@@ -117,7 +120,13 @@ def local_linear(
         a = np.column_stack([np.ones(dt.size), dt])
         coef, *_ = np.linalg.lstsq(a, xy[near], rcond=None)
         fitted[i], vel[i] = coef[0], coef[1]
-    return fitted, vel
+        n = dt.size
+        if n > 2:
+            # The slope's standard error, x and y pooled (one centre noise).
+            rss = float(np.sum((xy[near] - a @ coef) ** 2))
+            sigma2 = rss / (2 * (n - 2))
+            se[i] = math.sqrt(sigma2 / float(np.sum((dt - dt.mean()) ** 2)))
+    return fitted, vel, se
 
 
 def _undirected_mean(headings: np.ndarray) -> float:
@@ -168,17 +177,14 @@ def refine_moving(
     grounds: Sequence[Optional[GroundGrid]],
     cfg: MovingConfig,
     cls: Optional[str] = None,
-    size: Optional[tuple[float, float, float]] = None,
-    offset: tuple[float, float] = (0.0, 0.0),
 ) -> Refined:
     """Boxes for a moving (or unknown) track, one per frame in input order.
 
     ego_xy: (N, 2) ego position at each frame's time; grounds: each frame's
     ground grid (its chunk's), None to keep the boxes' median bottom; cls
     picks the size percentile and whether the box is corner-anchored or keeps
-    its observed centre (cfg.centred_classes). size (l, w, h) replaces the
-    percentile size and offset (along the length and width axes) moves every
-    centre: SLF's fit (slf.py).
+    its observed centre (cfg.centred_classes). SLF (slf.py) starts from these
+    boxes and, where accepted, replaces them with its own evaluated poses.
     """
     n = len(boxes)
     order = np.argsort(t_ns, kind="stable")
@@ -192,33 +198,30 @@ def refine_moving(
     width = float(np.percentile(ws, q))
     height = float(np.percentile(hs, q))
     length, width = max(length, width), min(length, width)
-    if size is not None:
-        length, width, height = size
     still_heading = _undirected_mean(np.array([boxes[i].heading for i in dense]))
 
     t = (t_ns[order] - t_ns[order][0]) * 1e-9
     measured = np.array([[boxes[i].cx, boxes[i].cy] for i in order])
-    _, vel = local_linear(t, measured, cfg.smooth_window_s)
+    _, vel, vel_se = local_linear(t, measured, cfg.smooth_window_s)
     speed = np.linalg.norm(vel, axis=1)
-    directed = speed >= cfg.heading_min_speed_mps
+    # A velocity no larger than its centres' jitter explains is no heading: a
+    # parked car whose visible faces change moves its box centre back and
+    # forth faster than heading_min_speed_mps (docs/label_refinement_measurements.md).
+    directed = (speed >= cfg.heading_min_speed_mps) & (
+        speed >= cfg.heading_speed_z * vel_se
+    )
     heading = np.where(directed, np.arctan2(vel[:, 1], vel[:, 0]), still_heading)
 
     centred = cls in cfg.centred_classes
     anchored = np.array(
         [
-            (
-                np.array([boxes[i].cx, boxes[i].cy])
-                if centred
-                else anchored_centre(
-                    boxes[i], length, width, float(heading[j]), ego_xy[i]
-                )
-            )
-            + offset[0] * axes(float(heading[j]))[0]
-            + offset[1] * axes(float(heading[j]))[1]
+            np.array([boxes[i].cx, boxes[i].cy])
+            if centred
+            else anchored_centre(boxes[i], length, width, float(heading[j]), ego_xy[i])
             for j, i in enumerate(order)
         ]
     )
-    smooth, _ = local_linear(t, anchored, cfg.smooth_window_s)
+    smooth, _, _ = local_linear(t, anchored, cfg.smooth_window_s)
     residual = (
         float(np.sqrt(np.mean(np.sum((smooth - anchored) ** 2, axis=1))))
         if n > 1

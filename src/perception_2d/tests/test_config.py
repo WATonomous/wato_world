@@ -5,7 +5,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from wato_perception_2d.config import load_config
+import pytest
+from pydantic import ValidationError
+
+from wato_perception_2d.config import (
+    MaskRefinementConfig,
+    SegmentationConfig,
+    load_config,
+)
 
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
 
@@ -17,3 +24,15 @@ def test_wato_config_is_the_default_plus_the_ego_mask():
     assert wato["ego_mask"]["polygons"]
     del base["ego_mask"], wato["ego_mask"]
     assert wato == base
+
+
+def test_invalid_correction_range_is_rejected():
+    with pytest.raises(ValidationError, match="must be below"):
+        MaskRefinementConfig(correction_min_mask_iou=0.9, correction_below_mask_iou=0.5)
+
+
+def test_mask_backend_is_explicit_and_validated():
+    assert SegmentationConfig().backend == "dam4sam"
+    assert SegmentationConfig(backend="sam2").backend == "sam2"
+    with pytest.raises(ValidationError):
+        SegmentationConfig(backend="dam4san")

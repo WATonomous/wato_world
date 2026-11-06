@@ -17,6 +17,38 @@ pano camera at 1280×1024; timings are on an RTX 5070 Ti.
   tracks it for the rest of the clip (a 161-frame masklet on the debug clip).
   GroundingDINO did not fire on it.
 
+## Mask propagation backend: stock SAM2 vs DAM4SAM (2026-11-05)
+
+Both nuScenes GT scenes run end to end with each `segmentation.backend`,
+everything else the shipped defaults and the same code (CUDA hole filling on
+for both), each into its own artifact root from the same ingest and
+lidar_preprocessing outputs, on an RTX 4090. Scored by the boxes downstream
+(`eval_proposals.py`, `eval_tracks.py`, `eval_refined.py`, 2 m matching):
+there is no mask ground truth.
+
+| scene | backend | masklets | fused hits / preds | true / false tracks | objects in one track | refined recall | car IoU | car yaw (°) |
+|---|---|---|---|---|---|---|---|---|
+| 0061 | sam2 | 693 | 352 / 495 | 60 / 46 | 0.45 | 0.34 | 0.36 | 2.9 |
+| 0061 | dam4sam | 710 | 356 / 497 | 62 / 45 | 0.50 | 0.35 | 0.36 | 2.5 |
+| 1100 | sam2 | 222 | 372 / 461 | 37 / 19 | 0.56 | 0.60 | 0.30 | 2.9 |
+| 1100 | dam4sam | 233 | 368 / 458 | 35 / 22 | 0.56 | 0.60 | 0.30 | 3.1 |
+
+- **No measurable difference.** Every gap is a few matches in ~350 or two or
+  three tracks, and its sign flips between the scenes; identity switches
+  (0.06 → 0.04 on scene-0061, 0 on scene-1100) and motion-state accuracy
+  (0.78, 0.88 for both) agree too. Boxes here come from LiDAR points, so a
+  mask change matters only where it changes which points an instance claims.
+- **The masks barely differ either:** 51.1k vs 50.6k and 43.1k vs 43.1k
+  masks, empty-mask share 2.1 / 2.3% and 0.6 / 0.6%, median threshold
+  stability 0.936 / 0.936 and 0.930 / 0.932. DAM4SAM's masklets are slightly
+  more and shorter (median 44 vs 45, 80 vs 88 images).
+- **Same cost:** the perception pass (depth included) took 13 min on
+  scene-0061 with either and 12.8 / 14.2 min on scene-1100.
+- DAM4SAM stays the default: nothing measured here favours either, and its
+  published case (distractors over long clips) is WATO's panoramic clips,
+  which have no ground truth. These scenes are 20 s; whether it helps on
+  WATO is unmeasured.
+
 ## Masks on a full bag (2026-10-31)
 
 `sensors_2026_07_07-23_01_24_2` (eidos poses), 11 chunks, 8522 masklets;
