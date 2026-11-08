@@ -981,7 +981,9 @@ def _track_window(
                 if backfill_frames > 0 and kf > 0:
                     birth_prompts[oid] = (
                         kf,
-                        ("mask", candidate.mask) if mask_seed else ("box", det.box_xyxy),
+                        ("mask", candidate.mask)
+                        if mask_seed
+                        else ("box", det.box_xyxy),
                     )
                 if gated:
                     born = _prompt_mask(prompted, oid, (H, W))
@@ -1325,9 +1327,11 @@ def _backfill(
                         if f in tracked_at:
                             if union_f != f:
                                 union_f = f
-                                union = np.unpackbits(
-                                    tracked_at[f], count=H * W
-                                ).reshape(H, W).astype(bool)
+                                union = (
+                                    np.unpackbits(tracked_at[f], count=H * W)
+                                    .reshape(H, W)
+                                    .astype(bool)
+                                )
                             box = _mask_bbox(mask)
                             if _untracked_share(box, union) <= untracked_fraction:
                                 stopped[oid] = "tracked"

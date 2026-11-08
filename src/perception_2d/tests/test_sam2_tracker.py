@@ -952,7 +952,9 @@ def test_box_on_one_car_of_a_mask_bled_over_two_is_refused():
     pred = _FakePredictor(
         64,
         64,
-        trajectories={(4, 20, 20, 32): lambda f: (4, 20, 44, 32) if f else (4, 20, 20, 32)},
+        trajectories={
+            (4, 20, 20, 32): lambda f: (4, 20, 44, 32) if f else (4, 20, 20, 32)
+        },
     )
     masklets = _track(
         pred,
@@ -1029,7 +1031,9 @@ def test_mask_events_carry_sam2_quality_when_the_predictor_reports_it():
             return {"predicted_iou": 0.7, "object_score_logit": 3.0}
 
     events: list[dict] = []
-    _track(Reporting(16, 16), _ConstDetector(_two_cars()), 2, 16, 16, diagnostics=events)
+    _track(
+        Reporting(16, 16), _ConstDetector(_two_cars()), 2, 16, 16, diagnostics=events
+    )
     masks = [e for e in events if e["kind"] == "mask"]
     assert len(masks) == 4
     assert all(

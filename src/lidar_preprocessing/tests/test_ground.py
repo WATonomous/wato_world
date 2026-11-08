@@ -336,9 +336,9 @@ def test_ground_voxels_not_in_any_class_pass_through(tmp_env):
 
     result = process_chunk(ComponentConfig(), bag_id, chunk_id)
     assert result.status == "ok"
-    assert result.n_ground == 200, (
-        f"all ground points must survive an empty dynamic set; kept {result.n_ground}"
-    )
+    assert (
+        result.n_ground == 200
+    ), f"all ground points must survive an empty dynamic set; kept {result.n_ground}"
     assert result.n_dropped_dynamic == 0
 
 
