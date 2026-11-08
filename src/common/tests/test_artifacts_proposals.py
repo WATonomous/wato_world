@@ -76,6 +76,7 @@ def _chunk() -> list[pr.Proposal]:
             frac_persistent=None,
             track_life=None,
             lift_confidence=0.8,
+            lift_seed_point_count=80,
         ),
         _proposal(
             proposal_id="fused-0",
@@ -102,6 +103,42 @@ def test_record_tracks_the_row_schema():
     record = {f.name for f in dataclasses.fields(pr.Proposal)}
     assert record == set(ProposalRow.model_fields) - {"bag_id", "chunk_id"}
     assert set(PROPOSAL_SCHEMA.names) == set(ProposalRow.model_fields)
+
+
+def test_legacy_proposals_without_a_seed_count_remain_readable():
+    pr.write(BAG, CHUNK, _chunk())
+    uri = proposals_path(BAG, CHUNK)
+    old_schema = PROPOSAL_SCHEMA.remove(
+        PROPOSAL_SCHEMA.get_field_index("lift_seed_point_count")
+    )
+    write_table(read_rows(uri), old_schema, uri)
+    assert all(p.lift_seed_point_count is None for p in pr.read(BAG, CHUNK))
+
+
+def test_missing_existing_columns_are_format_errors():
+    pr.write(BAG, CHUNK, _chunk())
+    uri = proposals_path(BAG, CHUNK)
+    broken_schema = PROPOSAL_SCHEMA.remove(PROPOSAL_SCHEMA.get_field_index("score"))
+    write_table(read_rows(uri), broken_schema, uri)
+    with pytest.raises(ArtifactFormatError, match="missing proposal column 'score'"):
+        pr.read(BAG, CHUNK)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"lift_seed_point_count": -1},
+        {"lift_seed_point_count": 121},
+        {"lift_seed_point_count": 1, "provenance": "lidar_mos"},
+    ],
+)
+def test_seed_evidence_cannot_exceed_geometry_or_belong_to_another_source(changes):
+    p = _proposal(
+        provenance="lifted", **{k: v for k, v in changes.items() if k != "provenance"}
+    )
+    p = dataclasses.replace(p, provenance=changes.get("provenance", "lifted"))
+    with pytest.raises(ValueError, match="lift_seed_point_count"):
+        pr.write(BAG, CHUNK, [p])
 
 
 @pytest.mark.parametrize(

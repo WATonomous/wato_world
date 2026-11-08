@@ -237,7 +237,8 @@ def test_manifest_records_effective_config_including_runtime_override(empty_bag)
         "backend": "dam4sam",
         "sam2_commit": installed_sam2_commit(),
         "dam4sam_commit": "67d5dfe86d8ae7b557193231c6058a46f5c0c490",
-        "adapter_version": 1,
+        "adapter_version": 2,
+        "mask_semantics": "independent",
         "cuda_hole_filling": _default_device() == "cuda",
     }
 
@@ -288,6 +289,32 @@ def test_resume_rejects_cache_from_before_required_cuda_cleanup(empty_bag):
         _load_cam_partial(bag_id, chunk_id, "cam_front", cfg, "cuda")
 
 
+@pytest.mark.parametrize("semantics", [None, "owned"])
+def test_resume_rejects_old_owned_masks_even_with_matching_config(empty_bag, semantics):
+    """A cached mask cannot acquire independent semantics by being re-serialized."""
+    import pickle
+    from pathlib import Path
+
+    from wato_perception_2d.pipeline import (
+        _cam_partial_path,
+        _load_cam_partial,
+        _save_cam_partial,
+    )
+
+    bag_id, chunk_id, _ = empty_bag
+    cfg = ComponentConfig()
+    _save_cam_partial(bag_id, chunk_id, "cam_front", [], cfg, "cpu")
+    path = Path(_cam_partial_path(bag_id, chunk_id, "cam_front"))
+    cached = pickle.loads(path.read_bytes())
+    if semantics is None:
+        del cached["mask_propagation"]["mask_semantics"]
+    else:
+        cached["mask_propagation"]["mask_semantics"] = semantics
+    path.write_bytes(pickle.dumps(cached))
+    with pytest.raises(RuntimeError, match="rerun with --force"):
+        _load_cam_partial(bag_id, chunk_id, "cam_front", cfg, "cpu")
+
+
 def test_complete_chunk_is_skipped_unless_forced(empty_bag):
     import time
 
@@ -313,6 +340,7 @@ def test_force_clears_previous_masks_and_depth(empty_bag):
     beside the new run's; a non-forced rerun (resume) must keep them.
     """
     from wato_common.artifact_store import depth_2d_dir, local_path, masks_2d_dir
+    from wato_perception_2d.pipeline import _cam_partial_path
 
     bag_id, chunk_id, _ = empty_bag
     stale_mask = os.path.join(
@@ -321,7 +349,8 @@ def test_force_clears_previous_masks_and_depth(empty_bag):
     stale_depth = os.path.join(
         local_path(depth_2d_dir(bag_id, chunk_id)), "CAM", "000001.npz"
     )
-    for p in (stale_mask, stale_depth):
+    stale_partial = _cam_partial_path(bag_id, chunk_id, "cam_front")
+    for p in (stale_mask, stale_depth, stale_partial):
         os.makedirs(os.path.dirname(p), exist_ok=True)
         open(p, "wb").close()
 
@@ -331,3 +360,4 @@ def test_force_clears_previous_masks_and_depth(empty_bag):
     run(ComponentConfig(), bag_id=bag_id, force=True)
     assert not os.path.exists(stale_mask)
     assert not os.path.exists(stale_depth)
+    assert not os.path.exists(stale_partial)

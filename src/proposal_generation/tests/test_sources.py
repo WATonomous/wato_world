@@ -13,8 +13,9 @@ from wato_proposal_generation.config import (
     FusionConfig,
     LidarMosConfig,
     LiftedConfig,
+    ScanRefinementConfig,
 )
-from wato_proposal_generation.frame_points import FramePoints
+from wato_proposal_generation.frame_points import FramePoints, LiftedSeed
 
 FRAME = Frame(
     frame_id=0, reference_sweep_id=4, sweep_ids=(4, 5), reference_timestamp_ns=100
@@ -70,6 +71,10 @@ INSTANCES = {
     "mA": LiftedInstance("mA", "car", ("mA",), ("CAM_A",), 10, 1),
     "mB": LiftedInstance("mB", "truck", ("mB",), ("CAM_B",), 10, 1),
 }
+
+
+def _sal_config(**overrides):
+    return LiftedConfig(support_method="scan_clusters", **overrides)
 
 
 def test_gate_keeps_only_moving_multi_source_transient_clusters():
@@ -164,10 +169,10 @@ def test_cluster_class_is_a_confidence_weighted_vote_with_a_floor():
     assert box.proposal.cls is None and box.proposal.supporting_masklet_ids == ()
 
 
-def test_lifted_box_keeps_the_largest_group_and_skips_small_ones():
+def test_lifted_box_refines_support_and_skips_small_ones():
     rng = np.random.default_rng(0)
     car = rng.uniform([-2, -1, 0.3], [2, 1, 1.5], size=(30, 3)) + [10, 0, 0]
-    # Default radius: 30 points in a car's volume chain at 2 m.
+    # A sufficiently dense car cluster matches; the isolated bleed does not.
     bleed = np.array([[40.0, 40.0, 1.0]])
     tiny = rng.uniform(-0.2, 0.2, size=(3, 3)) + [0, 20, 1]
     xyz = np.concatenate([car, bleed, tiny])
@@ -176,7 +181,7 @@ def test_lifted_box_keeps_the_largest_group_and_skips_small_ones():
         instance_id=["mA"] * 31 + ["mB"] * 3,
         cls=["car"] * 31 + ["truck"] * 3,
     )
-    boxes = lifted.proposals(FRAME, fp, None, INSTANCES, LiftedConfig(min_points=5))
+    boxes = lifted.proposals(FRAME, fp, None, INSTANCES, _sal_config(min_points=5))
     assert [b.proposal.proposal_id for b in boxes] == ["lifted-mA-000004"]
     p = boxes[0].proposal
     assert p.lidar_point_count == 30 and not boxes[0].members[30]
@@ -184,20 +189,68 @@ def test_lifted_box_keeps_the_largest_group_and_skips_small_ones():
     assert p.cls == "car" and p.lift_confidence == pytest.approx(0.9)
 
 
-def test_lifted_radius_is_per_class():
-    # A pedestrian 1.5 m from a wall its mask bled onto: one group at 2 m.
+def test_lifted_recovers_unlabelled_scan_returns_and_removes_bleed():
+    x, y = np.meshgrid(np.arange(3) * 0.3 + 10, np.arange(3) * 0.3)
+    surface = np.column_stack([x.ravel(), y.ravel(), np.ones(9)])
+    xyz = np.vstack([surface, [30, 30, 1]])
+    # Six object seeds plus an isolated mislabeled return. Three object
+    # returns have neither an image label nor a motion-cluster assignment.
+    fp = _points(xyz, instance_id=["mA"] * 6 + [""] * 3 + ["mA"])
+    [box] = lifted.proposals(FRAME, fp, None, INSTANCES, _sal_config())
+    assert box.members.tolist() == [True] * 9 + [False]
+    assert box.proposal.lidar_point_count == 9
+    assert box.proposal.lift_seed_point_count == 6
+    assert box.proposal.lift_confidence == pytest.approx(0.9)
+
+
+def test_lifted_preserves_original_seed_confidence_after_replacement():
+    xyz = np.column_stack([np.arange(9) * 0.05, np.zeros(9), np.ones(9)])
+    xyz = np.vstack([xyz, [30, 30, 1]])
+    fp = _points(
+        xyz,
+        instance_id=["mA"] * 6 + [""] * 3 + ["mA"],
+        confidence=[0.9] * 6 + [0] * 3 + [0.1],
+    )
+    [box] = lifted.proposals(FRAME, fp, None, INSTANCES, _sal_config())
+    assert box.proposal.lift_confidence == pytest.approx((6 * 0.9 + 0.1) / 7)
+    assert fp.instance_id.tolist() == ["mA"] * 6 + [""] * 3 + ["mA"]
+    assert np.all(fp.confidence[6:9] == 0)
+
+
+def test_refinement_runs_before_the_final_five_point_floor():
+    xyz = np.column_stack([np.arange(5) * 0.05, np.zeros(5), np.ones(5)])
+    fp = _points(xyz, instance_id=["mA"] * 3 + [""] * 2)
+    [box] = lifted.proposals(FRAME, fp, None, INSTANCES, _sal_config())
+    assert box.proposal.lidar_point_count == 5
+    assert box.proposal.lift_seed_point_count == 3
+
+
+def test_legacy_method_is_separate_from_sals_original_support_fallback():
+    xyz = np.column_stack(
+        [
+            np.r_[np.arange(6) * 0.01, 5 + np.arange(6) * 0.01, 20],
+            np.zeros(13),
+            np.ones(13),
+        ]
+    )
+    fp = _points(xyz, instance_id=["mA"] * 13)
+    [sal] = lifted.proposals(FRAME, fp, None, INSTANCES, _sal_config())
+    [legacy] = lifted.proposals(FRAME, fp, None, INSTANCES, LiftedConfig())
+    assert sal.proposal.lidar_point_count == 13
+    assert legacy.proposal.lidar_point_count == 6
+
+
+def test_a_contaminated_seed_can_match_background_without_a_semantic_veto():
+    # SAL's geometric overlap does not know that the larger component is a wall.
     rng = np.random.default_rng(1)
     ped = rng.uniform([-0.25, -0.25, 0.3], [0.25, 0.25, 1.7], size=(20, 3))
     wall = rng.uniform([1.5, -1.0, 0.3], [1.6, 1.0, 2.0], size=(40, 3))
     xyz = np.concatenate([ped, wall])
     instances = {"mP": LiftedInstance("mP", "pedestrian", ("mP",), ("CAM_A",), 10, 1)}
     fp = _points(xyz, instance_id=["mP"] * 60, cls=["pedestrian"] * 60)
-    [wide] = lifted.proposals(FRAME, fp, None, instances, LiftedConfig())
-    assert wide.proposal.lidar_point_count == 60
-    per_class = LiftedConfig(cluster_radius_by_class_m={"pedestrian": 0.7})
-    [box] = lifted.proposals(FRAME, fp, None, instances, per_class)
-    # The wall is the larger group now; what matters is the two are split.
-    assert box.proposal.lidar_point_count in (20, 40)
+    [box] = lifted.proposals(FRAME, fp, None, instances, _sal_config())
+    assert box.proposal.lidar_point_count == 40
+    assert box.members.tolist() == [False] * 20 + [True] * 40
 
 
 def test_lifted_height_cap_leaves_out_points_above_it():
@@ -205,13 +258,13 @@ def test_lifted_height_cap_leaves_out_points_above_it():
     car = rng.uniform([-2, -1, 0.0], [2, 1, 1.5], size=(40, 3))
     pole = np.column_stack([np.full(10, 1.5), np.zeros(10), np.linspace(1.6, 6.0, 10)])
     fp = _points(np.concatenate([car, pole]), instance_id=["mA"] * 50, cls=["car"] * 50)
-    [tall] = lifted.proposals(FRAME, fp, None, INSTANCES, LiftedConfig())
+    [tall] = lifted.proposals(FRAME, fp, None, INSTANCES, _sal_config())
     assert tall.proposal.h > 5.0
-    capped = LiftedConfig(max_height_m={"car": 3.0})
+    capped = _sal_config(max_height_m={"car": 3.0})
     [box] = lifted.proposals(FRAME, fp, None, INSTANCES, capped)
     assert box.proposal.h <= 3.0 and box.proposal.lidar_point_count < 50
     # A class without a cap is untouched.
-    assert LiftedConfig(max_height_m={"truck": 3.0}).max_height_m.get("car") is None
+    assert _sal_config(max_height_m={"truck": 3.0}).max_height_m.get("car") is None
 
 
 def test_lifted_box_inside_a_same_class_box_with_more_points_is_dropped():
@@ -229,12 +282,18 @@ def test_lifted_box_inside_a_same_class_box_with_more_points_is_dropped():
         instance_id=["mA"] * 40 + ["mH"] * 8 + ["mS"] * 30,
         cls=["car"] * 78,
     )
-    boxes = lifted.proposals(FRAME, fp, None, instances, LiftedConfig(min_points=5))
+    # Exercise the existing box filter independently of scan replacement.
+    original = ScanRefinementConfig(enabled=False)
+    boxes = lifted.proposals(
+        FRAME, fp, None, instances, _sal_config(refinement=original)
+    )
     assert [b.proposal.proposal_id for b in boxes] == [
         "lifted-mA-000004",
         "lifted-mS-000004",
     ]
-    off = LiftedConfig(min_points=5, max_nested_fraction=1.1, fragment_min_fraction=1.1)
+    off = _sal_config(
+        refinement=original, max_nested_fraction=1.1, fragment_min_fraction=1.1
+    )
     assert len(lifted.proposals(FRAME, fp, None, instances, off)) == 3
 
 
@@ -260,12 +319,15 @@ def test_a_few_points_against_a_bigger_objects_edge_are_its_fragment():
         instance_id=["mC"] * n + ["mF"] * 8 + ["mW"] * 30,
         cls=["car"] * n + ["pedestrian"] * 38,
     )
-    boxes = lifted.proposals(FRAME, fp, None, instances, LiftedConfig(min_points=5))
+    original = ScanRefinementConfig(enabled=False)
+    boxes = lifted.proposals(
+        FRAME, fp, None, instances, _sal_config(refinement=original)
+    )
     assert [b.proposal.proposal_id for b in boxes] == [
         "lifted-mC-000004",
         "lifted-mW-000004",
     ]
-    off = LiftedConfig(min_points=5, fragment_min_fraction=1.1)
+    off = _sal_config(refinement=original, fragment_min_fraction=1.1)
     assert len(lifted.proposals(FRAME, fp, None, instances, off)) == 3
 
 
@@ -282,13 +344,60 @@ def test_two_walkers_side_by_side_are_not_fragments_of_each_other():
         instance_id=["mA"] * 30 + ["mB"] * 20,
         cls=["pedestrian"] * 50,
     )
-    assert len(lifted.proposals(FRAME, fp, None, instances, LiftedConfig())) == 2
+    cfg = _sal_config(refinement=ScanRefinementConfig(enabled=False))
+    assert len(lifted.proposals(FRAME, fp, None, instances, cfg)) == 2
 
 
 def test_missing_lifted_instance_names_the_fix():
     fp = _points(np.zeros((6, 3)), instance_id=["mZ"] * 6, cls=["car"] * 6)
     with pytest.raises(KeyError, match="re-run semantic_lifting"):
-        lifted.proposals(FRAME, fp, None, INSTANCES, LiftedConfig())
+        lifted.proposals(FRAME, fp, None, INSTANCES, _sal_config())
+
+
+def test_partial_overlap_is_owned_once_and_boxes_refit_to_final_support():
+    from dataclasses import replace
+
+    from wato_common.tracking import fit_bev_box
+
+    xyz = np.column_stack([np.arange(10) * 0.1, np.zeros(10), np.ones(10)])
+    fp = replace(
+        _points(xyz),
+        lifted_seeds={
+            "mA": LiftedSeed(np.arange(6), np.full(6, 0.9)),
+            "mB": LiftedSeed(np.arange(4, 10), np.full(6, 0.4)),
+        },
+    )
+    cfg = _sal_config(
+        refinement=ScanRefinementConfig(enabled=False),
+        min_points=3,
+        max_nested_fraction=1.1,
+        fragment_min_fraction=1.1,
+    )
+    a, b = lifted.proposals(FRAME, fp, None, INSTANCES, cfg)
+    assert np.flatnonzero(a.members).tolist() == list(range(6))
+    assert np.flatnonzero(b.members).tolist() == list(range(6, 10))
+    assert not (a.members & b.members).any()
+    assert b.proposal.cx == pytest.approx(fit_bev_box(xyz[6:]).cx)
+    assert b.proposal.lift_seed_point_count == 4
+    assert b.proposal.lift_confidence == pytest.approx(0.4)
+
+
+def test_motion_semantic_view_uses_surviving_camera_seeds_only():
+    # Geometry expands six camera seeds to nine returns; a rejected competing
+    # provisional identity labels the whole object in the old unique view.
+    from dataclasses import replace
+
+    xyz = np.column_stack([np.arange(9) * 0.05, np.zeros(9), np.ones(9)])
+    fp = replace(
+        _points(xyz, instance_id=["mB"] * 9, cls=["truck"] * 9),
+        lifted_seeds={"mA": LiftedSeed(np.arange(6), np.full(6, 0.7))},
+    )
+    boxes = lifted.proposals(FRAME, fp, None, INSTANCES, _sal_config())
+    view = lifted.semantic_view(fp, boxes)
+    assert view.instance_id.tolist() == ["mA"] * 6 + [""] * 3
+    assert view.cls.tolist() == ["car"] * 6 + [""] * 3
+    assert view.confidence.tolist() == pytest.approx([0.7] * 6 + [0] * 3)
+    assert fp.instance_id.tolist() == ["mB"] * 9
 
 
 def _source_box(pid, members, provenance="lidar_mos", cls=None):
@@ -357,5 +466,12 @@ def test_a_pedestrian_beside_a_car_is_not_its_fragment(gap_m):
         cls=["car"] * n + ["pedestrian"] * 30,
     )
     assert n >= 5 * 30  # big enough for the fragment rule to consider it
-    boxes = lifted.proposals(FRAME, fp, None, instances, LiftedConfig(min_points=5))
+    cfg = _sal_config(refinement=ScanRefinementConfig(enabled=False))
+    boxes = lifted.proposals(FRAME, fp, None, instances, cfg)
     assert sorted(b.proposal.cls for b in boxes) == ["car", "pedestrian"]
+    # Full SAL replacement can absorb neighboring returns into the car; the
+    # existing fragment filter then suppresses the pedestrian. Keep this
+    # observed limitation visible rather than imposing an unpublished veto.
+    with_refinement = lifted.proposals(FRAME, fp, None, instances, _sal_config())
+    expected = ["car"] if gap_m <= 0.1 else ["car", "pedestrian"]
+    assert sorted(b.proposal.cls for b in with_refinement) == expected

@@ -10,7 +10,8 @@ On disk, per chunk:
   detections_2d.parquet  the same rows; perception_2d's skip check needs both.
   masks_2d/<masklet_id>/<camera_seq:06d>.png
                          one mask per entry of frames_present: 8-bit grayscale
-                         at the image's resolution, 255 = object.
+                         at the image's resolution, 255 = object. Independent
+                         per-object claims may overlap; no pixel ownership.
   masks_2d/<masklet_id>/dino_feature.npy
                          optional (D,) float32 mean DINOv2 embedding.
 
@@ -58,6 +59,7 @@ class MaskletRecord:
     centroid_depth_m: float = 0.0
     dino_feature_path: Optional[str] = None
     tracker_backend: str = "sam2"
+    mask_semantics: str = "independent"
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +113,7 @@ def write(bag_id: str, chunk_id: str, records: list[MaskletRecord]) -> None:
             discovery_score=r.discovery_score,
             centroid_depth_m=r.centroid_depth_m,
             tracker_backend=r.tracker_backend,
+            mask_semantics=r.mask_semantics,
         ).model_dump()
         for r in records
     ]
@@ -144,6 +147,12 @@ def _tracker_backend(row: dict, path: str) -> str:
 
 
 def _record(row: dict, path: str) -> MaskletRecord:
+    if row.get("mask_semantics") != "independent":
+        raise ArtifactFormatError(
+            path,
+            f"masklet {row.get('masklet_id')} does not preserve independent "
+            "mask claims; re-run perception_2d with --force",
+        )
     det_score = row.get("det_score")
     return MaskletRecord(
         masklet_id=str(row["masklet_id"]),
@@ -158,6 +167,7 @@ def _record(row: dict, path: str) -> MaskletRecord:
         centroid_depth_m=float(row.get("centroid_depth_m") or 0.0),
         dino_feature_path=row.get("dino_feature_path"),
         tracker_backend=_tracker_backend(row, path),
+        mask_semantics=row["mask_semantics"],
     )
 
 

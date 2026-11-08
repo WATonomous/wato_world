@@ -54,7 +54,12 @@ perception_2d's mask tracker is `segmentation.backend`: `dam4sam` (default;
 the authors' source vendored at a pinned commit in `_vendor/d4sm/`, whose two
 copied files must stay byte-identical) or `sam2`, both on the same SAM2.1
 weights; they score the same on the nuScenes GT scenes, and WATO is
-unmeasured. CUDA runs need SAM2's compiled `sam2._C` hole-filling kernel,
+unmeasured. The DAM4SAM adapter sets two memory parameters from its context
+subclass (`segmentation.dam4sam`: update spacing 2 images, SAMURAI's RAM gate),
+never by editing the vendored files. A box starts a track only past
+`tracking.birth_gate` (SAM2MOT's untracked area against tracked masks, or SAM 3's
+mask IoU), and each later birth is back-filled backwards from its prompt
+(`tracking.backfill_frames`). CUDA runs need SAM2's compiled `sam2._C` hole-filling kernel,
 checked before the depth pass. Mask refinement (`--refine-masks`) and mask
 diagnostics (`segmentation.mask_quality`) are off by default. Details:
 `src/perception_2d/README.md`.
@@ -67,7 +72,7 @@ diagnostics (`segmentation.mask_quality`) are off by default. Details:
 - **One module per cross-component artifact.** Anything one component writes
   and another reads is encoded, written and read by its module in
   `wato_common/artifacts/` (`calibration`, `frame_index`, `lidar_sweeps`,
-  `motion_proposals`, `ground`, `masklets`, `depth`, `lifted_labels`,
+  `motion_proposals`, `ground`, `masklets`, `depth`, `lifted_labels`, `lifted_candidates`,
   `proposals`, `tracks`, `refined_labels`; `gt_boxes` is imported ground
   truth that only evaluation reads),
   round-trip tested in
@@ -159,6 +164,12 @@ doesn't load; the trim-bag end-to-end test skips).
   object's per-camera masklets itself from the LiDAR points they both claim;
   `lifted_labels` name the instance by its smallest masklet_id and
   `lifted_instances.parquet` lists its masklets and cameras.
+  Perception saves independent overlapping masks (`mask_semantics: independent`).
+  Lifting preserves all visible point-instance claims in `lifted_candidates`;
+  `lifted_labels` is a provisional unique view. Proposal generation refines
+  candidates before exclusive ownership, and only surviving camera seeds
+  class motion proposals. When changing ownership or regenerating old owned
+  masks, read `docs/research/deferred_3d_mask_ownership.md` for ordering and reruns.
 - **Proposals are per frame and per source.** One `ProposalRow` per object per
   frame_sync frame, keyed on the frame's reference `sweep_id` (the canonical
   LiDAR's; `frame_id` is None for a sweep matched to none). Every source's rows
@@ -171,6 +182,10 @@ doesn't load; the trim-bag end-to-end test skips).
   so proposal_generation's config restates it (`frames.canonical_lidar`,
   `lidar_cc` in `.wato.yaml`) and `ProcessedSweeps.frames` raises
   `CanonicalLidarError` on a mismatch.
+  Lifted support has opt-in full non-ground scan-cluster matching. When changing
+  refinement or point-count evidence, read `docs/research/sal_scan_cluster_refinement.md`
+  for SAL fidelity choices; tracking counts retained camera seeds separately
+  from recovered geometry.
 - **Tracks are bag-level.** tracking tracks each chunk's fused rows, links
   each chunk's tracks to the next chunk's that agree in their shared span, and
   writes bag-level `tracks.parquet` + `track_summaries.parquet`. A linked

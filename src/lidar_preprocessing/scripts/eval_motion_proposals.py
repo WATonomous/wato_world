@@ -18,7 +18,7 @@ Recall is also split by the moving object's class and by range band.
     python /ws/src/lidar_preprocessing/scripts/eval_motion_proposals.py <bag_id> \
         [--chunk 0000] [--canonical-lidar lidar_cc] [--out FILE.json]
 
-This is gap 1 of docs/research/lidar_mos_guidance.md: the leakage metric of
+Results: docs/lidar_preprocessing_measurements.md. The leakage metric of
 compare_seg_dynamic.py measures false positives only, this measures misses.
 """
 

@@ -48,7 +48,10 @@ def propagation_provenance(backend: str, device: str) -> dict:
     vendored authors' memory policy (`dam4sam_commit`). SAM2's hole filling
     runs only on CUDA (check_sam2_cuda_extension proves it there); on CPU,
     SAM2 warns and returns the masks unfilled. The two produce different
-    masks, so the device's effect is part of the policy.
+    masks, so the device's effect is part of the policy. Output masks retain
+    independent claims; recording that policy rejects old owned-mask caches.
+    ``adapter_version`` 2: the DAM4SAM adapter sets the memory update spacing
+    and SAMURAI's RAM gate (their values are in the effective config).
     """
     if backend not in BACKENDS:
         raise ValueError(f"Unknown mask propagation backend: {backend}")
@@ -56,7 +59,8 @@ def propagation_provenance(backend: str, device: str) -> dict:
         "backend": backend,
         "sam2_commit": installed_sam2_commit(),
         "dam4sam_commit": d4sm.COMMIT if backend == "dam4sam" else None,
-        "adapter_version": 1,
+        "adapter_version": 2,
+        "mask_semantics": "independent",
         "cuda_hole_filling": device.startswith("cuda"),
     }
 
@@ -75,6 +79,8 @@ def get_sam2_predictor(
     config_file: str = DEFAULT_CONFIG,
     device: Optional[str] = None,
     backend: str = "sam2",
+    dam4sam_update_delta: int = 5,
+    dam4sam_memory_min_predicted_iou: float = 0.0,
 ) -> Optional[object]:
     """Return a cached predictor for the requested memory policy.
 
@@ -84,20 +90,31 @@ def get_sam2_predictor(
         config_file: hydra config name bundled in the `sam2` package.
         device: "cuda"/"cpu"; defaults to cuda when available.
         backend: "sam2" (stock API default) or "dam4sam" (pipeline default).
+        dam4sam_update_delta / dam4sam_memory_min_predicted_iou: DAM4SAM's
+            memory update spacing and SAMURAI's RAM gate (models/dam4sam.py);
+            the defaults are the authors' code. Ignored by stock SAM2.
 
     Stock SAM2 returns None when loading fails; DAM4SAM raises its loading error.
     """
     dev = device or _default_device()
     if backend not in BACKENDS:
         raise ValueError(f"Unknown mask propagation backend: {backend}")
-    key = (backend, config_file, checkpoint, dev)
+    memory = (
+        dict(
+            update_delta=dam4sam_update_delta,
+            memory_min_predicted_iou=dam4sam_memory_min_predicted_iou,
+        )
+        if backend == "dam4sam"
+        else {}
+    )
+    key = (backend, config_file, checkpoint, dev, tuple(sorted(memory.items())))
     cached = _cache.get(key)
     if cached is not None:
         return cached
     if backend == "dam4sam":
         from wato_perception_2d.models.dam4sam import build_dam4sam
 
-        predictor = build_dam4sam(config_file, checkpoint, dev)
+        predictor = build_dam4sam(config_file, checkpoint, dev, **memory)
         _cache[key] = predictor
         return predictor
     try:

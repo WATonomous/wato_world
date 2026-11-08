@@ -77,6 +77,7 @@ class Proposal:
     frac_persistent: Optional[float] = None
     track_life: Optional[int] = None
     lift_confidence: Optional[float] = None
+    lift_seed_point_count: Optional[int] = None
 
 
 def _problem(proposals: list[Proposal]) -> Optional[str]:
@@ -92,6 +93,17 @@ def _problem(proposals: list[Proposal]) -> Optional[str]:
             return f"{where}: provenance {p.provenance!r} not in {PROVENANCES}"
         if p.sweep_id not in p.sweep_ids:
             return f"{where}: sweep_id {p.sweep_id} not in sweep_ids {p.sweep_ids}"
+        if p.lift_seed_point_count is not None:
+            if p.provenance != "lifted":
+                return f"{where}: only lifted rows carry lift_seed_point_count"
+            if (
+                p.lift_seed_point_count < 0
+                or p.lidar_point_count is None
+                or p.lift_seed_point_count > p.lidar_point_count
+            ):
+                return (
+                    f"{where}: lift_seed_point_count must be within geometric support"
+                )
         if p.provenance != FUSED:
             if p.member_proposal_ids:
                 return f"{where}: only fused rows list member_proposal_ids"
@@ -131,7 +143,20 @@ def read(bag_id: str, chunk_id: str) -> list[Proposal]:
     uri = proposals_path(bag_id, chunk_id)
     out = []
     for row in read_rows(uri):
-        values = {f.name: row[f.name] for f in fields(Proposal)}
+        # Older proposals used labeled support directly and have no seed-count
+        # column. Preserve that explicit legacy case; other missing columns
+        # are still format errors rather than silently defaulted evidence.
+        try:
+            values = {
+                f.name: row[f.name]
+                for f in fields(Proposal)
+                if f.name != "lift_seed_point_count"
+            }
+        except KeyError as exc:
+            raise ArtifactFormatError(
+                local_path(uri), f"missing proposal column {exc.args[0]!r}"
+            ) from None
+        values["lift_seed_point_count"] = row.get("lift_seed_point_count")
         for name, (_, decode) in _LIST_FIELDS.items():
             values[name] = tuple(decode(values[name]))
         out.append(Proposal(**values))

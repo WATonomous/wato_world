@@ -50,8 +50,24 @@ the authors' prepared image/features once per frame. This avoids the author's
 replaces that object's context and resets its relative clock; removal frees its
 context. These lifecycle choices are application adaptations, not a reproduction
 of the paper's ground-truth-first-mask benchmark. Reverse propagation is not
-supported. The model and bounded per-object memories stay on its device; frames
-are read lazily on CPU. Upstream's offload-state flag is unused and not exposed.
+supported (back-fill feeds earlier frames forward in reverse order). The model
+and bounded per-object memories stay on its device; frames are read lazily on
+CPU. Upstream's offload-state flag is unused and not exposed.
+
+Two adapter parameters change what the memory keeps, from its context subclass,
+leaving both copied files as they are; the defaults reproduce the authors' code
+(the pipeline's values are in `segmentation.dam4sam`):
+
+- `update_delta` sets the context's `update_delta` attribute (the authors'
+  Δ, which spaces both RAM and DRM updates).
+- `memory_min_predicted_iou` ports SAMURAI's memory-bank gate: after the next
+  frame's memory attention, the previous frame's RAM entry is removed if its
+  predicted IoU was at most the gate, so the authors' update then treats the
+  new frame as a replacement for it. A frame waiting to be swapped into the DRM
+  is left to the authors' swap. Object pointers are not gated.
+
+A thin model view hands each `track_step` output to its context, which records
+the chosen mask's predicted IoU and object-score logit for diagnostics.
 
 Do not reformat the two copied upstream files. SHA-256 of the upstream files at
 the pinned commit (`sam2_base.py` here must still match the first):

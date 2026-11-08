@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from wato_proposal_generation.config import load_config
+import pytest
+from pydantic import ValidationError
+
+from wato_proposal_generation.config import (
+    LiftedConfig,
+    ScanRefinementConfig,
+    load_config,
+)
 
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
 
@@ -21,3 +28,27 @@ def test_wato_profile_is_the_default_with_the_rigs_canonical_lidar():
     assert default["frames"]["canonical_lidar"] is None
     wato["frames"]["canonical_lidar"] = None
     assert wato == default
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"radii_m": ()},
+        {"radii_m": (0,)},
+        {"radii_m": (-1,)},
+        {"radii_m": (float("nan"),)},
+        {"radii_m": (float("inf"),)},
+        {"min_samples": 0},
+        {"min_iou": -0.1},
+        {"min_iou": 1.1},
+    ],
+)
+def test_invalid_refinement_settings_fail(changes):
+    with pytest.raises(ValidationError):
+        ScanRefinementConfig(**changes)
+
+
+@pytest.mark.parametrize("threshold", [-0.1, 1.1, float("nan"), float("inf")])
+def test_invalid_coverage_thresholds_fail(threshold):
+    with pytest.raises(ValidationError):
+        LiftedConfig(max_support_iom=threshold)

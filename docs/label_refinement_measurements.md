@@ -181,8 +181,7 @@ These are 12-19 matched vehicles per scene.
 
 Not done: better parked support (lifted instances' own points rather than
 everything in the region), closeness seeds, LISO-style trajectory smoothing
-before the velocity heading. Sources and the papers' actual algorithms:
-`docs/research/box_orientation_reference_methods.md`.
+before the velocity heading.
 
 ## Choices
 

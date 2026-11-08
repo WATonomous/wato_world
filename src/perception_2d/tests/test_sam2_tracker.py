@@ -78,6 +78,15 @@ class _FakePredictor:
     def add_new_points_or_box(self, inference_state, frame_idx, obj_id, box):
         self._objs[int(obj_id)] = (int(frame_idx), tuple(float(v) for v in box))
         self.prompts.append((int(frame_idx), int(obj_id), tuple(int(v) for v in box)))
+        return self._prompt_output(frame_idx)
+
+    def _prompt_output(self, frame_idx):
+        """Like SAM2: (frame_idx, every object's id, their logits there)."""
+        ids = sorted(self._objs)
+        logits = np.stack(
+            [self._box_logit(self._objs[o][1], frame_idx) for o in ids], axis=0
+        )
+        return frame_idx, ids, logits
 
     def remove_object(self, inference_state, obj_id, strict=False, need_output=True):
         self._objs.pop(int(obj_id), None)
@@ -154,7 +163,7 @@ def _frames(n: int) -> list[CameraFrame]:
     ]
 
 
-def _track(predictor, detector, n, H, W, **kw):
+def _track(predictor, detector, n, H, W, stamped=False, **kw):
     base = dict(
         bag_id="bag0",
         chunk_id="chunk0",
@@ -168,9 +177,15 @@ def _track(predictor, detector, n, H, W, **kw):
         birth_score=0.0,
         support_keyframes=0,
         reprompt_below_iou=0.0,
+        birth_gate="none",
+        backfill_frames=0,
     )
     base.update(kw)
-    images = [np.zeros((H, W, 3), dtype=np.uint8) for _ in range(n)]
+    # stamped: image i is filled with 8 * i, which _StampedPredictor reads
+    # back to know the window frame behind each session frame.
+    images = [
+        np.full((H, W, 3), 8 * i if stamped else 0, dtype=np.uint8) for i in range(n)
+    ]
     return track_camera(
         predictor, detector, _frames(n), images, [("car", "car")], **base
     )
@@ -388,9 +403,11 @@ def test_lost_object_is_not_resumed_on_another_object():
     assert pred.removed == [0]
 
 
-def test_track_that_jumps_onto_another_tracked_object_ends():
-    """An oncoming car's mask snaps onto a parked car with no empty frame in
-    between: the track that jumped ends, the parked car's carries on."""
+def test_tracks_with_identical_masks_remain_independent_hypotheses():
+    """A mask that snaps onto another track remains available for 3D rejection.
+
+    Pixel overlap alone cannot establish which object its LiDAR points support.
+    """
     H, W, n = 40, 40, 12
     parked = Detection(box_xyxy=(2, 20, 10, 28), cls="car", score=0.9)
     oncoming = Detection(box_xyxy=(30, 20, 38, 30), cls="car", score=0.8)
@@ -414,7 +431,8 @@ def test_track_that_jumps_onto_another_tracked_object_ends():
     )
     by_score = {m.score: m.frames_present for m in masklets}
     assert by_score[0.9] == list(range(n))
-    assert by_score[0.8] == list(range(7))
+    assert by_score[0.8] == list(range(n))
+    assert pred.removed == []
 
 
 def test_same_keyframe_cross_class_duplicates_make_one_track():
@@ -434,14 +452,12 @@ def test_same_keyframe_cross_class_duplicates_make_one_track():
 
 
 # ---------------------------------------------------------------------------
-# Pixel ownership
+# Independent competing masks
 # ---------------------------------------------------------------------------
 
 
-def test_overlapping_masks_give_each_pixel_to_one_object():
-    """A bus's mask wraps around a car half-hidden beside it. Each pixel goes
-    to the object SAM2 is surest of there, or the car's LiDAR points would be
-    lifted as both."""
+def test_overlapping_masks_preserve_every_objects_claimed_pixels():
+    """Higher car logits cannot remove the bus's claims before 3D refinement."""
     H, W, n = 32, 32, 2
     bus = Detection(box_xyxy=(2, 2, 20, 20), cls="bus", score=0.9)
     car = Detection(box_xyxy=(16, 10, 24, 18), cls="car", score=0.8)
@@ -449,32 +465,37 @@ def test_overlapping_masks_give_each_pixel_to_one_object():
     masklets = _track(
         pred, _PerCallDetector([[bus, car]]), n, H, W, redetect_every_k=100
     )
-    m = {mk.cls: _mask(mk) for mk in masklets}
-    assert not (m["bus"] & m["car"]).any()
-    assert m["car"].sum() == 8 * 8
-    assert m["bus"].sum() == 18 * 18 - 4 * 8
+    for frame in range(n):
+        masks = {mk.cls: _mask(mk, frame) for mk in masklets}
+        assert (masks["bus"] & masks["car"]).sum() == 4 * 8
+        assert masks["car"].sum() == 8 * 8
+        assert masks["bus"].sum() == 18 * 18
 
 
-def test_track_left_owning_almost_none_of_its_mask_ends():
-    """A lost pedestrian's id latched onto a car that holds those pixels more
-    surely: it keeps a 1-row sliver (3% of its mask), far below
-    duplicate_mask_iou with the car. It is never recorded, and ends after
-    collapse_after_frames."""
-    H, W, n = 64, 64, 5
+def test_lower_logit_track_is_not_collapsed_or_ended():
+    """The small candidate keeps its complete mask across several keyframes."""
+    H, W, n = 64, 64, 8
     car = Detection(box_xyxy=(10, 10, 50, 50), cls="car", score=0.9)
     ped = Detection(box_xyxy=(20, 20, 30, 51), cls="pedestrian", score=0.5)
     pred = _FakePredictor(H, W, strength={(10, 10, 50, 50): 5.0})
     masklets = _track(
         pred,
-        _PerCallDetector([[car, ped]]),
+        _ConstDetector([car, ped]),
         n,
         H,
         W,
         redetect_every_k=3,
-        collapse_after_frames=3,
     )
-    assert [(m.cls, m.frames_present) for m in masklets] == [("car", [0, 1, 2, 3, 4])]
-    assert pred.removed == [1]  # removed at keyframe 3
+    assert {m.cls: m.frames_present for m in masklets} == {
+        "car": list(range(n)),
+        "pedestrian": list(range(n)),
+    }
+    assert pred.removed == []
+    for masklet in masklets:
+        assert all(
+            _mask(masklet, i).sum() == (1600 if masklet.cls == "car" else 310)
+            for i in range(n)
+        )
 
 
 def test_drop_islands_keeps_the_body_and_comparable_parts():
@@ -490,31 +511,6 @@ def test_drop_islands_keeps_the_body_and_comparable_parts():
     tiny = np.zeros((40, 40), dtype=bool)
     tiny[10:13, 10:13] = True  # a distant object: its only component stays
     assert (_drop_islands(tiny, 0.1) == tiny).all()
-
-
-def test_contested_specks_go_to_the_runner_up():
-    """Where two masks' logits are nearly equal, B wins isolated pixels inside
-    A's region. Dropped as B's specks, they go back to A instead of becoming
-    holes."""
-    from wato_perception_2d.models.sam2_tracker import _owned_masks
-
-    H, W = 40, 40
-    a = np.zeros((H, W), dtype=bool)
-    a[:20] = True
-    b = np.zeros((H, W), dtype=bool)
-    b[10:] = True
-    logits = np.full((2, 1, H, W), -5.0, dtype=np.float32)
-    logits[0, 0][a] = 2.0
-    logits[1, 0][b] = 1.9
-    logits[1, 0, 10:18:4, ::4] = 2.1  # B narrowly wins a sparse grid in A's rows
-
-    owned, collapsed = _owned_masks(
-        logits, [0, 1], [(0, a), (1, b)], island_fraction=0.1, collapse_fraction=0.2
-    )
-    got = dict(owned)
-    assert collapsed == []
-    assert (got[0] == a).all()
-    assert (got[1] == (b & ~a)).all()
 
 
 # ---------------------------------------------------------------------------
@@ -571,32 +567,30 @@ def test_track_segmenting_the_ego_vehicle_ends_and_is_not_prompted_again():
 
 
 # ---------------------------------------------------------------------------
-# Containment: what is seen through a vehicle's windows is part of it
+# Contained image masks remain competing hypotheses
 # ---------------------------------------------------------------------------
 
-_CONTAINED = dict(contained_classes=("pedestrian",), container_classes=("car",))
 
-
-def test_driver_seen_through_the_windows_is_not_a_pedestrian():
-    """The driver's mask lies inside the car's and ends well above its bottom:
-    never recorded, ended, and its pixels stay the car's."""
+def test_mask_contained_inside_vehicle_survives_for_3d_refinement():
+    """A contained image mask is retained; image containment cannot own points."""
     H, W, n = 64, 64, 5
     car = Detection(box_xyxy=(10, 10, 50, 50), cls="car", score=0.9)
     driver = Detection(box_xyxy=(25, 18, 35, 30), cls="pedestrian", score=0.6)
     pred = _FakePredictor(H, W, strength={(25, 18, 35, 30): 5.0})
-    (car_m,) = _track(
+    masklets = _track(
         pred,
-        _PerCallDetector([[car, driver]]),
+        _ConstDetector([car, driver]),
         n,
         H,
         W,
         redetect_every_k=3,
-        containment_after_frames=3,
-        **_CONTAINED,
     )
-    assert car_m.cls == "car" and car_m.frames_present == [0, 1, 2, 3, 4]
-    assert _mask(car_m).sum() == 40 * 40
-    assert pred.removed == [1]
+    by_cls = {m.cls: m for m in masklets}
+    assert set(by_cls) == {"car", "pedestrian"}
+    assert all(m.frames_present == list(range(n)) for m in masklets)
+    assert _mask(by_cls["car"]).sum() == 40 * 40
+    assert _mask(by_cls["pedestrian"]).sum() == 10 * 12
+    assert pred.removed == []
 
 
 def test_pedestrian_in_front_of_a_car_is_not_contained():
@@ -612,7 +606,6 @@ def test_pedestrian_in_front_of_a_car_is_not_contained():
         H,
         W,
         redetect_every_k=100,
-        **_CONTAINED,
     )
     assert {m.cls: m.frames_present for m in masklets} == {
         "car": [0, 1, 2, 3],
@@ -749,6 +742,7 @@ class _MaskPromptPredictor(_FakePredictor):
         self.mask_prompts.append((frame_idx, obj_id, mask.copy()))
         self._objs[obj_id] = (frame_idx, _mask_bbox(mask))
         self.seed_masks[obj_id] = mask.copy()
+        return self._prompt_output(frame_idx)
 
     def propagate_in_video(self, *args, **kwargs):
         for f, ids, logits in super().propagate_in_video(*args, **kwargs):
@@ -875,3 +869,272 @@ def test_shape_correction_with_identical_bboxes_has_an_identity_guard(
     prompts = [e for e in events if e["kind"] == "prompt"]
     assert prompts[-1]["applied"] is (not major_disagreement)
     assert prompts[-1]["masklet_id"] == m.masklet_id
+
+
+# ---------------------------------------------------------------------------
+# Birth gate: births are tested against tracked mask pixels
+# ---------------------------------------------------------------------------
+
+
+def test_part_box_inside_a_tracked_car_does_not_start_a_track():
+    """YOLO boxes a corner of a car already tracked. Its box IoU with the car's
+    mask bbox is 0.14, so it supports nothing, but all of it lies inside the
+    car's mask: under SAM2MOT's test (> 50% untracked) it starts no track."""
+    car = Detection(box_xyxy=(10, 10, 50, 40), cls="car", score=0.9)
+    corner = Detection(box_xyxy=(10, 10, 24, 22), cls="car", score=0.3)
+    events: list[dict] = []
+    (m,) = _track(
+        _FakePredictor(64, 64),
+        _PerCallDetector([[car], [car, corner]]),
+        4,
+        64,
+        64,
+        redetect_every_k=2,
+        birth_gate="untracked_area",
+        diagnostics=events,
+    )
+    assert m.frames_present == [0, 1, 2, 3]
+    births = [e for e in events if e["kind"] == "birth"]
+    assert [(e["camera_seq"], e["accepted"]) for e in births] == [
+        (0, True),
+        (2, False),
+    ]
+    assert births[0]["masklet_id"] == m.masklet_id
+    assert births[1]["untracked_fraction"] == 0.0
+    assert births[1]["masklet_id"] is None
+
+
+def test_part_box_behind_its_cars_box_at_the_same_keyframe_is_refused():
+    """Births at one keyframe go highest score first, each tested against the
+    masks of the births before it: the corner fails behind the whole car."""
+    car = Detection(box_xyxy=(10, 10, 50, 40), cls="car", score=0.84)
+    corner = Detection(box_xyxy=(36, 28, 50, 40), cls="truck", score=0.30)
+    masklets = _track(
+        _FakePredictor(64, 64),
+        _PerCallDetector([[corner, car]]),
+        2,
+        64,
+        64,
+        redetect_every_k=100,
+        birth_gate="untracked_area",
+    )
+    assert [m.cls for m in masklets] == ["car"]
+
+
+@pytest.mark.parametrize(
+    "box,born",
+    [
+        ((30, 30, 60, 40), False),  # a third of it untracked
+        ((40, 30, 64, 40), True),  # 58% untracked
+    ],
+)
+def test_box_is_born_when_most_of_it_is_untracked(box, born):
+    car = Detection(box_xyxy=(10, 10, 50, 50), cls="car", score=0.9)
+    other = Detection(box_xyxy=box, cls="truck", score=0.5)
+    masklets = _track(
+        _FakePredictor(64, 64),
+        _PerCallDetector([[car], [car, other]]),
+        4,
+        64,
+        64,
+        redetect_every_k=2,
+        birth_gate="untracked_area",
+    )
+    assert sorted(m.cls for m in masklets) == (["car", "truck"] if born else ["car"])
+
+
+def test_box_on_one_car_of_a_mask_bled_over_two_is_refused():
+    """A parked car's mask bleeds onto the car beside it. A confident box on
+    the second car has box IoU 0.45 with the bled bbox, so it matched nothing
+    and started a duplicate; it lies inside the bled mask, so it is refused."""
+    first = Detection(box_xyxy=(4, 20, 20, 32), cls="car", score=0.6)
+    second = Detection(box_xyxy=(26, 20, 44, 32), cls="car", score=0.72)
+    pred = _FakePredictor(
+        64,
+        64,
+        trajectories={(4, 20, 20, 32): lambda f: (4, 20, 44, 32) if f else (4, 20, 20, 32)},
+    )
+    masklets = _track(
+        pred,
+        _PerCallDetector([[first], [second]]),
+        4,
+        64,
+        64,
+        redetect_every_k=2,
+        birth_gate="untracked_area",
+    )
+    assert [m.score for m in masklets] == [pytest.approx(0.6)]
+
+
+def _box_mask_refiner(monkeypatch, H, W):
+    """The image predictor as the mask_iou gate uses it: a box's mask is the box."""
+    from wato_perception_2d.models import sam2_tracker
+
+    encoded: list[int] = []
+
+    class BoxMasks:
+        def __init__(self, *args):
+            pass
+
+        def set_image(self, image):
+            encoded.append(1)
+
+        def reset(self):
+            pass
+
+        def box_mask(self, box):
+            mask = np.zeros((H, W), dtype=bool)
+            x1, y1, x2, y2 = (int(v) for v in box)
+            mask[y1:y2, x1:x2] = True
+            return mask
+
+    monkeypatch.setattr(sam2_tracker, "KeyframeMaskRefiner", BoxMasks)
+    return encoded
+
+
+@pytest.mark.parametrize(
+    "gate,born",
+    [
+        # SAM2MOT refuses both boxes inside the car; SAM 3's mask IoU (0.02)
+        # lets the small one through and refuses the larger overlap (0.12).
+        ("untracked_area", ["car", "truck"]),
+        ("mask_iou", ["car", "motorcycle", "truck"]),
+    ],
+)
+def test_untracked_area_and_mask_iou_gates_differ_on_a_small_box_inside(
+    monkeypatch, gate, born
+):
+    encoded = _box_mask_refiner(monkeypatch, 64, 64)
+    car = Detection(box_xyxy=(10, 10, 50, 50), cls="car", score=0.9)
+    overlap = Detection(box_xyxy=(30, 30, 60, 40), cls="bus", score=0.6)
+    small = Detection(box_xyxy=(20, 20, 26, 26), cls="motorcycle", score=0.5)
+    clear = Detection(box_xyxy=(45, 52, 64, 62), cls="truck", score=0.4)
+    masklets = _track(
+        _FakePredictor(64, 64),
+        _PerCallDetector([[car], [car, overlap, small, clear]]),
+        4,
+        64,
+        64,
+        redetect_every_k=2,
+        birth_gate=gate,
+    )
+    assert sorted(m.cls for m in masklets) == born
+    # Encoded once, at the keyframe with something to overlap.
+    assert len(encoded) == (1 if gate == "mask_iou" else 0)
+
+
+def test_mask_events_carry_sam2_quality_when_the_predictor_reports_it():
+    class Reporting(_FakePredictor):
+        def frame_quality(self, state, obj_id):
+            return {"predicted_iou": 0.7, "object_score_logit": 3.0}
+
+    events: list[dict] = []
+    _track(Reporting(16, 16), _ConstDetector(_two_cars()), 2, 16, 16, diagnostics=events)
+    masks = [e for e in events if e["kind"] == "mask"]
+    assert len(masks) == 4
+    assert all(
+        e["predicted_iou"] == 0.7 and e["object_score_logit"] == 3.0 for e in masks
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reverse back-fill from each birth
+# ---------------------------------------------------------------------------
+
+
+class _StampedPredictor(_FakePredictor):
+    """Reads each session frame's window frame from its pixels
+    (``_track(stamped=True)``), so trajectories follow window frames in the
+    back-fill's reversed session."""
+
+    def init_state(self, video_path, **kwargs):
+        state = super().init_state(video_path, **kwargs)
+        names = sorted(
+            (f for f in os.listdir(video_path) if f.endswith(".jpg")),
+            key=lambda f: int(f[:-4]),
+        )
+        self.sessions = getattr(self, "sessions", [])
+        self._window_frame = [
+            round(np.asarray(PILImage.open(os.path.join(video_path, f))).mean() / 8)
+            for f in names
+        ]
+        self.sessions.append(list(self._window_frame))
+        return state
+
+    def _box_logit(self, box, frame):
+        return super()._box_logit(box, self._window_frame[frame])
+
+
+def _late_car(trajectory, *, n=12, **kw):
+    """A car tracked from image 0, and a distant one YOLO first boxes at
+    keyframe 8 whose mask SAM2 places by ``trajectory`` (window frame → box)."""
+    near = Detection(box_xyxy=(2, 2, 8, 8), cls="car", score=0.9)
+    far = Detection(box_xyxy=(20, 20, 28, 28), cls="truck", score=0.4)
+    pred = _StampedPredictor(32, 32, trajectories={far.box_xyxy: trajectory})
+    events: list[dict] = []
+    masklets = _track(
+        pred,
+        _PerCallDetector([[near], [near], [near, far]]),
+        n,
+        32,
+        32,
+        stamped=True,
+        redetect_every_k=4,
+        diagnostics=events,
+        **kw,
+    )
+    by_cls = {m.cls: m for m in masklets}
+    (backfill,) = [e for e in events if e["kind"] == "backfill"]
+    return by_cls, backfill, pred
+
+
+def test_backfill_recovers_a_car_before_its_first_detection():
+    by_cls, backfill, pred = _late_car(
+        lambda f: None if f == 0 else (20, 20, 28, 28),
+        backfill_frames=20,
+        drop_lost_after_frames=1,
+    )
+    assert by_cls["car"].frames_present == list(range(12))
+    assert by_cls["truck"].frames_present == list(range(1, 12))
+    assert all(_mask(by_cls["truck"], i).sum() == 64 for i in range(11))
+    assert backfill["frames_added"] == 7 and backfill["stop"] == "lost"
+    assert backfill["masklet_id"] == by_cls["truck"].masklet_id
+    # The reverse pass reads the window backwards from the birth.
+    assert pred.sessions[-1] == list(range(8, -1, -1))
+
+
+def test_backfill_stops_after_its_span():
+    by_cls, backfill, _ = _late_car(lambda f: (20, 20, 28, 28), backfill_frames=3)
+    assert by_cls["truck"].frames_present == list(range(5, 12))
+    assert backfill["stop"] == "span"
+
+
+def test_backfill_stops_where_the_mask_runs_onto_a_tracked_object():
+    """Before image 4 SAM2 latches the far car's id onto the near car, which
+    its own track already covers there: those masks are not added."""
+    by_cls, backfill, _ = _late_car(
+        lambda f: (2, 2, 8, 8) if f < 4 else (20, 20, 28, 28), backfill_frames=20
+    )
+    assert by_cls["truck"].frames_present == list(range(4, 12))
+    assert by_cls["car"].frames_present == list(range(12))
+    assert backfill["stop"] == "tracked"
+
+
+def test_a_birth_at_the_windows_first_image_is_not_backfilled():
+    near = Detection(box_xyxy=(2, 2, 8, 8), cls="car", score=0.9)
+    pred = _StampedPredictor(32, 32)
+    events: list[dict] = []
+    (m,) = _track(
+        pred,
+        _PerCallDetector([[near]]),
+        6,
+        32,
+        32,
+        stamped=True,
+        redetect_every_k=4,
+        backfill_frames=20,
+        diagnostics=events,
+    )
+    assert m.frames_present == list(range(6))
+    assert not [e for e in events if e["kind"] == "backfill"]
+    assert len(pred.sessions) == 1  # no reverse session was opened

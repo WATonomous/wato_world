@@ -25,6 +25,7 @@ from wato_common.artifacts import (
     depth,
     frame_index,
     lidar_sweeps,
+    lifted_candidates,
     lifted_labels,
     masklets,
 )
@@ -234,6 +235,32 @@ def test_points_inside_a_mask_are_labeled():
     assert inst.masklet_ids == (f"m_{CAM}",) and inst.n_points_labeled == 3
 
 
+def test_competing_mask_survives_lifting_even_when_it_wins_no_unique_labels():
+    _stage_chunk()
+    records = masklets.read(BAG, CHUNK)
+    competitor = replace(records[0], masklet_id="competitor", det_score=0.2)
+    # A smaller hypothesis covers the same physical returns as the larger
+    # high-score mask. Neither area nor score can erase it before refinement.
+    mask = np.zeros((H, W), bool)
+    mask[20:27, 28:36] = True
+    masklets.write_mask(BAG, CHUNK, competitor.masklet_id, SEQ, mask)
+    masklets.write(BAG, CHUNK, records + [competitor])
+    run(ComponentConfig(), bag_id=BAG)
+
+    labels = lifted_labels.read_sweep(BAG, CHUNK, SWEEP)
+    assert labels.instance_ids.tolist() == [f"m_{CAM}"] * 3
+    assert labels.n_supporting_cameras.tolist() == [1] * 3
+    claims = lifted_candidates.read_sweep(BAG, CHUNK, SWEEP, n_points=len(POINTS))
+    assert claims.point_indices.tolist() == [0, 0, 1, 1, 2, 2]
+    assert set(claims.instance_ids) == {f"m_{CAM}", "competitor"}
+    assert claims.confidences.tolist() == [1.0] * 6
+    instances = {
+        inst.instance_id: inst for inst in lifted_labels.read_instances(BAG, CHUNK)
+    }
+    assert set(instances) == {f"m_{CAM}", "competitor"}
+    assert instances["competitor"].n_points_labeled == 3
+
+
 def test_lifting_uses_the_calibrated_raw_image_distortion():
     # Optical x/z = .4. Brown k1=.5 gives xd=.432, u=53.6→pixel 54.
     # Ignoring distortion would hit pixel 52, which has no instance mask.
@@ -262,6 +289,7 @@ def test_points_behind_a_nearer_surface_take_no_label():
     assert stats.n_points_labeled == 0
     assert stats.n_points_failed_visibility == 3
     assert lifted_labels.read_sweep(BAG, CHUNK, SWEEP).point_indices.size == 0
+    assert lifted_candidates.read_sweep(BAG, CHUNK, SWEEP).point_indices.size == 0
 
 
 def test_points_behind_a_nearer_lidar_return_take_no_label():
@@ -385,6 +413,7 @@ def test_each_chunk_gets_a_manifest_of_its_inputs_and_outputs():
     assert manifest["inputs"]["manifest_perception_2d"]["present"] is False
     assert set(manifest["outputs"]) == {
         "lifted_labels",
+        "lifted_candidates",
         "lifted_instances",
         "lifted_stats",
     }

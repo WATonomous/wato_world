@@ -14,14 +14,21 @@ def test_backend_cache_separation_and_no_silent_fallback(monkeypatch):
     sam_module = types.ModuleType("sam2.build_sam")
     sam_module.build_sam2_video_predictor = lambda *a, **kw: stock
     dam_module = types.ModuleType("wato_perception_2d.models.dam4sam")
-    dam_module.build_dam4sam = lambda *a: dam
+    built = []
+    dam_module.build_dam4sam = lambda *a, **policy: built.append(policy) or dam
     monkeypatch.setitem(sys.modules, "sam2.build_sam", sam_module)
     monkeypatch.setitem(sys.modules, dam_module.__name__, dam_module)
     assert runtime.get_sam2_predictor("weights", device="cpu", backend="sam2") is stock
     assert runtime.get_sam2_predictor("weights", device="cpu", backend="dam4sam") is dam
     assert runtime.get_sam2_predictor("weights", device="cpu", backend="sam2") is stock
+    assert built == [{"update_delta": 5, "memory_min_predicted_iou": 0.0}]
+    # Another memory policy is another predictor, never the cached one.
+    runtime.get_sam2_predictor(
+        "weights", device="cpu", backend="dam4sam", dam4sam_update_delta=2
+    )
+    assert built[-1] == {"update_delta": 2, "memory_min_predicted_iou": 0.0}
 
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise RuntimeError("bad checkpoint")
 
     dam_module.build_dam4sam = fail

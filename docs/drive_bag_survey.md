@@ -91,11 +91,6 @@ Notes:
 
 ## Housekeeping
 
-- **Duplicates, about 156 GB.** These "Copy of" files are byte-for-byte the
-  same size as their originals:
-  - `recording_20260325_211221`: 3 copies of `_0`
-  - `recording_20260217_224728`: 2 copies of `_1`
-  - `ring_road_corrected`: 1 copy
 - **Unfinalized files (no summary/footer).** Most multi-file recordings end
   in one. These recordings consist only of unfinalized files:
   - `recording_20251220_181343`

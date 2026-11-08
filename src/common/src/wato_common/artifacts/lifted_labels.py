@@ -1,8 +1,12 @@
-"""semantic_lifting output: 2D masklet labels lifted onto LiDAR points.
+"""semantic_lifting's provisional unique-label view of lifted masklet claims.
 
 Written by semantic_lifting; read by proposal_generation (Segment-Lift-Fit),
 tracking and label_refinement once they exist. Write order: labels, then
 instances, then stats (the completion marker).
+
+Independent competing support lives in artifacts.lifted_candidates. Proposal
+generation refines those candidates before assigning ownership; this unique
+view is retained for diagnostics and other existing consumers.
 
 On disk, per chunk (under semantic_lifting/):
 
@@ -19,7 +23,7 @@ On disk, per chunk (under semantic_lifting/):
       n_disagreeing_cameras  int32 (M,)  cameras voting another class
   lifted_instances.parquet           one LiftedInstanceRow per instance: its
                                      class, masklet_ids and cam_ids (to find
-                                     its 2D masks), labeled point counts
+                                     its 2D masks), candidate support counts
   lifted_stats.parquet               one LiftedStatsRow per sweep (completion marker)
 
 Strings are fixed-width unicode arrays, so files load without pickle. Files
@@ -123,7 +127,11 @@ def read_sweep(
 
 @dataclass(frozen=True)
 class LiftedInstance:
-    """A LiftedInstanceRow without bag/chunk ids, lists decoded."""
+    """A LiftedInstanceRow without bag/chunk ids, lists decoded.
+
+    n_points_labeled / n_sweeps count retained candidate support, including
+    hypotheses that win no provisional unique labels.
+    """
 
     instance_id: str
     cls: str

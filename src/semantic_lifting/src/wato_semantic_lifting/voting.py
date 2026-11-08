@@ -1,8 +1,10 @@
 """Cross-camera vote resolution for LiDAR point labeling.
 
-Each camera casts at most one vote per visible LiDAR point: the masklet whose
-mask the point lands in (innermost mask wins, projection.label_raster),
-weighted by that masklet's det_score. Votes are resolved per point:
+Each independent mask supplies a claim for every visible LiDAR point it
+covers. ``candidates`` preserves all point-instance hypotheses after merging
+cross-camera identities. ``camera_winners`` selects one strongest-detector
+claim per camera for the provisional unique-label view; ``resolve`` then
+resolves that view per point:
 
   1. class: the class with the highest summed score across cameras wins.
      Masklets are per-camera, so cameras agree on a class, not on a masklet;
@@ -23,7 +25,12 @@ import numpy as np
 
 @dataclass(frozen=True)
 class Votes:
-    """One sweep's votes, one per (point, camera)."""
+    """One sweep's claims, one per (point, camera, masklet).
+
+    Independent masks from one camera may compete for the same point.
+    ``resolve`` accepts the provisional one-vote-per-camera view obtained
+    with ``camera_winners``; ``candidates`` retains every hypothesis.
+    """
 
     point_idx: np.ndarray  # int64 (V,) index into the sweep's world NPZ
     cam_idx: np.ndarray  # int64 (V,) the voting camera (only distinctness matters)
@@ -60,6 +67,86 @@ class Resolved:
     confidence: np.ndarray  # float64 (M,)
     n_supporting_cameras: np.ndarray  # int64 (M,) cameras voting the winning class
     n_disagreeing_cameras: np.ndarray  # int64 (M,) cameras voting another class
+
+
+@dataclass(frozen=True)
+class Candidates:
+    """Every unique point-instance claim after cross-camera identity merging."""
+
+    point_idx: np.ndarray
+    instance: np.ndarray
+    confidence: np.ndarray
+
+
+def camera_winners(votes: Votes) -> Votes:
+    """Provisional labels only: strongest masklet per point and camera.
+
+    Equal scores prefer the lower label index. This lossy view is never used
+    as the seed relation for proposal generation.
+    """
+    if not len(votes):
+        return votes
+    order = np.lexsort((votes.label_idx, -votes.score, votes.cam_idx, votes.point_idx))
+    points, cameras = votes.point_idx[order], votes.cam_idx[order]
+    first = np.r_[True, (points[1:] != points[:-1]) | (cameras[1:] != cameras[:-1])]
+    keep = order[first]
+    return Votes(
+        *(
+            getattr(votes, f)[keep]
+            for f in ("point_idx", "cam_idx", "label_idx", "score")
+        )
+    )
+
+
+def candidates(
+    votes: Votes, label_cls: np.ndarray, label_instance: np.ndarray
+) -> Candidates:
+    """Retain all hypotheses without counting duplicate masks as cameras.
+
+    Class scores sum at most the strongest masklet weight per camera/class.
+    Each candidate's confidence compares its class score to the strongest
+    other class. Same-class identity competition does not change confidence,
+    matching the existing class-agreement meaning of lifted labels.
+    """
+    if not len(votes):
+        z = np.zeros(0, np.int64)
+        return Candidates(z, z, np.zeros(0, np.float64))
+    classes = label_cls[votes.label_idx]
+    instances = label_instance[votes.label_idx]
+    # Several same-class hypotheses from one camera are one observation.
+    order = np.lexsort((-votes.score, classes, votes.cam_idx, votes.point_idx))
+    keys = np.stack([votes.point_idx, votes.cam_idx, classes], axis=1)[order]
+    first = np.r_[True, np.any(keys[1:] != keys[:-1], axis=1)]
+    keep = order[first]
+    class_pairs, sums, _ = _group_sums(
+        votes.point_idx[keep], classes[keep], votes.score[keep]
+    )
+    points, best, runner = _best_per_point(class_pairs, sums)
+    pairs, representative = np.unique(
+        np.stack([votes.point_idx, instances], axis=1), axis=0, return_index=True
+    )
+    candidate_classes = classes[representative]
+    # Join candidate classes to their summed class evidence in array form.
+    joined, inverse = np.unique(
+        np.concatenate(
+            [class_pairs, np.stack([pairs[:, 0], candidate_classes], axis=1)]
+        ),
+        axis=0,
+        return_inverse=True,
+    )
+    inverse = inverse.reshape(-1)
+    scores = np.zeros(len(joined), np.float64)
+    scores[inverse[: len(class_pairs)]] = sums
+    own = scores[inverse[len(class_pairs) :]]
+    at = np.searchsorted(points, pairs[:, 0])
+    other_index = np.where(
+        candidate_classes == class_pairs[best[at], 1], runner[at], best[at]
+    )
+    other = np.where(other_index >= 0, sums[np.maximum(other_index, 0)], 0.0)
+    confidence = np.divide(
+        own, own + other, out=np.ones_like(own), where=(own + other) > 0
+    )
+    return Candidates(pairs[:, 0], pairs[:, 1], confidence)
 
 
 def _group_sums(

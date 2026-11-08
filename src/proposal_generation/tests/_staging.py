@@ -31,6 +31,7 @@ from wato_common.artifacts import (
     frame_index,
     ground,
     lidar_sweeps,
+    lifted_candidates,
     lifted_labels,
     motion_proposals,
 )
@@ -177,6 +178,16 @@ def stage_chunk(*, with_camera: bool = False) -> None:
                     confidences=np.full(len(ids), 0.9, np.float32),
                     n_supporting_cameras=np.ones(len(ids), np.int32),
                     n_disagreeing_cameras=np.zeros(len(ids), np.int32),
+                ),
+            )
+            lifted_candidates.write_sweep(
+                BAG,
+                CHUNK,
+                sid,
+                lifted_candidates.SweepCandidates(
+                    labeled.astype(np.int32),
+                    np.array(ids),
+                    np.full(len(ids), 0.9, np.float32),
                 ),
             )
             stats.append(

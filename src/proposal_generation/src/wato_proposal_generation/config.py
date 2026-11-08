@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+import math
+from typing import Any, Literal, Optional
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class FramesConfig(BaseModel):
@@ -21,7 +22,7 @@ class LidarMosConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # Step F clusters become proposals only past these gates
-    # (docs/research/lidar_mos_guidance.md, "How downstream should consume it").
+    # (docs/lidar_preprocessing_measurements.md, "Step F against ground truth").
     min_motion_score: float = 1.0
     min_n_sources: int = 2
     max_frac_persistent: float = 0.5
@@ -42,21 +43,50 @@ class LidarMosConfig(BaseModel):
     min_volume_m3: float = 0.5
 
 
+class ScanRefinementConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # SAL Appendix A.1/Table A.1's six density thresholds, in published order.
+    # Interpreting them as Euclidean XYZ radii in metres is an implementation
+    # choice: the paper does not name the metric, units, or DBSCAN backend.
+    radii_m: tuple[float, ...] = (1.2488, 0.8136, 0.6952, 0.594, 0.4353, 0.3221)
+    # SAL does not report this. Five is the standard sklearn DBSCAN default;
+    # each point counts itself. It is configurable, not a claimed SAL value.
+    min_samples: int = Field(default=5, ge=1)
+    # Strictly greater, as in SAL. A failed match keeps the ORIGINAL seed.
+    min_iou: float = Field(default=0.5, ge=0.0, le=1.0)
+    # Disable for an original-support ablation, without largest-group cleanup.
+    enabled: bool = True
+
+    @field_validator("radii_m")
+    @classmethod
+    def valid_radii(cls, values: tuple[float, ...]) -> tuple[float, ...]:
+        if not values or any(not math.isfinite(v) or v <= 0 for v in values):
+            raise ValueError("radii_m must contain finite, positive radii")
+        return values
+
+
 class LiftedConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    # Points of one instance chained within this distance are one group; only
-    # the largest group is boxed (masklets bleed onto background). Lifted
-    # objects are far and sparse (median 34-51 m on WATO): 0.75 m splits real
-    # cars (docs/proposal_generation_measurements.md).
-    cluster_radius_m: float = 2.0
-    # Per-class override of cluster_radius_m, about the class's width (VESPA):
-    # at 2 m a pedestrian's group also takes in the wall or car beside it.
+    # Keep the two algorithms selectable for frozen-input comparisons. This
+    # chooses support before the same existing box postfilters are applied.
+    # SAL remains opt-in: the frozen nuScenes comparison currently loses
+    # proposal precision/recall (docs/research/sal_scan_cluster_refinement.md).
+    support_method: Literal["scan_clusters", "largest_group"] = "largest_group"
+    refinement: ScanRefinementConfig = Field(default_factory=ScanRefinementConfig)
+    # Resolve ownership only after independent 3D refinement and box gates.
+    # SAL-4D Appendix A.1.1 uses strict IoM > 0.5. Here support size ranks
+    # hypotheses within one frame; temporal volume is not accumulated.
+    max_support_iom: float = Field(default=0.5, ge=0.0, le=1.0)
+    # Only the legacy largest_group method reads these fields.
+    cluster_radius_m: float = Field(default=2.0, gt=0)
     cluster_radius_by_class_m: dict[str, float] = Field(default_factory=dict)
     # Points higher than this above the ground grid are left out of the box,
     # per class (CPD's vehicle window stops at 3 m): bleed onto a pole or wall
     # behind a car made car boxes 3.3 m tall at p90 on WATO. Without a ground
-    # grid, height is over the group's lowest point.
+    # grid, height is over the refined support's lowest point. This is a box
+    # postfilter, applied AFTER SAL matching; it never changes the seed IoU.
     max_height_m: dict[str, float] = Field(default_factory=dict)
     # A box with at least this share of its BEV footprint inside a same-class
     # box with more points in the frame is dropped (DetZero's nested-box
@@ -74,7 +104,7 @@ class LiftedConfig(BaseModel):
     fragment_min_fraction: float = 0.8
     fragment_min_ratio: float = 5.0
     # Fewer points than this in a frame: no box.
-    min_points: int = 5
+    min_points: int = Field(default=5, ge=1)
 
 
 class FusionConfig(BaseModel):

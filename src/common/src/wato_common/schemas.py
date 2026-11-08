@@ -500,6 +500,7 @@ class MaskletRow(BaseModel):
     discovery_score: float = 0.0  # detector / Florence-2 confidence
     centroid_depth_m: float = 0.0  # not populated yet
     tracker_backend: str = "sam2"  # tracker that produced this masklet
+    mask_semantics: str = "independent"  # overlapping per-object claims
 
 
 MASKLET_SCHEMA = pa.schema(
@@ -518,6 +519,7 @@ MASKLET_SCHEMA = pa.schema(
         pa.field("discovery_score", pa.float64()),
         pa.field("centroid_depth_m", pa.float64()),
         pa.field("tracker_backend", pa.string()),
+        pa.field("mask_semantics", pa.string()),
     ]
 )
 
@@ -593,8 +595,8 @@ class LiftedStatsRow(BaseModel):
 
 class LiftedInstanceRow(BaseModel):
     """One row per lifted instance (an object's masklets merged across
-    cameras) in lifted_instances.parquet, for every instance some point is
-    labeled with."""
+    cameras) in lifted_instances.parquet, for every instance with retained
+    candidate support, including zero provisional ownership."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -604,8 +606,8 @@ class LiftedInstanceRow(BaseModel):
     cls: str
     masklet_ids: str  # JSON list[str], sorted
     cam_ids: str  # JSON list[str], sorted, distinct
-    n_points_labeled: int  # summed over the chunk's sweeps
-    n_sweeps: int  # sweeps with at least one point labeled with it
+    n_points_labeled: int  # candidate support summed over the chunk's sweeps
+    n_sweeps: int  # sweeps with at least one retained candidate point
 
 
 LIFTED_INSTANCES_SCHEMA = pa.schema(
@@ -689,7 +691,9 @@ class ProposalRow(BaseModel):
     score: float
     # "lidar_mos" | "lifted" | "lidar_detector" | "fused"
     provenance: str
-    lidar_point_count: Optional[int] = None
+    lidar_point_count: Optional[int] = (
+        None  # total geometric support, including recovery
+    )
     supporting_cam_ids: str = "[]"  # JSON list[str] of cam_id
     supporting_masklet_ids: str = "[]"  # JSON list[str] of masklet_id
     member_proposal_ids: str = "[]"  # JSON list[str]; fused rows only
@@ -698,8 +702,13 @@ class ProposalRow(BaseModel):
     n_sources: Optional[int] = None
     frac_persistent: Optional[float] = None
     track_life: Optional[int] = None
-    # lifted evidence: mean semantic_lifting confidence of the box's points.
+    # lifted evidence: mean original seed confidence for scan refinement;
+    # legacy largest-group cleanup averages its final labeled support.
     lift_confidence: Optional[float] = None
+    # Original labeled returns retained in the final box support. Cluster-only
+    # additions contribute geometry, not camera evidence. Null on other sources
+    # and legacy proposals that predate scan refinement.
+    lift_seed_point_count: Optional[int] = None
 
 
 PROPOSAL_SCHEMA = pa.schema(
@@ -730,6 +739,7 @@ PROPOSAL_SCHEMA = pa.schema(
         pa.field("frac_persistent", pa.float64()),
         pa.field("track_life", pa.int64()),
         pa.field("lift_confidence", pa.float64()),
+        pa.field("lift_seed_point_count", pa.int64()),
     ]
 )
 

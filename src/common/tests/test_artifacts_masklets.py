@@ -78,6 +78,7 @@ def test_frames_present_is_stored_as_a_json_string():
         ],
     )  # fmt: skip
     (row,) = read_rows(tracklets_2d_path(BAG, CHUNK))
+    assert row["mask_semantics"] == "independent"
     assert row["frames_present"] == "[3, 4, 5]"
     assert masklets.read(BAG, CHUNK)[0].frames_present == (3, 4, 5)
 
@@ -132,4 +133,22 @@ def test_row_without_a_tracker_backend_raises():
     row["tracker_backend"] = None
     write_table([row], MASKLET_SCHEMA, tracklets_2d_path(BAG, CHUNK))
     with pytest.raises(ArtifactFormatError, match="tracker_backend"):
+        masklets.read(BAG, CHUNK)
+
+
+@pytest.mark.parametrize("semantics", [None, "owned"])
+def test_masks_without_independent_claim_semantics_are_rejected(semantics):
+    row = MaskletRow(
+        masklet_id="m0",
+        bag_id=BAG,
+        chunk_id=CHUNK,
+        cam_id="c",
+        cls="car",
+        score=0.9,
+        frames_present="[1]",
+        mask_path="",
+    ).model_dump()
+    row["mask_semantics"] = semantics
+    write_table([row], MASKLET_SCHEMA, tracklets_2d_path(BAG, CHUNK))
+    with pytest.raises(ArtifactFormatError, match="independent.*re-run perception_2d"):
         masklets.read(BAG, CHUNK)

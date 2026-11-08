@@ -35,7 +35,9 @@ class StrongConfig(BaseModel):
 
     # A box is strong when two sources agree on it (a fused lidar_mos + lifted
     # pair), or when its lifted box has at least this confidence and this many
-    # points. Strong boxes are matched to tracks first (SimpleTrack), so a weak
+    # retained original seed points, excluding geometry acquired by scan
+    # refinement. Legacy proposals use their total labeled count. Strong
+    # boxes are matched to tracks first (SimpleTrack), so a weak
     # box can't take a track a strong one fits.
     min_lift_confidence: float = 0.5
     min_lift_points: int = 20

@@ -1,10 +1,10 @@
 # semantic_lifting
 
-Occlusion-aware 2D → 3D label lifting: each LiDAR point takes the label of the
-perception_2d masklet it projects into, if nothing in front of it hides it from
-that camera (UniLiPs Eq. 1), with votes pooled across cameras.
-Design and rationale: `docs/research/semantic_lifting_design.md`; measurements
-behind the defaults: `docs/semantic_lifting_measurements.md`.
+Occlusion-aware 2D → 3D label lifting: every perception_2d masklet a LiDAR point
+projects into remains a candidate if nothing in front hides the return from
+that camera (UniLiPs Eq. 1). Competing hypotheses survive for geometric
+refinement and final point ownership in proposal_generation.
+Measurements behind the defaults: `docs/semantic_lifting_measurements.md`.
 
 ## How a point gets its label
 
@@ -12,13 +12,23 @@ For each sweep, every camera frame ingest paired with it (`frame_index`) is
 used; the points are already world-registered, so they are projected with the
 camera's pose at the frame's own time through the shared
 [camera model](../../docs/camera_geometry_contract.md), with full K and the
-stored image's lens model. A point inside a mask that passes the
-visibility test (below) gets one vote from that camera: the innermost (smallest) mask
-it lands in, weighted by the masklet's `det_score`. Votes are resolved per
-point by **class** first — the class with the highest summed score across
-cameras — then, within it, the highest-scoring instance. Masklets are
-per-camera, so two cameras on one car agree on its class even though their
-masklet ids differ.
+stored image's lens model. Visibility (below) is evaluated once per point and
+camera; every independent mask covering a visible return supplies a claim,
+weighted by its masklet's `det_score`. No image-area or logit winner erases
+competing claims. `lifted_candidates` stores every distinct point-instance
+pair, merging duplicate claims when masklets from different cameras represent
+the same instance. These retained candidates seed proposal_generation's
+geometric refinement, before point ownership is assigned.
+
+Frame caching stores each independent mask as its cropped bounding rectangle,
+with its image-pixel origin. PNGs are loaded and cropped one at a time; the
+cache does not retain a full-resolution image array for every hypothesis.
+
+`lifted_labels` remains a provisional unique-label view for visualization and
+existing consumers. It selects the strongest `det_score` claim per point and
+camera (ties prefer the lower masklet table index), then resolves **class** by
+summed camera score, followed by the highest-scoring instance of that class.
+Its ownership is not used to discard proposal candidates.
 
 **Ground is never labeled.** Points lidar_preprocessing's Patchwork++ marks as
 ground (the world sweep's `ground_mask`) get no vote: a mask's lower edge, or a
@@ -34,10 +44,19 @@ and stay within 5 m of each other (median, and for every pair in the group)
 in the sweeps where both claim points. A merge is also refused when the group
 would hold two masklets one camera saw in the same frame. On the WATO rig 69%
 of labeled points end up on a multi-camera instance. Instance quality is
-bounded by masklet quality: a masklet that drifts onto another object or a
-mask on the road still labels what it covers. `confidence` = winning class score / (winning + runner-up
-class score), 1.0 when every camera agrees; `n_supporting_cameras` /
-`n_disagreeing_cameras` count the cameras voting the winning / another class.
+bounded by masklet quality: a masklet that drifts onto another object still
+claims what it covers. Same-camera overlaps provide no cross-camera merging
+evidence. Every instance with candidate support appears in the instance table,
+including hypotheses that win no provisional labels.
+
+Candidate `confidence` compares that candidate's class score with the strongest
+other class: `own / (own + other)`, or 1 with no other class. Each camera
+contributes at most its strongest masklet score for a given class, so additional
+same-class masks do not inflate evidence. This remains class agreement, not
+calibrated reliability or same-class identity certainty. Provisional label
+`confidence` retains its winning-versus-runner-up class meaning;
+`n_supporting_cameras` / `n_disagreeing_cameras` count distinct cameras in its
+one-vote-per-camera view.
 
 **Visibility.** A point must have nothing nearer around its pixel, from two
 sources: perception_2d's depth map, whose surfaces only count up to
@@ -57,8 +76,9 @@ labels 77% of in-mask points instead of 57%, mostly cars at 20–50 m.
 Chunks whose `lifted_stats.parquet` exists are skipped unless `--force`. Each
 chunk gets `manifest_semantic_lifting.json` (wato_common.manifest): config,
 build provenance, and hashed inputs — the per-sweep world NPZs, masks and
-depth maps through their producers' manifests and indexes. A full WATO chunk
-(~1,900 sweeps × 8 cameras) takes ~3 min on CPU.
+depth maps through their producers' manifests and indexes. The earlier
+exclusive-mask path took ~3 min on CPU for a full WATO chunk (~1,900 sweeps ×
+8 cameras); independent candidate lifting needs a new runtime measurement.
 
 ```bash
 ./watod run semantic_lifting viz --bag <bag_id> [--chunk <chunk_id>] [--color class]
@@ -118,16 +138,21 @@ masklet lists) raises and stops the run.
 ## Outputs
 
 Under `chunks/<chunk_id>/semantic_lifting/`, written through
+`wato_common.artifacts.lifted_candidates` and
 `wato_common.artifacts.lifted_labels`:
 
 | Artifact | Contents |
 |---|---|
-| `lifted_labels/<sweep_id:06d>.npz` | Per labeled point: `point_indices` (int32, into the sweep's world NPZ), `instance_ids` (the instance's smallest masklet_id) and `classes` (unicode string arrays — load without pickle), `confidences` (float32), `n_supporting_cameras`, `n_disagreeing_cameras` (int32). |
-| `lifted_instances.parquet` | One `LiftedInstanceRow` per instance some point is labeled with: `cls`, its `masklet_ids` and `cam_ids` (to find its 2D masks), `n_points_labeled`, `n_sweeps`. Instance ids are chunk-local. |
+| `lifted_candidates/<sweep_id:06d>.npz` | Every distinct candidate `(point_indices, instance_ids)` pair and its `confidences` (int32, unicode, float32). Several instances can claim one point. An empty relation is written for sweeps with no claims. |
+| `lifted_labels/<sweep_id:06d>.npz` | Provisional unique labels: `point_indices` (int32, into the sweep's world NPZ), `instance_ids` (the instance's smallest masklet_id) and `classes` (unicode string arrays — load without pickle), `confidences` (float32), `n_supporting_cameras`, `n_disagreeing_cameras` (int32). |
+| `lifted_instances.parquet` | One `LiftedInstanceRow` per candidate-supported instance: `cls`, its `masklet_ids` and `cam_ids` (to find its 2D masks), `n_points_labeled` (distinct candidate points before ownership), `n_sweeps` (sweeps with candidate support). Instance ids are chunk-local. |
 | `lifted_stats.parquet` | One `LiftedStatsRow` per sweep (`sweep_id` int64). Written last: it is the chunk's completion marker. |
 
-Labels written before 2026-10-11 (pickled object arrays, and empty) are rejected
-by the reader; re-run semantic_lifting.
+The candidates reader rejects missing output, invalid pairs or pickled arrays
+with a rerun instruction. Existing owned-mask artifacts cannot reconstruct
+losing claims: rerun perception_2d, semantic_lifting and downstream stages with
+`--force`. Labels written before 2026-10-11 (pickled object arrays, and empty)
+are also rejected by the labels reader.
 
 ## Config
 

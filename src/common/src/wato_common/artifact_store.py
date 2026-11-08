@@ -240,6 +240,11 @@ def proposals_path(bag_id: str, chunk_id: str) -> str:
     return _join(chunk_root(bag_id, chunk_id), "proposals.parquet")
 
 
+def proposal_refinement_path(bag_id: str, chunk_id: str) -> str:
+    """proposal_generation's diagnostic table of all lifted-mask matches."""
+    return _join(chunk_root(bag_id, chunk_id), "proposal_refinement.parquet")
+
+
 # ---------------------------------------------------------------------------
 # semantic_lifting artifacts.
 # ---------------------------------------------------------------------------
@@ -257,6 +262,15 @@ def lifted_labels_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
 def lifted_instances_path(bag_id: str, chunk_id: str) -> str:
     """Parquet of LiftedInstanceRow rows — one per lifted instance."""
     return _join(semantic_lifting_dir(bag_id, chunk_id), "lifted_instances.parquet")
+
+
+def lifted_candidates_path(bag_id: str, chunk_id: str, sweep_id: int) -> str:
+    """Competing lifted point-instance claims; see artifacts.lifted_candidates."""
+    return _join(
+        semantic_lifting_dir(bag_id, chunk_id),
+        "lifted_candidates",
+        f"{sweep_id:06d}.npz",
+    )
 
 
 def lifted_stats_path(bag_id: str, chunk_id: str) -> str:

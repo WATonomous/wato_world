@@ -1,21 +1,29 @@
 """Source "lifted": a box around each semantic_lifting instance's points.
 
-Per frame, an instance's labelled points across the frame's sweeps. Masklets
-bleed onto background (60% of unmerged masklets' points jump > 5 m between
-sweeps, docs/semantic_lifting_measurements.md), so only the largest group of
-points within the class's cluster radius of each other is the object, minus
-any above the class's height cap; the box is fit to it and lowered to the
-ground. Then two filters, each dropping a box that is another object's:
+The opt-in scan_clusters method uses SAL-style matching to replace support with
+its best-IoU full-scan DBSCAN cluster when IoU > the threshold, retaining the
+original support otherwise. A class height cap then filters box support; the
+box is fit to it and lowered to ground. The default largest_group method keeps
+radius-connected support per independent hypothesis. Larger hypotheses are
+considered first; two filters compare their final support only to already
+accepted survivors and reject another object's:
 - a fragment: nearly all its points lie against a much bigger instance's
   points. A small mask beside a big one (a far car past a near car's edge, a
   low-score duplicate) claims a few of the big object's edge points, which
   box as a thin column beside it.
 - a nested box: one mostly inside a same-class box with more points, a hidden
   object boxed on its occluder.
+
+Coverage suppression, exclusive support, and the geometry filters share one
+acceptance pass. Each box is fit to its proposed final support before its
+geometry checks. Rejected hypotheses never take points away from another
+object or suppress later candidates. The provisional exclusive semantic
+labels are not used as seeds when retained claims are present.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Optional
 
 import numpy as np
@@ -30,6 +38,8 @@ from wato_common.tracking import bev_inside_fraction, fit_bev_box
 from wato_proposal_generation.boxes import SourceBox, box_of, proposal
 from wato_proposal_generation.config import LiftedConfig
 from wato_proposal_generation.frame_points import FramePoints
+from wato_proposal_generation.overlap import resolve_support
+from wato_proposal_generation.scan_refinement import RefinedMask, refine
 
 PROVENANCE = "lifted"
 
@@ -44,6 +54,31 @@ def instance(instances: dict[str, LiftedInstance], iid: str) -> LiftedInstance:
         ) from None
 
 
+def refine_support(
+    fp: FramePoints, instances: dict[str, LiftedInstance], cfg: LiftedConfig
+) -> dict[str, RefinedMask]:
+    """Select the published matcher or legacy cleanup for an explicit ablation.
+
+    The legacy method remains separate; it is never a fallback for failed SAL
+    matches. Its audit IoU is the retained component's overlap with its seed.
+    """
+    seeds = fp.seeds()
+    if cfg.support_method == "scan_clusters":
+        return refine(
+            fp.xyz, {iid: s.point_indices for iid, s in seeds.items()}, cfg.refinement
+        )
+    out = {}
+    for iid, claims in sorted(seeds.items()):
+        seed = claims.point_indices
+        cls = instance(instances, iid).cls
+        radius = cfg.cluster_radius_by_class_m.get(cls, cfg.cluster_radius_m)
+        keep = seed[largest_group(fp.xyz[seed], radius)]
+        out[iid] = RefinedMask(
+            seed, keep, radius, None, len(keep) / len(seed), "largest_group"
+        )
+    return out
+
+
 def below_height(
     keep: np.ndarray, xyz: np.ndarray, ground: Optional[GroundGrid], cap_m: float
 ) -> np.ndarray:
@@ -54,78 +89,33 @@ def below_height(
     return keep[above <= cap_m]
 
 
-def drop_nested(boxes: list[SourceBox], max_fraction: float) -> list[SourceBox]:
-    """The boxes minus each one whose BEV footprint lies at least max_fraction
-    inside a same-class box with more points (that one kept)."""
-    order = sorted(
-        range(len(boxes)), key=lambda i: (-boxes[i].proposal.lidar_point_count, i)
-    )
-    kept: list[int] = []
-    for i in order:
-        p = boxes[i].proposal
-        if not any(
-            boxes[k].proposal.cls == p.cls
-            and boxes[k].proposal.lidar_point_count > p.lidar_point_count
-            and bev_inside_fraction(box_of(p), box_of(boxes[k].proposal))
-            >= max_fraction
-            for k in kept
-        ):
-            kept.append(i)
-    return [boxes[i] for i in sorted(kept)]
-
-
-def drop_fragments(
-    boxes: list[SourceBox],
-    xyz: np.ndarray,
-    radius_m: float,
-    min_fraction: float,
-    min_ratio: float,
-) -> list[SourceBox]:
-    """The boxes minus each one with at least min_fraction of its points
-    within radius_m of the points of boxes kept with at least min_ratio times
-    as many (any class: the mask beside a car's may say pedestrian)."""
-    order = sorted(
-        range(len(boxes)), key=lambda i: (-boxes[i].proposal.lidar_point_count, i)
-    )
-    kept: list[int] = []
-    for i in order:
-        n = boxes[i].proposal.lidar_point_count
-        bigger = [
-            k for k in kept if boxes[k].proposal.lidar_point_count >= min_ratio * n
-        ]
-        if bigger:
-            near = cKDTree(
-                xyz[np.logical_or.reduce([boxes[k].members for k in bigger])]
-            )
-            d, _ = near.query(xyz[boxes[i].members], distance_upper_bound=radius_m)
-            if np.mean(np.isfinite(d)) >= min_fraction:
-                continue
-        kept.append(i)
-    return [boxes[i] for i in sorted(kept)]
-
-
 def proposals(
     frame: Frame,
     fp: FramePoints,
     ground: Optional[GroundGrid],
     instances: dict[str, LiftedInstance],
     cfg: LiftedConfig,
+    refinements: Optional[dict[str, RefinedMask]] = None,
 ) -> list[SourceBox]:
-    out = []
-    for iid in np.unique(fp.instance_id[fp.instance_id != ""]):
-        iid = str(iid)
+    if refinements is None:
+        refinements = refine_support(fp, instances, cfg)
+    seeds = fp.seeds()
+
+    def make_box(iid: str, keep: np.ndarray) -> SourceBox:
         inst = instance(instances, iid)
-        idx = np.flatnonzero(fp.instance_id == iid)
-        radius = cfg.cluster_radius_by_class_m.get(inst.cls, cfg.cluster_radius_m)
-        keep = idx[largest_group(fp.xyz[idx], radius)]
-        cap = cfg.max_height_m.get(inst.cls)
-        if cap is not None and keep.size:
-            keep = below_height(keep, fp.xyz, ground, cap)
-        if keep.size < cfg.min_points:
-            continue
+        refined = refinements[iid]
+        idx = refined.seed_indices
         members = np.zeros(fp.n, bool)
         members[keep] = True
-        confidence = float(fp.confidence[keep].mean())
+        # Cluster-acquired points have no new camera evidence. Preserve the
+        # original seed's confidence; only retained seed returns count toward
+        # tracking's strong-lift gate.
+        evidence = seeds[iid]
+        confidence = float(
+            evidence.confidences.mean()
+            if cfg.support_method == "scan_clusters"
+            else evidence.confidences[np.isin(evidence.point_indices, keep)].mean()
+        )
         p = proposal(
             f"lifted-{iid}-{frame.reference_sweep_id:06d}",
             frame,
@@ -138,13 +128,80 @@ def proposals(
             supporting_cam_ids=inst.cam_ids,
             supporting_masklet_ids=inst.masklet_ids,
             lift_confidence=confidence,
+            lift_seed_point_count=int(np.intersect1d(idx, keep).size),
         )
-        out.append(SourceBox(p, members))
-    out = drop_fragments(
-        out,
-        fp.xyz,
-        cfg.fragment_radius_m,
-        cfg.fragment_min_fraction,
-        cfg.fragment_min_ratio,
+        return SourceBox(p, members)
+
+    supports = {}
+    for iid, refined in sorted(refinements.items()):
+        inst = instance(instances, iid)
+        keep = refined.point_indices
+        cap = cfg.max_height_m.get(inst.cls)
+        if cap is not None and keep.size:
+            keep = below_height(keep, fp.xyz, ground, cap)
+        supports[iid] = keep
+
+    boxes: dict[str, SourceBox] = {}
+
+    def accept(iid: str, keep: np.ndarray, accepted: dict[str, np.ndarray]) -> bool:
+        # No candidate may suppress another and then disappear at a later
+        # geometry gate. Check the proposed final box against survivors only;
+        # after acceptance this box and its ownership are permanent.
+        box = make_box(iid, keep)
+        previous = [boxes[other] for other in accepted]
+        p = box.proposal
+        n = p.lidar_point_count
+        if any(
+            other.proposal.cls == p.cls
+            and other.proposal.lidar_point_count > n
+            and bev_inside_fraction(box_of(p), box_of(other.proposal))
+            >= cfg.max_nested_fraction
+            for other in previous
+        ):
+            return False
+        bigger = [
+            other
+            for other in previous
+            if other.proposal.lidar_point_count >= cfg.fragment_min_ratio * n
+        ]
+        if bigger:
+            near = cKDTree(
+                fp.xyz[np.logical_or.reduce([other.members for other in bigger])]
+            )
+            d, _ = near.query(fp.xyz[keep], distance_upper_bound=cfg.fragment_radius_m)
+            if np.mean(np.isfinite(d)) >= cfg.fragment_min_fraction:
+                return False
+        boxes[iid] = box
+        return True
+
+    owned = resolve_support(
+        supports,
+        min_points=cfg.min_points,
+        max_iom=cfg.max_support_iom,
+        accept=accept,
     )
-    return drop_nested(out, cfg.max_nested_fraction)
+    return [boxes[iid] for iid in sorted(owned)]
+
+
+def semantic_view(fp: FramePoints, boxes: list[SourceBox]) -> FramePoints:
+    """Camera evidence retained by the final 3D owners, for motion class votes.
+
+    A rejected candidate must not class an unmatched motion proposal through
+    the provisional label raster. Geometric additions have no camera evidence
+    and remain unlabeled in this view. Source artifacts stay unchanged.
+    """
+    seeds = fp.seeds()
+    ids = np.full(fp.n, "", dtype=f"U{max(map(len, seeds), default=1)}")
+    classes = np.full(
+        fp.n, "", dtype=f"U{max((len(b.proposal.cls) for b in boxes), default=1)}"
+    )
+    confidence = np.zeros(fp.n, np.float32)
+    for box in boxes:
+        iid = min(box.proposal.supporting_masklet_ids)
+        seed = seeds[iid]
+        retained = box.members[seed.point_indices]
+        idx = seed.point_indices[retained]
+        ids[idx] = iid
+        classes[idx] = box.proposal.cls
+        confidence[idx] = seed.confidences[retained]
+    return replace(fp, instance_id=ids, cls=classes, confidence=confidence)

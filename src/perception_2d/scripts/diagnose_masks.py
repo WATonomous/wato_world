@@ -80,6 +80,10 @@ def main():
         cfg.segmentation.config,
         device,
         backend=args.backend,
+        dam4sam_update_delta=cfg.segmentation.dam4sam.update_delta,
+        dam4sam_memory_min_predicted_iou=(
+            cfg.segmentation.dam4sam.memory_min_predicted_iou
+        ),
     )
     if predictor is None:
         raise RuntimeError("Could not load predictor")
@@ -148,6 +152,8 @@ def main():
         events=diagnostics,
     )
     events = [e for e in diagnostics if e["kind"] == "mask"]
+    births = [e for e in diagnostics if e["kind"] == "birth"]
+    backfills = [e for e in diagnostics if e["kind"] == "backfill"]
     summary = dict(
         backend=args.backend,
         bag=args.bag,
@@ -174,6 +180,10 @@ def main():
         median_threshold_stability=(
             float(np.median([e["stability"] for e in events])) if events else None
         ),
+        birth_boxes_tested=len(births),
+        birth_boxes_refused=sum(not e["accepted"] for e in births),
+        backfilled_tracks=sum(e["frames_added"] > 0 for e in backfills),
+        backfilled_masks=sum(e["frames_added"] for e in backfills),
         accuracy_measured=False,
         depth_and_embeddings_omitted=True,
     )

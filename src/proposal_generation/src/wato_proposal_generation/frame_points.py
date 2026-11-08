@@ -1,10 +1,9 @@
 """One frame's points that any proposal source can claim, as one table.
 
-A point enters when semantic_lifting labelled it or it belongs to a gated
-Step F cluster; every other point of the frame's sweeps is left out, so the
-world sweeps are read only for frames with something to box. Each row keeps
-its (sweep_id, point_index), the key both sources share: fusion matches boxes
-on it.
+Every non-ground point enters, including returns neither lifting nor motion
+labelled: scan-cluster refinement must be able to recover them. Each row keeps
+its (sweep_id, point_index), the key both sources share for fusion. Ground is
+excluded using each world sweep's stored Patchwork++ mask.
 """
 
 from __future__ import annotations
@@ -13,8 +12,21 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from wato_common.artifacts import ArtifactFormatError, lifted_labels, motion_proposals
+from wato_common.artifacts import (
+    ArtifactFormatError,
+    lifted_candidates,
+    lifted_labels,
+    motion_proposals,
+)
 from wato_common.artifacts.lidar_sweeps import Frame, ProcessedSweeps
+
+
+@dataclass(frozen=True)
+class LiftedSeed:
+    """One independent hypothesis, with camera confidence per original return."""
+
+    point_indices: np.ndarray  # int64 (S,) into this frame's point table
+    confidences: np.ndarray  # float32 (S,), aligned with point_indices
 
 
 @dataclass(frozen=True)
@@ -26,6 +38,20 @@ class FramePoints:
     cls: np.ndarray  # str (P,); "" = no lifted label
     confidence: np.ndarray  # float32 (P,); 0 = no lifted label
     cluster_id: np.ndarray  # int64 (P,); -1 = in no gated cluster
+    # Sparse independent claims; a return may occur in several seeds. None is
+    # only for callers constructing a frame from an exclusive label table.
+    lifted_seeds: dict[str, LiftedSeed] | None = None
+
+    def seeds(self) -> dict[str, LiftedSeed]:
+        if self.lifted_seeds is not None:
+            return self.lifted_seeds
+        return {
+            str(iid): LiftedSeed(
+                np.flatnonzero(self.instance_id == iid),
+                self.confidence[self.instance_id == iid],
+            )
+            for iid in np.unique(self.instance_id[self.instance_id != ""])
+        }
 
     @property
     def n(self) -> int:
@@ -41,6 +67,7 @@ class FramePoints:
             cls=np.zeros(0, np.str_),
             confidence=np.zeros(0, np.float32),
             cluster_id=np.zeros(0, np.int64),
+            lifted_seeds={},
         )
 
 
@@ -51,26 +78,51 @@ def load(
     sweeps: ProcessedSweeps,
     gated_cluster_ids: np.ndarray,
 ) -> FramePoints:
-    """The frame's labelled and gated-cluster points, across all its sweeps."""
+    """All non-ground points and independent seeds, preserving sweep point keys.
+
+    The exclusive labels remain a provisional diagnostic view. The pipeline
+    rebuilds motion class evidence from accepted 3D owners; lifted proposals
+    use retained candidates, including losing labels.
+    Missing candidate files require rerunning lifting; owned labels cannot
+    reconstruct their lost hypotheses.
+    """
     parts: list[FramePoints] = []
+    seed_parts: dict[str, list[LiftedSeed]] = {}
+    offset = 0
     for sid in frame.sweep_ids:
         meta = sweeps.get(sid)
         # Both artifacts index the world sweep; n_points_total is its size.
         n_points = meta.n_points_total
         labels = lifted_labels.read_sweep(bag_id, chunk_id, sid, n_points=n_points)
+        candidates = lifted_candidates.read_sweep(
+            bag_id, chunk_id, sid, n_points=n_points
+        )
         clusters = motion_proposals.read_sweep(
             bag_id, chunk_id, sid, n_points=n_points
         ).cluster_id
-        in_gated = np.flatnonzero(np.isin(clusters, gated_cluster_ids))
-        idx = np.union1d(labels.point_indices.astype(np.int64), in_gated)
-        if idx.size == 0:
-            continue
         world = sweeps.world(sid)
         if world.n_points != n_points:
             raise ArtifactFormatError(
                 meta.world_path,
                 f"{world.n_points} points but lidar_proc_index says {n_points}",
             )
+        if world.ground_mask is None:
+            raise ArtifactFormatError(
+                meta.world_path,
+                "no ground_mask: scan refinement needs Patchwork++ ground; "
+                "re-run lidar_preprocessing",
+            )
+        if (
+            world.ground_mask[labels.point_indices].any()
+            or world.ground_mask[candidates.point_indices].any()
+        ):
+            raise ArtifactFormatError(
+                meta.world_path,
+                "lifted labels include ground points; re-run semantic_lifting",
+            )
+        idx = np.flatnonzero(~world.ground_mask)
+        if idx.size == 0:
+            continue
 
         n = idx.size
         instance_id = np.full(n, "", dtype=labels.instance_ids.dtype)
@@ -80,6 +132,12 @@ def load(
         instance_id[at] = labels.instance_ids
         cls[at] = labels.classes
         confidence[at] = labels.confidences
+        for iid in np.unique(candidates.instance_ids):
+            claimed = candidates.instance_ids == iid
+            at = np.searchsorted(idx, candidates.point_indices[claimed])
+            seed_parts.setdefault(str(iid), []).append(
+                LiftedSeed(at + offset, candidates.confidences[claimed])
+            )
         cluster_id = clusters[idx].astype(np.int64)
         cluster_id[~np.isin(cluster_id, gated_cluster_ids)] = -1
         parts.append(
@@ -93,6 +151,7 @@ def load(
                 cluster_id=cluster_id,
             )
         )
+        offset += n
     if not parts:
         return FramePoints.empty()
     return FramePoints(
@@ -103,4 +162,11 @@ def load(
         cls=np.concatenate([p.cls for p in parts]),
         confidence=np.concatenate([p.confidence for p in parts]),
         cluster_id=np.concatenate([p.cluster_id for p in parts]),
+        lifted_seeds={
+            iid: LiftedSeed(
+                np.concatenate([p.point_indices for p in claims]),
+                np.concatenate([p.confidences for p in claims]),
+            )
+            for iid, claims in seed_parts.items()
+        },
     )

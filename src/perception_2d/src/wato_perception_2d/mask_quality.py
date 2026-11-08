@@ -7,10 +7,15 @@ camera's tracking has succeeded; ``--force`` clears the directory.
 
 ``events`` are sam2_tracker.track_camera's ``diagnostics``: a "mask" event per
 (frame, object) with raw, postprocessed and saved pixel areas, threshold
-stability, ended / tentative flags and DAM4SAM's memory frames; a "prompt"
-event per refinement prompt, with the image predictor's scores and whether
-it was applied. Stability is area(logit > +offset) / area(logit > −offset):
-threshold sensitivity, not accuracy or temporal consistency.
+stability, ended / tentative flags and, under DAM4SAM, its memory frames and
+SAM2's own confidence (``predicted_iou`` of the chosen mask,
+``object_score_logit``); a "birth" event per box the birth gate tested, with
+its untracked fraction or mask IoU and whether it started a track; a
+"backfill" event per back-filled track, with the masks added, each one's
+predicted IoU and why it stopped; a "prompt" event per refinement prompt, with the image predictor's
+scores and whether it was applied. Stability is area(logit > +offset) /
+area(logit > −offset): threshold sensitivity, not accuracy or temporal
+consistency; predicted IoU and object score are model confidence too.
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ import os
 
 from wato_common.artifact_store import chunk_root, local_path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def directory_uri(bag_id: str, chunk_id: str) -> str:

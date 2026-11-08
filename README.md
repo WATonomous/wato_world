@@ -94,7 +94,7 @@ wato_world/
 ├── docker/                      # one Dockerfile per component + base + template
 ├── modules/                     # docker-compose.{yaml,dev,gpu}.yaml
 ├── config/                      # prompts.yaml; pipeline.yaml (stub components)
-├── docs/                        # measurements, bag survey, research notes
+├── docs/                        # measurements, bag survey, design notes
 └── data/                        # bind-mounted into containers (git-ignored)
 ```
 

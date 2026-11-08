@@ -57,10 +57,18 @@ def detection(
     lift = next((m for m in members if m.provenance == LIFTED), None)
     has_mos = any(m.provenance == LIDAR_MOS for m in members)
     two_source = lift is not None and has_mos
+    # Recovered scan geometry must not manufacture strong camera evidence.
+    # Before scan refinement the total count was labeled support, so retain
+    # that interpretation for legacy artifacts with no separate seed count.
+    lift_points = 0
+    if lift is not None:
+        lift_points = lift.lift_seed_point_count
+        if lift_points is None:
+            lift_points = lift.lidar_point_count
     confident = (
         lift is not None
         and (lift.lift_confidence or 0.0) >= cfg.min_lift_confidence
-        and (lift.lidar_point_count or 0) >= cfg.min_lift_points
+        and (lift_points or 0) >= cfg.min_lift_points
     )
     return Detection(
         proposal=fused,

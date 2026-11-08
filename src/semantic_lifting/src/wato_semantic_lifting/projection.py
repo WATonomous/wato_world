@@ -58,8 +58,9 @@ def pixel_indices(
 
 
 def label_raster(masks: list[np.ndarray], labels: list[int]) -> np.ndarray:
-    """One frame's masks as an (H, W) int32 raster of label, -1 = no mask.
+    """Diagnostic single-label raster; production lifting retains all masks.
 
+    The (H, W) int32 result holds one label per pixel, -1 = no mask.
     Where masks overlap the smallest one wins (the innermost object: a
     pedestrian's mask inside a bus's); at equal area, the earlier mask.
     """

@@ -211,6 +211,12 @@ def test_strong_needs_two_sources_or_a_confident_dense_lift():
     assert det(["mos-1", "lifted-i-000001"], lift_confidence=0.1).strong
     assert det(["lifted-i-000001"], lift_confidence=0.9, points=40).strong
     assert not det(["lifted-i-000001"], lift_confidence=0.9, points=5).strong
+    assert not det(
+        ["lifted-i-000001"], lift_confidence=0.9, points=30, lift_seed_point_count=19
+    ).strong
+    assert det(
+        ["lifted-i-000001"], lift_confidence=0.9, points=30, lift_seed_point_count=20
+    ).strong
     assert not det(["mos-1"]).strong
     assert det(["lifted-i-000001"], lift_confidence=0.9).key == "i"
 

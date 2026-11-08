@@ -35,8 +35,8 @@ from wato_semantic_lifting.voting import Votes
 class CoClaims:
     """Accumulates, over a chunk's sweeps, the points each pair of masklets
     both claim, and where each masklet's claimed points are. Pairs are
-    (label, label), ascending; a camera votes once per point, so the two are
-    always from different cameras."""
+    (label, label), ascending. Same-camera competing masks provide no
+    cross-camera identity evidence and are explicitly excluded."""
 
     def __init__(self) -> None:
         self.shared: Counter[tuple[int, int]] = Counter()
@@ -56,6 +56,7 @@ class CoClaims:
             self.positions.setdefault(label, {})[sweep_id] = (x, y)
         order = np.lexsort((votes.label_idx, votes.point_idx))
         pts, labels = votes.point_idx[order], votes.label_idx[order]
+        cameras = votes.cam_idx[order]
         starts = np.flatnonzero(np.r_[True, pts[1:] != pts[:-1]])
         sizes = np.diff(np.r_[starts, len(pts)])
         here: Counter[tuple[int, int]] = Counter()
@@ -63,7 +64,7 @@ class CoClaims:
             ls = labels[s : s + k].tolist()
             for i in range(k):
                 for j in range(i + 1, k):
-                    if ls[i] != ls[j]:
+                    if ls[i] != ls[j] and cameras[s + i] != cameras[s + j]:
                         here[(ls[i], ls[j])] += 1
         if not here:
             return

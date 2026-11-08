@@ -27,6 +27,8 @@ class _Model:
 
     def track_step(self, **kw):
         self.calls.append((kw["frame_idx"], kw["is_init_cond_frame"]))
+        # score: the chosen mask's predicted IoU, or frame_idx → that IoU.
+        score = self.score(kw["frame_idx"]) if callable(self.score) else self.score
         chosen = torch.full((1, 1, 16, 16), -10.0)
         chosen[:, :, 2:6, 2:6] = 10
         alternatives = chosen.repeat(1, 3, 1, 1)
@@ -34,7 +36,7 @@ class _Model:
         return dict(
             pred_masks=chosen,
             multimasks_logits=alternatives,
-            ious=torch.tensor([[self.score, 0.5, 0.4]]),
+            ious=torch.tensor([[score, min(score, 0.5), min(score, 0.4)]]),
             obj_ptr=torch.zeros(1, 4),
             object_score_logits=torch.ones(1, 1),
             maskmem_features=torch.zeros(1, 4, 2, 2),
@@ -46,7 +48,9 @@ class _Model:
 
 
 @pytest.fixture
-def tracker(tmp_path, monkeypatch):
+def make_tracker(tmp_path, monkeypatch):
+    """(predictor, state, model, feature calls) for an adapter memory policy;
+    no arguments: the authors' (update_delta 5, no RAM gate)."""
     # CUDA extension is unrelated to these memory/lifecycle tests.
     monkeypatch.setattr(
         "wato_perception_2d._vendor.d4sm.tracking_wrapper_mot.fill_holes_in_mask_scores",
@@ -54,16 +58,25 @@ def tracker(tmp_path, monkeypatch):
     )
     for frame in range(45):
         Image.new("RGB", (16, 16)).save(tmp_path / f"{frame:06d}.jpg")
-    model = _Model()
-    predictor = DAM4SAMPredictor(model)
-    feature_calls = []
 
-    def features(image):
-        feature_calls.append(1)
-        return [torch.zeros(1)], [], []
+    def make(**policy):
+        model = _Model()
+        predictor = DAM4SAMPredictor(model, **policy)
+        feature_calls = []
 
-    monkeypatch.setattr(predictor._preprocessor, "_get_features", features)
-    return predictor, predictor.init_state(tmp_path), model, feature_calls
+        def features(image):
+            feature_calls.append(1)
+            return [torch.zeros(1)], [], []
+
+        monkeypatch.setattr(predictor._preprocessor, "_get_features", features)
+        return predictor, predictor.init_state(tmp_path), model, feature_calls
+
+    return make
+
+
+@pytest.fixture
+def tracker(make_tracker):
+    return make_tracker()
 
 
 def _seed(p, s, frame, oid):
@@ -147,3 +160,48 @@ def test_bfloat16_iou_export(tracker, monkeypatch):
     _seed(p, s, 0, 1)
     list(p.propagate_in_video(s, 0, 8))
     assert p.memory_diagnostics(s, 1)["drm_frames"]
+
+
+def _ram(p, s, oid=1):
+    return p.memory_diagnostics(s, oid)["ram_frames"]
+
+
+@pytest.mark.parametrize("delta,ram", [(5, [5, 10]), (2, [2, 4, 6, 8, 10])])
+def test_update_delta_sets_the_ram_spacing(make_tracker, delta, ram):
+    """Δ is the spacing of kept recent-appearance frames (plus the last one).
+    Predicted IoU 0.6 stays below the distractor memory's 0.8 gate."""
+    p, s, model, _ = make_tracker(update_delta=delta)
+    model.score = 0.6
+    _seed(p, s, 0, 1)
+    list(p.propagate_in_video(s, 0, 10))
+    assert _ram(p, s) == ram
+
+
+@pytest.mark.parametrize("gate,ram", [(0.0, [2, 4, 6, 8, 10]), (0.5, [2, 6, 10])])
+def test_samurai_gate_keeps_low_confidence_frames_out_of_ram(make_tracker, gate, ram):
+    """Frames 4 and 8 would be kept RAM slots; with SAMURAI's gate their
+    predicted IoU (0.3) leaves them only as the next image's last frame."""
+    p, s, model, _ = make_tracker(update_delta=2, memory_min_predicted_iou=gate)
+    model.score = lambda frame: 0.3 if frame in (4, 8) else 0.6
+    _seed(p, s, 0, 1)
+    seen = []
+    for frame, _, _ in p.propagate_in_video(s, 0, 10):
+        seen.append((frame, _ram(p, s)))
+    assert _ram(p, s) == ram
+    # The newest frame is always in memory, gated or not; a gated frame
+    # serves the next image only (8 is gone once 9 is in).
+    assert all(kept[-1] == frame for frame, kept in seen[1:])
+    assert (8 in dict(seen)[9]) is (gate == 0)
+    assert p.memory_diagnostics(s, 1)["gated_frames"] == (2 if gate else 0)
+    assert p.frame_quality(s, 1) == pytest.approx(
+        {"predicted_iou": 0.6, "object_score_logit": 1.0}
+    )
+
+
+def test_samurai_gate_leaves_object_pointers_and_drm_alone(make_tracker):
+    p, s, model, _ = make_tracker(update_delta=2, memory_min_predicted_iou=0.5)
+    model.score = 0.3
+    _seed(p, s, 0, 1)
+    list(p.propagate_in_video(s, 0, 20))
+    assert _ram(p, s) == [20]  # only the newest frame
+    assert len(s["objects"][1].context.per_object_obj_ptr[1]) == 16

@@ -596,6 +596,10 @@ def _run_tracking_pass(
         config_file=cfg.segmentation.config,
         device=device,
         backend=cfg.segmentation.backend,
+        dam4sam_update_delta=cfg.segmentation.dam4sam.update_delta,
+        dam4sam_memory_min_predicted_iou=(
+            cfg.segmentation.dam4sam.memory_min_predicted_iou
+        ),
     )
     if predictor is None:
         # sam2 imports (checked before the depth pass) but the predictor still
@@ -672,23 +676,20 @@ def _run_tracking_pass(
                 sub_clip_frames=cfg.tracking.sub_clip_frames,
                 min_sub_clip_frames=cfg.tracking.min_sub_clip_frames,
                 drop_lost_after_frames=cfg.tracking.drop_lost_after_frames,
-                duplicate_mask_iou=cfg.tracking.duplicate_mask_iou,
                 autocast_dtype=cfg.tracking.autocast_dtype,
                 ego_mask=ego,
                 ego_max_fraction=cfg.ego_mask.max_fraction,
                 island_fraction=cfg.tracking.island_fraction,
-                collapse_fraction=cfg.tracking.collapse_fraction,
-                collapse_after_frames=cfg.tracking.collapse_after_frames,
-                contained_classes=tuple(cfg.tracking.contained_classes),
-                container_classes=tuple(cfg.tracking.container_classes),
-                containment_fraction=cfg.tracking.containment_fraction,
-                containment_after_frames=cfg.tracking.containment_after_frames,
                 birth_score=cfg.tracking.birth_score,
                 confirm_keyframes=cfg.tracking.confirm_keyframes,
                 support_keyframes=cfg.tracking.support_keyframes,
                 support_min_area=cfg.tracking.support_min_area,
                 reprompt_score=cfg.tracking.reprompt_score,
                 reprompt_below_iou=cfg.tracking.reprompt_below_iou,
+                birth_gate=cfg.tracking.birth_gate,
+                birth_untracked_fraction=cfg.tracking.birth_untracked_fraction,
+                birth_max_mask_iou=cfg.tracking.birth_max_mask_iou,
+                backfill_frames=cfg.tracking.backfill_frames,
                 refinement=cfg.segmentation.refinement,
                 diagnostics=events,
             )

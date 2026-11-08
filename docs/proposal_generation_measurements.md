@@ -1,5 +1,12 @@
 # proposal_generation: measurements behind the defaults
 
+The largest-group radius and runtime measurements below describe the earlier
+cleanup, which remains the default. Lifted geometry also supports opt-in
+SAL-style full non-ground scan matching;
+the algorithm, explicit assumptions, and current validation are documented in
+[sal_scan_cluster_refinement.md](research/sal_scan_cluster_refinement.md).
+The earlier radius ablation does not validate the new DBSCAN settings.
+
 The measurements behind proposal_generation's defaults and what its first run
 produced. The behaviour itself is in the component README. Everything here is
 `sensors_2026_07_07_23_01_24_2_with_eidos_mcap` (WATO rig without `lidar_nw`:

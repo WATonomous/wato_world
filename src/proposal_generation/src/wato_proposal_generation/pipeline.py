@@ -2,12 +2,14 @@
 
 Per chunk, frame by frame (lidar_preprocessing's frame_sync frames, regrouped
 with ProcessedSweeps.frames on the configured canonical LiDAR):
-  1. Load the frame's points that a source can claim: semantic_lifting's
-     labelled points and the gated Step F clusters' (frame_points.py).
-  2. lidar_mos: one box per gated Step F cluster, classed by its lifted
-     labels (lidar_mos.py).
-  3. lifted: one box per lifted instance, around its largest group of points
-     (lifted.py).
+  1. Load all non-ground frame points with their provisional semantic/motion
+     labels and independent lifted candidates. Refine each candidate before
+     resolving 3D ownership; scan_clusters
+     builds the multiscale DBSCAN bank, largest_group retains legacy cleanup.
+  2. lifted: coverage suppression, proposed exclusive 3D support, and box gates
+     against accepted owners; commit ownership only after acceptance (lifted.py).
+  3. lidar_mos: one box per gated Step F cluster, classed only by camera seed
+     points retained by the surviving 3D owners (lidar_mos.py).
   4. fused: one box per object, merging a lidar_mos and a lifted box that
      share points (fusion.py).
 Then every row goes to proposals.parquet (wato_common.artifacts.proposals).
@@ -35,6 +37,7 @@ from wato_common.artifact_store import (
     local_path,
     motion_clusters_path,
     proposals_path,
+    proposal_refinement_path,
     semantic_lifting_dir,
 )
 from wato_common.artifacts import ground as ground_artifact
@@ -45,7 +48,7 @@ from wato_common.artifacts.proposals import Proposal
 from wato_proposal_generation import fusion, lidar_mos, lifted
 from wato_proposal_generation import frame_points as frame_points_mod
 from wato_proposal_generation.config import ComponentConfig
-from wato_proposal_generation.io import load_chunks
+from wato_proposal_generation.io import load_chunks, write_refinement_audit
 
 log = logging.getLogger(__name__)
 
@@ -98,20 +101,50 @@ def process_chunk(cfg: ComponentConfig, bag_id: str, chunk_id: str) -> dict[str,
     }
 
     rows: list[Proposal] = []
+    audit: list[dict] = []
     for frame in frames:
         fp = frame_points_mod.load(bag_id, chunk_id, frame, sweeps, gated_ids)
+        refined = lifted.refine_support(fp, instances, cfg.lifted)
+        lifts = lifted.proposals(frame, fp, ground, instances, cfg.lifted, refined)
+        semantic = lifted.semantic_view(fp, lifts)
         mos = lidar_mos.proposals(
             frame,
             clusters_at.get(frame.reference_sweep_id, []),
-            fp,
+            semantic,
             ground,
             instances,
             shapes,
             cfg.lidar_mos,
         )
-        lifts = lifted.proposals(frame, fp, ground, instances, cfg.lifted)
+        by_id = {b.proposal.proposal_id: b.proposal for b in lifts}
+        for iid, result in refined.items():
+            p = by_id.get(f"lifted-{iid}-{frame.reference_sweep_id:06d}")
+            shared = np.intersect1d(result.seed_indices, result.point_indices).size
+            audit.append(
+                dict(
+                    sweep_id=frame.reference_sweep_id,
+                    instance_id=iid,
+                    support_method=cfg.lifted.support_method,
+                    status=result.status,
+                    best_radius_m=result.radius_m,
+                    best_cluster_id=result.cluster_id,
+                    best_iou=result.iou,
+                    n_seed_points=int(result.seed_indices.size),
+                    n_refined_points=int(result.point_indices.size),
+                    n_added_points=int(result.point_indices.size - shared),
+                    n_removed_points=int(result.seed_indices.size - shared),
+                    emitted=p is not None,
+                    n_box_points=p.lidar_point_count if p is not None else None,
+                    n_seed_points_in_box=(
+                        p.lift_seed_point_count if p is not None else None
+                    ),
+                )
+            )
         rows += [b.proposal for b in mos] + [b.proposal for b in lifts]
         rows += fusion.fuse(frame, mos, lifts, fp, ground, cfg.fusion)
+    # proposals.parquet remains the completion marker: diagnostics must exist
+    # before it is written, including for instances later dropped by box gates.
+    write_refinement_audit(bag_id, chunk_id, audit)
     proposals.write(bag_id, chunk_id, rows)
     counts = fusion.counts(rows)
     log.info("chunk %s: %d frames, proposals %s", chunk_id, len(frames), counts)
@@ -145,7 +178,10 @@ def _write_chunk_manifest(
                 "lifted_stats": lifted_stats_path(bag_id, chunk_id),
                 **upstream,
             },
-            outputs={"proposals": proposals_path(bag_id, chunk_id)},
+            outputs={
+                "proposals": proposals_path(bag_id, chunk_id),
+                "refinement_audit": proposal_refinement_path(bag_id, chunk_id),
+            },
             config_path=config_path,
             extra={
                 "unhashed_inputs": {
@@ -153,6 +189,9 @@ def _write_chunk_manifest(
                         bag_id, chunk_id
                     ),
                     "lifted_labels": f"{semantic_lifting_dir(bag_id, chunk_id)}/lifted_labels",
+                    "lifted_candidates": (
+                        f"{semantic_lifting_dir(bag_id, chunk_id)}/lifted_candidates"
+                    ),
                 }
             },
             filename=common_manifest.component_manifest_name("proposal_generation"),

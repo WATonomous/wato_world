@@ -96,6 +96,17 @@ class KeyframeMaskRefiner:
     def reset(self) -> None:
         self.predictor.reset_predictor()
 
+    def box_mask(self, box_xyxy: tuple[float, float, float, float]) -> np.ndarray:
+        """SAM2's single-output mask (logits > 0) for a box on the encoded
+        image: a detection's mask, as SAM 3 matches detections to masklets by
+        mask IoU (its App. F.5 prompts SAM with an external detector's boxes)."""
+        logits, _, _ = self.predictor.predict(
+            box=np.asarray(box_xyxy, dtype=np.float32),
+            multimask_output=False,
+            return_logits=True,
+        )
+        return logits[0] > 0
+
     def propose(
         self, box_xyxy: tuple[float, float, float, float], ego_mask=None
     ) -> RefinedMask:

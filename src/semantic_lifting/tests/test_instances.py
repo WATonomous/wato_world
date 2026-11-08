@@ -49,6 +49,12 @@ def test_co_claims_count_shared_points_and_the_smaller_claim():
     assert co.smaller_claim == {(0, 1): 4}  # min(2, 4) per sweep, twice
 
 
+def test_same_camera_competing_masks_are_not_cross_camera_identity_evidence():
+    co = _co(_votes((0, 0, 0), (0, 0, 1), (0, 1, 2)))
+    assert co.shared == {(0, 2): 1, (1, 2): 1}
+    assert (0, 1) not in co.smaller_claim
+
+
 def test_masklets_claiming_the_same_points_merge_under_the_smallest_id():
     records = [_rec("b", "A"), _rec("a", "B"), _rec("c", "C")]
     co = _co(_votes((0, 0, 0), (1, 0, 0), (0, 1, 1), (1, 1, 1)))
