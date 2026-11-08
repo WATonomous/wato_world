@@ -1,6 +1,6 @@
 # perception_2d
 
-Per camera: a detector boxes keyframes, SAM2's video predictor tracks each box
+Per camera: a detector boxes keyframes, SAM2.1 with DAM4SAM memory tracks each box
 into a masklet (one per physical object), DINOv2 embeds each masklet, and Depth
 Anything V2 gives a metric depth map per image, fitted to static LiDAR.
 Cross-camera identity is left to the `tracking` component.
@@ -30,7 +30,10 @@ ego mask: `--config /ws/src/perception_2d/config/perception_2d.wato.yaml`.
 A chunk whose output parquets exist is skipped. Each camera's masklets are
 checkpointed, so an aborted run resumes per camera. `--force` discards those
 caches and clears the chunk's `masks_2d/` and `depth_2d/` first (mask
-directories are named by masklet id, which is new every run).
+directories are named by masklet id, which is new every run). A resume cache
+made under another effective config or mask backend (or one recording
+neither) stops the run rather than mix masks: rerun with `--force`. A finished
+chunk is recomputed only with `--force`, whatever the config.
 
 ## How a chunk runs
 
@@ -40,12 +43,30 @@ Two passes, so the heavy models never share VRAM:
    space, `1/depth = scale·disparity + shift`, by RANSAC with inliers judged in
    metres. The anchors are the static (`~dynamic_mask`) world-frame points of
    every sweep the image matched, projected with the ego pose at the image's
-   own `camera_timestamp_ns`. With too few anchors, a recent frame's fit is
+   own `camera_timestamp_ns`, through the shared full-intrinsic/lens
+   [camera model](../../docs/camera_geometry_contract.md). With too few anchors, a recent frame's fit is
    reused; a frame with no usable fit is not written.
 2. **Tracking.** The detector runs every `redetect_every_k` images. A box
    matching a track (box IoU with its mask bbox ≥ `iou_match_threshold`)
-   **supports** it; the rest, less repeats of a better box at the same
-   keyframe, prompt SAM2. Then, per track:
+   **supports** it. The rest, highest score first and less repeats of a better
+   box at the same keyframe, go through the **birth gate**, which tests each
+   against the masks of the live tracks and of the births already accepted at
+   that keyframe (`birth_gate`):
+   - `untracked_area` (default, [SAM2MOT](https://arxiv.org/abs/2504.04519)'s
+     object addition): the box starts a track only if more than
+     `birth_untracked_fraction` (its 0.5) of it lies outside every tracked
+     mask;
+   - `mask_iou` ([SAM 3](https://arxiv.org/abs/2511.16719), App. C.3): SAM2's
+     image mask for the box must have IoU below `birth_max_mask_iou` (its 0.1)
+     with every tracked mask; one extra image encoding per keyframe with
+     births. Unlike `untracked_area` it lets a small box inside a large mask
+     through;
+   - `none`: every such box starts a track.
+
+   A box on a corner of a tracked car, or on one car of a mask bled over two,
+   matches no mask bbox but lies inside a tracked mask, so it is refused at any
+   detector score; a refused box neither starts nor supports a track. Then,
+   per track:
    - **Keep-alive.** It rises by one per supported keyframe (up to
      `support_keyframes`) and falls by one per keyframe the mask covers at
      least `support_min_area` of the image with no supporting box; at zero the
@@ -59,30 +80,38 @@ Two passes, so the heavy models never share VRAM:
      re-prompts that track.
    - **Class.** The one its boxes' scores sum highest for; its score is their
      mean.
-   - **Identity.** SAM2 latches a lost object's id onto a similar nearby
-     object within a few images, so a track ends when its object has had no
-     mask for `drop_lost_after_frames` images, or its mask reaches
-     `duplicate_mask_iou` with another live track's (the one whose mask
-     changed most ends).
-   - **Pixels.** A pixel claimed by several masks goes to the highest logit;
-     a track owning under `collapse_fraction` of its own mask for
-     `collapse_after_frames` images has latched onto another track's object
-     and ends. Each mask drops its specks (components under `island_fraction`
-     of its largest), and specks a track wins in a contested region go to the
-     runner-up.
-   - **Containment.** A `contained_classes` mask at least
-     `containment_fraction` inside a `container_classes` (vehicle) mask and
-     ending above its bottom is the driver seen through the vehicle's
-     windows: not recorded, its pixels left to the vehicle, ended after
-     `containment_after_frames`. An object in front of a vehicle reaches the
-     road below it and is kept.
+   - **Identity.** A track ends when its object has had no mask for
+     `drop_lost_after_frames` images. Detector support also controls its
+     lifetime; overlap with another live mask does not end it.
+   - **Independent masks.** Each mask drops its specks (components under
+     `island_fraction` of its largest) and preserves every remaining claimed
+     pixel, including pixels claimed by another object. Pixel logits,
+     containment and overlap collapse do not prune competing hypotheses.
+     Lifting retains these claims until proposal generation refines their
+     LiDAR support and resolves ownership in 3D.
    - **Ego vehicle.** A box or mask at least `ego_mask.max_fraction` inside
      the camera's `ego_mask` polygons (the rack, hood and antenna) never
      becomes or stays a track, and every mask loses those pixels.
+   - **Back-fill.** YOLO's first box on a distant car is rarely its first
+     appearance. After the forward pass, each track born after its window's
+     first image is propagated backwards from its birth prompt for up to
+     `backfill_frames` images (CTRL's 20 at 10 Hz; [CTRL](https://arxiv.org/abs/2304.12315),
+     [OC-SORT](https://arxiv.org/abs/2203.14360) and
+     [SAM4D](https://arxiv.org/abs/2506.21547) recover the frames before a
+     first detection this way). One pass feeds the window's images to SAM2 in
+     reverse order. It stops where the forward rules would end the track read
+     backwards (`drop_lost_after_frames` empty masks, the ego vehicle) or where
+     its mask's bbox fails the `untracked_area` test against the masks
+     recorded there, since that object is already tracked. Back-filled images
+     get no DINOv2 embedding.
 
-   On CUDA OOM the camera is retried in windows of `sub_clip_frames`. SAM2
-   runs under `autocast_dtype` (bfloat16); the detector and DINOv2 stay
-   float32.
+   On CUDA OOM the camera is retried in windows of `sub_clip_frames`, halved
+   down to `min_sub_clip_frames`; an OOM at that floor raises rather than
+   publish a camera with gaps, and so does a failed late prompt or correction.
+   SAM2 runs under `autocast_dtype` (bfloat16); the detector and DINOv2 stay
+   float32. Retaining competing tracks can increase per-object memory attention,
+   active mask memory, PNG writes and DINOv2 work until detector support or
+   absent-mask checks end them. The existing OOM window retries still apply.
 
 **One entry per image.** `frame_index` repeats an image once per sweep it is
 nearest to (~4.9× on WATO, ~1.7× on nuScenes); both passes read it through
@@ -95,6 +124,99 @@ failure stops the run instead of leaving a camera with fewer masklets or no
 embeddings, both of which look like a finished chunk. SAM2 and the detector are
 import-checked, and the SAM2, YOLO and DINOv2 weights load-checked on the CPU,
 before each chunk's depth pass, so a missing checkpoint fails in seconds.
+
+## Mask propagation backend
+
+`segmentation.backend` picks how SAM2.1 Large (the same checkpoint either way)
+carries a mask from image to image:
+
+- `dam4sam` (default): the [DAM4SAM authors' multiobject
+  tracker](src/wato_perception_2d/_vendor/d4sm/README.md), vendored at a
+  pinned commit with its memory selection unchanged: three recent and three
+  distractor slots besides the initial prompt, 16 object pointers. Our adapter
+  shares one model and one image encoding per frame across objects; a late
+  detection starts its own memory and a correction restarts only that
+  object's (the authors have no correction API). Forward only; frames are
+  read lazily on CPU. The adapter sets two memory parameters
+  (`segmentation.dam4sam`), without editing the vendored files:
+  - `update_delta`: a new memory every 2 images. The authors use 5 at 30 fps
+    and 1 at 5 fps (one update per ~170-200 ms); their code's 5 would space
+    WATO's recent memories 0.5 s apart.
+  - `memory_min_predicted_iou`: [SAMURAI](https://arxiv.org/abs/2411.11922)'s
+    memory-bank gate (0.5, from its code). The previous image is always
+    attended to, but an image whose predicted IoU is at most the gate is
+    never kept as an older recent memory, so a mask SAM2 itself doubts does
+    not consolidate. Object pointers are not gated (nor in SAMURAI); the
+    distractor memory keeps the authors' stricter IoU > 0.8. 0 disables.
+- `sam2`: Meta's video predictor (`offload_video_to_cpu` applies to it only).
+
+On the two nuScenes GT scenes the two score the same downstream; WATO is
+unmeasured ("Mask propagation backend" in `docs/perception_2d_measurements.md`).
+Manifests and resume caches record the backend, the SAM2 and DAM4SAM commits,
+the adapter version and whether CUDA hole filling ran; each masklet records its
+`tracker_backend`.
+
+**CUDA hole filling.** Both backends fill background holes of ≤ 8 pixels in
+SAM2's 256 × 256 mask with its `sam2._C` connected-components kernel, which
+`docker/perception_2d.Dockerfile` compiles against the locked torch
+(`SAM2_BUILD_ALLOW_ERRORS=0`; `SAM2_CUDA_ARCH_LIST` sets the GPU
+architectures). SAM2 silently skips the fill when the kernel is missing or
+built for another GPU, so on CUDA the pipeline checks it first (an 8-pixel hole
+fills, a 9-pixel one stays) and stops with a rebuild message if not. On CPU
+the fill doesn't run and the masks differ.
+
+## Mask refinement (experimental, off)
+
+`--refine-masks` (`segmentation.refinement.enabled`) seeds births and box-drift
+corrections with image-predictor masks instead of boxes. Run it into a separate
+artifact root: it needs `--force`, which replaces the chunk's outputs.
+
+- At a keyframe needing a seed, SAM2's image predictor (the video model's
+  weights) encodes the image once and predicts a mask from each box. It is
+  used only if its predicted IoU ≥ `min_predicted_iou`, its threshold
+  stability ≥ `min_stability`, it lies in its box and misses the ego mask;
+  otherwise the box prompts as before, so weak distant detections survive.
+- `interior_point` / `mask_input_refinement`: one more decoder pass with a
+  click at the mask's most interior pixel and its low-resolution logits, kept
+  only if predicted IoU rises, stability doesn't fall and the click stays
+  inside.
+- `correct_shape_disagreement`: also re-check confident supported tracks
+  whose bbox still agrees, correcting only when the fresh mask's IoU with the
+  propagated one is in [`correction_min_mask_iou`,
+  `correction_below_mask_iou`) and it is at least as stable; a larger
+  disagreement may be another object, and is only recorded.
+
+The thresholds are SAM2's automatic-mask-generator defaults, not calibrated on
+WATO, and no WATO gain has been measured. With stock SAM2, memory clearing on
+correction stays off (the pinned SAM2 calls an undefined helper there).
+
+## Mask diagnostics
+
+`segmentation.mask_quality: true` writes `mask_quality/<cam_id>.json` per
+camera once its tracking succeeds: per frame and object, raw / postprocessed /
+saved pixel areas, threshold stability and, under DAM4SAM, its memory frames
+and SAM2's own confidence (`predicted_iou` of the chosen mask,
+`object_score_logit`); per box the birth gate tested, its measure and
+verdict; per back-filled track, the masks added, their predicted IoU and
+why it stopped; per
+refinement prompt, its scores and whether it was applied (`mask_quality.py`).
+Off by default: it costs a GPU sync per frame and 10-20 MB of JSON per WATO
+chunk. Stability (`area(logit > +offset) / area(logit > −offset)`), predicted
+IoU and object score are model confidence, not accuracy; nothing downstream
+reads them. Published trackers end tracks and re-prompt on predicted IoU and
+object score (Seg2Track-SAM2, SAM2MOT); whether they separate drifted masks
+from real cars on WATO is what these fields are for.
+
+`scripts/diagnose_masks.py` tracks one camera's frame range (fixed taxonomy +
+YOLO, no depth or DINOv2) into an empty artifact root, with the report and a
+`summary.json`, for comparing backends without a full run:
+
+```bash
+python3 /ws/src/perception_2d/scripts/diagnose_masks.py \
+  --config /ws/src/perception_2d/config/perception_2d.wato.yaml \
+  --bag <bag_id> --chunk 0000 --cam PANO_NN --frames 120 \
+  --backend dam4sam --output /data/artifacts/mask_diagnostic_dam4sam
+```
 
 ## Detector backends
 
@@ -129,6 +251,14 @@ In `data/artifacts/raw/<bag_id>/chunks/<chunk_id>/`:
 | `tracklets_2d.parquet`, `detections_2d.parquet`, `masks_2d/<masklet_id>/<camera_seq:06d>.png`, `masks_2d/<masklet_id>/dino_feature.npy` | `wato_common.artifacts.masklets` (consumers use `MaskletIndex`) |
 | `depth_2d/<cam_id>/<camera_seq:06d>.npz` | `wato_common.artifacts.depth`: a missing file means no usable depth; a 0 pixel means no measurement |
 | `manifest_perception_2d.json` | Provenance incl. pinned model revisions, hashed inputs |
+| `mask_quality/<cam_id>.json` | Perception-local mask diagnostics, only with `segmentation.mask_quality` (`mask_quality.py`) |
+
+Masklet rows declare `mask_semantics: independent`. Readers reject old rows
+without this marker because saved owned masks cannot recover their losing
+pixel claims. Re-run perception with `--force`, then semantic lifting and
+proposal generation, to regenerate those claims. Per-camera resume caches
+also record this policy and reject caches made with owned masks; `--force`
+clears those caches before processing.
 
 Outputs from before 2026-10-15 (per-row processing) aren't comparable, and
 depth from before 2026-10-11 is rejected by the reader; rerun with `--force`.
@@ -167,7 +297,9 @@ stays sharp), an overlay of those body masks (red) and the config's polygons
 ## Comparing two runs
 
 `compare` reviews what a change to the tracking rules removed, against a run
-of the same bag from before the change. Both runs box the same images with the
+of the same bag from before the change. It is one-sided: for a change that
+adds masks (back-fill), run it again with the roles swapped, the new run as
+baseline, to review what was added. Both runs box the same images with the
 same detector, so an object the change lost is a baseline mask that no current
 mask matches (pixel IoU < 0.5), checked on every `--every`-th image (5).
 
@@ -211,7 +343,19 @@ the host:
   "Ego mask"). Under the default `perception_2d.yaml` (no ego mask) the rack is
   tracked as a truck.
 - An object occluded for longer than `drop_lost_after_frames` comes back as a
-  new masklet; `tracking` must re-link it.
+  new masklet; only `tracking`'s 3D association can rejoin it (no appearance
+  ReID reads the DINOv2 embeddings yet).
+- **Birth gate.** `untracked_area` also refuses a real car under a large mask
+  of junk (sky, road) until detector support ends that mask (about a second);
+  back-fill then recovers the car's earlier images. No published 2D rule
+  repairs a mask SAM2 confidently bleeds over two cars; the gate only stops it
+  from also spawning a duplicate.
+- **Back-fill** can follow an object behind an occluder onto its neighbour
+  with SAM2 still confident (predicted IoU 0.7-0.8), so neither stop rule nor
+  a published quality gate ends it. On nuScenes it adds ~2% box recall for
+  1-2 points of precision, and on scene-0061 it gives one parked car extra
+  points (+0.4 m wide, +1.1 m long). Measurements:
+  `docs/perception_2d_measurements.md`.
 
 Measurements behind these defaults:
 [docs/perception_2d_measurements.md](../../docs/perception_2d_measurements.md).

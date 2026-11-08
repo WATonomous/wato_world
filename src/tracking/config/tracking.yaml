@@ -1,0 +1,31 @@
+# tracking: tracks over proposal_generation's fused boxes, per chunk, linked
+# across the spans neighbouring chunks share.
+# Every field is documented in src/wato_tracking/config.py.
+tracking:
+  association:
+    max_centre_dist_m: 2.0           # Chen's gates
+    max_one_minus_iou: 0.95
+    max_one_minus_volume_ratio: 0.7
+    max_coast_s: 2.0                 # a missed track keeps coasting this long
+    instance_bonus: 1.0              # same lifted instance as the track's last box
+    instance_opens_shape_gates: true # ...is held only to the distance gate
+
+  strong:                            # matched to tracks before weak boxes
+    min_lift_confidence: 0.5         # a lone lifted box this confident...
+    min_lift_points: 20              # ...with this many retained seed points
+
+  motion:
+    min_frames: 7                    # fewer: "unknown"
+    moving_displacement_m: 1.0       # moving: at least this far first → last,
+    fast_displacement_m: 0.5         # or at least this far...
+    fast_speed_mps: 0.5              # ...at at least this average speed
+    endpoint_frames: 3
+
+  filter:                            # drop a track only if short AND weak
+    min_frames: 5
+    min_strong: 1
+
+  stitch:                            # link chunk k's tracks to chunk k+1's
+    max_centre_dist_m: 1.0           # centres this close at a shared instant agree
+    min_agreement: 0.5               # share of the shorter track's span instants
+    min_agreeing_frames: 3

@@ -23,18 +23,6 @@ class _TTY(io.StringIO):
         return True
 
 
-def _reset_patch_state() -> None:
-    """Let configure_tqdm re-patch with a fresh mode in-process."""
-    progress._configured = False
-    from tqdm.std import tqdm as _tqdm
-
-    if getattr(_tqdm, "_wato_progress_patched", False):
-        # Tests run in one process; we can't un-wrap __init__ cleanly, so only
-        # the first configure wins. The default-auto test runs first and covers
-        # the behaviour; subsequent calls are asserted as no-ops.
-        pass
-
-
 def test_auto_forces_off_on_non_tty_even_with_explicit_disable_false():
     progress.configure_tqdm()  # auto (no env) → off on non-TTY
     from tqdm import tqdm

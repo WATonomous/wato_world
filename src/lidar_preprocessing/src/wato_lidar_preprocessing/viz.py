@@ -395,18 +395,16 @@ def viz_ground_grid(bag_id: str, chunk_id: str) -> None:
     import matplotlib.colors as mcolors
     import matplotlib.pyplot as plt
 
-    from wato_lidar_preprocessing.io import load_ground
+    from wato_common.artifacts import ground as ground_artifact
 
-    g = load_ground(bag_id, chunk_id)
-    status = g.get("status", b"ok")
-    if isinstance(status, (bytes, np.bytes_)):
-        status = status.decode()
-    if status in ("skipped_no_ground_mask", "empty"):
-        log.warning("ground status=%s for chunk %s — skipping", status, chunk_id)
+    try:
+        g = ground_artifact.read(bag_id, chunk_id)
+    except ground_artifact.GroundUnavailableError as exc:
+        log.warning("ground status=%s for chunk %s — skipping", exc.status, chunk_id)
         return
 
-    height_grid = g["height_grid"]
-    normal_grid = g["normal_grid"]
+    height_grid = g.height_grid
+    normal_grid = g.normal_grid
 
     nx, ny, nz = normal_grid[..., 0], normal_grid[..., 1], normal_grid[..., 2]
     hue = (np.arctan2(ny, nx) / (2 * np.pi)) % 1.0

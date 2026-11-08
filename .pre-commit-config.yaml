@@ -1,3 +1,6 @@
+# The two copied DAM4SAM files stay byte-identical to upstream (their hash is
+# tested): no hook may rewrite them. The rest of _vendor/ is linted.
+exclude: ^src/perception_2d/src/wato_perception_2d/_vendor/d4sm/(sam2_base|tracking_wrapper_mot)\.py$
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0

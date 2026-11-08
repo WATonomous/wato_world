@@ -36,7 +36,7 @@ Under `data/artifacts/raw/<bag_id>/`:
 |---|---|
 | `bag_meta.json` | Source path, duration, per-topic counts and types, detected storage plugin |
 | `calibration.json` | Per-bag calibration (format: `wato_common.artifacts.calibration`) |
-| `chunks/index.parquet` | Virtual chunk windows, with overlap ranges |
+| `chunks/index.parquet` | Virtual chunk windows: nominal `t_start_ns` / `t_end_ns` and the decoded `t_overlap_start_ns` / `t_overlap_end_ns` |
 | `chunks/<chunk_id>/camera_frames.parquet` | One row per decoded image |
 | `chunks/<chunk_id>/lidar_sweeps.parquet` | One row per sweep `.npz` (format: `wato_common.artifacts.lidar_sweeps`) |
 | `chunks/<chunk_id>/poses.parquet` | Pose samples over the chunk window ± (`max_bracket_ms` + 1 s), each with `interval_drop_reason` for the stretch to the next sample |
@@ -48,6 +48,14 @@ Contracts every consumer relies on:
 
 - **`sweep_id` is one counter per chunk across all LiDARs** (record order), so
   `(bag_id, chunk_id, sweep_id)` names one sweep on a multi-LiDAR rig.
+- **Neighbouring chunks share 3 × `chunk_overlap_seconds` of data** (6 s at
+  the defaults). Nominal windows start `chunk_seconds - chunk_overlap_seconds`
+  apart, and each chunk is decoded over its nominal window widened by
+  `chunk_overlap_seconds` on both sides (`t_overlap_*`). An image or sweep in
+  the shared span is in both chunks under different `camera_seq` / `sweep_id`
+  (each restarts at 0 per chunk): match it across chunks by
+  `(cam_id, camera_timestamp_ns)` / `(lidar_id, reference_timestamp_ns)`.
+  `tracking` stitches across the span (`src/tracking/README.md`).
 - **`frame_index` repeats an image once per sweep it is nearest to** (~4.9× on
   the 3-LiDAR WATO rig). Consumers read it through
   `wato_common.artifacts.frame_index.FrameIndex`, which hands out each image
@@ -135,13 +143,17 @@ Built from the bag unless `--calibration` is given:
   and P's focal length is ~2% lower). A rectified camera with unset `P`, a
   stereo baseline, or a non-identity `R` is refused. The raw CameraInfo is kept
   under `camera_info`.
+  Nontrivial CameraInfo binning/ROI is refused until an authored calibration
+  describes the stored images. Supported raw lens models and image-size
+  checks are in the [camera contract](../../docs/camera_geometry_contract.md).
 - **LiDAR frame_id** from the first PointCloud2 per LiDAR.
 - **Extrinsics** by a BFS over the `tf_static` topic from `ego_frame` to each
   sensor frame, in either edge direction, composing multi-hop chains.
 
 `require_complete` then stops ingest unless every camera has `ego_T_cam` and
 every LiDAR has `ego_T_lidar`. An authored file is parsed by the same reader
-and rejected, naming the field, if it lacks one.
+and rejected, naming the field, if it lacks one. Camera intrinsics, rigid
+extrinsics and declared lens models are validated before image processing.
 
 ## Poses
 
@@ -212,3 +224,25 @@ SLAM converges).
 `pipeline.py` sequences; `cli.py` parses options and prints. Bag-level
 validation and discovery go in `inputs/`, message decoding in `decoders/`,
 tables derived from decoded artifacts in `artifacts/`.
+
+## Ground truth (evaluation only)
+
+Scripts under `scripts/` import labels into `gt_boxes.parquet`
+(`wato_common.artifacts.gt_boxes`), which only evaluation reads. Each object's
+parked / moving state is judged from its boxes over time
+(`wato_common.eval.motion`).
+
+- `import_nuscenes_gt.py <bag.mcap> --bag <bag_id>`: a converted nuScenes bag
+  carries every sample's boxes on `/markers/annotations` (CUBE markers in
+  `map`, the frame the nuScenes profile's `/odom` is in). The category isn't in
+  the message, so it is read back from the devkit colour; an unknown colour
+  stops the import. Needs ROS (the ingest image).
+- `export_sustechpoints.py <bag_id> --chunk <id>` writes a chunk as a
+  [SUSTechPOINTS](https://github.com/naurril/SUSTechPOINTS) scene (points in
+  the ego frame at each frame's time, every 10th frame by default) under
+  `<bag>/labelling/sustechpoints/`; `import_sustechpoints.py <bag_id>` reads the
+  drawn boxes back into the world frame. Keep one `obj_id` per object across
+  frames, and label chunks that don't neighbour each other.
+
+The world sweeps' paths in `lidar_proc_index.parquet` are container paths, so
+run the SUSTechPOINTS scripts in a dev container.

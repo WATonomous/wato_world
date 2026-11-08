@@ -13,6 +13,7 @@ import os
 
 import numpy as np
 
+from wato_common.artifacts import ground as ground_artifact
 from wato_common.artifact_store import (
     chunks_index_path,
     global_ground_path,
@@ -145,9 +146,8 @@ def reduce_ground_map(bag_id: str, cfg: ComponentConfig) -> str:
                 chunk_id,
             )
             continue
-        data = np.load(path)
-        ground_xyz = data.get("ground_xyz")
-        if ground_xyz is None or ground_xyz.shape[0] == 0:
+        ground_xyz = ground_artifact.read_points(bag_id, chunk_id)
+        if ground_xyz.shape[0] == 0:
             log.debug("chunk %s has no ground points, skipping", chunk_id)
             continue
         all_ground.append(np.asarray(ground_xyz, dtype=np.float64))

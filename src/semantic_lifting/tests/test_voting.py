@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from wato_semantic_lifting.voting import Votes, resolve
+from wato_semantic_lifting.voting import Votes, camera_winners, candidates, resolve
 
 # Labels (masklets) used below: index -> class index, instance index.
 CAR, PED = 0, 1
@@ -104,3 +104,29 @@ def test_empty_votes_resolve_to_nothing():
 def test_a_camera_voting_twice_for_one_point_is_rejected():
     with pytest.raises(ValueError, match="one vote per camera"):
         _resolve(_votes((0, 0, 0, 0.5), (0, 0, 1, 0.5)), [CAR, CAR])
+
+
+def test_all_same_camera_hypotheses_survive_candidate_generation():
+    votes = _votes((0, 0, 0, 0.9), (0, 0, 1, 0.3), (1, 0, 1, 0.3))
+    claims = candidates(votes, np.array([CAR, CAR]), np.array([0, 1]))
+    assert claims.point_idx.tolist() == [0, 0, 1]
+    assert claims.instance.tolist() == [0, 1, 1]
+    assert claims.confidence.tolist() == [1.0, 1.0, 1.0]
+    provisional = _resolve(camera_winners(votes), [CAR, CAR])
+    assert provisional.point_idx.tolist() == [0, 1]
+    assert provisional.instance.tolist() == [0, 1]
+    assert provisional.n_supporting_cameras.tolist() == [1, 1]
+
+
+def test_duplicate_same_camera_masks_cannot_multiply_class_evidence():
+    votes = _votes((0, 0, 0, 0.6), (0, 0, 1, 0.6), (0, 1, 2, 0.9))
+    claims = candidates(votes, np.array([CAR, CAR, PED]), np.arange(3))
+    assert claims.confidence == pytest.approx([0.4, 0.4, 0.6])
+
+
+def test_cross_camera_members_of_one_instance_deduplicate_the_candidate():
+    votes = _votes((0, 0, 0, 0.6), (0, 1, 1, 0.9))
+    claims = candidates(votes, np.array([CAR, CAR]), np.array([0, 0]))
+    assert claims.point_idx.tolist() == [0]
+    assert claims.instance.tolist() == [0]
+    assert claims.confidence.tolist() == [1.0]

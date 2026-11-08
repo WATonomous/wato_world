@@ -12,7 +12,7 @@ On disk (JSON):
     "cameras": {
       "<cam_id>": {
         "frame_id": str,                  # CameraInfo.header.frame_id
-        "K": [[fx, 0, cx], [0, fy, cy], [0, 0, 1]],   # of the ingested images
+        "K": [[fx, skew, cx], [0, fy, cy], [0, 0, 1]], # of the ingested images
         "distortion": [...],              # of the ingested images
         "distortion_model": str,
         "width": int, "height": int,
@@ -35,8 +35,10 @@ from CameraInfo.P (CameraInfo.K / D describe the raw sensor image, which was
 never recorded), and keeps the raw CameraInfo under `camera_info`.
 
 Reading requires `cameras` and `lidars`, each camera's `K` and `ego_T_cam`
-key, and each LiDAR's `ego_T_lidar` key. The other fields are metadata no
-projection uses; an authored file may leave them out and they read as empty.
+key, and each LiDAR's `ego_T_lidar` key. CameraCalibration.model uses the full
+K and the stored image's distortion/model; dimensions validate image shape.
+An authored undistorted camera can omit distortion fields. Raw camera_info
+fields are provenance only.
 An extrinsic is null when ingest couldn't resolve the TF chain; ingest's
 require_complete refuses such a bag, and the accessors below raise rather
 than hand a consumer None.
@@ -47,12 +49,14 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Optional
 
 import numpy as np
 
 from wato_common.artifact_store import calibration_path, ensure_local_dir, local_path
 from wato_common.artifacts import ArtifactFormatError
+from wato_common.geometry.camera_model import CameraModel, validate_transform
 
 
 @dataclass(frozen=True)
@@ -70,6 +74,38 @@ class CameraCalibration:
     camera_info_K: Optional[np.ndarray] = None
     camera_info_D: tuple[float, ...] = ()
     camera_info_P: Optional[np.ndarray] = None
+
+    @cached_property
+    def model(self) -> CameraModel:
+        """Geometry of the ingested image, including its declared lens model.
+
+        Raw CameraInfo K/D/P are provenance only. Rectified images already
+        use their rectified K and must not apply the raw distortion again.
+        """
+        try:
+            if self.ego_T_cam is not None:
+                validate_transform(self.ego_T_cam)
+            if self.rectified:
+                if any(self.distortion):
+                    raise ValueError("rectified image has active distortion")
+                return CameraModel(self.K)
+            return CameraModel(self.K, self.distortion, self.distortion_model)
+        except ValueError as exc:
+            raise ValueError(f"camera {self.cam_id}: {exc}") from exc
+
+    def model_for_image(self, image_size: tuple[int, int]) -> CameraModel:
+        """Reject a resized/cropped image whose calibration was not updated."""
+        width, height = image_size
+        if width <= 0 or height <= 0:
+            raise ValueError(f"camera {self.cam_id}: image dimensions must be positive")
+        if (self.width is not None and width != self.width) or (
+            self.height is not None and height != self.height
+        ):
+            raise ValueError(
+                f"camera {self.cam_id}: image size {image_size} disagrees with "
+                f"calibration {(self.width, self.height)}; update image intrinsics"
+            )
+        return self.model
 
 
 @dataclass(frozen=True)

@@ -61,8 +61,11 @@ from wato_perception_2d.io import (
     load_chunks,
     load_static_lidar_points,
 )
+from wato_perception_2d import mask_quality
 from wato_perception_2d.models._sam2_runtime import (
+    check_sam2_cuda_extension,
     get_sam2_predictor,
+    propagation_provenance,
     release_sam2_predictor,
     sam2_importable,
 )
@@ -235,7 +238,7 @@ def _align_and_write_depth(
         d_lidar, disp = build_anchor_pairs(
             static_pts,
             disparity,
-            calib.K,
+            calib.model_for_image((W, H)),
             cam_T_world,
             (W, H),
             sky_mask_top_fraction=cfg.depth.sky_mask_top_fraction,
@@ -277,7 +280,7 @@ def _cam_partial_path(bag_id: str, chunk_id: str, cam_id: str) -> str:
 
 
 def _load_cam_partial(
-    bag_id: str, chunk_id: str, cam_id: str
+    bag_id: str, chunk_id: str, cam_id: str, cfg: ComponentConfig, device: str
 ) -> Optional[list[Masklet]]:
     """Return cached per-camera masklets if a readable partial exists.
 
@@ -297,18 +300,43 @@ def _load_cam_partial(
         except OSError:
             pass
         return None
-    return cached
+    if (
+        not isinstance(cached, dict)
+        or cached.get("config") != cfg.model_dump(mode="json")
+        or cached.get("mask_propagation")
+        != propagation_provenance(cfg.segmentation.backend, device)
+    ):
+        raise RuntimeError(
+            f"{cam_id}: resume cache config/propagation policy differs or is unrecorded; "
+            "rerun with --force to avoid mixing mask policies"
+        )
+    return cached["masklets"]
 
 
 def _save_cam_partial(
-    bag_id: str, chunk_id: str, cam_id: str, cam_masklets: list[Masklet]
+    bag_id: str,
+    chunk_id: str,
+    cam_id: str,
+    cam_masklets: list[Masklet],
+    cfg: ComponentConfig,
+    device: str,
 ) -> None:
     """Persist per-camera masklets so abort doesn't lose this camera's work."""
     p = _cam_partial_path(bag_id, chunk_id, cam_id)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     tmp = p + ".tmp"
     with open(tmp, "wb") as f:
-        pickle.dump(cam_masklets, f, protocol=pickle.HIGHEST_PROTOCOL)
+        pickle.dump(
+            {
+                "config": cfg.model_dump(mode="json"),
+                "mask_propagation": propagation_provenance(
+                    cfg.segmentation.backend, device
+                ),
+                "masklets": cam_masklets,
+            },
+            f,
+            protocol=pickle.HIGHEST_PROTOCOL,
+        )
     os.replace(tmp, p)
 
 
@@ -405,6 +433,7 @@ def _process_chunk(
             _partial_dir(bag_id, chunk_id),
             local_path(masks_2d_dir(bag_id, chunk_id)),
             local_path(depth_2d_dir(bag_id, chunk_id)),
+            mask_quality.directory(bag_id, chunk_id),
         ):
             if os.path.isdir(d):
                 shutil.rmtree(d)
@@ -437,6 +466,7 @@ def _process_chunk(
             "(scripts/fetch_models.py)."
         )
     _check_tracking_weights(cfg, detector)
+    check_sam2_cuda_extension(device)
 
     calib = Calibration.load(bag_id)
     calibration = {cam_id: calib.camera(cam_id) for cam_id in calib.cameras}
@@ -565,6 +595,11 @@ def _run_tracking_pass(
         checkpoint=cfg.segmentation.checkpoint,
         config_file=cfg.segmentation.config,
         device=device,
+        backend=cfg.segmentation.backend,
+        dam4sam_update_delta=cfg.segmentation.dam4sam.update_delta,
+        dam4sam_memory_min_predicted_iou=(
+            cfg.segmentation.dam4sam.memory_min_predicted_iou
+        ),
     )
     if predictor is None:
         # sam2 imports (checked before the depth pass) but the predictor still
@@ -584,7 +619,7 @@ def _run_tracking_pass(
                 )
                 continue
 
-            cached = _load_cam_partial(bag_id, chunk_id, cam_id)
+            cached = _load_cam_partial(bag_id, chunk_id, cam_id, cfg, device)
             if cached is not None:
                 log.info(
                     "chunk %s / %s: resuming %d cached masklets — skipping reprocessing",
@@ -621,6 +656,7 @@ def _run_tracking_pass(
                 else None
             )
 
+            events: Optional[list[dict]] = [] if cfg.segmentation.mask_quality else None
             cam_masklets = track_camera(
                 predictor,
                 detector,
@@ -630,6 +666,7 @@ def _run_tracking_pass(
                 bag_id=bag_id,
                 chunk_id=chunk_id,
                 cam_id=cam_id,
+                tracker_backend=cfg.segmentation.backend,
                 dino_model=cfg.embeddings.model,
                 dino_every_k=cfg.embeddings.every_k_frames,
                 device=device,
@@ -639,24 +676,32 @@ def _run_tracking_pass(
                 sub_clip_frames=cfg.tracking.sub_clip_frames,
                 min_sub_clip_frames=cfg.tracking.min_sub_clip_frames,
                 drop_lost_after_frames=cfg.tracking.drop_lost_after_frames,
-                duplicate_mask_iou=cfg.tracking.duplicate_mask_iou,
                 autocast_dtype=cfg.tracking.autocast_dtype,
                 ego_mask=ego,
                 ego_max_fraction=cfg.ego_mask.max_fraction,
                 island_fraction=cfg.tracking.island_fraction,
-                collapse_fraction=cfg.tracking.collapse_fraction,
-                collapse_after_frames=cfg.tracking.collapse_after_frames,
-                contained_classes=tuple(cfg.tracking.contained_classes),
-                container_classes=tuple(cfg.tracking.container_classes),
-                containment_fraction=cfg.tracking.containment_fraction,
-                containment_after_frames=cfg.tracking.containment_after_frames,
                 birth_score=cfg.tracking.birth_score,
                 confirm_keyframes=cfg.tracking.confirm_keyframes,
                 support_keyframes=cfg.tracking.support_keyframes,
                 support_min_area=cfg.tracking.support_min_area,
                 reprompt_score=cfg.tracking.reprompt_score,
                 reprompt_below_iou=cfg.tracking.reprompt_below_iou,
+                birth_gate=cfg.tracking.birth_gate,
+                birth_untracked_fraction=cfg.tracking.birth_untracked_fraction,
+                birth_max_mask_iou=cfg.tracking.birth_max_mask_iou,
+                backfill_frames=cfg.tracking.backfill_frames,
+                refinement=cfg.segmentation.refinement,
+                diagnostics=events,
             )
+            if events is not None:
+                mask_quality.write(
+                    bag_id,
+                    chunk_id,
+                    cam_id,
+                    backend=cfg.segmentation.backend,
+                    refinement=cfg.segmentation.refinement.model_dump(mode="json"),
+                    events=events,
+                )
             log.info(
                 "chunk %s / %s: %d masklets from %d frames",
                 chunk_id,
@@ -667,7 +712,7 @@ def _run_tracking_pass(
             # Log the post-camera baseline so accumulation across cameras is
             # visible early.
             _log_vram(f"{cam_id} tracking")
-            _save_cam_partial(bag_id, chunk_id, cam_id, cam_masklets)
+            _save_cam_partial(bag_id, chunk_id, cam_id, cam_masklets, cfg, device)
             all_masklets.extend(cam_masklets)
 
     return all_masklets
@@ -761,7 +806,11 @@ def build_detector(cfg: ComponentConfig, fixed_concepts: list[Concept]):
 
 
 def _write_chunk_manifest(
-    bag_id: str, chunk_id: str, config_path: Optional[str]
+    bag_id: str,
+    chunk_id: str,
+    config_path: Optional[str],
+    cfg: ComponentConfig,
+    device: str,
 ) -> None:
     """Record the models (``model_revisions()``), config and inputs behind this
     chunk's 2D labels. Best-effort: never fails a chunk that succeeded."""
@@ -780,9 +829,20 @@ def _write_chunk_manifest(
                 "masks_2d": masks_2d_dir(bag_id, chunk_id),
                 "depth_2d": depth_2d_dir(bag_id, chunk_id),
                 "depth_stats": depth_stats_path(bag_id, chunk_id),
+                **(
+                    {"mask_quality": mask_quality.directory_uri(bag_id, chunk_id)}
+                    if cfg.segmentation.mask_quality
+                    else {}
+                ),
             },
             config_path=config_path,
             models=model_revisions(),
+            extra={
+                "effective_config": cfg.model_dump(mode="json"),
+                "mask_propagation": propagation_provenance(
+                    cfg.segmentation.backend, device
+                ),
+            },
             filename=common_manifest.component_manifest_name("perception_2d"),
         )
     except Exception:  # noqa: BLE001
@@ -871,7 +931,7 @@ def run(
                 device,
                 force=force,
             )
-            _write_chunk_manifest(bag_id, cid, config_path)
+            _write_chunk_manifest(bag_id, cid, config_path, cfg, device)
             n_ok += 1
     finally:
         # Don't leave SAM2 parked in VRAM after the bag finishes.

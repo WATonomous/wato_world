@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from wato_common.geometry import invert_se3, project_lidar_to_image
+from wato_common.geometry import CameraModel, invert_se3, project_lidar_to_image
 
 
 def compute_cam_T_world(
@@ -27,7 +27,7 @@ def compute_cam_T_world(
 
 def project_and_clip(
     points_world: np.ndarray,
-    K: np.ndarray,
+    K: np.ndarray | CameraModel,
     cam_T_world: np.ndarray,
     image_size: tuple[int, int],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -35,7 +35,7 @@ def project_and_clip(
 
     Args:
         points_world: (N, 3) float64 points in the SLAM world frame.
-        K: (3, 3) intrinsic matrix.
+        K: calibrated image CameraModel, or a bare undistorted intrinsic matrix.
         cam_T_world: (4, 4) SE3 transform from world to camera.
         image_size: (W, H) in pixels.
 
@@ -58,8 +58,9 @@ def pixel_indices(
 
 
 def label_raster(masks: list[np.ndarray], labels: list[int]) -> np.ndarray:
-    """One frame's masks as an (H, W) int32 raster of label, -1 = no mask.
+    """Diagnostic single-label raster; production lifting retains all masks.
 
+    The (H, W) int32 result holds one label per pixel, -1 = no mask.
     Where masks overlap the smallest one wins (the innermost object: a
     pedestrian's mask inside a bus's); at equal area, the earlier mask.
     """

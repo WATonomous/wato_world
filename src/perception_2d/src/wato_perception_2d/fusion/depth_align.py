@@ -25,7 +25,7 @@ from typing import Optional
 
 import numpy as np
 
-from wato_common.geometry import project_lidar_to_image
+from wato_common.geometry import CameraModel, project_lidar_to_image
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 def build_anchor_pairs(
     lidar_world_pts: np.ndarray,
     disparity: np.ndarray,
-    K: np.ndarray,
+    K: np.ndarray | CameraModel,
     cam_T_world: np.ndarray,
     image_size: tuple[int, int],
     sky_mask_top_fraction: float = 0.3,
@@ -43,7 +43,7 @@ def build_anchor_pairs(
     Args:
         lidar_world_pts: (N, 3) static-only world-frame LiDAR points.
         disparity: (H, W) float32 DA-V2 relative disparity map.
-        K: (3, 3) intrinsic matrix.
+        K: calibrated image model, or a bare undistorted intrinsic matrix.
         cam_T_world: (4, 4) SE3 — world → camera transform.
         image_size: (width, height).
         sky_mask_top_fraction: discard points in the top X% of the image

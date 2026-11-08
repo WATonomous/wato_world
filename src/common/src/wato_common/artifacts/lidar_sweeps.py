@@ -28,7 +28,8 @@ semantic_lifting (and lidar_preprocessing's later steps):
                   sweep. Precision-oriented: ~mask is trusted static.
   lidar_proc_index.parquet
     one ProcessedSweepMeta per sweep (schemas.PROCESSED_SWEEPS_SCHEMA), with
-    both files' URIs; valid=False rows have neither file.
+    both files' URIs; valid=False rows have neither file. frame_id groups the
+    sweeps of one frame_sync tick: ProcessedSweeps.frames.
 """
 
 from __future__ import annotations
@@ -210,6 +211,25 @@ def read_dynamic_mask(
     return mask
 
 
+class CanonicalLidarError(ValueError):
+    """The canonical LiDAR named by a consumer's config doesn't anchor the
+    chunk's frames: lidar_preprocessing ran with a different frame_sync."""
+
+
+@dataclass(frozen=True)
+class Frame:
+    """One frame_sync tick: a canonical-LiDAR sweep and the other LiDARs'
+    sweeps matched to it, or one sweep alone."""
+
+    # lidar_proc_index's frame_id; None for a sweep frame_sync matched to no
+    # canonical sweep. Without a canonical LiDAR it is a per-LiDAR ordinal and
+    # not unique across LiDARs; reference_sweep_id always is.
+    frame_id: Optional[int]
+    reference_sweep_id: int  # the canonical LiDAR's sweep, or the lone sweep
+    sweep_ids: tuple[int, ...]  # ascending, reference_sweep_id among them
+    reference_timestamp_ns: int  # the reference sweep's
+
+
 class ProcessedSweeps:
     """A chunk's valid processed sweeps, by sweep_id (reads the index once)."""
 
@@ -230,6 +250,54 @@ class ProcessedSweeps:
 
     def get(self, sweep_id: int) -> Optional[ProcessedSweepMeta]:
         return self._by_id.get(sweep_id)
+
+    def frames(self, canonical_lidar: Optional[str]) -> list[Frame]:
+        """The chunk's frames in time order, grouped as lidar_preprocessing's
+        frame_sync grouped them.
+
+        canonical_lidar must be the one lidar_preprocessing ran with (None on
+        a bag without one: every sweep is its own frame). CanonicalLidarError
+        when a frame has no sweep, or several, from it.
+        """
+        if canonical_lidar is None:
+            frames = [
+                Frame(r.frame_id, r.sweep_id, (r.sweep_id,), r.reference_timestamp_ns)
+                for r in self.rows
+            ]
+            return sorted(
+                frames, key=lambda f: (f.reference_timestamp_ns, f.reference_sweep_id)
+            )
+
+        groups: dict[int, list[ProcessedSweepMeta]] = {}
+        frames = []
+        for r in self.rows:
+            if r.frame_id is None:
+                frames.append(
+                    Frame(None, r.sweep_id, (r.sweep_id,), r.reference_timestamp_ns)
+                )
+            else:
+                groups.setdefault(r.frame_id, []).append(r)
+        for frame_id, rows in groups.items():
+            anchors = [r for r in rows if r.lidar_id == canonical_lidar]
+            if len(anchors) != 1:
+                raise CanonicalLidarError(
+                    f"frame {frame_id} has {len(anchors)} sweeps from canonical "
+                    f"LiDAR {canonical_lidar!r} (LiDARs "
+                    f"{sorted(r.lidar_id for r in rows)}); lidar_preprocessing's "
+                    "frame_sync.canonical_lidar differs from this config"
+                )
+            ref = anchors[0]
+            frames.append(
+                Frame(
+                    frame_id,
+                    ref.sweep_id,
+                    tuple(sorted(r.sweep_id for r in rows)),
+                    ref.reference_timestamp_ns,
+                )
+            )
+        return sorted(
+            frames, key=lambda f: (f.reference_timestamp_ns, f.reference_sweep_id)
+        )
 
     def world(self, sweep_id: int) -> WorldSweep:
         """KeyError when the sweep isn't a valid row; FileNotFoundError when

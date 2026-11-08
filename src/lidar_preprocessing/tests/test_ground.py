@@ -92,6 +92,19 @@ def test_normals_unit_length():
     np.testing.assert_allclose(norms, 1.0, atol=1e-5)
 
 
+def test_normals_are_per_metre_at_sub_metre_cells():
+    """A 4% / 2% grade on 0.25 m cells gives the plane's normal, not one 4x
+    too flat (gradient taken per cell instead of per metre)."""
+    g = np.arange(0.025, 10.0, 0.05)
+    x, y = np.meshgrid(g, g)
+    xyz = np.column_stack([x.ravel(), y.ravel(), 0.04 * x.ravel() + 0.02 * y.ravel()])
+    _, ng, _ = _build_height_grid(xyz, cell_size=0.25)
+    expected = np.array([-0.04, -0.02, 1.0]) / np.linalg.norm([-0.04, -0.02, 1.0])
+    np.testing.assert_allclose(
+        ng.reshape(-1, 3), np.tile(expected, (ng.shape[0] * ng.shape[1], 1)), atol=1e-4
+    )
+
+
 @pytest.fixture()
 def tmp_env(tmp_path, monkeypatch):
     monkeypatch.setenv("ARTIFACT_ROOT_URI", str(tmp_path))

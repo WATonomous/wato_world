@@ -13,7 +13,6 @@ from wato_common.artifact_store import (
     dynamic_mask_path,
     global_iwu_path,
     global_static_map_path,
-    ground_path,
     lidar_world_path,
     local_path,
     static_map_path,
@@ -46,11 +45,6 @@ def load_dynamic_map(bag_id: str, chunk_id: str) -> dict[str, np.ndarray]:
                                  had intensity (mirrors static_map.npz).
     """
     return dict(np.load(local_path(dynamic_map_path(bag_id, chunk_id))))
-
-
-def load_ground(bag_id: str, chunk_id: str) -> dict[str, np.ndarray]:
-    """Load the ground height grid NPZ for a chunk."""
-    return dict(np.load(local_path(ground_path(bag_id, chunk_id))))
 
 
 def load_global_static_map(bag_id: str) -> np.ndarray:

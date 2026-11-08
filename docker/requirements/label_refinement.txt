@@ -1,0 +1,73 @@
+# Locked Python dependency set for the label_refinement component.
+#
+# GENERATED, NOT HAND-EDITED. Frozen on 2026-11-03 from the deps stage built on
+# the digest-pinned base in docker/label_refinement.Dockerfile:
+#     docker run --rm --entrypoint uv \
+#         ghcr.io/watonomous/wato_world/label_refinement:deps_<tag> pip freeze --system
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# This pipeline's output is training data. A rebuild that silently resolves a
+# different dependency set is a different labeler, and labels produced by it
+# are not comparable to labels produced by this one. Every version here is
+# exact so that an image rebuilt in a year behaves identically.
+#
+# TO CHANGE A DEPENDENCY
+# ----------------------
+# Edit the *unpinned* intent in docker/label_refinement.Dockerfile's comment
+# block, install it unpinned in the deps stage (with this file as constraints,
+# `-c`, so nothing already pinned moves), build that stage, re-freeze into this
+# file, restore the locked install, and commit both together. Do not hand-edit
+# a version here.
+#
+# 2026-11-03: + torch==2.7.1+cu128 (SLF) with its CUDA closure, and pillow
+# (mask PNGs), resolved with the previous lock as constraints: the freeze diff
+# was exactly these additions.
+#
+# INDEX RESOLUTION
+# ----------------
+# Installed with `--index-strategy unsafe-first-match`, as perception_2d is:
+# download.pytorch.org/whl/cu128 mirrors common packages at its own versions,
+# and uv's default strategy then refuses to fall back to PyPI for them.
+# unsafe-first-match takes each pinned version from the first index that has
+# it: PyPI for ordinary packages, the cu128 index for torch==...+cu128. Every
+# version is exactly pinned and installed with --no-deps, so neither index can
+# introduce a package or a version this file does not name.
+
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+annotated-types==0.8.0
+click==8.5.0
+filelock==4.2.7
+fsspec==2026.9.0
+jinja2==3.1.6
+markupsafe==3.0.4
+mpmath==1.3.0
+networkx==3.7
+numpy==2.5.4
+nvidia-cublas-cu12==12.8.3.14
+nvidia-cuda-cupti-cu12==12.8.57
+nvidia-cuda-nvrtc-cu12==12.8.61
+nvidia-cuda-runtime-cu12==12.8.57
+nvidia-cudnn-cu12==9.7.1.26
+nvidia-cufft-cu12==11.3.3.41
+nvidia-cufile-cu12==1.13.0.11
+nvidia-curand-cu12==10.3.9.55
+nvidia-cusolver-cu12==11.7.2.55
+nvidia-cusparse-cu12==12.5.7.53
+nvidia-cusparselt-cu12==0.6.3
+nvidia-nccl-cu12==2.26.2
+nvidia-nvjitlink-cu12==12.8.61
+nvidia-nvtx-cu12==12.8.55
+pillow==13.0.0
+pyarrow==26.0.0
+pydantic==2.14.2
+pydantic-core==2.50.2
+pyyaml==6.0.3
+scipy==1.18.1
+setuptools==84.2.1
+sympy==1.14.0
+torch==2.7.1+cu128
+triton==3.3.1
+typing-extensions==4.16.0
+typing-inspection==0.4.4

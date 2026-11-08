@@ -1,26 +1,68 @@
-"""Shared SAM2 video predictor loader (cache).
+"""Shared SAM2 / DAM4SAM predictor loader (cache).
 
-SAM2.1 is built with the `sam2` package's ``build_sam2_video_predictor`` from
-a local checkpoint (fetched by scripts/fetch_models.py; the hydra config ships
-in the package) — not ``from_pretrained``, since the container runs
-``HF_HUB_OFFLINE=1``. One GPU-resident predictor is cached across cameras and
-chunks. Lazy-imports `sam2`; a None return means unavailable, which the
-pipeline turns into a hard error.
+Both backends reuse a local SAM2.1 checkpoint and the installed SAM2 Hydra
+config. DAM4SAM loads the vendored author model class; stock SAM2 uses
+``build_sam2_video_predictor``. Models are cached by backend, config, checkpoint
+and device across cameras/chunks. Neither path downloads weights. Stock SAM2
+returns None on loading failure; DAM4SAM propagates its error. Neither failure
+can silently select a different backend.
 """
 
 from __future__ import annotations
 
+import importlib.metadata
+import json
 import logging
 import time
 from typing import Optional
 
+from wato_perception_2d._vendor import d4sm
+
 log = logging.getLogger(__name__)
 
-# (config_file, ckpt_path, device) → predictor
+# (backend, config_file, ckpt_path, device) → predictor
 _cache: dict[tuple, object] = {}
 
 # Hydra config name bundled in the `sam2` package for the 2.1 hiera-large model.
 DEFAULT_CONFIG = "configs/sam2.1/sam2.1_hiera_l.yaml"
+BACKENDS = ("sam2", "dam4sam")
+
+
+def installed_sam2_commit() -> Optional[str]:
+    """The commit the installed `sam-2` package was built from (its PEP 610
+    direct_url.json; docker/perception_2d.Dockerfile's SAM2_COMMIT is the one
+    pin), or None when sam2 isn't installed from git."""
+    try:
+        text = importlib.metadata.distribution("sam-2").read_text("direct_url.json")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    if not text:
+        return None
+    return json.loads(text).get("vcs_info", {}).get("commit_id")
+
+
+def propagation_provenance(backend: str, device: str) -> dict:
+    """What produced the masks, for manifests and resume-cache checks.
+
+    Both backends run Meta's SAM2 modules (`sam2_commit`); DAM4SAM adds the
+    vendored authors' memory policy (`dam4sam_commit`). SAM2's hole filling
+    runs only on CUDA (check_sam2_cuda_extension proves it there); on CPU,
+    SAM2 warns and returns the masks unfilled. The two produce different
+    masks, so the device's effect is part of the policy. Output masks retain
+    independent claims; recording that policy rejects old owned-mask caches.
+    ``adapter_version`` 2: the DAM4SAM adapter sets the memory update spacing
+    and SAMURAI's RAM gate (their values are in the effective config).
+    """
+    if backend not in BACKENDS:
+        raise ValueError(f"Unknown mask propagation backend: {backend}")
+    return {
+        "backend": backend,
+        "sam2_commit": installed_sam2_commit(),
+        "dam4sam_commit": d4sm.COMMIT if backend == "dam4sam" else None,
+        "adapter_version": 2,
+        "mask_semantics": "independent",
+        "cuda_hole_filling": device.startswith("cuda"),
+    }
 
 
 def _default_device() -> str:
@@ -36,22 +78,45 @@ def get_sam2_predictor(
     checkpoint: str,
     config_file: str = DEFAULT_CONFIG,
     device: Optional[str] = None,
+    backend: str = "sam2",
+    dam4sam_update_delta: int = 5,
+    dam4sam_memory_min_predicted_iou: float = 0.0,
 ) -> Optional[object]:
-    """Return a cached SAM2 video predictor, or None if unavailable.
+    """Return a cached predictor for the requested memory policy.
 
     Args:
         checkpoint: path to the SAM2.1 .pt checkpoint (e.g.
             /data/models/sam2.1_hiera_large.pt).
         config_file: hydra config name bundled in the `sam2` package.
         device: "cuda"/"cpu"; defaults to cuda when available.
+        backend: "sam2" (stock API default) or "dam4sam" (pipeline default).
+        dam4sam_update_delta / dam4sam_memory_min_predicted_iou: DAM4SAM's
+            memory update spacing and SAMURAI's RAM gate (models/dam4sam.py);
+            the defaults are the authors' code. Ignored by stock SAM2.
 
-    None means the `sam2` package isn't installed or the checkpoint is missing.
+    Stock SAM2 returns None when loading fails; DAM4SAM raises its loading error.
     """
     dev = device or _default_device()
-    key = (config_file, checkpoint, dev)
+    if backend not in BACKENDS:
+        raise ValueError(f"Unknown mask propagation backend: {backend}")
+    memory = (
+        dict(
+            update_delta=dam4sam_update_delta,
+            memory_min_predicted_iou=dam4sam_memory_min_predicted_iou,
+        )
+        if backend == "dam4sam"
+        else {}
+    )
+    key = (backend, config_file, checkpoint, dev, tuple(sorted(memory.items())))
     cached = _cache.get(key)
     if cached is not None:
         return cached
+    if backend == "dam4sam":
+        from wato_perception_2d.models.dam4sam import build_dam4sam
+
+        predictor = build_dam4sam(config_file, checkpoint, dev, **memory)
+        _cache[key] = predictor
+        return predictor
     try:
         from sam2.build_sam import build_sam2_video_predictor
 
@@ -104,6 +169,47 @@ def sam2_importable() -> bool:
     except Exception as exc:  # noqa: BLE001
         log.warning("SAM2 (`sam2.build_sam`) not importable: %s", exc)
         return False
+
+
+def check_sam2_cuda_extension(device: str) -> None:
+    """Exercise official hole filling before a CUDA pipeline starts expensive work.
+
+    Import alone cannot detect a kernel built for the wrong GPU. SAM2 normally
+    warns and returns unchanged masks on failure; that would silently disable
+    the configured cleanup. Check the actual <=8-pixel boundary on this device.
+    CPU inference remains available without this CUDA-only extension.
+    """
+    if not device.startswith("cuda"):
+        return
+    try:
+        _probe_hole_filling(device)
+    except Exception as exc:
+        raise RuntimeError(
+            "SAM2 CUDA hole filling is unavailable or failed its kernel check. "
+            "Rebuild the perception_2d dependency and runtime images with "
+            "docker/perception_2d.Dockerfile (SAM2_BUILD_ALLOW_ERRORS=0)."
+        ) from exc
+
+
+def _probe_hole_filling(device: str) -> None:
+    """Raise unless SAM2's fill_holes_in_mask_scores fills an eight-pixel hole
+    and keeps a nine-pixel one on `device`, without warning (SAM2's warning is
+    its silent fallback)."""
+    import warnings
+
+    import torch
+    from sam2.utils.misc import fill_holes_in_mask_scores
+
+    with torch.inference_mode(), warnings.catch_warnings():
+        warnings.simplefilter("error")
+        scores = torch.ones((1, 1, 16, 16), device=device)
+        scores[:, :, 2:4, 2:6] = -1  # eight pixels: fill
+        scores[:, :, 8:11, 8:11] = -1  # nine pixels: retain
+        expected = scores.clone()
+        expected[:, :, 2:4, 2:6] = 0.1
+        actual = fill_holes_in_mask_scores(scores, max_area=8)
+        if not torch.equal(actual, expected):
+            raise RuntimeError("SAM2 CUDA hole filling returned unexpected pixels")
 
 
 def release_sam2_predictor() -> None:

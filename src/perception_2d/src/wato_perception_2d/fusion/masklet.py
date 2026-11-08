@@ -24,5 +24,5 @@ class Masklet:
     score: float
     frames_present: list[int]  # camera_seq values where the mask exists
     mask_paths: list[str]  # parallel to frames_present
+    tracker_backend: str  # segmentation.backend that produced it: sam2 / dam4sam
     dino_feature: Optional[np.ndarray] = None  # (D,) float32 DINOv2 embedding
-    tracker_backend: str = "sam2"  # which tracker produced this masklet

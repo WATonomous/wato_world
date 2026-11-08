@@ -25,9 +25,9 @@ from scipy.ndimage import distance_transform_edt
 from scipy.stats import binned_statistic_2d
 from tqdm import tqdm
 
+from wato_common.artifacts import ground as ground_artifact
 from wato_common.artifacts.lidar_sweeps import read_world
 from wato_common.artifact_store import (
-    ground_path,
     lidar_proc_index_path,
     local_path,
     static_map_path,
@@ -48,49 +48,6 @@ class GroundResult:
     ground_path: str
     status: str = "ok"  # "ok" | "skipped_no_ground_mask" | "empty"
     n_dropped_dynamic: int = 0  # rejected by dynamic-voxel intersection
-
-
-def load_ground_grid(
-    bag_id: str, chunk_id: str
-) -> tuple[np.ndarray, np.ndarray, float] | None:
-    """ground.npz → (height_grid, grid_origin, cell_size) or None.
-
-    None (with a warning) when ground.npz is absent or a sentinel (Patchwork++
-    unavailable).
-    """
-    path = local_path(ground_path(bag_id, chunk_id))
-    if not os.path.exists(path):
-        log.warning("chunk %s: ground.npz not found — no height grid", chunk_id)
-        return None
-    g = np.load(path)
-    status = str(g["status"]) if "status" in g.files else "ok"
-    if status != "ok" or "height_grid" not in g.files:
-        log.warning("chunk %s: ground.npz status=%r — no height grid", chunk_id, status)
-        return None
-    return (
-        g["height_grid"],
-        np.asarray(g["grid_origin"], dtype=np.float64),
-        float(g["cell_size"]),
-    )
-
-
-def height_above_ground(
-    xyz: np.ndarray, grid: tuple[np.ndarray, np.ndarray, float]
-) -> np.ndarray:
-    """Per-point height over the ground grid.
-
-    height_grid is (H, W) = (y, x) — see _build_height_grid. Points outside
-    the grid clamp to the nearest edge cell; the grid spans the bbox of all
-    ground returns, so real out-of-bounds points are rare.
-    """
-    hg, grid_origin, cell = grid
-    ix = np.clip(
-        ((xyz[:, 0] - grid_origin[0]) / cell).astype(np.int64), 0, hg.shape[1] - 1
-    )
-    iy = np.clip(
-        ((xyz[:, 1] - grid_origin[1]) / cell).astype(np.int64), 0, hg.shape[0] - 1
-    )
-    return xyz[:, 2] - hg[iy, ix]
 
 
 def _load_dynamic_voxel_set(
@@ -155,7 +112,7 @@ def _build_height_grid(
     Returns:
         height_grid  (H, W) float32  — median ground Z per cell
         normal_grid  (H, W, 3) float32 — unit surface normals
-        grid_origin  (2,) float64   — [x0, y0] of lower-left cell centre
+        grid_origin  (2,) float64   — [x0, y0], cell (0, 0)'s lower-left corner
     """
     if ground_xyz.shape[0] == 0:
         empty_hg = np.zeros((1, 1), dtype=np.float32)
@@ -199,16 +156,17 @@ def _build_height_grid(
         height_grid[nan_mask] = height_grid[indices[0][nan_mask], indices[1][nan_mask]]
 
     # Surface normals via finite differences on the height grid.
-    # n = [-dh/dx, -dh/dy, 1] normalised.
+    # n = [-dh/dx, -dh/dy, 1] normalised; the spacing is cell_size so the
+    # slopes are per metre, not per cell.
     hf = height_grid.astype(np.float64)
     if H >= 2 and W >= 2:
-        dh_dr, dh_dc = np.gradient(hf)
+        dh_dr, dh_dc = np.gradient(hf, cell_size)
     elif H >= 2:
-        dh_dr = np.gradient(hf, axis=0)
+        dh_dr = np.gradient(hf, cell_size, axis=0)
         dh_dc = np.zeros_like(hf)
     elif W >= 2:
         dh_dr = np.zeros_like(hf)
-        dh_dc = np.gradient(hf, axis=1)
+        dh_dc = np.gradient(hf, cell_size, axis=1)
     else:
         dh_dr = np.zeros_like(hf)
         dh_dc = np.zeros_like(hf)
@@ -337,15 +295,14 @@ def _save_ground(
     height_grid, normal_grid, grid_origin = _build_height_grid(
         ground_pts, cell_size=params.ground_cell_size_m
     )
-    out_uri = ground_path(bag_id, chunk_id)
-    np.savez_compressed(
-        local_path(out_uri),
-        height_grid=height_grid,
-        normal_grid=normal_grid,
-        grid_origin=grid_origin,
-        cell_size=np.float32(params.ground_cell_size_m),
-        ground_xyz=ground_pts,
-        status=np.array(status),
+    out_uri = ground_artifact.write(
+        bag_id,
+        chunk_id,
+        ground_artifact.GroundGrid(
+            height_grid, normal_grid, grid_origin, params.ground_cell_size_m
+        ),
+        ground_pts,
+        status=status,
     )
     return GroundResult(
         n_ground=int(ground_pts.shape[0]),

@@ -162,8 +162,9 @@ heuristics fired:
 Bit 3 is unused; the positions are the on-disk encoding. Seed bits start
 clusters; attach bits only join one. A missing source leaves its bit clear. Ground, near-ego points and points below
 `min_height_above_ground_m` are never flagged; BOX_FILL restores wheels and feet
-on clusters with `motion_score > 1`, `track_life ≥ 3` and
-`frac_persistent < 0.5`. Clusters are per `frame_sync` frame, tracked with
+on clusters with `motion_score > 1`, `track_life ≥ 3`,
+`frac_persistent < 0.5` and a track that isn't wall-shaped (median length ≤ 4 ×
+median width). Clusters are per `frame_sync` frame, tracked with
 `wato_common.tracking`. Feature meanings: `schemas.MotionClusterRow`. A chunk
 re-runs when `motion_clusters.parquet` is older than any input, or with
 `--force`.

@@ -1,0 +1,49 @@
+# proposal_generation (nuScenes and other single-LiDAR bags).
+# Per-chunk counts behind the defaults: docs/proposal_generation_measurements.md.
+proposal_generation:
+  # Must match lidar_preprocessing's frame_sync.canonical_lidar for the bag.
+  frames:
+    canonical_lidar: null        # one LiDAR: each sweep is its own frame
+
+  # Step F clusters (lidar_mos). Gates: docs/lidar_preprocessing_measurements.md.
+  lidar_mos:
+    min_motion_score: 1.0        # Chen: moved further than its own size
+    min_n_sources: 2             # heuristics agreeing, excluding BOX_FILL
+    max_frac_persistent: 0.5     # mostly in long-occupied voxels: structure
+    min_labeled_fraction: 0.3    # of its points lifted-labelled, to take a class
+    # Shape gates on the median box of the cluster's Step F track.
+    max_aspect_ratio: 4.0        # longer than 4 widths: a wall strip
+    min_footprint_m2: 0.35       # smaller tracks keep a box only when
+    min_volume_m3: 0.5           # a lifted label classes the row
+
+  # Boxes around semantic_lifting instances (lifted).
+  lifted:
+    # SAL is opt-in pending the measured precision/recall regression's review.
+    # Set scan_clusters to use the research matcher below.
+    support_method: largest_group
+    # Independent claims survive lifting and refinement. Suppress duplicates
+    # only in 3D at strict IoM > this value; residual support is exclusive.
+    max_support_iom: 0.5         # SAL-4D threshold, applied per frame here
+    cluster_radius_m: 2.0        # only used by the largest_group comparison path
+    cluster_radius_by_class_m: {}
+    refinement:
+      enabled: true
+      # SAL Appendix A.1/Table A.1, in published order. Assumption: these are
+      # Euclidean XYZ radii in metres; the paper leaves metric/units unstated.
+      radii_m: [1.2488, 0.8136, 0.6952, 0.594, 0.4353, 0.3221]
+      min_samples: 5             # NOT specified by SAL; standard DBSCAN default
+      min_iou: 0.5               # strict >; otherwise preserve original support
+    max_height_m:                # points above this over the ground are left out
+      car: 3.0                   # (bleed onto poles made 3-5 m car boxes)
+    max_nested_fraction: 0.3     # a box this far inside a same-class box with
+                                 # more points is a hidden car boxed on its occluder
+    fragment_radius_m: 0.3       # a box with this share of its points this close
+    fragment_min_fraction: 0.8   # to a box with this many times its points is
+    fragment_min_ratio: 5.0      # that object's edge, claimed by a mask beside it
+    min_points: 5                # per frame; half of WATO's (frame, instance)
+                                 # pairs have fewer
+
+  # Matching lidar_mos to lifted boxes within a frame, by shared LiDAR points.
+  fusion:
+    min_shared_points: 5
+    min_shared_fraction: 0.3     # of the smaller box's points

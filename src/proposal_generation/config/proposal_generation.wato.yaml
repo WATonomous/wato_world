@@ -1,0 +1,41 @@
+# proposal_generation on the WATO rig: proposal_generation.yaml with the
+# canonical LiDAR of lidar_preprocessing.wato.yaml's frame_sync.
+proposal_generation:
+  frames:
+    canonical_lidar: lidar_cc
+
+  lidar_mos:
+    min_motion_score: 1.0
+    min_n_sources: 2
+    max_frac_persistent: 0.5
+    min_labeled_fraction: 0.3
+    max_aspect_ratio: 4.0
+    min_footprint_m2: 0.35
+    min_volume_m3: 0.5
+
+  lifted:
+    # Set scan_clusters for SAL; the frozen nuScenes check regressed recall.
+    support_method: largest_group
+    # Independent claims survive lifting and refinement. Suppress duplicates
+    # only in 3D at strict IoM > this value; residual support is exclusive.
+    max_support_iom: 0.5         # SAL-4D threshold, applied per frame here
+    cluster_radius_m: 2.0
+    cluster_radius_by_class_m: {}
+    refinement:
+      enabled: true
+      # SAL's density thresholds interpreted as Euclidean XYZ radii (metres).
+      # Metric/units and min_samples are implementation choices, not SAL facts.
+      radii_m: [1.2488, 0.8136, 0.6952, 0.594, 0.4353, 0.3221]
+      min_samples: 5
+      min_iou: 0.5
+    max_height_m:
+      car: 3.0
+    max_nested_fraction: 0.3
+    fragment_radius_m: 0.3
+    fragment_min_fraction: 0.8
+    fragment_min_ratio: 5.0
+    min_points: 5
+
+  fusion:
+    min_shared_points: 5
+    min_shared_fraction: 0.3

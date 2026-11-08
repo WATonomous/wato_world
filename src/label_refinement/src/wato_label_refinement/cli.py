@@ -2,26 +2,38 @@
 
 from __future__ import annotations
 
+import logging
+
 import click
 
 from wato_label_refinement.config import load_config
-from wato_label_refinement.pipeline import run as run_pipeline
+
+# Python's default WARNING level would drop every log.info (per-chunk progress).
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+
+_DEFAULT_CONFIG = "/ws/src/label_refinement/config/label_refinement.yaml"
 
 
 @click.group()
 def main() -> None:
-    """Track-centric refinement (multimodal LabelFormer)."""
+    """Training-free track refinement: one box per parked track, one size and
+    a smoothed path per moving track."""
 
 
 @main.command("run")
 @click.option("--bag", "bag_id", required=True, help="bag_id to process.")
+@click.option("--config", "config_path", default=_DEFAULT_CONFIG)
 @click.option(
-    "--chunk", "chunk_id", default=None, help="optional chunk_id; default: all chunks."
+    "--force", is_flag=True, default=False, help="re-run even if refined labels exist."
 )
-@click.option("--config", "config_path", default="/config/pipeline.yaml")
-def run_cmd(bag_id: str, chunk_id: str | None, config_path: str) -> None:
+def run_cmd(bag_id: str, config_path: str, force: bool) -> None:
     cfg = load_config(config_path)
-    run_pipeline(cfg, bag_id=bag_id, chunk_id=chunk_id)
+    from wato_label_refinement.pipeline import run as run_pipeline
+
+    run_pipeline(cfg, bag_id=bag_id, force=force, config_path=config_path)
 
 
 if __name__ == "__main__":

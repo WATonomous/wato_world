@@ -178,6 +178,14 @@ def test_complete_calibration_passes():
     require_complete(_calib(static), _one_of_each_cfg())
 
 
+def test_unsupported_camera_model_fails_before_ingest_writes_images():
+    calib = _calib({("base_link", "cam"): _xyz(1), ("base_link", "lidar"): _xyz(0)})
+    camera = replace(calib.cameras["CAM"], distortion_model="unknown_lens")
+    calib = replace(calib, cameras={"CAM": camera})
+    with pytest.raises(CalibrationError, match="unsupported camera distortion model"):
+        require_complete(calib, _one_of_each_cfg())
+
+
 def test_unresolved_extrinsic_fails_ingest():
     calib = _calib({("base_link", "cam"): _xyz(1.0)})
     with pytest.raises(CalibrationError, match="lidar LIDAR: no transform"):
@@ -319,3 +327,18 @@ def test_wato_profile_marks_its_rectified_cameras():
     assert all(
         c.image.endswith("image_rect_compressed") for c in cfg.topics.cameras.values()
     )
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"binning_x": 2},
+        {"roi": {"x_offset": 10, "y_offset": 0, "width": 640, "height": 480}},
+    ],
+)
+def test_camera_info_cropping_or_binning_cannot_silently_use_full_sensor_intrinsics(
+    extra,
+):
+    info = {**_rect_info(), **extra}
+    with pytest.raises(CalibrationError, match="binning/ROI"):
+        _build_rect(info)

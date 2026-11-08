@@ -1,0 +1,75 @@
+# label_refinement on the WATO rig: label_refinement.yaml with the canonical
+# LiDAR of lidar_preprocessing.wato.yaml's frame_sync. Every field is
+# documented in src/wato_label_refinement/config.py.
+label_refinement:
+  frames:
+    canonical_lidar: lidar_cc
+
+  parked:                        # one box from the points of every frame
+    region_margin_m: 0.3         # around the rectangle enclosing its boxes
+    region_max_centre_offset_m: 1.0  # ...those within this of their median centre
+    cluster_radius_m: 0.5        # accumulated points are dense
+    voxel_m: 0.05
+    min_points: 30               # fewer: refined like a moving track
+    aggregate_classes: [car, truck, bus]  # people and two-wheelers move on the spot
+
+  moving:                        # one size, corner-anchored, smoothed path
+    size_percentile: 90.0        # of the densest frames' l, w, h
+    densest_fraction: 0.5
+    size_percentile_by_class:    # small objects: their high percentile is bleed
+      pedestrian: 50.0
+      bicycle: 50.0
+      motorcycle: 50.0
+    centred_classes: [pedestrian]  # grow about the observed centre, not from the near corner
+    heading_min_speed_mps: 0.5   # heading from velocity at or above this
+    heading_speed_z: 3.0         # ...and this many standard errors of it (jitter isn't motion)
+    smooth_window_s: 1.0
+
+  slf:                           # a box shape fit per track to its masks and points
+    enabled: true
+    classes: [car, truck, bus, pedestrian, bicycle, motorcycle]
+    device: auto                 # CUDA if torch sees a GPU, else CPU
+    max_views: 16                # images with the track's mask, spread over its life
+    min_views: 3
+    min_mask_px: 64
+    crop_px: 48                  # >=2; crop_px x crop_px rays over box and mask
+    crop_margin: 0.2
+    ray_samples: 32              # >=2 samples along each ray
+    edge_px: 1.0                 # >0; the silhouette's soft edge
+    corner_radius_frac: 0.2
+    occluder_margin_m: 0.5       # a nearer object's mask hides the track
+    point_margin_m: 0.15         # LiDAR returns on the observed box, grown by this
+    max_points: 2048
+    batch_tracks: 32             # tracks fit at once (as if alone)
+    iterations: 150              # Adam, SLF's settings
+    lr: 0.1
+    weight_mask: 1.0
+    weight_lidar_per_m: 2.0
+    lidar_robust_m: 0.05
+    enclosing_classes: [pedestrian]  # their returns need only be inside the box
+    weight_size_prior: 0.01      # a weak pull to the class's mean size
+    size_prior_sigma: 0.25
+    size_prior_m:                # l, w, h (nuScenes means, CenterPoint's anchors)
+      car: [4.63, 1.97, 1.74]
+      truck: [6.94, 2.51, 2.84]
+      bus: [11.19, 2.94, 3.47]
+      pedestrian: [0.73, 0.67, 1.77]
+      bicycle: [1.70, 0.60, 1.28]
+      motorcycle: [2.11, 0.77, 1.47]
+    weight_offset: 0.01
+    offset_sigma_m: 0.3
+    min_size_m: 0.1
+    max_size_m: 20.0
+    min_silhouette_gain: 0.15    # kept only if it explains the masks this much better,
+    min_silhouette_gain_by_class:  # but a pedestrian's always (the prior gives its depth)
+      pedestrian: -1.0
+    max_residual_silhouette: 0.8
+    max_residual_lidar_m: 0.3
+    # Heading: Phase 3's plus a correction fit with the shape (slf.py)
+    fit_yaw_classes: [car, truck, bus, bicycle, motorcycle]  # not pedestrian: square footprint
+    yaw_knot_spacing_s: 2.0      # a mover's correction is piecewise linear in time; null: one angle
+    yaw_lr: 0.02                 # radians per Adam step
+    weight_yaw_prior: 0.01
+    yaw_prior_sigma_deg: 10.0    # pulls each knot to Phase 3's heading
+    yaw_step_sigma_deg: 5.0      # ...and neighbouring knots together
+    max_yaw_correction_deg: 30.0

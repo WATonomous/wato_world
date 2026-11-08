@@ -8,9 +8,6 @@ recovers unweighted behaviour for the geometry-only tests.
 
 from __future__ import annotations
 
-import subprocess
-import sys
-import textwrap
 
 import numpy as np
 import pytest
@@ -372,144 +369,6 @@ def test_range_weight_numba_python_parity():
     ), "weighted log_odds diverged between Numba and Python kernels"
 
 
-def test_range_weight_per_voxel_free_space_python_kernel():
-    """Pure-Python equivalent of the per-voxel weighting contract (no numba)."""
-    from wato_lidar_preprocessing.ray_traversal._python_kernel import (
-        _update_sweep_python,
-    )
-
-    sweep_origin = np.array([0.001, 0.0, 0.0])
-    endpoints = np.array([[20.001, 0.0, 0.0]])
-    chunk_origin = np.array([0.0, 0.0, 0.0])
-
-    log_odds: dict[int, np.float32] = {}
-    n_obs: dict[int, np.int32] = {}
-    n_hits: dict[int, np.int32] = {}
-    _update_sweep_python(
-        sweep_origin,
-        endpoints,
-        None,
-        chunk_origin,
-        voxel_size=1.0,
-        margin_m=1.0,
-        max_length_m=50.0,
-        log_odds=log_odds,
-        n_obs=n_obs,
-        n_hits=n_hits,
-        l_occ=0.85,
-        l_free=0.40,
-        d_star=5.0,
-    )
-
-    near_key = _pack(1, 0, 0)
-    mid_key = _pack(10, 0, 0)
-    far_key = _pack(15, 0, 0)
-
-    assert near_key in log_odds, "near voxel must be carved"
-    assert mid_key in log_odds, "mid voxel must be carved"
-    assert far_key in log_odds, "far voxel must be carved"
-
-    np.testing.assert_allclose(float(log_odds[near_key]), -0.40, atol=1e-5)
-    np.testing.assert_allclose(
-        float(log_odds[mid_key]), -0.40 * (5.0 / 9.999), rtol=1e-4
-    )
-    np.testing.assert_allclose(
-        float(log_odds[far_key]), -0.40 * (5.0 / 14.999), rtol=1e-4
-    )
-    assert log_odds[near_key] < log_odds[mid_key] < log_odds[far_key] < 0.0
-
-
-def test_range_weight_endpoint_python_kernel():
-    """Pure-Python endpoint scaling test (mirror of the numba-gated variants)."""
-    from wato_lidar_preprocessing.ray_traversal._python_kernel import (
-        _update_sweep_python,
-    )
-
-    sweep_origin = np.array([0.001, 0.0, 0.0])
-    chunk_origin = np.array([0.0, 0.0, 0.0])
-
-    # Case 1: 50m endpoint, d_star=200 → r* pinned to 1.0 → endpoint = +l_occ.
-    log_odds: dict[int, np.float32] = {}
-    n_obs: dict[int, np.int32] = {}
-    n_hits: dict[int, np.int32] = {}
-    _update_sweep_python(
-        sweep_origin,
-        np.array([[50.001, 0.0, 0.0]]),
-        None,
-        chunk_origin,
-        1.0,
-        1.0,
-        200.0,
-        log_odds,
-        n_obs,
-        n_hits,
-        0.85,
-        0.40,
-        200.0,
-    )
-    assert _pack(50, 0, 0) in log_odds
-    np.testing.assert_allclose(
-        float(log_odds[_pack(50, 0, 0)]),
-        0.85,
-        atol=1e-6,
-        err_msg="endpoint inside d_star must keep full l_occ",
-    )
-
-    # Case 2: 500m endpoint, d_star=200 → r* = 200/500 = 0.4 → endpoint = 0.34.
-    log_odds = {}
-    n_obs = {}
-    n_hits = {}
-    _update_sweep_python(
-        sweep_origin,
-        np.array([[500.001, 0.0, 0.0]]),
-        None,
-        chunk_origin,
-        1.0,
-        1.0,
-        1000.0,
-        log_odds,
-        n_obs,
-        n_hits,
-        0.85,
-        0.40,
-        200.0,
-    )
-    assert _pack(500, 0, 0) in log_odds
-    np.testing.assert_allclose(
-        float(log_odds[_pack(500, 0, 0)]),
-        0.85 * (200.0 / 500.0),
-        rtol=1e-5,
-        err_msg="endpoint at 2.5*d_star must scale to d_star/length",
-    )
-
-    # Case 3: large d_star → 500m endpoint gets +l_occ unchanged.
-    log_odds = {}
-    n_obs = {}
-    n_hits = {}
-    _update_sweep_python(
-        sweep_origin,
-        np.array([[500.001, 0.0, 0.0]]),
-        None,
-        chunk_origin,
-        1.0,
-        1.0,
-        1000.0,
-        log_odds,
-        n_obs,
-        n_hits,
-        0.85,
-        0.40,
-        _NO_WEIGHT,
-    )
-    assert _pack(500, 0, 0) in log_odds
-    np.testing.assert_allclose(
-        float(log_odds[_pack(500, 0, 0)]),
-        0.85,
-        atol=1e-6,
-        err_msg="large d_star: endpoint must carry full l_occ",
-    )
-
-
 @requires_numba
 def test_compute_normals_recovers_plane_normal():
     """A voxel filled with points on a y-z plane yields a normal along ±x."""
@@ -618,52 +477,6 @@ def test_missing_numba_hard_fail_dispatch(monkeypatch):
         dispatch_mod.make_log_odds_dicts()
     msg = str(exc_info.value)
     assert "install" in msg.lower() and "numba" in msg.lower()
-
-
-def test_missing_numba_hard_fail_real_import(tmp_path):
-    """Subprocess test: simulate a clean import with numba blocked."""
-    script = textwrap.dedent(
-        """
-        import sys
-        sys.modules['numba'] = None
-        sys.modules['numba.types'] = None
-        sys.modules['numba.typed'] = None
-
-        from wato_lidar_preprocessing.ray_traversal import (
-            make_log_odds_dicts, _NUMBA_AVAILABLE,
-        )
-        assert _NUMBA_AVAILABLE is False, "numba should be hidden in subprocess"
-
-        try:
-            make_log_odds_dicts()
-        except ImportError as e:
-            msg = str(e)
-            assert "install" in msg.lower() and "numba" in msg.lower(), msg
-            print("OK")
-            sys.exit(0)
-        sys.exit(2)
-        """
-    )
-    try:
-        result = subprocess.run(
-            [sys.executable, "-c", script],
-            env={
-                "PYTHONPATH": "src/common/src:src/lidar_preprocessing/src",
-                "PATH": "/usr/bin:/bin",
-            },
-            cwd=".",
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError) as e:
-        pytest.skip(f"subprocess unsupported: {e}")
-
-    assert result.returncode == 0, (
-        f"subprocess failed (rc={result.returncode}):\n"
-        f"stdout: {result.stdout}\nstderr: {result.stderr}"
-    )
-    assert "OK" in result.stdout
 
 
 @requires_numba

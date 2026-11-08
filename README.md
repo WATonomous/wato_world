@@ -27,12 +27,12 @@ flowchart TD
         SL["UniLiPs Eq.1 occlusion test\ncross-camera vote accumulation\nper-point instance labels"]
     end
 
-    subgraph proposal_gen["proposal_generation  ·  GPU"]
-        PG["LiDAR detector ensemble\nSegment-Lift-Fit\nproposal fusion"]
+    subgraph proposal_gen["proposal_generation  ·  CPU"]
+        PG["Step F clusters + lifted-instance boxes\nfusion on shared points\n(later: Segment-Lift-Fit, LiDAR detector)"]
     end
 
-    subgraph tracking["tracking  ·  GPU"]
-        TR["3D Kalman filter\nmasklet association\nDINOv2 ReID"]
+    subgraph tracking["tracking  ·  CPU"]
+        TR["3D Kalman filter over fused boxes\nlinked across chunks\n(later: DINOv2 ReID)"]
     end
 
     subgraph label_ref["label_refinement  ·  GPU"]
@@ -70,7 +70,8 @@ being placed — a point, a sweep, a camera frame — and honours ingest's verdi
 on which stretches of the pose stream are trustworthy.
 
 **ingest**, **lidar_preprocessing** and **perception_2d** are implemented end-to-end (and
-**semantic_lifting**'s core lifting algorithm). The remaining components are stubs.
+**semantic_lifting**'s core lifting algorithm); **proposal_generation** has its first
+sources (Step F clusters, lifted-instance boxes, fusion). The remaining components are stubs.
 
 ## Layout
 
@@ -93,7 +94,7 @@ wato_world/
 ├── docker/                      # one Dockerfile per component + base + template
 ├── modules/                     # docker-compose.{yaml,dev,gpu}.yaml
 ├── config/                      # prompts.yaml; pipeline.yaml (stub components)
-├── docs/                        # measurements, bag survey, research notes
+├── docs/                        # measurements, bag survey, design notes
 └── data/                        # bind-mounted into containers (git-ignored)
 ```
 
@@ -133,8 +134,8 @@ watod down all
 | `perception_2d` | YOLO26 or GroundingDINO detector + SAM2 video tracker + Depth Anything V2 + DINOv2 (optional Florence-2 discovery) | CUDA | yes |
 | `semantic_lifting` | Occlusion-aware 2D→3D label lifting (UniLiPs Eq.1) | CPU | no |
 | `lidar_preprocessing` | Motion comp, static/dynamic split, ground grid, UniLiPs IWU, recall-oriented motion proposals | CPU | no |
-| `proposal_generation` | LiDAR detector + Segment-Lift-Fit + fusion | CUDA | yes |
-| `tracking` | 3D Kalman + masklet association + DINOv2 ReID | CUDA | yes (light) |
+| `proposal_generation` | Boxes from Step F clusters + lifted instances, fused per object (SLF, LiDAR detector later) | CPU | no |
+| `tracking` | 3D Kalman over fused boxes, linked across chunks (DINOv2 ReID later) | CPU | no |
 | `label_refinement` | Multimodal LabelFormer (bootstrap → learned) | CUDA | yes |
 | `open_vocab_discovery` | Rare-class discovery branch | CUDA | yes |
 | `student_training` | BEVFusion / TransFusion student training | CUDA | yes |
@@ -150,8 +151,9 @@ and is pip-installed editable inside the container.
   `wato_common.artifact_store`. Local filesystems only — `local_path` refuses
   remote URIs.
 - **Artifact formats**: every artifact one component writes and another reads
-  has one module in `wato_common.artifacts` (calibration, lidar_sweeps,
-  motion_proposals, masklets, depth, lifted_labels) holding both its write and
+  has one module in `wato_common.artifacts` (calibration, frame_index,
+  lidar_sweeps, motion_proposals, ground, masklets, depth, lifted_labels,
+  proposals) holding both its write and
   read halves, round-trip tested in `src/common/tests`. Consumer images install
   only `src/common` and their own package, so a reader can't live in the
   producer's package.

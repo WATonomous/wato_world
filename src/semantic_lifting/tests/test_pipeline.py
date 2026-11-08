@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -24,6 +25,7 @@ from wato_common.artifacts import (
     depth,
     frame_index,
     lidar_sweeps,
+    lifted_candidates,
     lifted_labels,
     masklets,
 )
@@ -67,10 +69,13 @@ def _stage_chunk(
     depth_m: float = 10.0,
     points: np.ndarray = POINTS,
     ground_mask: bool = True,
+    ground: tuple[int, ...] = (),
 ) -> None:
     """One sweep of `points`; per (camera, det_score) one frame, all cameras
     looking along ego +x, a masklet m_<camera> over the pixels points 0-2 land
-    on, and a depth map of depth_m everywhere (None: no depth artifact)."""
+    on, and a depth map of depth_m everywhere (None: no depth artifact).
+    The sweep's ground_mask marks the points in `ground` (ground_mask=False:
+    the sweep has none)."""
     write_table(
         [
             {
@@ -139,6 +144,8 @@ def _stage_chunk(
     )
 
     os.makedirs(local_path(lidar_proc_dir(BAG, CHUNK)), exist_ok=True)
+    is_ground = np.zeros(len(points), bool)
+    is_ground[list(ground)] = True
     world_uri = lidar_sweeps.write_world(
         BAG,
         CHUNK,
@@ -148,7 +155,7 @@ def _stage_chunk(
             y=points[:, 1],
             z=points[:, 2],
             origin=np.zeros(3),
-            ground_mask=np.zeros(len(points), bool) if ground_mask else None,
+            ground_mask=is_ground if ground_mask else None,
         ),
     )
     mask_uri = lidar_sweeps.write_dynamic_mask(
@@ -228,6 +235,49 @@ def test_points_inside_a_mask_are_labeled():
     assert inst.masklet_ids == (f"m_{CAM}",) and inst.n_points_labeled == 3
 
 
+def test_competing_mask_survives_lifting_even_when_it_wins_no_unique_labels():
+    _stage_chunk()
+    records = masklets.read(BAG, CHUNK)
+    competitor = replace(records[0], masklet_id="competitor", det_score=0.2)
+    # A smaller hypothesis covers the same physical returns as the larger
+    # high-score mask. Neither area nor score can erase it before refinement.
+    mask = np.zeros((H, W), bool)
+    mask[20:27, 28:36] = True
+    masklets.write_mask(BAG, CHUNK, competitor.masklet_id, SEQ, mask)
+    masklets.write(BAG, CHUNK, records + [competitor])
+    run(ComponentConfig(), bag_id=BAG)
+
+    labels = lifted_labels.read_sweep(BAG, CHUNK, SWEEP)
+    assert labels.instance_ids.tolist() == [f"m_{CAM}"] * 3
+    assert labels.n_supporting_cameras.tolist() == [1] * 3
+    claims = lifted_candidates.read_sweep(BAG, CHUNK, SWEEP, n_points=len(POINTS))
+    assert claims.point_indices.tolist() == [0, 0, 1, 1, 2, 2]
+    assert set(claims.instance_ids) == {f"m_{CAM}", "competitor"}
+    assert claims.confidences.tolist() == [1.0] * 6
+    instances = {
+        inst.instance_id: inst for inst in lifted_labels.read_instances(BAG, CHUNK)
+    }
+    assert set(instances) == {f"m_{CAM}", "competitor"}
+    assert instances["competitor"].n_points_labeled == 3
+
+
+def test_lifting_uses_the_calibrated_raw_image_distortion():
+    # Optical x/z = .4. Brown k1=.5 gives xd=.432, u=53.6→pixel 54.
+    # Ignoring distortion would hit pixel 52, which has no instance mask.
+    _stage_chunk(points=np.array([[10.0, -4.0, 0.0]]))
+    c = Calibration.load(BAG)
+    cam = replace(
+        c.camera(CAM), distortion=(0.5, 0, 0, 0, 0), distortion_model="plumb_bob"
+    )
+    calibration.write(BAG, replace(c, cameras={CAM: cam}))
+    mask = np.zeros((H, W), bool)
+    mask[24, 54] = True
+    masklets.write_mask(BAG, CHUNK, f"m_{CAM}", SEQ, mask)
+    run(ComponentConfig(), bag_id=BAG)
+    labels = lifted_labels.read_sweep(BAG, CHUNK, SWEEP)
+    assert labels.point_indices.tolist() == [0]
+
+
 def test_points_behind_a_nearer_surface_take_no_label():
     """The mask covers points 0-2, but the depth map has a surface at 5 m in
     front of them (10 m): the mask belongs to that surface, not to them."""
@@ -239,6 +289,7 @@ def test_points_behind_a_nearer_surface_take_no_label():
     assert stats.n_points_labeled == 0
     assert stats.n_points_failed_visibility == 3
     assert lifted_labels.read_sweep(BAG, CHUNK, SWEEP).point_indices.size == 0
+    assert lifted_candidates.read_sweep(BAG, CHUNK, SWEEP).point_indices.size == 0
 
 
 def test_points_behind_a_nearer_lidar_return_take_no_label():
@@ -281,6 +332,20 @@ def test_a_far_depth_map_surface_does_not_occlude():
         1,
         2,
     ]
+
+
+def test_ground_inside_a_mask_takes_no_label():
+    """Point 2 lands inside the mask but is Patchwork++ ground: a mask reaching
+    past an object's lower edge, or covering the road, doesn't make the road
+    its class. It isn't a visibility failure either: it was never a candidate."""
+    _stage_chunk(ground=(2,))
+    run(ComponentConfig(), bag_id=BAG)
+
+    (stats,) = lifted_labels.read_stats(BAG, CHUNK)
+    assert stats.n_points_in_any_mask == stats.n_points_labeled == 2
+    assert stats.n_points_failed_visibility == 0
+    labels = lifted_labels.read_sweep(BAG, CHUNK, SWEEP, n_points=len(POINTS))
+    assert labels.point_indices.tolist() == [0, 1]
 
 
 def test_a_sweep_without_a_ground_mask_stops_the_run():
@@ -348,6 +413,7 @@ def test_each_chunk_gets_a_manifest_of_its_inputs_and_outputs():
     assert manifest["inputs"]["manifest_perception_2d"]["present"] is False
     assert set(manifest["outputs"]) == {
         "lifted_labels",
+        "lifted_candidates",
         "lifted_instances",
         "lifted_stats",
     }

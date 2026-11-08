@@ -9,15 +9,17 @@ Per chunk, sweeps in time order:
     b. Project the sweep's world-frame points with the camera's pose at the
        frame's own time (points are world-registered upstream, so no
        sweep-pose / ego-motion term).
-    c. Look up the mask each point lands in (innermost mask wins).
+    c. Retain every independent mask each non-ground point lands in;
+       Patchwork++ ground (the world sweep's ground_mask) takes no label.
     d. Keep the in-mask points that pass the visibility test (UniLiPs Eq. 1)
        against the depth map up close and the sweep's own LiDAR returns.
-    e. Each such point gets one vote from this camera, weighted by the
-       claiming masklet's det_score.
+    e. Each visible point retains all claiming masklets, weighted by det_score.
   Then merge one object's masklets across cameras into one instance, from the
   points they both claim (instances.py).
-  Pass 2 — resolve each sweep's votes across cameras (voting.py) and write
-  lifted_labels/<sweep_id:06d>.npz, then lifted_instances.parquet and
+  Pass 2 — preserve competing point-instance claims in lifted_candidates,
+  and write a provisional unique-label view in lifted_labels (voting.py).
+  Geometric refinement and final ownership belong to proposal_generation.
+  Then write lifted_instances.parquet and
   lifted_stats.parquet (wato_common.artifacts.lifted_labels).
 
 A failure in one chunk propagates: an upstream artifact that is missing or
@@ -49,7 +51,7 @@ from wato_common.artifact_store import (
     semantic_lifting_dir,
     tracklets_2d_path,
 )
-from wato_common.artifacts import ArtifactFormatError, lifted_labels
+from wato_common.artifacts import ArtifactFormatError, lifted_candidates, lifted_labels
 from wato_common.artifacts.calibration import Calibration
 from wato_common.artifacts.frame_index import CameraFrame, FrameIndex
 from wato_common.artifacts.lidar_sweeps import ProcessedSweeps, WorldSweep
@@ -66,7 +68,14 @@ from wato_semantic_lifting.projection import (
 )
 from wato_semantic_lifting.stats import build_stats_row
 from wato_semantic_lifting.visibility import lidar_occluder, visible
-from wato_semantic_lifting.voting import Resolved, Votes, resolve
+from wato_semantic_lifting.voting import (
+    Candidates,
+    Resolved,
+    Votes,
+    camera_winners,
+    candidates,
+    resolve,
+)
 
 log = logging.getLogger(__name__)
 
@@ -118,12 +127,14 @@ class _ChunkLifter:
         if world.ground_mask is None:
             raise ArtifactFormatError(
                 local_path(sweep.world_path),
-                "no ground_mask: the LiDAR occlusion test needs it (ground must "
-                "not hide what stands on it); lidar_preprocessing writes it "
-                "with Patchwork++",
+                "no ground_mask: lifting needs it (ground neither occludes nor "
+                "takes a label); lidar_preprocessing writes it with Patchwork++",
             )
         xyz = world.xyz
-        can_occlude = ~world.ground_mask
+        # Ground can't occlude: it sits in front of an object's lower edge in the
+        # image without hiding it. Nor can it take a label: a mask reaching past
+        # that edge, or one covering the road, would paint the road its class.
+        not_ground = ~world.ground_mask
         vis_cfg = self.cfg.visibility
         n = int(xyz.shape[0])
         in_mask = np.zeros(n, dtype=bool)
@@ -140,13 +151,18 @@ class _ChunkLifter:
             cam = self.calibration.camera(ref.cam_id)
             W, H = frame.size
             uv, d_cam, valid = project_and_clip(
-                xyz, cam.K, compute_cam_T_world(ref.world_T_ego, cam.ego_T_cam), (W, H)
+                xyz,
+                cam.model_for_image((W, H)),
+                compute_cam_T_world(ref.world_T_ego, cam.ego_T_cam),
+                (W, H),
             )
             n_cameras += 1
             idx = np.flatnonzero(valid)
             ui, vi = pixel_indices(uv[idx], W, H)
-            label = frame.labels[vi, ui]
-            hit = label >= 0
+            hit = np.zeros(len(idx), bool)
+            for mask in frame.masks:
+                hit |= mask.sample(ui, vi)
+            hit &= not_ground[idx]
             if not hit.any():
                 continue
             # Every projected return can occlude, not only the in-mask ones.
@@ -154,22 +170,29 @@ class _ChunkLifter:
                 ui,
                 vi,
                 d_cam[idx],
-                can_occlude[idx],
+                not_ground[idx],
                 (W, H),
                 vis_cfg.lidar_cell_px,
                 vis_cfg.lidar_neighborhood_cells,
             )[hit]
-            idx, ui, vi, label = idx[hit], ui[hit], vi[hit], label[hit]
+            idx, ui, vi = idx[hit], ui[hit], vi[hit]
             in_mask[idx] = True
             vis = visible(d_cam[idx], frame.occluder_m[vi, ui], lidar_occ, vis_cfg)
-            parts.append(
-                Votes(
-                    point_idx=idx[vis],
-                    cam_idx=np.full(int(vis.sum()), self.cam_index[ref.cam_id]),
-                    label_idx=label[vis].astype(np.int64),
-                    score=self.vote_score[label[vis]],
+            idx, ui, vi = idx[vis], ui[vis], vi[vis]
+            # Visibility is physical evidence shared by every hypothesis. It
+            # is evaluated once per point/camera, then all mask claims survive.
+            # Sample masks individually rather than allocate an L×N matrix.
+            for mask in frame.masks:
+                label = mask.label
+                claimed = idx[mask.sample(ui, vi)]
+                parts.append(
+                    Votes(
+                        point_idx=claimed,
+                        cam_idx=np.full(len(claimed), self.cam_index[ref.cam_id]),
+                        label_idx=np.full(len(claimed), label, np.int64),
+                        score=np.full(len(claimed), self.vote_score[label]),
+                    )
                 )
-            )
         return _SweepVotes(
             sweep.sweep_id, n, Votes.concat(parts), int(in_mask.sum()), n_cameras
         )
@@ -200,9 +223,12 @@ def _write_sweep_labels(
 def _instances_table(
     records: list[MaskletRecord],
     label_instance: np.ndarray,
-    per_sweep: list[Resolved],
+    per_sweep: list[Candidates],
 ) -> list[lifted_labels.LiftedInstance]:
-    """One LiftedInstance per instance some point is labeled with."""
+    """Every candidate-supported instance, including provisional-label losers.
+
+    Point/sweep counts describe distinct candidate support, before ownership.
+    """
     n_points: Counter[int] = Counter()
     n_sweeps: Counter[int] = Counter()
     for resolved in per_sweep:
@@ -265,8 +291,21 @@ def _process_chunk(
     # Pass 2: resolve and write.
     stats_rows = []
     per_sweep: list[Resolved] = []
+    per_sweep_candidates: list[Candidates] = []
     for sv in sorted(collected, key=lambda sv: sv.sweep_id):
-        resolved = resolve(sv.votes, label_cls, label_instance)
+        claims = candidates(sv.votes, label_cls, label_instance)
+        lifted_candidates.write_sweep(
+            bag_id,
+            chunk_id,
+            sv.sweep_id,
+            lifted_candidates.SweepCandidates(
+                claims.point_idx.astype(np.int32),
+                instance_ids[claims.instance],
+                claims.confidence.astype(np.float32),
+            ),
+        )
+        per_sweep_candidates.append(claims)
+        resolved = resolve(camera_winners(sv.votes), label_cls, label_instance)
         _write_sweep_labels(
             bag_id, chunk_id, sv.sweep_id, resolved, instance_ids, classes
         )
@@ -282,7 +321,7 @@ def _process_chunk(
                 n_cameras_used=sv.n_cameras_used,
             )
         )
-    instances = _instances_table(records, label_instance, per_sweep)
+    instances = _instances_table(records, label_instance, per_sweep_candidates)
     lifted_labels.write_instances(bag_id, chunk_id, instances)
     lifted_labels.write_stats(bag_id, chunk_id, stats_rows)
     log.info(
@@ -326,6 +365,7 @@ def _write_chunk_manifest(
             },
             outputs={
                 "lifted_labels": f"{semantic_lifting_dir(bag_id, chunk_id)}/lifted_labels",
+                "lifted_candidates": f"{semantic_lifting_dir(bag_id, chunk_id)}/lifted_candidates",
                 "lifted_instances": lifted_instances_path(bag_id, chunk_id),
                 "lifted_stats": lifted_stats_path(bag_id, chunk_id),
             },

@@ -13,7 +13,7 @@ import os
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class DiscoveryConfig(BaseModel):
@@ -84,18 +84,73 @@ class DetectionConfig(BaseModel):
     redetect_every_k: int = 2  # images; see config/perception_2d.yaml
 
 
+class MaskRefinementConfig(BaseModel):
+    """Experimental image-mask seeds; thresholds need validation on WATO."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    # SAM2 automatic-mask-generator defaults, not calibrated WATO probabilities.
+    min_predicted_iou: float = Field(default=0.8, ge=0, le=1)
+    min_stability: float = Field(default=0.95, ge=0, le=1)
+    stability_offset: float = Field(default=1.0, gt=0)
+    # False follows the image API's advice for unambiguous box prompts.
+    multimask_output: bool = False
+    # At most one extra decoder pass; ablate points and logit recurrence separately.
+    interior_point: bool = True
+    mask_input_refinement: bool = True
+    # Start with seed / existing box-drift refinement; ablate shape correction separately.
+    correct_shape_disagreement: bool = False
+    # A fresh mask must retain this much agreement before correcting an ID.
+    # These are engineering guardrails, not published optimal thresholds.
+    correction_min_mask_iou: float = Field(default=0.5, ge=0, le=1)
+    correction_below_mask_iou: float = Field(default=0.8, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def correction_range(self) -> MaskRefinementConfig:
+        if self.correction_min_mask_iou >= self.correction_below_mask_iou:
+            raise ValueError(
+                "correction_min_mask_iou must be below correction_below_mask_iou"
+            )
+        return self
+
+
+class Dam4samConfig(BaseModel):
+    """DAM4SAM memory parameters the adapter sets (models/dam4sam.py)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Memory update spacing Δ, in images. The authors use 5 at 30 fps and 1 at
+    # 5 fps (DAM4SAM extended, §3.2.1 / §5.5): one update per ~170-200 ms,
+    # which is 2 at WATO's ~10 Hz and nuScenes' 12 Hz cameras.
+    update_delta: int = Field(default=2, ge=1)
+    # SAMURAI's memory-bank gate (its code's memory_bank_iou_threshold): a
+    # frame is kept as an older recent-appearance memory only if SAM2's
+    # predicted IoU exceeds this; the previous frame is always attended to.
+    # Object pointers are not gated, as in SAMURAI. 0 disables.
+    memory_min_predicted_iou: float = Field(default=0.5, ge=0, le=1)
+
+
 class SegmentationConfig(BaseModel):
-    """SAM2 video predictor settings."""
+    """SAM2.1 weights, propagation backend and optional image-mask refinement."""
 
     model_config = ConfigDict(extra="allow")
 
+    # Published training-free memory policy, using the same SAM2.1 weights.
+    backend: Literal["sam2", "dam4sam"] = "dam4sam"
+    # backend dam4sam only; stock SAM2 keeps Meta's memory.
+    dam4sam: Dam4samConfig = Field(default_factory=Dam4samConfig)
+
     # Local SAM2.1 checkpoint path. data/models is bind-mounted read-only at
     # /data/models in the container; the checkpoint is a loose .pt (placed there
-    # by scripts/fetch_models.py), loaded via build_sam2_video_predictor — not
-    # from_pretrained, since the container runs HF_HUB_OFFLINE=1.
+    # by scripts/fetch_models.py), loaded by the selected backend with no download.
     checkpoint: str = "/data/models/sam2.1_hiera_large.pt"
     # Hydra config name bundled in the `sam2` package (matches the checkpoint).
     config: str = "configs/sam2.1/sam2.1_hiera_l.yaml"
+    refinement: MaskRefinementConfig = Field(default_factory=MaskRefinementConfig)
+    # Write per-camera mask diagnostics (mask_quality.py). Off: computing them
+    # costs a GPU sync per frame and 10-20 MB of JSON per WATO chunk.
+    mask_quality: bool = False
 
 
 class TrackingConfig(BaseModel):
@@ -106,12 +161,12 @@ class TrackingConfig(BaseModel):
     # A re-detected box whose IoU with an already-tracked object's mask bbox is
     # >= this is treated as the existing object (not a new track).
     iou_match_threshold: float = 0.5
-    # Keep the SAM2 frame stack in host RAM (stream per frame to GPU). Essential
-    # for long panoramic clips that would otherwise OOM at init_state.
+    # Stock SAM2 frame stack on CPU. DAM4SAM always loads frames lazily on CPU.
     offload_video_to_cpu: bool = True
     # OOM fallback: if the whole clip OOMs, retry in windows of this many frames
-    # (fresh session each — object ids reset between windows, re-linked downstream
-    # via DINOv2). A window that itself OOMs is recursively halved to the floor.
+    # (fresh session each — object ids reset between windows; `tracking`
+    # associates 3D boxes, not masklet ids). A window that itself OOMs is
+    # recursively halved to the floor.
     sub_clip_frames: int = 150
     min_sub_clip_frames: int = 16
     # SAM2 doesn't let go of an object it has lost: within 0-30 frames it tends
@@ -119,27 +174,11 @@ class TrackingConfig(BaseModel):
     # (no more masks recorded; removed from the session at the next keyframe)
     # once its object has had no mask for this many consecutive frames. 0 = never.
     drop_lost_after_frames: int = 1  # images
-    # ...or once its mask and another live track's reach this IoU in the same
-    # frame (a jump with no empty frame); the track whose mask changed most
-    # since its previous frame is the one that ends. > 1 disables.
-    duplicate_mask_iou: float = 0.7
     # Drop a mask's specks: 8-connected components smaller than this fraction
     # of its largest one (the largest always stays). 0 disables.
     island_fraction: float = 0.1
-    # A track left owning less than this fraction of its own mask once
-    # contested pixels go to the surest track, for collapse_after_frames images
-    # in a row, has latched onto another track's object, and ends. 0 disables.
-    collapse_fraction: float = 0.05
-    collapse_after_frames: int = 3
-    # A contained_classes track whose mask lies at least containment_fraction
-    # inside a container_classes track's and ends above that track's bottom, for
-    # containment_after_frames images in a row, is part of that vehicle (the
-    # driver or cabin seen through its windows): not recorded, and ended.
-    # Taxonomy class names; empty disables.
-    contained_classes: list[str] = Field(default_factory=list)
-    container_classes: list[str] = Field(default_factory=list)
-    containment_fraction: float = 0.9
-    containment_after_frames: int = 3
+    # Independent masks retain contested pixels; overlap, containment and
+    # collapse are resolved after lifting and geometric refinement.
     # Detector support, on keyframes (a box matching a track's mask bbox at
     # iou_match_threshold supports it). A track's keep-alive rises by one per
     # supported keyframe (up to support_keyframes) and falls by one per
@@ -153,6 +192,28 @@ class TrackingConfig(BaseModel):
     confirm_keyframes: int = 3
     support_keyframes: int = 5
     support_min_area: float = 0.01
+    # Whether a box no track accounts for may start one, tested against the
+    # tracked masks (tracks still live at the keyframe, plus births already
+    # accepted there, highest score first):
+    #   untracked_area: SAM2MOT (arXiv 2504.04519, "object addition"): more
+    #     than birth_untracked_fraction (its 0.5) of the box lies outside
+    #     every tracked mask;
+    #   mask_iou: SAM 3 (arXiv 2511.16719, App. C.3): SAM2's image-decoder
+    #     mask for the box has IoU below birth_max_mask_iou (its 0.1) with
+    #     every tracked mask; costs one image encoding per keyframe with births;
+    #   none: every such box starts a track.
+    # A refused box neither starts nor supports a track.
+    birth_gate: Literal["untracked_area", "mask_iou", "none"] = "untracked_area"
+    birth_untracked_fraction: float = Field(default=0.5, ge=0, lt=1)
+    birth_max_mask_iou: float = Field(default=0.1, gt=0, le=1)
+    # Reverse back-fill ("once detected, never lost": CTRL arXiv 2304.12315,
+    # OC-SORT 2203.14360, SAM4D 2506.21547): each track born after its
+    # window's first image is propagated backwards from its birth prompt for
+    # up to this many images (CTRL's 20 frames for short tracks, at 10 Hz).
+    # It stops at drop_lost_after_frames empty masks, on the ego vehicle, or
+    # where its mask's bbox fails the untracked_area test against the tracks
+    # recorded there. 0 disables.
+    backfill_frames: int = Field(default=20, ge=0)  # images
     # A track backed by exactly one box scoring >= reprompt_score that backs no
     # other track, whose mask bbox has drifted below reprompt_below_iou from
     # it, is re-prompted with the box. 0 disables.
@@ -200,7 +261,7 @@ class DepthConfig(BaseModel):
 
 
 class EmbeddingConfig(BaseModel):
-    """DINOv2 appearance embeddings, persisted for the `tracking` component's ReID."""
+    """DINOv2 appearance embeddings, kept for a later `tracking` ReID (unread today)."""
 
     model_config = ConfigDict(extra="allow")
 

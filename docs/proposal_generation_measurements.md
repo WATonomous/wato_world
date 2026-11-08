@@ -1,0 +1,305 @@
+# proposal_generation: measurements behind the defaults
+
+The largest-group radius and runtime measurements below describe the earlier
+cleanup, which remains the default. Lifted geometry also supports opt-in
+SAL-style full non-ground scan matching;
+the algorithm, explicit assumptions, and current validation are documented in
+[sal_scan_cluster_refinement.md](research/sal_scan_cluster_refinement.md).
+The earlier radius ablation does not validate the new DBSCAN settings.
+
+The measurements behind proposal_generation's defaults and what its first run
+produced. The behaviour itself is in the component README. Everything here is
+`sensors_2026_07_07_23_01_24_2_with_eidos_mcap` (WATO rig without `lidar_nw`:
+frames of one `lidar_cc` VLP-32C sweep plus one `lidar_ne` VLP-16 sweep; 8 pano
+cameras), all 11 chunks, `proposal_generation.wato.yaml`, unless stated.
+
+## Fusion: per-frame overlap is small
+
+Gated Step F clusters against lifted instances in the same frame, by shared
+LiDAR points (chunks 0000 / 0005):
+
+| Gated clusters | 1,211 / 2,728 |
+|---|---|
+| sharing any point with a lifted instance | 571 / 1,642 |
+| best match: shared points p10 / p50 / p90 | 1 / 8 / 112 · 2 / 14.5 / 124 |
+| matched at ≥ 20 shared and ≥ 0.3 of the smaller | 158 / 689 |
+| matched at ≥ 5 shared and ≥ 0.3 | 205 / 1,118 |
+| matched at ≥ 3 shared and ≥ 0.3 | 224 / 1,221 |
+
+semantic_lifting's masklet-merge rule (≥ 20 points, ≥ 0.3) is counted over a
+whole chunk; per frame it drops 40% of the matches ≥ 5 keeps on chunk 0005.
+`fusion.min_shared_points: 5`.
+
+## Lifted boxes: far and sparse
+
+A lifted instance has a median of 4–8 points in a frame (p90 88–98); 35–46%
+have ≥ 10, 48–65% ≥ 5. `lifted.min_points: 5`.
+
+Instances with ≥ 5 points sit a median 51 m / 34 m from the reference LiDAR
+(chunks 0000 / 0005, every 4th frame). The share of an instance's points in
+its largest group, by `cluster_radius_m`:
+
+| Radius | Median share kept | Keeping ≥ 90% | ≥ 90%, beyond 20 m |
+|---|---|---|---|
+| 0.5 m | 0.50 / 0.60 | 0.30 / 0.21 | 0.01 / 0.11 |
+| 0.75 m | 0.60 / 0.71 | 0.39 / 0.32 | 0.08 / 0.21 |
+| 1.0 m | 0.80 / 0.80 | 0.44 / 0.39 | 0.13 / 0.29 |
+| 1.5 m | 0.96 / 0.86 | 0.59 / 0.46 | 0.36 / 0.36 |
+| 2.0 m | 1.00 / 0.88 | 0.68 / 0.48 | 0.51 / 0.39 |
+| 3.0 m | 1.00 / 0.91 | 0.72 / 0.51 | 0.57 / 0.43 |
+
+Below 1.5 m the group splits real cars along VLP-16 rings (~0.7 m apart at
+20 m); past 2 m the gain flattens, so what is left out is mostly bleed.
+`lifted.cluster_radius_m: 2.0`.
+
+## First run
+
+| Chunk | Frames | lidar_mos | classed | lifted | fused | pairs | pairs / lidar_mos |
+|---|---|---|---|---|---|---|---|
+| 0000 | 629 | 1,211 | 0.17 | 8,023 | 9,097 | 137 | 0.11 |
+| 0001 | 666 | 2,688 | 0.40 | 7,386 | 9,036 | 1,038 | 0.39 |
+| 0002 | 666 | 1,678 | 0.26 | 2,135 | 3,324 | 489 | 0.29 |
+| 0003 | 670 | 1,415 | 0.38 | 3,235 | 4,094 | 556 | 0.39 |
+| 0004 | 674 | 2,144 | 0.36 | 7,011 | 8,206 | 949 | 0.44 |
+| 0005 | 674 | 2,728 | 0.37 | 9,479 | 11,237 | 970 | 0.36 |
+| 0006 | 675 | 2,791 | 0.57 | 6,545 | 7,776 | 1,560 | 0.56 |
+| 0007 | 658 | 2,151 | 0.55 | 5,780 | 6,735 | 1,196 | 0.56 |
+| 0008 | 657 | 2,397 | 0.37 | 10,033 | 11,605 | 825 | 0.34 |
+| 0009 | 674 | 3,655 | 0.38 | 18,933 | 21,204 | 1,384 | 0.38 |
+| 0010 | 567 | 1,972 | 0.47 | 6,503 | 7,516 | 959 | 0.49 |
+
+"Frames" counts frames with at least one proposal; "classed" is the share of
+lidar_mos boxes a lifted vote gave a class.
+
+Bag totals: 24,830 lidar_mos, 85,063 lifted, 99,830 fused (10,063 pairs).
+
+| Rows | n | l / w / h median (m) |
+|---|---|---|
+| lidar_mos with a class | 10,014 | 3.80 / 1.61 / 1.55 |
+| lidar_mos without | 14,816 | 3.32 / 1.34 / 1.46 |
+| lifted car | 75,116 | 2.26 / 0.83 / 1.42 (p90 4.57 / 1.89 / 3.28; 15 points) |
+| lifted pedestrian | 5,494 | 1.12 / 0.24 / 1.29 (8 points) |
+| lifted truck | 2,669 | 2.55 / 0.74 / 1.57 |
+| lifted bus | 1,480 | 6.54 / 1.30 / 4.33 |
+| fused pairs | 10,063 | 3.96 / 1.68 / 1.59 |
+
+- Pairs are car-sized; lifted-only car boxes are not: a box around the
+  visible points of a far car (a median of 15) covers one side. Completing the
+  shape is what SLF is for.
+- Class-less lidar_mos boxes are car-sized too (3% under 0.8 m tall): Step F
+  movers no camera masklet covers, kept by design.
+- Lifted car boxes up to 3.28 m tall (p90) exceed any car; probably bleed
+  within 2 m of the car (a pole, a wall) that the largest group kept. Not yet
+  checked frame by frame.
+
+Runtime: 8–21 s per chunk, 2 min for the bag. Viewers on chunk 0005: the 3D
+page is 36 MB (every 5th frame), top-down PNGs 2.4 MB (68 frames), camera
+overlays 125 MB (every 10th image of 8 cameras).
+
+## Occlusion
+
+Lifted boxes in cluttered scenes, every 5th frame of all 11 chunks (17,043
+lifted boxes). Occlusion of a box is measured from `lidar_cc`: the share of
+its angular footprint (0.4° × 1° bins with a return) whose nearest return is
+more than 0.5 m in front of the box.
+
+**Overlapping boxes are mostly a hidden object boxed on its occluder.** Of
+2,406 pairs of fused boxes that overlap in a frame (3D IoU > 0.05 or centres
+< 1.5 m), 1,544 (64%) are two lifted instances of one class from the same
+camera. On five rendered at < 15 m, each was a car behind another car (two
+masks in the image), with the hidden car's box on the front car. Over 873 such
+pairs under 30 m, perception_2d's depth map puts the smaller instance's mask a
+median 2.1 m behind the other's (p75 15.9 m); its LiDAR points sit at the
+other's depth (median 0.0 m, p25–p75 −0.3–0.6 m). The hidden car has a median
+of 7–9 points: the occluder blocks the roof LiDAR, and the occluder's edge
+returns that project into the hidden car's mask pass the visibility test,
+being the nearest surface there. The occlusion metric reads such boxes as
+unoccluded (median 0 over all car boxes): they sit on the occluder.
+
+**Sparsity.** On car boxes both sources agree on (fused pairs), the LiDAR
+returns inside the box and the share semantic_lifting labelled:
+
+| Range | Pairs | Returns (lidar_cc / lidar_ne) | Labelled share |
+|---|---|---|---|
+| 0–15 m | 594 | 226 / 3 | 0.68 |
+| 15–30 m | 958 | 97 / 2 | 0.43 |
+| 30–50 m | 450 | 35 / 0 | 0.33 |
+
+The VLP-16 corner adds almost nothing (this bag has no `lidar_nw`).
+Unoccluded lifted car boxes have a median of 119 points under 15 m and 9–13
+beyond.
+
+**Rejecting points far nearer than their own mask (not shipped).** Point
+camera depth ÷ the median depth-map value over its mask: clean instances
+(lifted half of a fused pair, nothing overlapping) p5/p50/p95 0.60 / 0.90 /
+1.25; the hidden instances above 0.23 / 0.55 / 0.99. Share of instances whose
+median point falls below 0.5 × mask depth, i.e. that such a test would empty:
+
+| Mask depth | Clean | Hidden |
+|---|---|---|
+| 10–20 m | 0.00 (316) | 0.26 (27) |
+| 20–30 m | 0.00 (261) | 0.28 (135) |
+| 30–50 m | 0.12 (155) | 0.41 (254) |
+| > 50 m | 0.62 (85) | 0.70 (144) |
+
+The depth map's error past ~30 m (it overestimates far masks) makes the test
+unsafe there, and under 30 m it removes about a quarter of the hidden boxes.
+"Hidden" is itself judged with the depth map, so part of it is depth-map error.
+
+## Against ground truth (nuScenes scene-0061)
+
+`scripts/eval_proposals.py`, `proposal_generation.yaml`, 37 annotated
+instants, matched class-agnostically within 2 m (nuScenes-style, by score);
+annotations with no non-ground point in the sweep are ignored. 1,087 annotated
+boxes in the taxonomy: 740 pedestrian, 160 car, 113 truck, 36 motorcycle,
+32 bicycle, 6 bus. Errors are medians on matched boxes, prediction − ground
+truth.
+
+| Source | Recall | Precision | IoU | Centre (m) | Δl | Δw | Δh | Δz |
+|---|---|---|---|---|---|---|---|---|
+| lidar_mos | 0.02 | 0.89 | 0.31 | 0.20 | −0.39 | −0.28 | −0.16 | −0.04 |
+| lifted | 0.33 | 0.70 | 0.12 | 0.29 | −0.53 | −0.52 | −0.30 | −0.29 |
+| fused | 0.33 | 0.70 | 0.12 | 0.28 | −0.52 | −0.51 | −0.30 | −0.29 |
+
+| fused, by range | 0–15 | 15–30 | 30–50 | 50+ |
+|---|---|---|---|---|
+| recall | 0.72 | 0.36 | 0.08 | 0.01 |
+| precision | 0.81 | 0.73 | 0.31 | 0.25 |
+
+| fused, by class | car | pedestrian | truck | motorcycle | bicycle | bus |
+|---|---|---|---|---|---|---|
+| recall | 0.53 | 0.25 | 0.55 | 0.39 | 0.19 | 0 |
+| IoU | 0.19 | 0.07 | 0.37 | 0.09 | 0.15 | – |
+| Δl / Δw (m) | −0.64 / −0.38 | −0.38 / −0.53 | −0.76 / −0.57 | −1.09 / −0.54 | −0.13 / +0.24 | – |
+
+- Boxes are too small and too low wherever they match: cars 0.6 m short and
+  0.4 m narrow; pedestrian boxes are slivers of the visible side (0.5 m
+  narrower than the annotation), hence IoU 0.07 at a 0.19 m centre error.
+- Recall falls off a cliff past 30 m, and so does precision.
+- lidar_mos boxes are precise (0.89) but rare: one per frame, 14 tracks.
+- 0.89 of lidar_mos rows pair with a lifted box here (WATO: 0.11–0.56).
+
+Recall at 0.5 / 1 / 2 / 4 m: fused 0.21 / 0.29 / 0.33 / 0.36.
+
+## Track shapes (WATO, no ground truth)
+
+`scripts/eval_proposals.py` without ground truth, all 11 chunks: the gated
+lidar_mos rows form 1,050 Step F tracks (track_hint_id). By their median box,
+209 are wall-shaped (length > 4 × width, LISO's limit) and 179 small
+(footprint < 0.35 m²); 537 have a camera class on some frame, 32 a pedestrian.
+
+## Shape gates, height cap, nested boxes
+
+Each fix on and off. nuScenes scene-0061 is scored against ground truth
+(within 2 m); WATO (all 11 chunks) has no ground truth, so its numbers are
+counts.
+
+| nuScenes scene-0061 | lidar_mos hits (prec.) | lifted recall / prec. | pedestrian recall |
+|---|---|---|---|
+| all off | 28 (0.89) | 0.33 / 0.70 | 0.25 |
+| track shape gates | 27 (0.89) | 0.33 / 0.70 | 0.25 |
+| pedestrian radius 0.5 / 0.7 / 1.0 / 1.5 m | 28 | 0.30 / 0.32 / 0.32 / 0.33 | 0.21 / 0.24 / 0.25 / 0.26 |
+| car height cap 3 m | 28 | 0.33 / 0.70 | 0.25 |
+| nested ≥ 0.3 / 0.5 / 0.7 | 28 | 0.32 / 0.71 (all three) | 0.25 |
+
+The scene has 2 wall-shaped Step F tracks and no tall car boxes, so the gates
+and the cap change nothing there; a smaller pedestrian radius only loses
+pedestrians (their boxes are thin from few points, not bleed), so no class gets
+one.
+
+| WATO | off | on |
+|---|---|---|
+| lidar_mos tracks | 1,050 | 765 |
+| wall-shaped / small tracks | 209 / 179 | 6 / 40 |
+| tracks with a camera class / pedestrian | 538 / 32 | 496 / 30 |
+| lifted rows | 85,063 | 76,826 |
+| fused pairs | 10,055 | 9,891 |
+| car box height p50 / p90 / p99 (chunk 0005) | 1.42 / 2.99 / 4.98 m | 1.40 / 2.58 / 3.82 m |
+
+On chunk 0005, 2 of the 46 lidar_mos tracks the gates drop had a camera class
+on any frame, both thin strips (1.55 × 0.23 m, 1.10 × 0.22 m): no side-on car
+among them. The 846 lifted rows dropped there are all cars, a median 8 points
+at 47 m, inside a car box with more points. Whether they were hidden cars or
+real far ones needs the WATO labels.
+
+## Fragments
+
+A second track on an object, at the same time, was 43% of scene-1100's
+false-positive track frames (`docs/tracking_measurements.md`, "Duplicate
+tracks"). The ones beside a car parked behind the ego are each a separate
+low-score SAM2 masklet (0.33-0.39, about 2,000 px) beside the car's 118,000-px
+mask, zero pixel overlap, labelled car or pedestrian. Each claims 6-8 of the
+car's edge returns, which box as a 0.2 × 0.1 × 1.5 m column beside the car for
+100-245 frames. The filter: drop a lifted box with ≥ `fragment_min_fraction` of
+its points within `fragment_radius_m` of the points of a box with ≥
+`fragment_min_ratio` × as many, any class.
+
+| fused, within 2 m | scene-0061 hits / false pos. | scene-1100 hits / false pos. |
+|---|---|---|
+| off | 352 / 145 | 372 / 143 |
+| fraction 0.5, ratio 2, 0.3 m | 349 / 141 | 372 / 88 |
+| fraction 0.8, ratio 2, 0.3 m | 351 / 142 | 372 / 89 |
+| fraction 0.95, ratio 2, 0.3 m | 352 / 143 | 372 / 107 |
+| **fraction 0.8, ratio 5, 0.3 m** | **352 / 144** | **372 / 89** |
+| fraction 0.8, ratio 2, 0.5 m | 349 / 141 | 372 / 89 |
+
+Ratio 5 keeps every hit on both scenes and removes 54 of scene-1100's 143
+false positives (precision 0.72 → 0.81). Downstream on scene-1100: track
+frames' precision 0.73 → 0.81 (0.81 → 0.97 under 15 m), duplicate false
+positives 59 → 8. On WATO it changes almost nothing: 2,669 tracks instead of
+2,672.
+
+## Camera-overlay alignment (WATO July 7 bag, 2026-11-03)
+
+Boxes drawn on WATO camera images looked displaced from their objects. Three
+separate causes, measured on chunks 0000, 0004 and 0009:
+
+- **The viewer mixed times (fixed).** An image is paired with several sweeps,
+  and on WATO those can belong to two frame_sync frames (the centre sweep
+  nearest an image and a corner sweep nearest it). The viewer drew every
+  paired frame's proposals, so a moving object appeared twice: on 6,542 of
+  15,939 images (41%), projected centres of the same track median 5.4 px
+  apart (p90 21.8, p99 89.1). It now draws the one nearest frame (an earlier
+  one wins a tie; an empty nearest frame stays empty).
+- **Lifted boxes are boxes around what was seen.** A lifted proposal boxes
+  its instance's largest connected group of returns; a side, a roof strip or
+  an edge becomes the whole box. Over 3,761 lifted-car views with a mask
+  (projected box rectangle vs mask rectangle):
+
+  | Returns in box | Views | Median l × w × h (m) | Median IoU | Centre offset > 0.5 |
+  |---|---:|---|---:|---:|
+  | 5–19 | 1,798 | 1.54 × 0.38 × 1.16 | 0.248 | 39.3% |
+  | 20–49 | 739 | 3.49 × 1.13 × 1.57 | 0.426 | – |
+  | 50+ | 1,224 | 3.70 × 1.55 × 1.50 | 0.622 | 8.4% |
+
+  (Offset: projected centre minus mask centroid over the mask's width and
+  height.) A cuboid may rightly reach past a foreground mask (hidden body,
+  perspective), so these are proxies, not wrong-box counts.
+- **Visibility isn't ownership.** Lifting's depth tests reject returns
+  behind a nearer surface; a foreground return on a background car's mask
+  edge *is* the nearest surface and passes. Of 1,024 masks at 5–20 m, 10.7%
+  have a box centre nearer than 0.65 × the mask's depth. Object motion
+  between sweep and image is a minor term here: shifting each box by its
+  track velocity × the time gap moved median IoU 0.620 → 0.623 (0.614 →
+  0.614 above 2 m/s).
+
+**Chunk 0005, PANO_NN image 50** (the reported screenshot, one proposal
+time). Rebuilt from stored labels, the proposals reproduce exactly. The near
+SUV (287 returns) and red car (173) have tops 47–50 px below their visible
+roofs and bottoms 76–85 px below their masks: their returns cover the lower
+and rear body, and grounding then lowers each bottom to the ground grid
+(raw z extent 1.10 → 1.65 m and 0.81 → 1.40 m). The grid is not too low:
+current-sweep road planes under both cars agree with it within 2.1 cm.
+A larger cluster radius doesn't help: the red car keeps the same 173 returns
+from 1 to 4 m, and the SUV at 2.5 m gains 7 returns but widens 1.68 → 2.75 m
+(16.2 m long at 4 m). The thin "car" beside the signpost is a 0.63 × 0.17 m
+group of 42 returns, grounded to 2.25 m tall. With NN's independently
+estimated rotation, lifting gives that mask the moving SUV's returns instead
+("WATO camera alignment" in `semantic_lifting_measurements.md`): this frame's
+root cause is the camera's orientation, and the partial shapes remain after
+it.
+
+What would fix the rest: track-consistent shape completion from the observed
+near surface, and ownership checks for weak lifted instances, measured on
+labelled WATO frames. Class dimensions or a far-range depth threshold
+without that would swap one bias for another.
