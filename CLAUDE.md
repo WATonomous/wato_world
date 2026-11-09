@@ -35,8 +35,11 @@ proposal_generation → tracking → label_refinement / open_vocab_discovery →
 ingest, lidar_preprocessing, perception_2d and semantic_lifting are implemented
 end to end; proposal_generation has its first sources (Step F clusters,
 lifted instances, fusion; no LiDAR detector yet); tracking has a v0 (tracks
-per chunk linked across chunks, a parked / moving state per track; no ReID
-yet); label_refinement has a v0 (one box per parked vehicle, one size and a
+per chunk with SimpleTrack's GIoU cost, never-terminating tracks and
+CenterPoint's circle NMS on vehicles, re-linked after the pass by
+Offline-Poly's STWO, then linked across chunks; a parked / moving state per
+track; no ReID yet; `wato_common.tracking` keeps Chen's cost as the default
+for Step F); label_refinement has a v0 (one box per parked vehicle, one size and a
 smoothed path per moving track, then SLF's box shape and heading fit per
 track to its masks and points, PyTorch on the GPU); the rest are stubs raising
 NotImplementedError. Each implemented component's README is its
@@ -101,14 +104,23 @@ diagnostics (`segmentation.mask_quality`) are off by default. Details:
 ./watod build                 # pull bases from ghcr, build ACTIVE_MODULES (watod-config.sh)
 ./watod up                    # docker compose up -d
 ./watod -t ingest_dev         # shell into a running dev container
-./watod run <component> --bag <bag> [flags]   # also: validate-bag, trim-bag, reduce, viz, ego-mask, compare
+./watod run <component> --bag <bag> [flags]   # also: validate-bag, trim-bag, debug-bag, reduce, viz, ego-mask, compare
+./watod pipeline --bag <bag> [--profile wato] [--force <stage>,...] [--from|--to <stage>] [--dry-run]
 ./watod test <component>      # src/common/tests, then the component's, in its dev image
 ./watod down all
 ./watod build-base            # only when ghcr lacks the bases (first-time setup)
 ```
 
 `ACTIVE_MODULES` matches the monorepo: `"ingest:dev"`, `"all"`, `"all:dev"`, or
-a list; `:dev` = develop target with source bind-mounts. Run tests with
+a list; `:dev` = develop target with source bind-mounts.
+`watod pipeline` (`watod_scripts/watod-pipeline.sh`) runs ingest through
+label_refinement through `watod-run.sh`. Every stage skips work whose outputs
+exist (ingest: each chunk's `manifest.json`; lidar_preprocessing's bag-level
+steps: outputs newer than their inputs), so `--force <stage>` re-runs that
+stage and every later one. `--profile <name>` takes each stage's
+`<stage>.<name>.yaml`, falling back to the longest existing prefix (`wato_6cam`
+→ `wato`) and then `<stage>.yaml`. A stage not active as `:dev` runs its image
+as last built. Run tests with
 `./watod test`: the images have pyarrow, ROS, numba and pypatchworkpp. On a host
 with the Python deps,
 `PYTHONPATH=src/common/src:src/ingest/src python3 -m pytest -p no:anyio src/ingest/tests`
@@ -256,9 +268,15 @@ Details: `src/ingest/README.md`; measurements: `docs/ingest_measurements.md`.
   positions and headings for every frame without another smoothing pass.
 - **Before ingest, `validate-bag` / `trim-bag`.** Judged on log time. trim-bag
   uses the pinned `mcap` CLI (rosbag2's writer would empty custom-type schemas)
-  and writes to `data/bags/trimmed/`, the only read-write mount under
-  `/data/bags`. One-shot eidos topics must be passed as `--static-topic`, or
-  there is no common window.
+  and writes to `data/bags/trimmed/`; with `data/bags/debug/` the only
+  read-write mounts under `/data/bags`. One-shot eidos topics must be passed as
+  `--static-topic`, or there is no common window.
+- **`debug-bag` (ingest) merges the bag's boxes into a copy of the source bag**
+  as `visualization_msgs/MarkerArray` topics (`/wato_world/proposals/<provenance>`,
+  `/wato_world/tracks`, `/wato_world/refined_labels`), in the ego frame at
+  each frame's reference time (the bag has no usable TF for the pipeline's
+  world frame); each instant from the chunk that owns it, or one `--chunk`
+  over its decoded window. `src/ingest/README.md`.
 
 ## CI / ghcr
 

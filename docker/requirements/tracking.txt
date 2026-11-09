@@ -1,6 +1,6 @@
 # Locked Python dependency set for the tracking component.
 #
-# GENERATED, NOT HAND-EDITED. Frozen on 2026-11-03 from the deps stage built on
+# GENERATED, NOT HAND-EDITED. Frozen on 2026-11-09 from the deps stage built on
 # the digest-pinned base in docker/tracking.Dockerfile:
 #     docker run --rm --entrypoint uv \
 #         ghcr.io/watonomous/wato_world/tracking:deps_<tag> pip freeze --system
@@ -22,6 +22,7 @@
 annotated-types==0.8.0
 click==8.5.0
 fsspec==2026.9.0
+networkx==3.7
 numpy==2.5.4
 pillow==13.0.0
 pyarrow==26.0.0

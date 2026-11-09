@@ -1,8 +1,9 @@
 """Tracks over one chunk's detections, with wato_common.tracking.
 
-The same Kalman filter and Chen association cost Step F scores motion with,
-plus the two cues tracking adds: strong detections are matched first and a
-shared lifted instance id lowers a pair's cost (config `association`).
+The same Kalman filter Step F scores motion with, Chen's cost or SimpleTrack's
+GIoU, plus the cues tracking adds: strong detections are matched first, a
+shared lifted instance id lowers a pair's cost, and tracks may coast until
+the chunk ends (config `association`).
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ class Observation:
     frame: DetFrame
     det: Detection
     filtered: Box3D  # the Kalman filter's box after this detection
+    velocity: tuple[float, float, float]  # the filter's velocity then, m/s
 
 
 def run(frames: list[DetFrame], cfg: AssociationConfig) -> list[list[Observation]]:
@@ -41,8 +43,12 @@ def run(frames: list[DetFrame], cfg: AssociationConfig) -> list[list[Observation
             t_d=cfg.max_centre_dist_m,
             t_o=cfg.max_one_minus_iou,
             t_v=cfg.max_one_minus_volume_ratio,
+            cost=cfg.cost,
+            t_giou=cfg.max_one_minus_giou,
         ),
-        n_old=max(1, math.ceil(cfg.max_coast_s / max(period, 1e-3))),
+        n_old=None
+        if cfg.max_coast_s is None
+        else max(1, math.ceil(cfg.max_coast_s / max(period, 1e-3))),
         key_bonus=cfg.instance_bonus,
         key_opens_shape_gates=cfg.instance_opens_shape_gates,
     )
@@ -56,7 +62,10 @@ def run(frames: list[DetFrame], cfg: AssociationConfig) -> list[list[Observation
     return [
         [
             Observation(
-                frames[o.frame_idx], frames[o.frame_idx].dets[o.det_idx], o.filtered
+                frames[o.frame_idx],
+                frames[o.frame_idx].dets[o.det_idx],
+                o.filtered,
+                o.velocity,
             )
             for o in trk.history
         ]

@@ -48,6 +48,25 @@ def test_run_proposals_runs_iwu_then_f_and_records_manifest(tmp_env):
     assert "global_iwu" in json.dumps(m["inputs"])
 
 
+def test_run_proposals_reruns_iwu_only_when_stale_or_forced(tmp_env):
+    bag = "bag_rp_iwu"
+    _stage_scene(bag, "c0", with_iwu=False)
+    write_global_static_map(bag, np.array([[30.0, 0.0, 1.0]]))
+    pipeline.run_proposals(_cfg(), bag_id=bag)
+    iwu = local_path(global_iwu_path(bag))
+    t = os.path.getmtime(iwu)
+    pipeline.run_proposals(_cfg(), bag_id=bag)
+    assert os.path.getmtime(iwu) == t
+    pipeline.run_proposals(_cfg(), bag_id=bag, force=True)
+    assert os.path.getmtime(iwu) > t
+    # A rebuilt global static map is newer than global_iwu.npz.
+    t = os.path.getmtime(iwu)
+    os.utime(iwu, (t - 10, t - 10))
+    write_global_static_map(bag, np.array([[30.0, 0.0, 1.0]]))
+    pipeline.run_proposals(_cfg(), bag_id=bag)
+    assert os.path.getmtime(iwu) > t - 10
+
+
 def test_run_proposals_single_chunk_skips_iwu(tmp_env):
     bag = "bag_rp_chunk"
     _stage_scene(bag, "c0", with_iwu=False)

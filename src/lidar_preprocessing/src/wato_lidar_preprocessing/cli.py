@@ -12,7 +12,11 @@ from wato_common.progress import configure_tqdm
 from wato_lidar_preprocessing.config import load_config
 from wato_lidar_preprocessing.pipeline import run as run_pipeline
 from wato_lidar_preprocessing.pipeline import run_proposals
-from wato_lidar_preprocessing.reduce import reduce_ground_map, reduce_static_map
+from wato_lidar_preprocessing.reduce import (
+    reduce_ground_map,
+    reduce_static_map,
+    reduce_up_to_date,
+)
 
 log = logging.getLogger(__name__)
 
@@ -62,7 +66,10 @@ def main(log_level: str) -> None:
     "force",
     is_flag=True,
     default=False,
-    help="re-process chunks whose ground.npz already exists.",
+    help=(
+        "re-process chunks whose ground.npz already exists, and rebuild the "
+        "global maps, IWU and motion proposals even when up to date."
+    ),
 )
 @click.option(
     "--workers",
@@ -134,10 +141,15 @@ def run_cmd(
     # Two-pass already built one global_static_map.npz to seed pass 2; we
     # re-reduce here so the final on-disk map reflects pass-2 outputs.
     if auto_reduce and chunk_id is None:
-        log.info("auto-reduce: building global_static_map.npz + global_ground.npz ...")
-        static_out = reduce_static_map(bag_id, cfg)
-        ground_out = reduce_ground_map(bag_id, cfg)
-        log.info("auto-reduce complete: %s  %s", static_out, ground_out)
+        if not force and reduce_up_to_date(bag_id):
+            log.info("auto-reduce: global maps up to date — skipping (use --force)")
+        else:
+            log.info(
+                "auto-reduce: building global_static_map.npz + global_ground.npz ..."
+            )
+            static_out = reduce_static_map(bag_id, cfg)
+            ground_out = reduce_ground_map(bag_id, cfg)
+            log.info("auto-reduce complete: %s  %s", static_out, ground_out)
 
     if proposals:
         if chunk_id is None and not auto_reduce:

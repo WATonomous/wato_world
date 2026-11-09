@@ -16,16 +16,24 @@ against later detections using their continued motion prediction.
 Defaults are the paper's (§III-F): α = 1, T_d = 2 m, T_o = 0.95, T_v = 0.7,
 n_old = 5.
 
+`AssociationGates.cost = "giou_3d"` swaps in SimpleTrack's cost instead
+(arXiv 2111.09621 §4.3.1): 1 − GIoU (3D), one gate T_giou (1.5, GIoU > −0.5
+for every class on nuScenes and WOD). IoU is 0 for every pair of disjoint
+boxes; GIoU keeps falling as they move apart, so it still ranks a one-sided
+sliver against the track's whole box.
+
 This tracker is deliberately minimal — geometry only, no appearance, no
 class. lidar_preprocessing uses it as is to score whether a cluster moved.
-The `tracking` component adds two optional cues on top, both off by default:
+The `tracking` component adds optional cues on top, all off by default:
+the GIoU cost; tracks that never retire (n_old None, Immortal Tracker);
 detections flagged strong are matched before weak ones (SimpleTrack's
 two-stage matching, so a weak box can't take a track a strong one fits), and a
 detection whose key (a lifted instance id) equals the track's last key gets
 `key_bonus` off its cost. With `key_opens_shape_gates`, such a pair is held
-only to the distance gate: the shape gates exist to stop a track jumping to a
-neighbour, and a shared upstream identity already rules that out, while a
-one-sided box's IoU and volume swing as its visible face changes.
+only to the distance gate T_d: the shape gates (IoU and volume, or GIoU) exist
+to stop a track jumping to a neighbour, and a shared upstream identity
+already rules that out, while a one-sided box's IoU and volume swing as its
+visible face changes.
 """
 
 from __future__ import annotations
@@ -37,8 +45,16 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from wato_common.schemas import Box3D
-from wato_common.tracking.boxes import box_volume, iou_3d
+from wato_common.tracking.boxes import (
+    box_volume,
+    giou_3d,
+    giou_3d_cannot_exceed,
+    iou_3d,
+)
 from wato_common.tracking.kalman import BoxKalmanFilter, KalmanNoise
+
+CHEN = "chen"
+GIOU_3D = "giou_3d"
 
 
 @dataclass(frozen=True)
@@ -49,6 +65,12 @@ class AssociationGates:
     t_d: float = 2.0  # m — max centre distance
     t_o: float = 0.95  # max (1 − IoU)
     t_v: float = 0.7  # max (1 − volume ratio)
+    cost: str = CHEN  # or GIOU_3D: cost 1 − GIoU, gated by t_giou alone
+    t_giou: float = 1.5  # max (1 − GIoU); SimpleTrack's GIoU > −0.5
+
+    def __post_init__(self) -> None:
+        if self.cost not in (CHEN, GIOU_3D):
+            raise ValueError(f"cost {self.cost!r}: expected {CHEN!r} or {GIOU_3D!r}")
 
 
 def cost_terms(det: Box3D, pred: Box3D) -> tuple[float, float, float]:
@@ -75,22 +97,43 @@ def associate(
     cost_adjust, (n_dets, n_preds), is added to the cost after gating: it
     reorders feasible pairs and never makes an infeasible one feasible.
     distance_gate_only, (n_dets, n_preds) bool, exempts those pairs from the
-    IoU and volume gates (the distance gate still holds).
+    shape gates (IoU and volume, or GIoU); the distance gate still holds.
     """
     nd, npred = len(dets), len(preds)
     if nd == 0 or npred == 0:
         return [], list(range(nd)), list(range(npred))
 
-    cost = np.empty((nd, npred))
-    ok = np.empty((nd, npred), dtype=bool)
-    for i, d in enumerate(dets):
-        for j, p in enumerate(preds):
-            c_d, c_o, c_v = cost_terms(d, p)
-            cost[i, j] = gates.alpha_d * c_d + gates.alpha_o * c_o + gates.alpha_v * c_v
-            shape_ok = c_o <= gates.t_o and c_v <= gates.t_v
-            if distance_gate_only is not None and distance_gate_only[i, j]:
-                shape_ok = True
-            ok[i, j] = c_d <= gates.t_d and shape_ok
+    # Pairs that provably fail every gate open to them are skipped; their
+    # cost is never read, so the result is the same as scoring every pair.
+    centre = np.linalg.norm(
+        np.array([[d.cx, d.cy, d.cz] for d in dets])[:, None, :]
+        - np.array([[p.cx, p.cy, p.cz] for p in preds])[None, :, :],
+        axis=2,
+    )
+    exempt = (
+        np.zeros((nd, npred), dtype=bool)
+        if distance_gate_only is None
+        else np.asarray(distance_gate_only, dtype=bool)
+    )
+    near = centre <= gates.t_d
+    if gates.cost == GIOU_3D:
+        hopeless = giou_3d_cannot_exceed(dets, preds, 1.0 - gates.t_giou)
+        candidate = ~hopeless | (exempt & near)
+    else:
+        candidate = centre <= gates.t_d + 1e-9  # c_d is re-checked exactly
+    cost = np.zeros((nd, npred))
+    ok = np.zeros((nd, npred), dtype=bool)
+    for i, j in zip(*np.nonzero(candidate)):
+        d, p = dets[i], preds[j]
+        if gates.cost == GIOU_3D:
+            c = 1.0 - giou_3d(d, p)
+            cost[i, j] = c
+            ok[i, j] = c <= gates.t_giou or (exempt[i, j] and near[i, j])
+            continue
+        c_d, c_o, c_v = cost_terms(d, p)
+        cost[i, j] = gates.alpha_d * c_d + gates.alpha_o * c_o + gates.alpha_v * c_v
+        shape_ok = (c_o <= gates.t_o and c_v <= gates.t_v) or exempt[i, j]
+        ok[i, j] = c_d <= gates.t_d and shape_ok
     if cost_adjust is not None:
         cost = cost + cost_adjust
     # Gate BEFORE solving so an infeasible pair can't displace a feasible one.
@@ -115,6 +158,7 @@ class TrackObservation:
     det_idx: int  # index into that frame's detection list
     measured: Box3D
     filtered: Box3D
+    velocity: Optional[tuple[float, float, float]] = None  # filtered, m/s
 
 
 @dataclass
@@ -131,20 +175,22 @@ class MultiObjectTracker:
     """Frame-by-frame tracker: predict → associate → update / birth / expire.
 
     Tracks missing up to `n_old` consecutive frames stay associable (their
-    Kalman prediction keeps coasting); older ones are retired. Every track
-    ever created — retired or live — is available via `all_tracks()`.
+    Kalman prediction keeps coasting); older ones are retired. n_old None
+    never retires a track (Immortal Tracker, arXiv 2111.13672 §3: most ID
+    switches are tracks ended early). Every track ever created — retired or
+    live — is available via `all_tracks()`.
     """
 
     def __init__(
         self,
         gates: AssociationGates = AssociationGates(),
-        n_old: int = 5,
+        n_old: Optional[int] = 5,
         noise: KalmanNoise | None = None,
         key_bonus: float = 0.0,
         key_opens_shape_gates: bool = False,
     ) -> None:
         self.gates = gates
-        self.n_old = int(n_old)
+        self.n_old = None if n_old is None else int(n_old)
         self.noise = noise
         self.key_bonus = float(key_bonus)
         self.key_opens_shape_gates = bool(key_opens_shape_gates)
@@ -216,7 +262,7 @@ class MultiObjectTracker:
             filtered = trk.kf.update(dets[di])
             trk.misses = 0
             trk.history.append(
-                TrackObservation(self._frame_idx, t, di, dets[di], filtered)
+                TrackObservation(self._frame_idx, t, di, dets[di], filtered, _v(trk.kf))
             )
             if keys is not None:
                 trk.last_key = keys[di] if keys[di] is not None else trk.last_key
@@ -227,7 +273,8 @@ class MultiObjectTracker:
 
         still_live: list[Track] = []
         for trk in self._live:
-            (still_live if trk.misses <= self.n_old else self._retired).append(trk)
+            retire = self.n_old is not None and trk.misses > self.n_old
+            (self._retired if retire else still_live).append(trk)
         self._live = still_live
 
         for di in sorted(unmatched_dets):
@@ -239,7 +286,7 @@ class MultiObjectTracker:
                 last_key=keys[di] if keys is not None else None,
             )
             trk.history.append(
-                TrackObservation(self._frame_idx, t, di, dets[di], kf.box)
+                TrackObservation(self._frame_idx, t, di, dets[di], kf.box, _v(kf))
             )
             self._live.append(trk)
             ids[di] = trk.track_id
@@ -248,3 +295,8 @@ class MultiObjectTracker:
 
     def all_tracks(self) -> list[Track]:
         return sorted(self._retired + self._live, key=lambda trk: trk.track_id)
+
+
+def _v(kf: BoxKalmanFilter) -> tuple[float, float, float]:
+    vx, vy, vz = kf.velocity
+    return float(vx), float(vy), float(vz)

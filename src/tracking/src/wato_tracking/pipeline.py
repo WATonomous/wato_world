@@ -1,7 +1,8 @@
 """tracking pipeline orchestrator.
 
-1. Per chunk: its fused proposals as per-frame detections (detections.py), and
-   tracks over them (tracker.py), named "<chunk_id>-<n>".
+1. Per chunk: its fused proposals as per-frame detections (detections.py),
+   tracks over them (tracker.py), and the tracks that never exist at once
+   fused where they are one object (relink.py), named "<chunk_id>-<n>".
 2. Each chunk's tracks linked to the next chunk's across the span they share
    (stitch.py). A chain of linked tracks is one track of the bag, named after
    its first.
@@ -32,7 +33,7 @@ from wato_common.artifact_store import (
 )
 from wato_common.artifacts import proposals, tracks
 from wato_common.artifacts.tracks import TrackFrame, TrackSummary
-from wato_tracking import detections, stitch, summary, tracker
+from wato_tracking import detections, relink, stitch, summary, tracker
 from wato_tracking.config import ComponentConfig
 from wato_tracking.io import load_chunks
 from wato_tracking.tracker import Observation
@@ -44,8 +45,14 @@ def track_chunk(
     cfg: ComponentConfig, bag_id: str, chunk_id: str
 ) -> list[list[Observation]]:
     """The chunk's tracks, each its observations in time order."""
-    det_frames = detections.frames(proposals.read(bag_id, chunk_id), cfg.strong)
+    det_frames = detections.frames(
+        proposals.read(bag_id, chunk_id), cfg.strong, cfg.duplicates
+    )
     out = tracker.run(det_frames, cfg.association)
+    if cfg.relink.enabled:
+        out = relink.relink(
+            out, det_frames, cfg.relink, cfg.association.max_centre_dist_m
+        )
     log.info("chunk %s: %d frames, %d tracks", chunk_id, len(det_frames), len(out))
     return out
 

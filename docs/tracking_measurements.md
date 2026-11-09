@@ -5,9 +5,86 @@ component README. Scored with `src/tracking/scripts/eval_tracks.py` against
 nuScenes ground truth (`gt_boxes.parquet`, imported from the converted bags):
 scene-0061 (ego driving; 42 objects with a motion state) and scene-1100 (ego
 stationary; 25), each one chunk, proposals from `proposal_generation.yaml`.
-Matching is within 2 m at the annotated instants. WATO has no ground truth yet.
+Matching is within 2 m at the annotated instants (37 and 38 of them, 2 Hz).
+WATO has no ground truth yet; it is scored by the instance-split proxy.
 
-## Association
+## Association, duplicates and re-linking
+
+The methods and their sources: `docs/research/tracking_improvements.md`.
+Scored with TrackEval's association metrics (`eval_tracks.py` "association",
+matched within 2 m): AssRe falls when one object is split over several
+tracks, AssPr when one track covers several objects; IDSW counts an object
+changing track. On WATO: tracks kept, and the lifted instances' mean tracks
+each (SAM2's identity as weak ground truth; it misses splits where the new box
+carries a new instance, and by construction favours the instance bonus).
+Every change alone on the previous defaults (Chen's gates, 2 s coast), then
+stacked:
+
+| | 0061 AssRe / AssPr | IDF1 | IDSW | tracks per object | 1100 AssRe / AssPr | IDF1 | IDSW | WATO tracks | per instance |
+|---|---|---|---|---|---|---|---|---|---|
+| previous defaults | 0.42 / 0.96 | 0.36 | 33 | 1.79 | 0.69 / 0.98 | 0.61 | 15 | 2,757 | 2.39 |
+| circle NMS, every CenterPoint head | 0.42 / 0.96 | 0.36 | 28 | 1.69 | 0.68 / 0.97 | 0.62 | 13 | 2,584 | 2.36 |
+| GIoU cost | 0.48 / 0.93 | 0.40 | 22 | 1.50 | 0.74 / 0.98 | 0.64 | 10 | 2,039 | 2.24 |
+| never terminate | 0.42 / 0.96 | 0.36 | 33 | 1.79 | 0.70 / 0.98 | 0.62 | 14 | 2,732 | 2.42 |
+| STWO re-linking | 0.46 / 0.93 | 0.39 | 26 | 1.57 | 0.74 / 0.98 | 0.64 | 11 | 2,372 | 2.31 |
+| GIoU + never terminate | 0.48 / 0.93 | 0.40 | 22 | 1.50 | 0.78 / 0.98 | 0.66 | 9 | 1,982 | 2.26 |
+| + circle NMS, vehicle heads | 0.48 / 0.92 | 0.40 | 18 | 1.48 | 0.77 / 0.97 | 0.66 | 9 | 1,815 | 2.21 |
+| **+ STWO (shipped)** | 0.49 / 0.93 | 0.41 | 17 | 1.43 | 0.77 / 0.97 | 0.66 | 9 | 1,746 | 2.21 |
+
+Shipped against previous: HOTA 0.34 → 0.37 and 0.60 → 0.63; false tracks
+46 → 35 and 19 → 11; frame recall unchanged (0.32, 0.60), precision
+0.72 → 0.74 and 0.81 → 0.82; parked / moving accuracy 0.78 → 0.80 and 0.88
+both. On WATO the median owned span is 1.5 s (0.7 s before), p90 8.2 s
+(3.6 s), and 16 tracks last over 30 s (9). Tracking the 11 WATO chunks takes
+80 s instead of 30 s, on CPU.
+
+- **GIoU** (SimpleTrack's −0.5 for every class) is the largest single gain: a
+  one-sided sliver beside its track's whole box has IoU 0 but a GIoU that
+  still ranks it. It costs 0.03 AssPr on scene-0061 (tracks that now cover a
+  neighbour at times).
+- **Never terminating** does nothing alone: a coasting track's drifted
+  prediction still fails Chen's IoU and volume gates. With GIoU it raises
+  scene-1100's AssRe 0.74 → 0.78 (ego stationary: objects occluded and seen
+  again near where they were).
+- **Circle NMS.** CenterPoint's pedestrian head (0.42 m) costs scene-1100
+  frame recall 0.60 → 0.58: it removes real pedestrians walking side by side.
+  Its truck and bus heads cut scene-0061's switches (22 → 18). Shipped with
+  the car, truck and bus heads only, it suppresses 205 of 5,500 fused boxes on
+  scene-0061, 71 of 4,867 on scene-1100, and 5,504 of 90,800 (6%) on WATO,
+  without changing frame recall. The motorcycle / bicycle head is left out
+  untested (too few boxes).
+- **STWO** on the previous tracker recovers about half of GIoU's gain. On top
+  of GIoU and never terminating, few sequential splits are left for it: it
+  fuses 15 of 173 tracks on scene-0061, 5 of 79 on scene-1100, and 2-55 per
+  WATO chunk. Its metric (BEV IoU, 3D IoU or GIoU), class gate and
+  shared-instance admission change nothing measurable on the two scenes.
+- **The instance bonus** on the GIoU cost: 0 or 1 score the same on the
+  ground truth (AssRe 0.49 / 0.48, 0.74 / 0.75); kept at 1.0.
+
+### What is left
+
+For each ground-truth object in several tracks, its tracks in time order:
+pairs alive at once (concurrent) or one after the other (sequential, by the
+gap between them).
+
+| | 0061 split objects | concurrent | sequential (≤ 1 s / 1-2 s / > 2 s) | 1100 split objects | concurrent | sequential |
+|---|---|---|---|---|---|---|
+| previous defaults | 23 / 42 | 12 | 21 (10 / 5 / 6) | 11 / 25 | 8 | 8 (5 / 0 / 3) |
+| GIoU + never terminate + NMS | 13 / 42 | 14 | 6 (2 / 0 / 4) | 11 / 25 | 14 | 1 |
+| shipped | 13 / 42 | 13 | 5 (1 / 0 / 4) | 11 / 25 | 15 | 0 |
+
+Sequential splits are gone but for gaps over 2 s, beyond STWO's two 1 s
+horizons. The concurrent pairs are long-lived (the shorter track 52 frames at
+the median on scene-0061, 71 on scene-1100), 2.2-2.6 m apart at the median
+with IoU 0, mostly pedestrians and motorcycles: largely neighbours in a
+group, which the eval's 2 m match (all fused scores tie) assigns to one
+object at some instants and the other at others. Only the closest tenth
+(≤ 0.5 m apart) look like one object's duplicate tracks.
+
+## Chen's gates (cost `chen`)
+
+Measured with a 2 s coast, before GIoU became the default. Step F still uses
+these gates.
 
 A track is *true* when most of its matched instants hit one object, *false*
 when most hit nothing. Purity is the share of a track's matches on its main
@@ -38,7 +115,8 @@ fragmentation but lets tracks jump between neighbours. Letting SAM2's identity
 
 Per object, its dominant track's state against the ground truth's (3DAL's
 rule over the object's life: parked iff < 1 m net and never > 1 m/s), with the
-shared-instance association above. Objects whose track has < 7 frames are
+shared-instance association above (Chen's gates; with the shipped
+association, 33 / 41 and 22 / 25). Objects whose track has < 7 frames are
 "unknown" under every rule and left out (1 of 67).
 
 | Rule (moving iff …) | scene-0061 | scene-1100 | both |
@@ -62,16 +140,17 @@ shared-instance association above. Objects whose track has < 7 frames are
 
 | | scene-0061 | scene-1100 | WATO (11 chunks, linked) |
 |---|---|---|---|
-| tracks kept / short weak dropped | 142 / 104 | 73 / 49 | 2,669 / 2,906 |
-| moving / parked / unknown | 55 / 56 / 31 | 37 / 25 / 11 | 1,409 / 458 / 802 |
-| frame recall / precision | 0.32 / 0.72 | 0.60 / 0.81 | — |
+| tracks kept / short weak dropped | 98 / 60 | 52 / 22 | 1,746 / 1,187 |
+| moving / parked / unknown | 48 / 39 / 11 | 29 / 17 / 6 | 1,097 / 351 / 298 |
+| frame recall / precision | 0.32 / 0.74 | 0.60 / 0.82 | — |
 | fused proposals' recall / precision | 0.32 / 0.71 | 0.60 / 0.81 | — |
 
-Half of WATO's tracks read as moving. Whether that is the traffic or one-sided
-far boxes drifting more than 1 m needs the WATO track tags. WATO also drops
-421 tracks only the non-owning chunk saw. Its tracks are short: the owned span
-is 0.7 s at the median and 3.7 s at p90, linked or not, so on WATO
-fragmentation inside a chunk matters more than the seams.
+63% of WATO's kept tracks read as moving (53% under the previous
+association, whose shorter tracks were more often "unknown"). Whether that is
+the traffic or one-sided far boxes drifting more than 1 m needs the WATO track
+tags. WATO also drops 174 tracks only the non-owning chunk saw. Its tracks are
+short: the owned span is 1.5 s at the median and 8.2 s at p90, linked or not,
+so on WATO fragmentation inside a chunk matters more than the seams.
 
 ## Linking across chunks
 
@@ -100,6 +179,8 @@ no instant with any.
 
 ### Linking
 
+Measured with Chen's gates and a 2 s coast.
+
 A seam break here is a track whose owned frames end within 0.5 s before a seam
 and one whose owned frames start within 0.5 s after it, ≤ 1.5 m apart: one
 object, two ids (no ground truth needed).
@@ -123,6 +204,8 @@ On nuScenes (one chunk each) nothing changes: every number above the WATO
 column is the same before and after.
 
 ### A seam against ground truth
+
+Measured with Chen's gates and a 2 s coast.
 
 scene-0061 ingested again as two chunks (`ingest.yaml` with `chunk_seconds:
 12`, `--bag-id NuScenes_v1_0_mini_scene_0061_2chunk`; shared span 8-14 s, seam

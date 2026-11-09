@@ -37,7 +37,12 @@ F  motion_proposals/  per-point source bits + HDBSCAN clusters with motion featu
 ```
 
 A chunk counts as done when its summary exists, so a run after a Step B change
-needs `--force`.
+needs `--force`. `run`'s bag-level steps skip when their output is newer than
+everything it read: D when both global maps are newer than every chunk's
+`static_map.npz` / `ground.npz`, E when `global_iwu.npz` is newer than the
+global static map and every chunk's `lidar_proc_index.parquet`, F per chunk
+(below); `--force` re-runs them. The `reduce` and `iwu` subcommands always
+run.
 
 ### Two dynamic artifacts — which one to read
 

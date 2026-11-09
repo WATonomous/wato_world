@@ -1,14 +1,32 @@
 # tracking: tracks over proposal_generation's fused boxes, per chunk, linked
 # across the spans neighbouring chunks share.
-# Every field is documented in src/wato_tracking/config.py.
+# Every field is documented in src/wato_tracking/config.py; the measurements
+# behind the defaults are in docs/tracking_measurements.md.
 tracking:
   association:
-    max_centre_dist_m: 2.0           # Chen's gates
+    cost: giou_3d                    # SimpleTrack's 1 − GIoU (or chen: Step F's)
+    max_one_minus_giou: 1.5          # GIoU > −0.5, every class
+    max_centre_dist_m: 2.0           # Chen's gates, for cost chen...
     max_one_minus_iou: 0.95
     max_one_minus_volume_ratio: 0.7
-    max_coast_s: 2.0                 # a missed track keeps coasting this long
+    max_coast_s: null                # null: coast until the chunk ends (Immortal Tracker)
     instance_bonus: 1.0              # same lifted instance as the track's last box
-    instance_opens_shape_gates: true # ...is held only to the distance gate
+    instance_opens_shape_gates: true # ...is held only to max_centre_dist_m
+
+  duplicates:                        # CenterPoint circle NMS per frame
+    enabled: true
+    groups:                          # min_radius: squared BEV distance, m²
+      - {classes: [car], min_radius: 4.0}
+      - {classes: [truck], min_radius: 12.0}
+      - {classes: [bus], min_radius: 10.0}
+
+  relink:                            # Offline-Poly STWO after the forward pass
+    enabled: true
+    horizon_s: 1.0                   # predictions past 1 s are discarded
+    max_cost: 0.9                    # θ_blo, on 1 − IoU
+    metric: iou_bev
+    class_consistent: true           # never fuse two known, different classes
+    shared_instance: true            # same lifted instance: fuse within max_centre_dist_m
 
   strong:                            # matched to tracks before weak boxes
     min_lift_confidence: 0.5         # a lone lifted box this confident...

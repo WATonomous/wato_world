@@ -158,6 +158,17 @@ def box_volume(box: Box3D) -> float:
     )
 
 
+def iou_bev(a: Box3D, b: Box3D) -> float:
+    """IoU of two boxes' BEV footprints."""
+    if math.hypot(a.cx - b.cx, a.cy - b.cy) > 0.5 * (
+        math.hypot(a.l, a.w) + math.hypot(b.l, b.w)
+    ):
+        return 0.0
+    inter = _polygon_area(_clip_polygon(bev_corners(a), bev_corners(b)))
+    union = a.l * a.w + b.l * b.w - inter
+    return float(inter / union) if union > 0 else 0.0
+
+
 def iou_3d(a: Box3D, b: Box3D) -> float:
     """Volumetric IoU of two yaw-only boxes (BEV polygon ∩ × z overlap)."""
     # Cheap reject: centres farther apart than the sum of half-diagonals.
@@ -174,6 +185,94 @@ def iou_3d(a: Box3D, b: Box3D) -> float:
     inter = inter_bev * z_overlap
     union = box_volume(a) + box_volume(b) - inter
     return float(inter / union) if union > 0 else 0.0
+
+
+def _convex_hull(pts: np.ndarray) -> np.ndarray:
+    """Andrew's monotone chain: the hull of (n, 2) points, counter-clockwise."""
+    p = sorted(map(tuple, pts))
+    if len(p) < 3:
+        return np.array(p)
+
+    def half(seq):
+        out: list[tuple[float, float]] = []
+        for q in seq:
+            while (
+                len(out) >= 2
+                and (
+                    (out[-1][0] - out[-2][0]) * (q[1] - out[-2][1])
+                    - (out[-1][1] - out[-2][1]) * (q[0] - out[-2][0])
+                )
+                <= 0
+            ):
+                out.pop()
+            out.append(q)
+        return out
+
+    lower, upper = half(p), half(reversed(p))
+    return np.array(lower[:-1] + upper[:-1])
+
+
+def giou_3d(a: Box3D, b: Box3D) -> float:
+    """Generalized IoU (Rezatofighi et al., CVPR 2019) of two yaw-only boxes,
+    in [-1, 1]: IoU − (C − U) / C, where C, as in SimpleTrack's 3D GIoU, is
+    the convex hull of the two BEV footprints extruded over both boxes' joint
+    z span. Unlike IoU it keeps falling as disjoint boxes move apart."""
+    ca, cb = bev_corners(a), bev_corners(b)
+    a_lo, a_hi = a.cz - a.h / 2.0, a.cz + a.h / 2.0
+    b_lo, b_hi = b.cz - b.h / 2.0, b.cz + b.h / 2.0
+    inter = _polygon_area(_clip_polygon(ca, cb)) * max(
+        0.0, min(a_hi, b_hi) - max(a_lo, b_lo)
+    )
+    union = box_volume(a) + box_volume(b) - inter
+    enclose = _polygon_area(_convex_hull(np.vstack([ca, cb]))) * (
+        max(a_hi, b_hi) - min(a_lo, b_lo)
+    )
+    if union <= 0.0 or enclose <= 0.0:
+        return 0.0
+    return float(inter / union - (enclose - union) / enclose)
+
+
+def _chord(l: float, w: float, angle: np.ndarray) -> np.ndarray:  # noqa: E741
+    """Length of an l × w rectangle's chord through its centre at `angle`
+    from its long axis."""
+    c, s = np.abs(np.cos(angle)), np.abs(np.sin(angle))
+    with np.errstate(divide="ignore"):
+        return np.minimum(
+            np.where(c > 0, l / np.maximum(c, 1e-300), np.inf),
+            np.where(s > 0, w / np.maximum(s, 1e-300), np.inf),
+        )
+
+
+def giou_3d_cannot_exceed(
+    dets: list[Box3D], preds: list[Box3D], g: float
+) -> np.ndarray:
+    """(n_dets, n_preds) bool: pairs whose giou_3d is provably below g.
+
+    Exact pruning, no approximation: a pair whose BEV footprints are disjoint
+    has IoU 0 and U = V_a + V_b, and its hull holds the trapezoid spanned by
+    each box's chord through its centre perpendicular to the centre line, of
+    area d · (W_a + W_b) / 2, extruded over at least max(h_a, h_b). So
+    GIoU ≤ (V_a + V_b) / (d · (W_a + W_b) / 2 · max(h_a, h_b)) − 1.
+    """
+    out = np.zeros((len(dets), len(preds)), dtype=bool)
+    if not dets or not preds:
+        return out
+    D = np.array([[x.cx, x.cy, x.l, x.w, x.h, x.heading, box_volume(x)] for x in dets])
+    P = np.array([[x.cx, x.cy, x.l, x.w, x.h, x.heading, box_volume(x)] for x in preds])
+    dx = P[None, :, 0] - D[:, None, 0]
+    dy = P[None, :, 1] - D[:, None, 1]
+    d = np.hypot(dx, dy)
+    r = (
+        0.5 * np.hypot(D[:, 2], D[:, 3])[:, None]
+        + 0.5 * np.hypot(P[:, 2], P[:, 3])[None, :]
+    )
+    perp = np.arctan2(dy, dx) + np.pi / 2.0
+    w_d = _chord(D[:, None, 2], D[:, None, 3], perp - D[:, None, 5])
+    w_p = _chord(P[None, :, 2], P[None, :, 3], perp - P[None, :, 5])
+    lower_c = d * (w_d + w_p) / 2.0 * np.maximum(D[:, None, 4], P[None, :, 4])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        bound = (D[:, None, 6] + P[None, :, 6]) / lower_c - 1.0
+    return (d > r) & (lower_c > 0) & (bound < g)
 
 
 def points_in_box(xyz: np.ndarray, box: Box3D, margin_m: float = 0.0) -> np.ndarray:

@@ -7,11 +7,14 @@ The pipeline owns orchestration. Leaf modules under `inputs`, `decoders`, and
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 
 from tqdm import tqdm
 
+from wato_common.artifact_store import chunks_index_path, local_path, manifest_path
 from wato_common.artifacts.calibration import Calibration
+from wato_common.io.parquet_io import read_rows
 from wato_ingest.artifacts import frame_index, manifest, quality
 from wato_ingest.config import IngestConfig
 from wato_ingest.decoders import cameras, lidar, poses
@@ -29,6 +32,21 @@ class ChunkRunResult:
     dropped_camera_count: int
 
 
+def chunk_ingested(bag_id: str, chunk_id: str) -> bool:
+    """The chunk's manifest.json exists: the last file its ingest writes."""
+    return os.path.exists(local_path(manifest_path(bag_id, chunk_id)))
+
+
+def bag_ingested(bag_id: str, only_chunk: str | None = None) -> bool:
+    """Every chunk in the bag's chunk index (or only_chunk) is ingested."""
+    if not os.path.exists(local_path(chunks_index_path(bag_id))):
+        return False
+    ids = [r["chunk_id"] for r in read_rows(chunks_index_path(bag_id))]
+    if only_chunk is not None:
+        ids = [c for c in ids if c == only_chunk]
+    return bool(ids) and all(chunk_ingested(bag_id, c) for c in ids)
+
+
 def run_bag(
     *,
     bag_path: str,
@@ -37,6 +55,7 @@ def run_bag(
     bag_id: str | None = None,
     calibration_source: str | None = None,
     only_chunk: str | None = None,
+    force: bool = False,
 ) -> list[ChunkRunResult]:
     """Run ingest end-to-end for a single bag.
 
@@ -52,7 +71,18 @@ def run_bag(
          on a sparse stream or a child-frame mismatch — see the README's
          "Poses"), decode cameras + LiDAR, build the frame index,
          compute quality metrics, and write the manifest.
+
+    Without `force`, a bag whose every chunk is ingested is skipped before
+    anything is written (so a re-run can't replace an authored calibration
+    with the bag's), and otherwise a chunk with a manifest is not decoded
+    again. Returns the chunks ingested by this call.
     """
+    if not force and bag_ingested(bags.derive_bag_id(bag_path, bag_id), only_chunk):
+        log.info(
+            "bag %s already ingested — skipping (use --force)",
+            bags.derive_bag_id(bag_path, bag_id),
+        )
+        return []
     meta = bags.register(bag_path, bag_id=bag_id, storage_id=cfg.storage_id)
     bag_id = meta.bag_id
     log.info(
@@ -100,6 +130,10 @@ def run_bag(
         leave=True,
     )
     for c in chunk_rows:
+        if not force and chunk_ingested(bag_id, c.chunk_id):
+            log.info("chunk %s already ingested — skipping (use --force)", c.chunk_id)
+            bar.update(steps_per_chunk)
+            continue
         # Poses first: a pose stream that fails the density / frame
         # requirements aborts the bag before the expensive image + LiDAR decode.
         bar.set_description(f"ingest {c.chunk_id} poses")
@@ -190,4 +224,4 @@ def run(cfg: IngestConfig, *, bag_id: str, chunk_id: str | None = None) -> None:
     )
 
 
-__all__ = ["ChunkRunResult", "run", "run_bag"]
+__all__ = ["ChunkRunResult", "bag_ingested", "chunk_ingested", "run", "run_bag"]

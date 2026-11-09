@@ -57,7 +57,7 @@ def default_output(mcap_file: Path, out_dir: str) -> Path:
     return Path(out_dir) / f"{stem}_trimmed.mcap"
 
 
-def _topic_regex(topic: str) -> str:
+def topic_regex(topic: str) -> str:
     # ROS topic names are [A-Za-z0-9_/~]; anchor so /tf never matches /tf_static.
     return f"^{topic}$"
 
@@ -85,13 +85,13 @@ def mcap_commands(
         "--compression", compression,
     ]  # fmt: skip
     for t in static_topics:
-        window += ["--exclude-topic-regex", _topic_regex(t)]
+        window += ["--exclude-topic-regex", topic_regex(t)]
     cmds = [window]
     if static_topics:
         static = ["mcap", "filter", str(src), "-o", str(static_part)]
         static += ["--compression", compression]
         for t in static_topics:
-            static += ["--include-topic-regex", _topic_regex(t)]
+            static += ["--include-topic-regex", topic_regex(t)]
         cmds.append(static)
         cmds.append(
             [

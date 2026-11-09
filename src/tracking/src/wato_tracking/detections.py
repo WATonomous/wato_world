@@ -7,10 +7,15 @@ two sources agree on it or its lift is confident (config `strong`).
 
 Only frames with at least one fused row are stepped; a track coasting over
 empty frames is still predicted at each stepped frame's time.
+
+With `duplicates` on, each frame's boxes go through CenterPoint's circle NMS
+first: a second box on one object, beside the box its track takes, would
+otherwise start a second track (IoU 0 at ~1 m, so no overlap rule reaches it).
 """
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Optional
@@ -18,7 +23,9 @@ from typing import Optional
 from wato_common.artifacts import proposals
 from wato_common.artifacts.proposals import Proposal
 from wato_common.schemas import Box3D
-from wato_tracking.config import StrongConfig
+from wato_tracking.config import DuplicatesConfig, StrongConfig
+
+log = logging.getLogger(__name__)
 
 LIFTED = "lifted"
 LIDAR_MOS = "lidar_mos"
@@ -79,12 +86,55 @@ def detection(
     )
 
 
-def frames(rows: list[Proposal], cfg: StrongConfig) -> list[DetFrame]:
+def suppress_duplicates(
+    dets: list[Detection], cfg: DuplicatesConfig
+) -> list[Detection]:
+    """CenterPoint's circle NMS over one frame's detections (config
+    `duplicates`): in rank order, each kept box drops the lower-ranked boxes
+    of its class group whose BEV centres lie within sqrt(min_radius) of it.
+    Boxes with no class, or a class in no group, are always kept."""
+    radius = {c: g.min_radius for g in cfg.groups for c in g.classes}
+    group = {c: k for k, g in enumerate(cfg.groups) for c in g.classes}
+    order = sorted(
+        range(len(dets)),
+        key=lambda i: (
+            not dets[i].strong,
+            -(dets[i].proposal.lidar_point_count or 0),
+            i,
+        ),
+    )
+    dropped = [False] * len(dets)
+    for a, i in enumerate(order):
+        ci = dets[i].proposal.cls
+        if dropped[i] or ci not in group:
+            continue
+        pi = dets[i].proposal
+        for j in order[a + 1 :]:
+            pj = dets[j].proposal
+            if dropped[j] or group.get(pj.cls) != group[ci]:
+                continue
+            if (pi.cx - pj.cx) ** 2 + (pi.cy - pj.cy) ** 2 <= radius[ci]:
+                dropped[j] = True
+    return [d for d, x in zip(dets, dropped) if not x]
+
+
+def frames(
+    rows: list[Proposal],
+    cfg: StrongConfig,
+    duplicates: Optional[DuplicatesConfig] = None,
+) -> list[DetFrame]:
     """The chunk's frames with fused rows, in time order."""
     by_id = {p.proposal_id: p for p in rows}
     by_sweep: dict[int, list[Detection]] = defaultdict(list)
     for p in proposals.fused(rows):
         by_sweep[p.sweep_id].append(detection(p, by_id, cfg))
+    if duplicates is not None and duplicates.enabled:
+        n = sum(map(len, by_sweep.values()))
+        by_sweep = {
+            sid: suppress_duplicates(dets, duplicates) for sid, dets in by_sweep.items()
+        }
+        kept = sum(map(len, by_sweep.values()))
+        log.info("duplicates: %d of %d fused boxes suppressed", n - kept, n)
     out = [
         DetFrame(sid, dets[0].proposal.reference_timestamp_ns, tuple(dets))
         for sid, dets in by_sweep.items()

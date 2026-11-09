@@ -22,7 +22,7 @@ shift 1
 # treating it as the bag path.
 SUBCMD="run"
 case "${1:-}" in
-    viz|reduce|validate-bag|trim-bag|ego-mask|compare) SUBCMD="$1"; shift 1 ;;
+    viz|reduce|validate-bag|trim-bag|debug-bag|ego-mask|compare) SUBCMD="$1"; shift 1 ;;
 esac
 
 # Accept both positional and flag-style bag argument:

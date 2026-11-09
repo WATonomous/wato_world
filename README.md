@@ -114,6 +114,8 @@ watod up
 
 # 5. Run a component on a bag under data/bags/. Example:
 watod run ingest /data/bags/my_bag
+# ...or every stage in order, each skipping work already done:
+watod pipeline --bag /data/bags/my_bag [--profile wato] [--force tracking]
 
 # 6. Open a dev shell in an active dev container with source bind-mounted.
 # First set ACTIVE_MODULES="perception_2d:dev" in watod-config.local.sh, then:

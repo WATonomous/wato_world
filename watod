@@ -85,6 +85,9 @@ Commands:
   down [SERVICE|all]       Stop containers.
   run MODULE --bag BAG [ARGS...]
                            One-shot module run.
+  pipeline --bag BAG [--profile NAME] [--force STAGES] [--from STAGE] [--to STAGE]
+                           Every stage on one bag, skipping work already done;
+                           --force re-runs those stages and every later one.
   test [MODULE] [ARGS...]  Run pytest inside the module's dev container.
   <docker-compose-cmd>     Passthrough (ps, logs, pull, exec, ...).
 
@@ -97,6 +100,7 @@ Examples:
   watod up                 # brings up ingest_dev
   watod -t ingest_dev      # shell into the ingest dev container
   watod run ingest --bag /data/bags/scene-0001.mcap
+  watod pipeline --bag /data/bags/scene-0001.mcap --force tracking
 EOF
 }
 
@@ -237,6 +241,9 @@ case "${COMMAND}" in
         ;;
     run)
         exec bash "${SCRIPTS_DIR}/watod-run.sh" "$@"
+        ;;
+    pipeline)
+        exec bash "${SCRIPTS_DIR}/watod-pipeline.sh" "$@"
         ;;
     test)
         exec bash "${SCRIPTS_DIR}/watod-test.sh" "$@"
