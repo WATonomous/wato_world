@@ -103,6 +103,24 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix
       - /mnt/wslg:/mnt/wslg
 
+  detection_3d_dev:
+    profiles: ["detection_3d_dev"]
+    extends:
+      file: docker-compose.yaml
+      service: detection_3d
+    build:
+      target: develop
+      args: { USERNAME: "${USERNAME}", USER_UID: "${SETUID}", USER_GID: "${SETGID}", CLAUDE_CODE: "${CLAUDE_CODE}" }
+    image: "${DETECTION_3D_IMAGE}:dev_${TAG}"
+    command: sleep infinity
+    volumes:
+      - ${WATO_WORLD_DIR}/src/common:/ws/src/common
+      - ${WATO_WORLD_DIR}/src/detection_3d:/ws/src/detection_3d
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/data/models:/data/models:ro
+      - ${WATO_WORLD_DIR}/data/models/.cache/tensorrt:/data/models/.cache/tensorrt
+      - ${WATO_WORLD_DIR}/config:/config:ro
+
   proposal_generation_dev:
     profiles: ["proposal_generation_dev"]
     extends:

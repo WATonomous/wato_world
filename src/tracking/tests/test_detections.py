@@ -94,3 +94,52 @@ def test_frames_applies_suppression_only_when_enabled():
     on = frames(rows, StrongConfig(), DuplicatesConfig())
     off = frames(rows, StrongConfig(), DuplicatesConfig(enabled=False))
     assert len(on[0].dets) == 1 and len(off[0].dets) == 2
+
+
+def _member(pid, provenance, score=0.5, **kw) -> Proposal:
+    return Proposal(
+        proposal_id=pid,
+        sweep_id=0,
+        frame_id=0,
+        sweep_ids=(0,),
+        reference_timestamp_ns=0,
+        cx=0.0,
+        cy=0.0,
+        cz=0.8,
+        w=1.8,
+        l=4.4,
+        h=1.6,
+        heading=0.0,
+        cls="car",
+        score=score,
+        provenance=provenance,
+        lidar_point_count=30,
+        **kw,
+    )
+
+
+@pytest.mark.parametrize("score, strong", [(0.49, False), (0.5, True), (0.9, True)])
+def test_a_confident_detector_member_makes_the_box_strong(score, strong):
+    from wato_tracking.detections import detection
+
+    det = _member("det-000000-0", "fusion_detector", score=score)
+    fused = _member("fused-000000-0", "fused", member_proposal_ids=(det.proposal_id,))
+    d = detection(fused, {det.proposal_id: det}, StrongConfig())
+    assert d.strong is strong and d.detector_score == score
+    assert d.key is None and not d.two_source
+
+
+def test_detector_and_lift_agreeing_are_not_two_sources():
+    from wato_tracking.detections import detection
+
+    lift = _member(
+        "lifted-m3-000000", "lifted", lift_confidence=0.1, lift_seed_point_count=5
+    )
+    det = _member("det-000000-0", "fusion_detector", score=0.2)
+    fused = _member(
+        "fused-000000-0",
+        "fused",
+        member_proposal_ids=(lift.proposal_id, det.proposal_id),
+    )
+    d = detection(fused, {p.proposal_id: p for p in (lift, det)}, StrongConfig())
+    assert not d.two_source and not d.strong and d.key == "m3"

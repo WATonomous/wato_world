@@ -234,6 +234,17 @@ def depth_stats_path(bag_id: str, chunk_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# detection_3d artifacts (format: wato_common.artifacts.detections_3d).
+# ---------------------------------------------------------------------------
+def detections_3d_path(bag_id: str, chunk_id: str) -> str:
+    return _join(chunk_root(bag_id, chunk_id), "detections_3d.parquet")
+
+
+def detections_3d_frames_path(bag_id: str, chunk_id: str) -> str:
+    return _join(chunk_root(bag_id, chunk_id), "detections_3d_frames.parquet")
+
+
+# ---------------------------------------------------------------------------
 # proposal_generation artifacts.
 # ---------------------------------------------------------------------------
 def proposals_path(bag_id: str, chunk_id: str) -> str:

@@ -2,8 +2,11 @@
 
 Each fused row is one detection. Its member rows say what backs it: a
 lidar_mos member is Step F motion evidence, a lifted member carries SAM2's
-instance id (the matching key) and its confidence. A detection is strong when
-two sources agree on it or its lift is confident (config `strong`).
+instance id (the matching key) and its confidence, a fusion_detector member
+carries BEVFusion's score. A detection is strong when lidar_mos and lifted
+agree on it, its lift is confident, or its detector score is high (config
+`strong`). The detector and lifting share cameras, so their agreement alone
+doesn't count as two sources.
 
 Only frames with at least one fused row are stepped; a track coasting over
 empty frames is still predicted at each stepped frame's time.
@@ -29,6 +32,7 @@ log = logging.getLogger(__name__)
 
 LIFTED = "lifted"
 LIDAR_MOS = "lidar_mos"
+FUSION_DETECTOR = "fusion_detector"
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,7 @@ class Detection:
     key: Optional[str]  # the lifted member's instance id
     two_source: bool
     has_lidar_mos: bool
+    detector_score: Optional[float] = None  # its fusion_detector member's
 
     @property
     def box(self) -> Box3D:
@@ -63,6 +68,7 @@ def detection(
     members = [by_id[m] for m in fused.member_proposal_ids]
     lift = next((m for m in members if m.provenance == LIFTED), None)
     has_mos = any(m.provenance == LIDAR_MOS for m in members)
+    det = next((m for m in members if m.provenance == FUSION_DETECTOR), None)
     two_source = lift is not None and has_mos
     # Recovered scan geometry must not manufacture strong camera evidence.
     # Before scan refinement the total count was labeled support, so retain
@@ -77,12 +83,14 @@ def detection(
         and (lift.lift_confidence or 0.0) >= cfg.min_lift_confidence
         and (lift_points or 0) >= cfg.min_lift_points
     )
+    detected = det is not None and det.score >= cfg.min_detector_score
     return Detection(
         proposal=fused,
-        strong=two_source or confident,
+        strong=two_source or confident or detected,
         key=instance_of(lift.proposal_id) if lift is not None else None,
         two_source=two_source,
         has_lidar_mos=has_mos,
+        detector_score=det.score if det is not None else None,
     )
 
 

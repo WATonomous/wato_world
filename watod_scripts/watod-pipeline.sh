@@ -29,7 +29,7 @@ SCRIPTS_DIR="${WATO_WORLD_DIR}/watod_scripts"
 
 # The implemented stages, in dependency order (open_vocab_discovery and
 # student_training are stubs).
-STAGES=(ingest lidar_preprocessing perception_2d semantic_lifting proposal_generation tracking label_refinement)
+STAGES=(ingest lidar_preprocessing detection_3d perception_2d semantic_lifting proposal_generation tracking label_refinement)
 
 usage() {
     cat <<EOF

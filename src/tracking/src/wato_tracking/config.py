@@ -110,6 +110,12 @@ class StrongConfig(BaseModel):
     # box can't take a track a strong one fits.
     min_lift_confidence: float = 0.5
     min_lift_points: int = 20
+    # A box backed by a fusion_detector row scored at least this is strong:
+    # ByteTrack's high-score split (track_thresh), the value the car's tracker
+    # runs on BEVFusion (wato_monorepo tracking params.yaml). Lower-scored
+    # detector boxes are matched only after the strong ones, as ByteTrack's
+    # low-score boxes are.
+    min_detector_score: float = 0.5
 
 
 class MotionConfig(BaseModel):

@@ -6,48 +6,66 @@ shared points first, each box in at most one pair. A pair becomes one box fit
 to both boxes' points, with the lifted box's class. A box no other source
 matched is fused on its own, class-less if it has no class, so every object
 either source found has a fused row.
+
+A fusion_detector box (detector.py) then joins the object — pair or lone box —
+it shares the most points with, by the same rule, one to one. The object keeps
+the detector's box: the model predicts the whole object, where a fit to the
+points covers only the sides LiDAR hit (refitting would discard exactly what
+the detector adds). The class stays the lifted one when there is one, else
+the detector's. A detector box no object matched is fused on its own when
+fusion_detector.add_unmatched is set.
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Optional
+
+import numpy as np
 
 from wato_common.artifacts.ground import GroundGrid
 from wato_common.artifacts.lidar_sweeps import Frame
 from wato_common.artifacts.proposals import FUSED, Proposal
 from wato_common.tracking import fit_bev_box
 from wato_common.geometry.objects import to_ground
-from wato_proposal_generation.boxes import SourceBox, proposal
+from wato_proposal_generation.boxes import SourceBox, box_of, proposal
 from wato_proposal_generation.config import FusionConfig
 from wato_proposal_generation.frame_points import FramePoints
+
+
+def _pairs(
+    a: list[np.ndarray], b: list[np.ndarray], cfg: FusionConfig
+) -> list[tuple[int, int]]:
+    """(a index, b index) pairs of member masks sharing enough points, one to
+    one, most shared points first."""
+    candidates = []
+    for i, ma in enumerate(a):
+        n_a = int(ma.sum())
+        for j, mb in enumerate(b):
+            n_b = int(mb.sum())
+            if n_a == 0 or n_b == 0:
+                continue
+            shared = int((ma & mb).sum())
+            fraction = shared / min(n_a, n_b)
+            if shared >= cfg.min_shared_points and fraction >= cfg.min_shared_fraction:
+                candidates.append((shared, fraction, i, j))
+    pairs = []
+    used_a: set[int] = set()
+    used_b: set[int] = set()
+    for _, _, i, j in sorted(candidates, key=lambda c: (-c[0], -c[1], c[2], c[3])):
+        if i in used_a or j in used_b:
+            continue
+        used_a.add(i)
+        used_b.add(j)
+        pairs.append((i, j))
+    return pairs
 
 
 def match(
     mos: list[SourceBox], lifted: list[SourceBox], cfg: FusionConfig
 ) -> list[tuple[int, int]]:
     """(mos index, lifted index) pairs, one to one."""
-    candidates = []
-    for i, m in enumerate(mos):
-        n_m = int(m.members.sum())
-        for j, f in enumerate(lifted):
-            n_f = int(f.members.sum())
-            if n_m == 0 or n_f == 0:
-                continue
-            shared = int((m.members & f.members).sum())
-            fraction = shared / min(n_m, n_f)
-            if shared >= cfg.min_shared_points and fraction >= cfg.min_shared_fraction:
-                candidates.append((shared, fraction, i, j))
-    pairs = []
-    used_m: set[int] = set()
-    used_f: set[int] = set()
-    for _, _, i, j in sorted(candidates, key=lambda c: (-c[0], -c[1], c[2], c[3])):
-        if i in used_m or j in used_f:
-            continue
-        used_m.add(i)
-        used_f.add(j)
-        pairs.append((i, j))
-    return pairs
+    return _pairs([m.members for m in mos], [f.members for f in lifted], cfg)
 
 
 def _alone(p: Proposal, fused_id: str) -> Proposal:
@@ -66,6 +84,20 @@ def _alone(p: Proposal, fused_id: str) -> Proposal:
     )
 
 
+@dataclass(frozen=True)
+class _Object:
+    """What the lidar_mos / lifted matching found, before the detector joins."""
+
+    mos: Optional[SourceBox]
+    lifted: Optional[SourceBox]
+
+    @property
+    def members(self) -> np.ndarray:
+        if self.mos is not None and self.lifted is not None:
+            return self.mos.members | self.lifted.members
+        return (self.mos or self.lifted).members
+
+
 def fuse(
     frame: Frame,
     mos: list[SourceBox],
@@ -73,40 +105,79 @@ def fuse(
     fp: FramePoints,
     ground: Optional[GroundGrid],
     cfg: FusionConfig,
+    detector: Optional[list[SourceBox]] = None,
+    add_unmatched_detector: bool = True,
 ) -> list[Proposal]:
     pairs = match(mos, lifted, cfg)
-    out = []
+    matched_m = {i for i, _ in pairs}
+    matched_f = {j for _, j in pairs}
+    # In emission order: pairs, then lone lidar_mos, then lone lifted boxes.
+    objects = [_Object(mos[i], lifted[j]) for i, j in pairs]
+    objects += [_Object(m, None) for i, m in enumerate(mos) if i not in matched_m]
+    objects += [_Object(None, f) for j, f in enumerate(lifted) if j not in matched_f]
+
+    detector = detector or []
+    joined = dict(
+        _pairs([o.members for o in objects], [d.members for d in detector], cfg)
+    )
+
+    out: list[Proposal] = []
 
     def next_id() -> str:
         return f"fused-{frame.reference_sweep_id:06d}-{len(out)}"
 
-    for i, j in pairs:
-        m, f = mos[i].proposal, lifted[j].proposal
-        union = mos[i].members | lifted[j].members
-        out.append(
-            replace(
-                proposal(
-                    next_id(),
-                    frame,
-                    to_ground(fit_bev_box(fp.xyz[union]), ground),
-                    cls=f.cls,
-                    score=(m.score + f.score) / 2.0,
-                    provenance=FUSED,
-                    lidar_point_count=int(union.sum()),
-                    supporting_cam_ids=f.supporting_cam_ids,
-                    supporting_masklet_ids=f.supporting_masklet_ids,
-                ),
-                member_proposal_ids=(m.proposal_id, f.proposal_id),
+    for k, o in enumerate(objects):
+        det = detector[joined[k]] if k in joined else None
+        if det is not None:
+            members = [s.proposal for s in (o.mos, o.lifted, det) if s is not None]
+            lift = o.lifted.proposal if o.lifted is not None else None
+            union = o.members | det.members
+            out.append(
+                replace(
+                    proposal(
+                        next_id(),
+                        frame,
+                        box_of(det.proposal),
+                        cls=lift.cls
+                        if lift is not None and lift.cls
+                        else det.proposal.cls,
+                        score=float(np.mean([p.score for p in members])),
+                        provenance=FUSED,
+                        lidar_point_count=int(union.sum()),
+                        supporting_cam_ids=lift.supporting_cam_ids if lift else (),
+                        supporting_masklet_ids=lift.supporting_masklet_ids
+                        if lift
+                        else (),
+                    ),
+                    member_proposal_ids=tuple(p.proposal_id for p in members),
+                )
             )
-        )
-    matched_m = {i for i, _ in pairs}
-    matched_f = {j for _, j in pairs}
-    for i, m in enumerate(mos):
-        if i not in matched_m:
-            out.append(_alone(m.proposal, next_id()))
-    for j, f in enumerate(lifted):
-        if j not in matched_f:
-            out.append(_alone(f.proposal, next_id()))
+        elif o.mos is not None and o.lifted is not None:
+            m, f = o.mos.proposal, o.lifted.proposal
+            union = o.members
+            out.append(
+                replace(
+                    proposal(
+                        next_id(),
+                        frame,
+                        to_ground(fit_bev_box(fp.xyz[union]), ground),
+                        cls=f.cls,
+                        score=(m.score + f.score) / 2.0,
+                        provenance=FUSED,
+                        lidar_point_count=int(union.sum()),
+                        supporting_cam_ids=f.supporting_cam_ids,
+                        supporting_masklet_ids=f.supporting_masklet_ids,
+                    ),
+                    member_proposal_ids=(m.proposal_id, f.proposal_id),
+                )
+            )
+        else:
+            out.append(_alone((o.mos or o.lifted).proposal, next_id()))
+    if add_unmatched_detector:
+        taken = set(joined.values())
+        for j, d in enumerate(detector):
+            if j not in taken:
+                out.append(_alone(d.proposal, next_id()))
     return out
 
 

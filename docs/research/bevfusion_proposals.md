@@ -2,6 +2,15 @@
 
 Research date: 2026-11-09. This is source inspection and an integration assessment, not an inference benchmark.
 
+**Status (2026-11-09): implemented** as the `detection_3d` component, with
+proposal_generation's `fusion_detector` source and tracking's detector evidence
+(`src/detection_3d/README.md`; measurements in
+`docs/detection_3d_measurements.md`). Checking against nuScenes ground truth
+corrected one statement below: the vendor z is the box's *centre* (MIT's
+loader read nuScenes centres as bottoms), so the car's ROS output, which
+publishes it as the centre, is right; "z-center versus bottom-center" is
+settled. BEVFusion is now on wato_monorepo `main` (#474).
+
 ## Scope and source revision
 
 The adjacent checkout is `/home/watonomous/brianzheng/wato_monorepo`, currently on `bzheng/eidos_vio`; that checkout has no `src/perception/bevfusion` directory. Its existing local remote-tracking branch `origin/ashish/bevfusion` contains the implementation inspected here at commit `9edb8b334fcb53d9434aa4f3aa728a2a8f09b095`. Inspection used `git show` without fetching, switching branches, or changing that repository. Links below identify that exact revision rather than nonexistent working-tree files. The older local `ashish/bevfusion` branch differs materially, including its treatment of the fifth LiDAR feature. No applicable `AGENTS.md` was found in the inspected repository trees or workspace ancestors.

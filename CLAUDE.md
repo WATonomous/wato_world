@@ -23,18 +23,22 @@ no `infrastructure`, carla or simulation profiles; config is per component at
 
 ## What this repo is
 
-Offline batch 3D auto-labeling for WATonomous: nine components, one Docker
+Offline batch 3D auto-labeling for WATonomous: ten components, one Docker
 image each, communicating only through files under `data/artifacts/`
 (Parquet / JSON / PNG / NPZ). No runtime messaging, no database.
 
 ```
 ingest → lidar_preprocessing → perception_2d → semantic_lifting →
 proposal_generation → tracking → label_refinement / open_vocab_discovery → student_training
+         lidar_preprocessing → detection_3d ↗ (BEVFusion boxes into proposal_generation)
 ```
 
 ingest, lidar_preprocessing, perception_2d and semantic_lifting are implemented
-end to end; proposal_generation has its first sources (Step F clusters,
-lifted instances, fusion; no LiDAR detector yet); tracking has a v0 (tracks
+end to end; detection_3d runs the car's BEVFusion (camera + LiDAR, int8,
+TensorRT) on every frame, with the inputs offline allows (nuScenes' training
+frame, earlier sweeps, images at nuScenes geometry); proposal_generation has
+its sources (Step F clusters, lifted instances, detection_3d's boxes as
+`fusion_detector`, fusion; no LiDAR-only detector); tracking has a v0 (tracks
 per chunk with SimpleTrack's GIoU cost, never-terminating tracks and
 CenterPoint's circle NMS on vehicles, re-linked after the pass by
 Offline-Poly's STWO, then linked across chunks; a parked / moving state per
@@ -76,7 +80,7 @@ diagnostics (`segmentation.mask_quality`) are off by default. Details:
   and another reads is encoded, written and read by its module in
   `wato_common/artifacts/` (`calibration`, `frame_index`, `lidar_sweeps`,
   `motion_proposals`, `ground`, `masklets`, `depth`, `lifted_labels`, `lifted_candidates`,
-  `proposals`, `tracks`, `refined_labels`; `gt_boxes` is imported ground
+  `detections_3d`, `proposals`, `tracks`, `refined_labels`; `gt_boxes` is imported ground
   truth that only evaluation reads),
   round-trip tested in
   `src/common/tests/test_artifacts_*.py`. Producers call the write half,
@@ -185,19 +189,32 @@ doesn't load; the trim-bag end-to-end test skips).
 - **Proposals are per frame and per source.** One `ProposalRow` per object per
   frame_sync frame, keyed on the frame's reference `sweep_id` (the canonical
   LiDAR's; `frame_id` is None for a sweep matched to none). Every source's rows
-  (`lidar_mos`, `lifted` today; `lidar_detector` later) stay beside the
+  (`lidar_mos`, `lifted`, `fusion_detector`; a LiDAR-only `lidar_detector`
+  later) stay beside the
   `fused` rows that list them in `member_proposal_ids`, so each source's
   reliability can be measured; tracking reads the fused rows. SLF is not a
   proposal source: it fits one shape per track in label_refinement. `cls` is
-  perception_2d's class (`car`, `truck`, ...), None when no lifted instance
-  supports the box. No artifact records lidar_preprocessing's canonical LiDAR,
+  perception_2d's class (`car`, `truck`, ...), else the detector's mapped onto
+  that taxonomy, None when neither supports the box. No artifact records lidar_preprocessing's canonical LiDAR,
   so proposal_generation's config restates it (`frames.canonical_lidar`,
   `lidar_cc` in `.wato.yaml`) and `ProcessedSweeps.frames` raises
   `CanonicalLidarError` on a mismatch.
+  A `fusion_detector` box joins the object it shares points with and its
+  geometry replaces the refit (the model predicts the whole object); tracking
+  counts a detector score ≥ 0.5 as strong, but never detector + lift as two
+  sources (both use the cameras).
   Lifted support has opt-in full non-ground scan-cluster matching. When changing
   refinement or point-count evidence, read `docs/research/sal_scan_cluster_refinement.md`
   for SAL fidelity choices; tracking counts retained camera seeds separately
   from recovered geometry.
+- **detection_3d keeps every box, raw and in the world.** BEVFusion's 200
+  boxes per frame, whatever the score or class, keyed on the frame's
+  reference `sweep_id`, with `world_T_model` per frame: thresholds, the
+  class map and the car's 2.5 m ego zone are proposal_generation's
+  (`fusion_detector`). Vendor z is the box's centre (MIT's loader read
+  nuScenes centres as bottoms), not the bottom its decoder implies; heading
+  is directed. Frames are anchored on the canonical LiDAR; a frame without
+  all six cameras within 200 ms is skipped and recorded as such.
 - **Tracks are bag-level.** tracking tracks each chunk's fused rows, links
   each chunk's tracks to the next chunk's that agree in their shared span, and
   writes bag-level `tracks.parquet` + `track_summaries.parquet`. A linked
@@ -315,10 +332,12 @@ labels aren't comparable.
 
 | Surface | Where | Mechanism |
 |---|---|---|
-| Python deps | `docker/requirements/{ingest,lidar_preprocessing,perception_2d,semantic_lifting,proposal_generation,tracking,label_refinement}.txt` | exact `==` for the full transitive closure, installed `--no-deps` |
+| Python deps | `docker/requirements/{ingest,lidar_preprocessing,perception_2d,semantic_lifting,detection_3d,proposal_generation,tracking,label_refinement}.txt` | exact `==` for the full transitive closure, installed `--no-deps` |
 | `sam2` | `docker/perception_2d.Dockerfile` | `ARG SAM2_COMMIT` (no PyPI release); manifests read the installed package's commit back, so there is no second pin |
 | Model weights | `src/perception_2d/src/wato_perception_2d/model_registry.py` | HF `revision=`, torch.hub `repo:<sha>`, raw `.pt` from an HF commit loaded by path |
-| Component bases | `docker/{ingest,lidar_preprocessing,perception_2d,semantic_lifting,proposal_generation,tracking,label_refinement}.Dockerfile` | `base:<tag>@sha256:...` |
+| Component bases | `docker/{ingest,lidar_preprocessing,perception_2d,semantic_lifting,detection_3d,proposal_generation,tracking,label_refinement}.Dockerfile` | `base:<tag>@sha256:...` |
+| BEVFusion runtime | `docker/detection_3d.Dockerfile` | `ARG WATO_CUDA_BEVFUSION_COMMIT`, `PYBIND11_COMMIT`, `TENSORRT_VERSION` + exact apt versions; `CUDASM` |
+| BEVFusion model | `src/detection_3d/config/detection_3d*.yaml` | `model.sha256` per ONNX file; engines rebuilt per (files, TensorRT, GPU) |
 | Upstream bases | `docker/base/inject_*.Dockerfile` | `ubuntu` / `nvcr.io` by digest, `ARG UV_VERSION` |
 | `mcap` CLI | `docker/ingest.Dockerfile` | `ARG MCAP_CLI_VERSION` + `MCAP_CLI_SHA256` |
 
@@ -348,10 +367,12 @@ current lock as constraints (`-c`) so nothing already pinned moves.
 `/opt/watonomous/requirements.lock.txt`; `manifest.py` writes one manifest per
 (bag, chunk) per component with content-hashed inputs (> 64 MB: size + mtime),
 so a changed input marks the outputs stale. ingest writes `manifest.json`;
-lidar_preprocessing, perception_2d, semantic_lifting, proposal_generation,
-tracking and label_refinement write `manifest_<component>.json`
-(semantic_lifting and proposal_generation hash their upstreams' manifests in
-place of their per-sweep files; tracking's and label_refinement's outputs are
+lidar_preprocessing, perception_2d, semantic_lifting, detection_3d,
+proposal_generation, tracking and label_refinement write
+`manifest_<component>.json` (semantic_lifting, detection_3d and
+proposal_generation hash their upstreams' manifests in place of their
+per-sweep files; detection_3d also records its model files' hashes, TensorRT,
+GPU and fork commit; tracking's and label_refinement's outputs are
 bag-level, so each chunk's manifest names the same files).
 
 - `WATO_GIT_COMMIT` is baked in at build time (`watod-setup-env.sh` →

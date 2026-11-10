@@ -17,6 +17,7 @@ ALL_MODULES=(
     perception_2d
     semantic_lifting
     lidar_preprocessing
+    detection_3d
     proposal_generation
     tracking
     label_refinement

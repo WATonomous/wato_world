@@ -39,3 +39,12 @@ proposal_generation:
   fusion:
     min_shared_points: 5
     min_shared_fraction: 0.3
+
+  # detection_3d's BEVFusion boxes as a third source (detector.py); needs
+  # detection_3d to have run. Measurements: docs/detection_3d_measurements.md.
+  fusion_detector:
+    enabled: false
+    min_score: 0.08              # the car's confidence_threshold
+    ego_suppression_radius_m: 2.5  # the car's ego zone
+    class_map: {car: car, truck: truck, bus: bus, motorcycle: motorcycle, bicycle: bicycle, pedestrian: pedestrian}
+    add_unmatched: true          # objects only the detector found get a fused row

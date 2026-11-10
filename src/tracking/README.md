@@ -11,8 +11,11 @@ Per chunk, every frame with fused rows (`proposals.fused`) is one tracker
 step; then the chunks' tracks are linked and judged:
 
 - **Detections.** A fused row is a detection. It is *strong* when two sources
-  agree on it (a lidar_mos + lifted pair) or its lifted box has confidence ≥
-  0.5 and ≥ 20 retained original seed points. Scan-cluster additions supply
+  agree on it (a lidar_mos + lifted pair), its lifted box has confidence ≥
+  0.5 and ≥ 20 retained original seed points, or its `fusion_detector` member
+  scores ≥ 0.5 (ByteTrack's high-score split, the car's tracker on BEVFusion).
+  A detector box agreeing with a lifted one is not two sources: both rest on
+  the cameras. Scan-cluster additions supply
   geometry, not camera evidence. Legacy proposals without the separate seed
   count use their original total labeled count. Its lifted member's instance id (SAM2's identity across
   frames) is its key.

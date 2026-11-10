@@ -46,6 +46,7 @@ case "${TARGET}" in
     perception_2d)        SERVICE="perception_2d";        PKG="wato_perception_2d"  ;;
     semantic_lifting)     SERVICE="semantic_lifting";     PKG="wato_semantic_lifting"  ;;
     lidar_preprocessing)  SERVICE="lidar_preprocessing";  PKG="wato_lidar_preprocessing"  ;;
+    detection_3d)         SERVICE="detection_3d";         PKG="wato_detection_3d"  ;;
     proposal_generation)  SERVICE="proposal_generation";  PKG="wato_proposal_generation"  ;;
     tracking)             SERVICE="tracking";             PKG="wato_tracking"  ;;
     label_refinement)     SERVICE="label_refinement";     PKG="wato_label_refinement"  ;;

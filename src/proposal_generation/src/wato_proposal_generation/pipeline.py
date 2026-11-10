@@ -10,8 +10,11 @@ with ProcessedSweeps.frames on the configured canonical LiDAR):
      against accepted owners; commit ownership only after acceptance (lifted.py).
   3. lidar_mos: one box per gated Step F cluster, classed only by camera seed
      points retained by the surviving 3D owners (lidar_mos.py).
-  4. fused: one box per object, merging a lidar_mos and a lifted box that
-     share points (fusion.py).
+  4. fusion_detector (when enabled): one row per kept detection_3d box, with
+     the points inside it (detector.py).
+  5. fused: one box per object, merging a lidar_mos and a lifted box that
+     share points, then the detector box that shares the object's points
+     (fusion.py).
 Then every row goes to proposals.parquet (wato_common.artifacts.proposals).
 
 A missing or malformed upstream artifact stops the run rather than leaving a
@@ -29,6 +32,7 @@ import numpy as np
 from wato_common import manifest as common_manifest
 from wato_common.artifact_store import (
     chunk_root,
+    detections_3d_path,
     ground_path,
     lidar_proc_dir,
     lidar_proc_index_path,
@@ -41,11 +45,16 @@ from wato_common.artifact_store import (
     semantic_lifting_dir,
 )
 from wato_common.artifacts import ground as ground_artifact
-from wato_common.artifacts import lifted_labels, motion_proposals, proposals
+from wato_common.artifacts import (
+    detections_3d,
+    lifted_labels,
+    motion_proposals,
+    proposals,
+)
 from wato_common.artifacts.ground import GroundGrid
 from wato_common.artifacts.lidar_sweeps import ProcessedSweeps
 from wato_common.artifacts.proposals import Proposal
-from wato_proposal_generation import fusion, lidar_mos, lifted
+from wato_proposal_generation import detector, fusion, lidar_mos, lifted
 from wato_proposal_generation import frame_points as frame_points_mod
 from wato_proposal_generation.config import ComponentConfig
 from wato_proposal_generation.io import load_chunks, write_refinement_audit
@@ -53,7 +62,7 @@ from wato_proposal_generation.io import load_chunks, write_refinement_audit
 log = logging.getLogger(__name__)
 
 
-def _check_inputs(bag_id: str, chunk_id: str) -> None:
+def _check_inputs(bag_id: str, chunk_id: str, with_detector: bool) -> None:
     """Name the upstream step to run when a chunk's inputs are missing."""
     required = {
         "lidar_proc_index.parquet (run lidar_preprocessing)": lidar_proc_index_path(
@@ -67,6 +76,8 @@ def _check_inputs(bag_id: str, chunk_id: str) -> None:
     missing = [n for n, uri in required.items() if not os.path.exists(local_path(uri))]
     if not lifted_labels.exists(bag_id, chunk_id):
         missing.append("lifted labels (run semantic_lifting)")
+    if with_detector and not detections_3d.exists(bag_id, chunk_id):
+        missing.append("detections_3d.parquet (run detection_3d)")
     if missing:
         raise FileNotFoundError(
             f"chunk {chunk_id!r} of bag {bag_id!r} is missing {', '.join(missing)}"
@@ -87,7 +98,7 @@ def _ground(bag_id: str, chunk_id: str) -> Optional[GroundGrid]:
 
 def process_chunk(cfg: ComponentConfig, bag_id: str, chunk_id: str) -> dict[str, int]:
     """Write the chunk's proposals.parquet; returns rows per provenance."""
-    _check_inputs(bag_id, chunk_id)
+    _check_inputs(bag_id, chunk_id, cfg.fusion_detector.enabled)
     sweeps = ProcessedSweeps.load(bag_id, chunk_id)
     frames = sweeps.frames(cfg.frames.canonical_lidar)
     ground = _ground(bag_id, chunk_id)
@@ -99,6 +110,11 @@ def process_chunk(cfg: ComponentConfig, bag_id: str, chunk_id: str) -> dict[str,
     instances = {
         i.instance_id: i for i in lifted_labels.read_instances(bag_id, chunk_id)
     }
+    detections_at: dict[int, list] = {}
+    if cfg.fusion_detector.enabled:
+        _, dets = detections_3d.read(bag_id, chunk_id)
+        for d in dets:
+            detections_at.setdefault(d.sweep_id, []).append(d)
 
     rows: list[Proposal] = []
     audit: list[dict] = []
@@ -140,8 +156,24 @@ def process_chunk(cfg: ComponentConfig, bag_id: str, chunk_id: str) -> dict[str,
                     ),
                 )
             )
+        dets = detector.proposals(
+            frame,
+            detections_at.get(frame.reference_sweep_id, []),
+            fp,
+            cfg.fusion_detector,
+        )
         rows += [b.proposal for b in mos] + [b.proposal for b in lifts]
-        rows += fusion.fuse(frame, mos, lifts, fp, ground, cfg.fusion)
+        rows += [b.proposal for b in dets]
+        rows += fusion.fuse(
+            frame,
+            mos,
+            lifts,
+            fp,
+            ground,
+            cfg.fusion,
+            detector=dets,
+            add_unmatched_detector=cfg.fusion_detector.add_unmatched,
+        )
     # proposals.parquet remains the completion marker: diagnostics must exist
     # before it is written, including for instances later dropped by box gates.
     write_refinement_audit(bag_id, chunk_id, audit)
@@ -152,7 +184,7 @@ def process_chunk(cfg: ComponentConfig, bag_id: str, chunk_id: str) -> dict[str,
 
 
 def _write_chunk_manifest(
-    bag_id: str, chunk_id: str, config_path: Optional[str]
+    bag_id: str, chunk_id: str, config_path: Optional[str], with_detector: bool
 ) -> None:
     """Record the config and inputs behind this chunk's proposals.
     Best-effort: never fails a chunk that succeeded.
@@ -161,10 +193,16 @@ def _write_chunk_manifest(
     manifests (which hash those producers' own inputs and config) and indexes
     stand in for them."""
     root = chunk_root(bag_id, chunk_id)
+    components = ["lidar_preprocessing", "semantic_lifting"]
+    if with_detector:
+        components.append("detection_3d")
     upstream = {
         f"manifest_{c}": f"{root}/{common_manifest.component_manifest_name(c)}"
-        for c in ("lidar_preprocessing", "semantic_lifting")
+        for c in components
     }
+    detector_inputs = (
+        {"detections_3d": detections_3d_path(bag_id, chunk_id)} if with_detector else {}
+    )
     try:
         common_manifest.write(
             component="proposal_generation",
@@ -176,6 +214,7 @@ def _write_chunk_manifest(
                 "motion_clusters": motion_clusters_path(bag_id, chunk_id),
                 "lifted_instances": lifted_instances_path(bag_id, chunk_id),
                 "lifted_stats": lifted_stats_path(bag_id, chunk_id),
+                **detector_inputs,
                 **upstream,
             },
             outputs={
@@ -233,7 +272,7 @@ def run(
             n_skip += 1
             continue
         process_chunk(cfg, bag_id, cid)
-        _write_chunk_manifest(bag_id, cid, config_path)
+        _write_chunk_manifest(bag_id, cid, config_path, cfg.fusion_detector.enabled)
         n_ok += 1
     log.info(
         "proposal_generation complete for bag %s: %d processed, %d skipped",

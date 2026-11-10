@@ -31,6 +31,7 @@ tracking:
   strong:                            # matched to tracks before weak boxes
     min_lift_confidence: 0.5         # a lone lifted box this confident...
     min_lift_points: 20              # ...with this many retained seed points
+    min_detector_score: 0.5          # a fusion_detector box this sure (ByteTrack's track_thresh)
 
   motion:
     min_frames: 7                    # fewer: "unknown"

@@ -111,9 +111,37 @@ class FusionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # A lidar_mos and a lifted box are one object when they share this many
-    # LiDAR points in the frame, and this fraction of the smaller one's.
+    # LiDAR points in the frame, and this fraction of the smaller one's; a
+    # fusion_detector box joins an object by the same rule.
     min_shared_points: int = 5
     min_shared_fraction: float = 0.3
+
+
+class FusionDetectorConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Propose detection_3d's BEVFusion boxes (detector.py). Off: the stage
+    # needs no detections_3d and its output is what it was without them.
+    enabled: bool = False
+    # Lower boxes are not proposed: the car's confidence_threshold (wato_monorepo
+    # bevfusion params.yaml), a deployment choice, not a calibrated one.
+    min_score: float = Field(default=0.08, ge=0.0, le=1.0)
+    # A box centred this close (XY, the model's input frame) to its origin is
+    # dropped: the car's ego_suppression_radius, against self-detections and
+    # zero-position outputs.
+    ego_suppression_radius_m: float = Field(default=2.5, ge=0.0)
+    # The model's classes proposed, and their name in the pipeline's taxonomy.
+    # Others (trailer, construction_vehicle, barrier, traffic_cone) stay in
+    # detections_3d only, not relabelled.
+    class_map: dict[str, str] = Field(
+        default_factory=lambda: {
+            c: c for c in ("car", "truck", "bus", "motorcycle", "bicycle", "pedestrian")
+        }
+    )
+    # A detector box no other source matched becomes a fused row of its own
+    # (an object only the model found). False: detector boxes only reshape
+    # objects the other sources found.
+    add_unmatched: bool = True
 
 
 class ComponentConfig(BaseModel):
@@ -123,6 +151,7 @@ class ComponentConfig(BaseModel):
     lidar_mos: LidarMosConfig = Field(default_factory=LidarMosConfig)
     lifted: LiftedConfig = Field(default_factory=LiftedConfig)
     fusion: FusionConfig = Field(default_factory=FusionConfig)
+    fusion_detector: FusionDetectorConfig = Field(default_factory=FusionDetectorConfig)
 
 
 def load_config(path: str) -> ComponentConfig:
