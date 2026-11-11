@@ -2,8 +2,9 @@
 
 The same Kalman filter Step F scores motion with, Chen's cost or SimpleTrack's
 GIoU, plus the cues tracking adds: strong detections are matched first, a
-shared lifted instance id lowers a pair's cost, and tracks may coast until
-the chunk ends (config `association`).
+shared lifted instance id lowers a pair's cost, tracks may coast until the
+chunk ends (config `association`), and a low-scored detector-only box never
+starts a track (config `strong`).
 """
 
 from __future__ import annotations
@@ -58,6 +59,7 @@ def run(frames: list[DetFrame], cfg: AssociationConfig) -> list[list[Observation
             [d.box for d in f.dets],
             strong=[d.strong for d in f.dets],
             keys=[d.key for d in f.dets],
+            can_birth=[d.can_birth for d in f.dets],
         )
     return [
         [

@@ -116,6 +116,10 @@ class StrongConfig(BaseModel):
     # detector boxes are matched only after the strong ones, as ByteTrack's
     # low-score boxes are.
     min_detector_score: float = 0.5
+    # A box backed only by a fusion_detector row starts a track only when
+    # scored at least this; below it, it can only extend one. ByteTrack's
+    # new-track threshold (track_thresh + 0.1), the car's high_thresh.
+    min_detector_birth_score: float = 0.6
 
 
 class MotionConfig(BaseModel):

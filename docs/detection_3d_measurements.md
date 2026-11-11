@@ -76,5 +76,48 @@ front-camera calibration error rather than the detector's.
 
 ## Proposals and tracks, with and without the detector (nuScenes)
 
-Pending: base / detector reshaping matched objects only / plus unmatched
-detector boxes, through `eval_proposals.py` and `eval_tracks.py`.
+Both scenes re-run from perception_2d in a scratch artifact root (their
+perception_2d / semantic_lifting outputs predated independent masks and
+`lifted_candidates`), current code, default configs. Three proposal_generation
+variants, then tracking and its evaluator; matched within 2 m, class-agnostic.
+Training scenes: an upper bound, not held-out accuracy.
+
+**Proposals** (fused rows; `eval_proposals.py`):
+
+| Scene | Variant | recall | precision | IoU | dl / dw | 0-15 / 15-30 / 30-50 m recall |
+|---|---|---|---|---|---|---|
+| 0061 | base (detector off) | 0.34 | 0.71 | 0.11 | −0.51 / −0.51 | 0.72 / 0.38 / 0.08 |
+| 0061 | detector reshapes matched objects (`add_unmatched: false`) | 0.38 | 0.78 | 0.46 | −0.02 / +0.01 | 0.78 / 0.41 / 0.14 |
+| 0061 | + detector-only objects (`add_unmatched: true`) | 0.93 | 0.72 | 0.38 | −0.03 / +0.01 | 0.99 / 0.98 / 0.96 |
+| 1100 | base | 0.62 | 0.81 | 0.13 | −0.34 / −0.35 | 0.86 / 0.43 / 0.05 |
+| 1100 | reshapes matched | 0.69 | 0.90 | 0.43 | 0.00 / −0.02 | 0.86 / 0.58 / 0.08 |
+| 1100 | + detector-only | 0.99 | 0.79 | 0.41 | −0.01 / −0.01 | 0.99 / 0.99 / 1.00 |
+
+Taking the detector's box for objects the other sources found removes the
+half-metre shortfall of point-fitted boxes and quadruples their IoU, and
+raises precision (fewer misplaced centres). Detector-only objects then lift
+recall to 0.93–0.99 at the base's precision.
+
+**Tracks** (`eval_tracks.py`), with tracking's detector rules (detector score
+≥ 0.5 strong; a detector-only box starts a track only at ≥ 0.6, ByteTrack's
+birth rule):
+
+| Scene | Variant | frame recall | frame precision | true / seen tracks | tracks per object | objects in one track | switched |
+|---|---|---|---|---|---|---|---|
+| 0061 | base | 0.33 | 0.74 | 53 / 98 | 1.51 | 0.63 | 0.08 |
+| 0061 | reshapes matched | 0.38 | 0.81 | 52 / 91 | 1.33 | 0.74 | 0.07 |
+| 0061 | + detector-only | 0.78 | 0.81 | 46 / 130 | 2.03 | 0.43 | 0.28 |
+| 1100 | base | 0.62 | 0.82 | 30 / 44 | 1.35 | 0.69 | 0.00 |
+| 1100 | reshapes matched | 0.69 | 0.92 | 34 / 42 | 1.63 | 0.44 | 0.09 |
+| 1100 | + detector-only | 0.97 | 0.85 | 28 / 45 | 1.70 | 0.59 | 0.08 |
+
+Without the birth rule, detector-only boxes down to score 0.08 each started a
+track: 224 tracks on scene-0061 (69 true), 2.55 per object, 27% of objects in
+one track. With it, frame-level recall and precision both beat the base, but
+objects split across more tracks and identities switch more (0061 is 70%
+pedestrians, which the circle NMS deliberately doesn't suppress). Reshaping
+matched objects alone helps scene-0061's continuity and hurts scene-1100's.
+
+`fusion_detector.enabled` stays off by default: the gains are measured on
+scenes the model was trained on, and the fragmentation is unresolved.
+Turning it on is one config line per profile.

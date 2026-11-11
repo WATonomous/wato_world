@@ -6,7 +6,9 @@ instance id (the matching key) and its confidence, a fusion_detector member
 carries BEVFusion's score. A detection is strong when lidar_mos and lifted
 agree on it, its lift is confident, or its detector score is high (config
 `strong`). The detector and lifting share cameras, so their agreement alone
-doesn't count as two sources.
+doesn't count as two sources. A box backed only by the detector starts a
+track only when scored high enough (ByteTrack's birth rule); otherwise it can
+only extend one.
 
 Only frames with at least one fused row are stepped; a track coasting over
 empty frames is still predicted at each stepped frame's time.
@@ -43,6 +45,7 @@ class Detection:
     two_source: bool
     has_lidar_mos: bool
     detector_score: Optional[float] = None  # its fusion_detector member's
+    can_birth: bool = True  # may start a track when no track takes it
 
     @property
     def box(self) -> Box3D:
@@ -84,6 +87,7 @@ def detection(
         and (lift_points or 0) >= cfg.min_lift_points
     )
     detected = det is not None and det.score >= cfg.min_detector_score
+    detector_only = det is not None and lift is None and not has_mos
     return Detection(
         proposal=fused,
         strong=two_source or confident or detected,
@@ -91,6 +95,7 @@ def detection(
         two_source=two_source,
         has_lidar_mos=has_mos,
         detector_score=det.score if det is not None else None,
+        can_birth=not detector_only or det.score >= cfg.min_detector_birth_score,
     )
 
 

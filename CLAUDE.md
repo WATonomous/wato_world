@@ -23,12 +23,12 @@ no `infrastructure`, carla or simulation profiles; config is per component at
 
 ## What this repo is
 
-Offline batch 3D auto-labeling for WATonomous: ten components, one Docker
+Offline batch 3D auto-labeling for WATonomous: eleven components, one Docker
 image each, communicating only through files under `data/artifacts/`
 (Parquet / JSON / PNG / NPZ). No runtime messaging, no database.
 
 ```
-ingest → lidar_preprocessing → perception_2d → semantic_lifting →
+ingest → lidar_preprocessing → camera_calibration → perception_2d → semantic_lifting →
 proposal_generation → tracking → label_refinement / open_vocab_discovery → student_training
          lidar_preprocessing → detection_3d ↗ (BEVFusion boxes into proposal_generation)
 ```
@@ -202,7 +202,10 @@ doesn't load; the trim-bag end-to-end test skips).
   A `fusion_detector` box joins the object it shares points with and its
   geometry replaces the refit (the model predicts the whole object); tracking
   counts a detector score ≥ 0.5 as strong, but never detector + lift as two
-  sources (both use the cameras).
+  sources (both use the cameras), and a detector-only box starts a track only
+  at ≥ 0.6 (ByteTrack). `fusion_detector.enabled` is off by default
+  (`docs/detection_3d_measurements.md`: measured on BEVFusion's training scenes,
+  tracks fragment more).
   Lifted support has opt-in full non-ground scan-cluster matching. When changing
   refinement or point-count evidence, read `docs/research/sal_scan_cluster_refinement.md`
   for SAL fidelity choices; tracking counts retained camera seeds separately
@@ -227,6 +230,24 @@ doesn't load; the trim-bag end-to-end test skips).
   label_refinement refines it whole.
 - **Sensor physics lives in `sensor_model.py`** (profiles `vlp32c`, `vlp16`,
   `hdl32e`), never in YAML.
+
+## Camera calibration
+
+`camera_calibration` runs after LiDAR preprocessing, before detection/depth.
+It uses a pinned Koide NID objective in a headless Ceres runner, fixed camera
+intrinsics/LiDAR mounts/poses, and independent static correspondences for
+validation. Shipped profiles stay disabled and unqualified: current WATO
+fits can be unstable. When changing calibration selection, validation, cache
+identity or rollout, read `src/camera_calibration/README.md` and
+`docs/camera_calibration_measurements.md`.
+
+Ingest's `calibration.json` stays baseline provenance. Candidate/effective/report
+artifacts live beside it under `camera_calibration/`, read/written only through
+`wato_common.artifacts.calibration_refinement`. Camera consumers explicitly choose
+`calibration_source: recorded|validated`; validated reads reject stale,
+unqualified or failed-camera results. Calibration identities bind resumable
+caches and propagate through proposal/tracking/refinement manifests. Rerun all
+camera-dependent outputs with `--force` after changing their calibration.
 
 ## Ingest
 

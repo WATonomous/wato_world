@@ -203,6 +203,20 @@ def test_strong_detections_are_matched_before_weak_ones():
     assert trk2.step(0.1, [weak, strong])[0] == 0
 
 
+def test_a_det_that_may_not_birth_only_extends_tracks():
+    """ByteTrack: a low-score box can continue a track, never start one."""
+    trk = MultiObjectTracker()
+    assert trk.step(0.0, [_box(cx=0.0), _box(cx=20.0)], can_birth=[True, False]) == [
+        0,
+        -1,
+    ]
+    # Matched, it extends the track whatever can_birth says.
+    assert trk.step(0.1, [_box(cx=0.1)], can_birth=[False]) == [0]
+    assert len(trk.all_tracks()) == 1
+    # Unset, every unmatched det starts a track as before.
+    assert trk.step(0.2, [_box(cx=0.2), _box(cx=20.0)]) == [0, 1]
+
+
 def test_a_shared_key_breaks_a_near_tie_but_never_opens_a_gate():
     trk = MultiObjectTracker(key_bonus=1.0)
     trk.step(0.0, [_box(cx=0.0), _box(cx=3.0)], keys=["a", "b"])

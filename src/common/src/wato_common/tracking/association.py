@@ -206,12 +206,17 @@ class MultiObjectTracker:
         *,
         strong: Optional[Sequence[bool]] = None,
         keys: Optional[Sequence[Optional[Hashable]]] = None,
+        can_birth: Optional[Sequence[bool]] = None,
     ) -> list[int]:
-        """Process one frame at time t (seconds). Returns track_id per det.
+        """Process one frame at time t (seconds). Returns track_id per det
+        (-1 for a det that neither matched nor started a track).
 
         strong: per det; when given, strong dets are matched first and weak
         ones only to the tracks left. keys: per det (None = no key); a det
         whose key equals a track's last key costs key_bonus less.
+        can_birth: per det; when given, an unmatched det marked False starts
+        no track and is dropped (ByteTrack: a low-score box may extend a
+        track, never start one).
         """
         self._frame_idx += 1
         preds = [trk.kf.predict(t - trk.last_t) for trk in self._live]
@@ -278,6 +283,8 @@ class MultiObjectTracker:
         self._live = still_live
 
         for di in sorted(unmatched_dets):
+            if can_birth is not None and not can_birth[di]:
+                continue
             kf = BoxKalmanFilter(dets[di], self.noise)
             trk = Track(
                 track_id=self._next_id,

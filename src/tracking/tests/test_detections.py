@@ -143,3 +143,31 @@ def test_detector_and_lift_agreeing_are_not_two_sources():
     )
     d = detection(fused, {p.proposal_id: p for p in (lift, det)}, StrongConfig())
     assert not d.two_source and not d.strong and d.key == "m3"
+
+
+@pytest.mark.parametrize("score, can_birth", [(0.59, False), (0.6, True)])
+def test_a_detector_only_box_starts_a_track_only_when_sure(score, can_birth):
+    from wato_tracking.detections import detection
+
+    det = _member("det-000000-0", "fusion_detector", score=score)
+    fused = _member("fused-000000-0", "fused", member_proposal_ids=(det.proposal_id,))
+    assert (
+        detection(fused, {det.proposal_id: det}, StrongConfig()).can_birth is can_birth
+    )
+
+
+def test_other_evidence_lets_a_low_scored_detector_box_start_a_track():
+    from wato_tracking.detections import detection
+
+    lift = _member(
+        "lifted-m3-000000", "lifted", lift_confidence=0.1, lift_seed_point_count=5
+    )
+    det = _member("det-000000-0", "fusion_detector", score=0.1)
+    fused = _member(
+        "fused-000000-0",
+        "fused",
+        member_proposal_ids=(lift.proposal_id, det.proposal_id),
+    )
+    assert detection(
+        fused, {p.proposal_id: p for p in (lift, det)}, StrongConfig()
+    ).can_birth

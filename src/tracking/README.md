@@ -15,7 +15,9 @@ step; then the chunks' tracks are linked and judged:
   0.5 and ≥ 20 retained original seed points, or its `fusion_detector` member
   scores ≥ 0.5 (ByteTrack's high-score split, the car's tracker on BEVFusion).
   A detector box agreeing with a lifted one is not two sources: both rest on
-  the cameras. Scan-cluster additions supply
+  the cameras. A box backed only by the detector starts a track only when it
+  scores ≥ 0.6 (ByteTrack's new-track threshold); below that it can only
+  extend a track. Scan-cluster additions supply
   geometry, not camera evidence. Legacy proposals without the separate seed
   count use their original total labeled count. Its lifted member's instance id (SAM2's identity across
   frames) is its key.
