@@ -291,11 +291,26 @@ def test_wato_6cam_profile_is_the_wato_profile_without_ee_ww():
     assert six == full
 
 
-def test_wato_no_lidar_nw_profile_is_the_wato_profile_without_lidar_nw():
+def test_wato_no_lidar_nw_profile_is_a_compatibility_alias():
     full = load_config(str(CONFIG_DIR / "ingest.wato.yaml")).model_dump()
     no_nw = load_config(str(CONFIG_DIR / "ingest.wato_no_lidar_nw.yaml")).model_dump()
-    del full["topics"]["lidars"]["lidar_nw"]
     assert no_nw == full
+
+
+@pytest.mark.parametrize("name", ["ingest.wato.yaml", "ingest.wato_no_lidar_nw.yaml"])
+def test_wato_uses_all_top_cameras_and_only_the_centre_lidar(name):
+    cfg = load_config(str(CONFIG_DIR / name))
+    assert set(cfg.topics.cameras) == {
+        "PANO_NN",
+        "PANO_NE",
+        "PANO_EE",
+        "PANO_SE",
+        "PANO_SS",
+        "PANO_SW",
+        "PANO_WW",
+        "PANO_NW",
+    }
+    assert cfg.topics.lidars == {"lidar_cc": "/lidar_cc/velodyne_points"}
 
 
 def test_old_max_pose_gap_key_is_rejected():

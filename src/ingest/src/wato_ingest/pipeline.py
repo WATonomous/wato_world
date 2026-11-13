@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import json
 from dataclasses import dataclass
 
 from tqdm import tqdm
@@ -47,6 +48,36 @@ def bag_ingested(bag_id: str, only_chunk: str | None = None) -> bool:
     return bool(ids) and all(chunk_ingested(bag_id, c) for c in ids)
 
 
+def _check_existing_sensors(
+    bag_id: str, cfg: IngestConfig, only_chunk: str | None
+) -> None:
+    """A sensor selection change must not silently reuse completed chunks."""
+    index = local_path(chunks_index_path(bag_id))
+    if not os.path.exists(index):
+        return
+    expected = {
+        "found_camera_images": {c.image for c in cfg.topics.cameras.values()},
+        "found_lidars": set(cfg.topics.lidars.values()),
+    }
+    for row in read_rows(chunks_index_path(bag_id)):
+        cid = row["chunk_id"]
+        if only_chunk is not None and cid != only_chunk:
+            continue
+        path = local_path(manifest_path(bag_id, cid))
+        if not os.path.exists(path):
+            continue
+        with open(path, encoding="utf-8") as fh:
+            recorded = json.load(fh).get("topic_check", {})
+        if any(
+            set(recorded.get(key, [])) != sensors for key, sensors in expected.items()
+        ):
+            raise ValueError(
+                f"bag {bag_id} chunk {cid}: existing sensor selection differs "
+                "from the requested cameras/LiDARs. Use a new --bag-id, or "
+                "rerun the pipeline with --force ingest to regenerate downstream artifacts."
+            )
+
+
 def run_bag(
     *,
     bag_path: str,
@@ -77,6 +108,8 @@ def run_bag(
     with the bag's), and otherwise a chunk with a manifest is not decoded
     again. Returns the chunks ingested by this call.
     """
+    if not force:
+        _check_existing_sensors(bags.derive_bag_id(bag_path, bag_id), cfg, only_chunk)
     if not force and bag_ingested(bags.derive_bag_id(bag_path, bag_id), only_chunk):
         log.info(
             "bag %s already ingested — skipping (use --force)",

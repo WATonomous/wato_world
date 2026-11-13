@@ -22,8 +22,9 @@ ground maps, and recall-oriented motion proposals.
 `python -m wato_lidar_preprocessing reduce | iwu | proposals --bag <bag>`.
 
 WATO bags must be ingested with `ingest.wato.yaml` / `ingest.wato_6cam.yaml` /
-`ingest.wato_no_lidar_nw.yaml` (per-corner LiDAR topics), then processed with
-`lidar_preprocessing.wato.yaml`.
+`ingest.wato_no_lidar_nw.yaml` (only `/lidar_cc/velodyne_points`), then
+processed with `lidar_preprocessing.wato.yaml`. Historical measurements using
+corner scanners describe the older multi-LiDAR setup.
 
 ## Steps
 

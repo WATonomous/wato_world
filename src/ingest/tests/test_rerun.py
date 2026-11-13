@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 
 import pytest
 
@@ -39,11 +40,25 @@ def _index(*chunk_ids):
     )
 
 
-def _manifest(chunk_id):
+def _manifest(chunk_id, extra_lidar=None):
     path = local_path(manifest_path(BAG, chunk_id))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
-        fh.write("{}")
+        cfg = load_config(CONFIG)
+        lidars = list(cfg.topics.lidars.values())
+        if extra_lidar:
+            lidars.append(extra_lidar)
+        json.dump(
+            {
+                "topic_check": {
+                    "found_camera_images": [
+                        c.image for c in cfg.topics.cameras.values()
+                    ],
+                    "found_lidars": lidars,
+                }
+            },
+            fh,
+        )
 
 
 def test_a_bag_is_ingested_when_every_chunk_has_its_manifest():
@@ -68,3 +83,15 @@ def test_an_ingested_bag_is_skipped_without_opening_it():
     assert run_bag(bag_path=missing, cfg=cfg, config_path=CONFIG) == []
     with pytest.raises(Exception):
         run_bag(bag_path=missing, cfg=cfg, config_path=CONFIG, force=True)
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_completed_chunks_with_other_sensors_cannot_be_silently_reused(partial):
+    _index(*(("0000", "0001") if partial else ("0000",)))
+    _manifest("0000", extra_lidar="/corner/points")
+    with pytest.raises(ValueError, match="sensor selection differs"):
+        run_bag(
+            bag_path="/nonexistent/some_bag.mcap",
+            cfg=load_config(CONFIG),
+            config_path=CONFIG,
+        )
