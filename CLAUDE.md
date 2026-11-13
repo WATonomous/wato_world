@@ -42,7 +42,8 @@ its sources (Step F clusters, lifted instances, detection_3d's boxes as
 per chunk with SimpleTrack's GIoU cost, never-terminating tracks and
 CenterPoint's circle NMS on vehicles, re-linked after the pass by
 Offline-Poly's STWO, then linked across chunks; a parked / moving state per
-track; no ReID yet; `wato_common.tracking` keeps Chen's cost as the default
+track; appearance ReID from perception_2d's masklet descriptors built in and
+off by default; `wato_common.tracking` keeps Chen's cost as the default
 for Step F); label_refinement has a v0 (one box per parked vehicle, one size and a
 smoothed path per moving track, then SLF's box shape and heading fit per
 track to its masks and points, PyTorch on the GPU); the rest are stubs raising
@@ -66,7 +67,10 @@ subclass (`segmentation.dam4sam`: update spacing 2 images, SAMURAI's RAM gate),
 never by editing the vendored files. A box starts a track only past
 `tracking.birth_gate` (SAM2MOT's untracked area against tracked masks, or SAM 3's
 mask IoU), and each later birth is back-filled backwards from its prompt
-(`tracking.backfill_frames`). CUDA runs need SAM2's compiled `sam2._C` hole-filling kernel,
+(`tracking.backfill_frames`). A third pass writes one DINOv2 appearance
+descriptor per masklet per image (`masklet_embeddings.npz`, mask-pooled patch
+tokens) from the saved masks; `./watod run perception_2d embed` redoes only
+that pass. CUDA runs need SAM2's compiled `sam2._C` hole-filling kernel,
 checked before the depth pass. Mask refinement (`--refine-masks`) and mask
 diagnostics (`segmentation.mask_quality`) are off by default. Details:
 `src/perception_2d/README.md`.
@@ -108,7 +112,7 @@ diagnostics (`segmentation.mask_quality`) are off by default. Details:
 ./watod build                 # pull bases from ghcr, build ACTIVE_MODULES (watod-config.sh)
 ./watod up                    # docker compose up -d
 ./watod -t ingest_dev         # shell into a running dev container
-./watod run <component> --bag <bag> [flags]   # also: validate-bag, trim-bag, debug-bag, reduce, viz, ego-mask, compare
+./watod run <component> --bag <bag> [flags]   # also: validate-bag, trim-bag, debug-bag, reduce, viz, ego-mask, compare, embed, pick
 ./watod pipeline --bag <bag> [--profile wato] [--force <stage>,...] [--from|--to <stage>] [--dry-run]
 ./watod test <component>      # src/common/tests, then the component's, in its dev image
 ./watod down all
@@ -199,13 +203,13 @@ doesn't load; the trim-bag end-to-end test skips).
   so proposal_generation's config restates it (`frames.canonical_lidar`,
   `lidar_cc` in `.wato.yaml`) and `ProcessedSweeps.frames` raises
   `CanonicalLidarError` on a mismatch.
-  A `fusion_detector` box joins the object it shares points with and its
-  geometry replaces the refit (the model predicts the whole object); tracking
-  counts a detector score ≥ 0.5 as strong, but never detector + lift as two
-  sources (both use the cameras), and a detector-only box starts a track only
-  at ≥ 0.6 (ByteTrack). `fusion_detector.enabled` is off by default
-  (`docs/detection_3d_measurements.md`: measured on BEVFusion's training scenes,
-  tracks fragment more).
+  A matched `fusion_detector` contributes provenance while preserving the
+  motion/lifted geometry, class, score and support. Unmatched detections add
+  objects only at score ≥ 0.6 with ≥ 5 non-ground points. Tracking prioritizes
+  independent boxes during duplicate suppression and association; matched
+  detector scores never promote their strength. Detector + lift is one
+  camera evidence family. The WATO profile enables this supplemental
+  policy; older geometry-replacement measurements describe a different policy.
   Lifted support has opt-in full non-ground scan-cluster matching. When changing
   refinement or point-count evidence, read `docs/research/sal_scan_cluster_refinement.md`
   for SAL fidelity choices; tracking counts retained camera seeds separately
@@ -217,7 +221,11 @@ doesn't load; the trim-bag end-to-end test skips).
   (`fusion_detector`). Vendor z is the box's centre (MIT's loader read
   nuScenes centres as bottoms), not the bottom its decoder implies; heading
   is directed. Frames are anchored on the canonical LiDAR; a frame without
-  all six cameras within 200 ms is skipped and recorded as such.
+  every configured camera within 200 ms is skipped and recorded as such.
+  WATO uses all eight top cameras and only `lidar_cc`, with a native eight-view
+  ONNX export and camera-count-aware CUDA binding. When changing sensors,
+  exports or detector influence, read `docs/sensor_setup.md`; cached inputs
+  must match and sensor changes require an ingest-through-refinement rerun.
 - **Tracks are bag-level.** tracking tracks each chunk's fused rows, links
   each chunk's tracks to the next chunk's that agree in their shared span, and
   writes bag-level `tracks.parquet` + `track_summaries.parquet`. A linked
@@ -228,6 +236,16 @@ doesn't load; the trim-bag end-to-end test skips).
   (moving / parked / unknown) is judged on the whole linked track
   (`src/tracking/README.md`), not by Step F's per-cluster `motion_score`;
   label_refinement refines it whole.
+- **Appearance is per masklet per image, compared by closest pair.**
+  perception_2d writes `masklet_embeddings.npz` (unit-norm rows, with the
+  model and pooling that made them), read only through
+  `wato_common.artifacts.masklets.read_embeddings`; rows of different
+  model or pooling don't compare. tracking's `appearance` (off by default)
+  uses them in the re-link under a threshold calibrated on the bag's own
+  masklet pairs. When changing the descriptor, its use or the default, read
+  `src/tracking/README.md` ("Appearance") and the measurement behind it in
+  `docs/tracking_measurements.md`; a descriptor change needs `embed --force`
+  and a tracking rerun.
 - **Sensor physics lives in `sensor_model.py`** (profiles `vlp32c`, `vlp16`,
   `hdl32e`), never in YAML.
 
@@ -237,7 +255,10 @@ doesn't load; the trim-bag end-to-end test skips).
 It uses a pinned Koide NID objective in a headless Ceres runner, fixed camera
 intrinsics/LiDAR mounts/poses, and independent static correspondences for
 validation. Shipped profiles stay disabled and unqualified: current WATO
-fits can be unstable. When changing calibration selection, validation, cache
+fits can be unstable. `./watod run camera_calibration pick` writes a browser
+picker for those correspondences on the report's held-out views; pixel and
+3D point are picked separately and LiDAR is never drawn on the image, so picks
+stay independent of the calibration they judge. When changing calibration selection, validation, cache
 identity or rollout, read `src/camera_calibration/README.md` and
 `docs/camera_calibration_measurements.md`.
 
@@ -260,13 +281,12 @@ Details: `src/ingest/README.md`; measurements: `docs/ingest_measurements.md`.
   rosbag2 storage plugin, and stops rather than write artifacts that look
   complete but aren't.
 - **Profiles.** `ingest.yaml` (nuScenes); `ingest.wato.yaml` (8 rectified pano
-  cameras, per-corner LiDARs, eidos `liso/odometry`, `ego_frame:
+  cameras, only `lidar_cc`, eidos `liso/odometry`, `ego_frame:
   base_footprint`); `ingest.wato_6cam.yaml` = `ingest.wato.yaml` without
   `PANO_EE` / `PANO_WW` (`ring_road_corrected`, May 30 tests 2–3);
-  `ingest.wato_no_lidar_nw.yaml` = `ingest.wato.yaml` without `lidar_nw`
-  (`sensors_2026_07_07-23_01_24_2`, whose `lidar_nw` topic is empty); a test
+  `ingest.wato_no_lidar_nw.yaml` is a compatibility alias of `ingest.wato.yaml`; a test
   fails if any other value drifts. lidar_preprocessing's `.wato.yaml` pairs
-  with them (`per_lidar`: `lidar_cc` vlp32c, `lidar_ne`/`lidar_nw` vlp16;
+  with them (`per_lidar`: `lidar_cc` vlp32c;
   `frame_sync.canonical_lidar: lidar_cc`; `header_stamp_at: sweep_end`, from the
   car's `timestamp_first_packet: false`, since WATO Velodyne `time` fields are
   all zero and deskew synthesizes times from azimuth). So does
@@ -275,7 +295,7 @@ Details: `src/ingest/README.md`; measurements: `docs/ingest_measurements.md`.
   drift): without it the rack is tracked as a truck. `./watod run perception_2d
   ego-mask` drafts a new rig's polygons from a run without them and, after a
   run with them, reports body masklets they miss.
-- **WATO LiDAR: ingest the per-corner topics**, not `/lidar/all/points_merged`:
+- **WATO LiDAR: ingest only `/lidar_cc/velodyne_points`**:
   classify's ray traversal assumes one sensor origin per sweep, and merged
   clouds leak static structure into `dynamic_map.npz`.
 - **Pose source: dense and smooth.** `pose_requirements` aborts a chunk whose
@@ -314,7 +334,10 @@ Details: `src/ingest/README.md`; measurements: `docs/ingest_measurements.md`.
   `/wato_world/tracks`, `/wato_world/refined_labels`), in the ego frame at
   each frame's reference time (the bag has no usable TF for the pipeline's
   world frame); each instant from the chunk that owns it, or one `--chunk`
-  over its decoded window. `src/ingest/README.md`.
+  over its decoded window. `--masks` / `--depth` add perception_2d's masklets
+  and depth drawn per camera image (`/wato_world/{masks,depth}/<cam>`, JPEG
+  `CompressedImage`), stamped with the source image's header stamp, log time
+  and `frame_id`. `src/ingest/README.md`.
 
 ## CI / ghcr
 
