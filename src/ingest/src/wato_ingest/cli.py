@@ -10,7 +10,8 @@ Bag preparation:
 
 Debugging:
   debug-bag           Copy the source bag with the bag's proposals, tracks and
-                      refined labels added as MarkerArray topics, for
+                      refined labels added as MarkerArray topics, and
+                      optionally masks and depth as per-camera images, for
                       Foxglove / RViz.
 
 Debug and rerun commands:
@@ -247,6 +248,25 @@ def trim_bag_cmd(
     help="Output chunk compression.",
 )
 @click.option("--overwrite", is_flag=True, help="Replace an existing output.")
+@click.option(
+    "--masks",
+    is_flag=True,
+    help="Add /wato_world/masks/<cam>: each camera image with perception_2d's "
+    "masklets drawn on it, stamped as its source image.",
+)
+@click.option(
+    "--depth",
+    is_flag=True,
+    help="Add /wato_world/depth/<cam>: perception_2d's metric depth per camera "
+    "image, coloured on a 1-100 m log scale, stamped as its source image.",
+)
+@click.option(
+    "--workers",
+    default=min(16, os.cpu_count() or 1),
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Processes drawing --masks / --depth images.",
+)
 def debug_bag_cmd(
     bag_id: str,
     chunk_id: str | None,
@@ -255,10 +275,14 @@ def debug_bag_cmd(
     out_path: str | None,
     compression: str,
     overwrite: bool,
+    masks: bool,
+    depth: bool,
+    workers: int,
 ) -> None:
     """Copy the source bag with the bag's proposals, tracks and refined labels
-    added as MarkerArray topics (/wato_world/..., in the ego frame)."""
-    from wato_ingest import debug_bag
+    added as MarkerArray topics (/wato_world/..., in the ego frame), and
+    optionally perception_2d's masks and depth as per-camera images."""
+    from wato_ingest import debug_bag, debug_images
     from wato_ingest.inputs import trim
 
     if static_topics and chunk_id is None:
@@ -281,6 +305,15 @@ def debug_bag_cmd(
             static_topics=static_topics,
             compression=compression,
             overwrite=overwrite,
+            image_layers=tuple(
+                layer
+                for layer, on in (
+                    (debug_images.MASKS, masks),
+                    (debug_images.DEPTH, depth),
+                )
+                if on
+            ),
+            workers=workers,
         )
     except (debug_bag.DebugBagError, trim.TrimError) as e:
         click.echo(f"debug-bag: {e}", err=True)

@@ -233,6 +233,53 @@ def test_default_output_names_the_bag_and_chunk(tmp_path):
     )
 
 
+def _camera_row(cam, seq, header_ms, log_ms, valid=True):
+    return dict(
+        cam_id=cam,
+        camera_seq=seq,
+        image_path=f"file:///art/cam_{cam}/{seq:06d}.jpg",
+        header_timestamp_ns=header_ms * MS,
+        record_timestamp_ns=log_ms * MS,
+        valid=valid,
+    )
+
+
+class _Masklets:
+    def __init__(self, at):
+        self._at = at
+
+    def at(self, cam, seq):
+        return self._at.get((cam, seq), [])
+
+
+def test_chunk_images_are_the_owned_images_with_their_source_stamps():
+    rows = [
+        _camera_row("CAM_A", 0, 90, 120),  # before the window
+        _camera_row("CAM_A", 1, 140, 166),
+        _camera_row("CAM_B", 1, 150, 171),
+        _camera_row("CAM_B", 2, 190, 215, valid=False),
+        _camera_row("CAM_A", 2, 200, 226),  # the window's end is the next chunk's
+    ]
+    index = _Masklets({("CAM_A", 1): ["m-1", "m-2"]})
+    frame_ids = {"CAM_A": "cam_a", "CAM_B": "cam_b"}
+    images = debug_bag.chunk_images(
+        "b", "0000", rows, (100 * MS, 200 * MS), frame_ids, index
+    )
+    assert [(f.cam_id, f.camera_seq) for f in images] == [("CAM_A", 1), ("CAM_B", 1)]
+    a, b = images
+    assert (a.header_ns, a.log_ns, a.frame_id) == (140 * MS, 166 * MS, "cam_a")
+    assert a.image_path == "/art/cam_CAM_A/000001.jpg"
+    assert a.masklets == ("m-1", "m-2") and b.masklets == ()
+    with pytest.raises(debug_bag.DebugBagError, match="CAM_C"):
+        debug_bag.chunk_images(
+            "b", "0000", [_camera_row("CAM_C", 0, 150, 160)], (0, 1e18), frame_ids
+        )
+
+
+def test_image_topics_name_the_layer_and_camera():
+    assert debug_bag.image_topic("masks", "PANO_NN") == "/wato_world/masks/pano_nn"
+
+
 # ---------------------------------------------------------------------------
 # End to end: needs rosbag2 (ingest container) and the mcap CLI.
 # ---------------------------------------------------------------------------
@@ -255,6 +302,7 @@ def _source_bag(path):
 def _read(path):
     import rosbag2_py
     from rclpy.serialization import deserialize_message
+    from sensor_msgs.msg import CompressedImage
     from visualization_msgs.msg import MarkerArray
 
     r = rosbag2_py.SequentialReader()
@@ -268,6 +316,8 @@ def _read(path):
         topic, data, t = r.read_next()
         if types[topic] == debug_bag.MARKER_ARRAY:
             data = deserialize_message(data, MarkerArray)
+        elif types[topic] == debug_bag.COMPRESSED_IMAGE:
+            data = deserialize_message(data, CompressedImage)
         msgs.append((topic, t, data))
     return types, msgs
 
@@ -339,3 +389,93 @@ def test_overlay_merges_into_the_source(tmp_path):
     ]
     # Frames where a layer has no box only clear it.
     assert len(at("/wato_world/tracks")[1][1].markers) == 3
+
+
+@pytest.mark.skipif(shutil.which("mcap") is None, reason="mcap CLI not installed")
+def test_images_replay_with_their_source_images(tmp_path, monkeypatch):
+    """Each camera image's drawn layers carry its header stamp, log time and
+    frame_id, interleaved with the boxes in log-time order."""
+    from PIL import Image
+
+    from wato_common.artifacts import masklets
+    from wato_common.artifacts.masklets import MaskletRecord
+    from wato_ingest import debug_images
+
+    monkeypatch.setenv("ARTIFACT_ROOT_URI", f"file://{tmp_path}")
+    _source_bag(tmp_path / "src")
+    m = np.zeros((48, 64), bool)
+    m[10:30, 10:40] = True
+    masklets.write_mask("b", "0000", "m-1", 0, m)
+    rec = MaskletRecord(
+        masklet_id="m-1", cam_id="CAM_A", cls="car", score=0.9, frames_present=(0,)
+    )
+    images = []
+    for cam, seq, header_ms, log_ms in [
+        ("CAM_A", 0, 95, 120),
+        ("CAM_B", 0, 98, 121),
+        ("CAM_A", 1, 145, 170),
+    ]:
+        path = tmp_path / f"{cam}_{seq}.jpg"
+        Image.fromarray(np.full((48, 64, 3), 100, np.uint8)).save(path)
+        images.append(
+            debug_images.ImageFrame(
+                bag_id="b",
+                chunk_id="0000",
+                cam_id=cam,
+                camera_seq=seq,
+                image_path=str(path),
+                header_ns=header_ms * MS + 7,
+                log_ns=log_ms * MS,
+                frame_id=cam.lower(),
+                masklets=(rec,) if (cam, seq) == ("CAM_A", 0) else (),
+            )
+        )
+    frames = debug_bag.chunk_frames(
+        "0000",
+        debug_bag.proposal_items(
+            [
+                _proposal("fused-a", "fused", 100, sweep_id=1),
+                _proposal("fused-b", "fused", 150, sweep_id=2),
+            ]
+        ),
+        _poses(0, 400),
+        window=(-math.inf, math.inf),
+        layers=["proposals/fused"],
+    )
+    counts = debug_bag.write_overlay(
+        tmp_path / "overlay",
+        frames,
+        "base_link",
+        images,
+        (debug_images.MASKS, debug_images.DEPTH),
+        workers=2,
+    )
+    assert counts == {
+        "/wato_world/proposals/fused": 2,
+        "/wato_world/masks/cam_a": 2,
+        "/wato_world/masks/cam_b": 1,
+        "/wato_world/depth/cam_a": 2,
+        "/wato_world/depth/cam_b": 1,
+    }
+    out = tmp_path / "out.mcap"
+    for cmd in debug_bag.merge_commands(
+        debug_bag.resolve_mcap_file(str(tmp_path / "src")),
+        debug_bag.resolve_mcap_file(str(tmp_path / "overlay")),
+        out,
+        (tmp_path / "w.mcap", tmp_path / "s.mcap", tmp_path / "o.mcap"),
+        window=None,
+        static_topics=[],
+        compression="none",
+    ):
+        subprocess.run(cmd, check=True, capture_output=True)
+    types, msgs = _read(out)
+    assert types["/wato_world/masks/cam_a"] == debug_bag.COMPRESSED_IMAGE
+    mine = [(name, t) for name, t, _ in msgs if name.startswith("/wato_world/")]
+    assert [t for _, t in mine] == sorted(t for _, t in mine)
+    masks = [(t, msg) for name, t, msg in msgs if name == "/wato_world/masks/cam_a"]
+    (t0, first), (t1, _) = masks
+    assert (t0, t1) == (120 * MS, 170 * MS)  # the source images' log times
+    stamp = first.header.stamp.sec * 1_000_000_000 + first.header.stamp.nanosec
+    assert stamp == 95 * MS + 7 and first.header.frame_id == "cam_a"
+    assert first.format == debug_bag.JPEG_FORMAT
+    assert bytes(first.data[:2]) == b"\xff\xd8"  # a JPEG
