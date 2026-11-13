@@ -7,13 +7,11 @@ to both boxes' points, with the lifted box's class. A box no other source
 matched is fused on its own, class-less if it has no class, so every object
 either source found has a fused row.
 
-A fusion_detector box (detector.py) then joins the object — pair or lone box —
-it shares the most points with, by the same rule, one to one. The object keeps
-the detector's box: the model predicts the whole object, where a fit to the
-points covers only the sides LiDAR hit (refitting would discard exactly what
-the detector adds). The class stays the lifted one when there is one, else
-the detector's. A detector box no object matched is fused on its own when
-fusion_detector.add_unmatched is set.
+A fusion_detector box (detector.py) then joins the object it shares the most
+points with, by the same rule, one to one. It is recorded as supporting
+provenance; the object's geometry, class, score and point count remain those
+of the motion/lifted sources. An unmatched detector box can supply a new
+object when fusion_detector.add_unmatched is set.
 """
 
 from __future__ import annotations
@@ -28,7 +26,7 @@ from wato_common.artifacts.lidar_sweeps import Frame
 from wato_common.artifacts.proposals import FUSED, Proposal
 from wato_common.tracking import fit_bev_box
 from wato_common.geometry.objects import to_ground
-from wato_proposal_generation.boxes import SourceBox, box_of, proposal
+from wato_proposal_generation.boxes import SourceBox, proposal
 from wato_proposal_generation.config import FusionConfig
 from wato_proposal_generation.frame_points import FramePoints
 
@@ -107,6 +105,8 @@ def fuse(
     cfg: FusionConfig,
     detector: Optional[list[SourceBox]] = None,
     add_unmatched_detector: bool = True,
+    unmatched_detector_min_score: float = 0.6,
+    unmatched_detector_min_points: int = 5,
 ) -> list[Proposal]:
     pairs = match(mos, lifted, cfg)
     matched_m = {i for i, _ in pairs}
@@ -127,32 +127,7 @@ def fuse(
         return f"fused-{frame.reference_sweep_id:06d}-{len(out)}"
 
     for k, o in enumerate(objects):
-        det = detector[joined[k]] if k in joined else None
-        if det is not None:
-            members = [s.proposal for s in (o.mos, o.lifted, det) if s is not None]
-            lift = o.lifted.proposal if o.lifted is not None else None
-            union = o.members | det.members
-            out.append(
-                replace(
-                    proposal(
-                        next_id(),
-                        frame,
-                        box_of(det.proposal),
-                        cls=lift.cls
-                        if lift is not None and lift.cls
-                        else det.proposal.cls,
-                        score=float(np.mean([p.score for p in members])),
-                        provenance=FUSED,
-                        lidar_point_count=int(union.sum()),
-                        supporting_cam_ids=lift.supporting_cam_ids if lift else (),
-                        supporting_masklet_ids=lift.supporting_masklet_ids
-                        if lift
-                        else (),
-                    ),
-                    member_proposal_ids=tuple(p.proposal_id for p in members),
-                )
-            )
-        elif o.mos is not None and o.lifted is not None:
+        if o.mos is not None and o.lifted is not None:
             m, f = o.mos.proposal, o.lifted.proposal
             union = o.members
             out.append(
@@ -173,10 +148,21 @@ def fuse(
             )
         else:
             out.append(_alone((o.mos or o.lifted).proposal, next_id()))
+        if k in joined:
+            p = out[-1]
+            out[-1] = replace(
+                p,
+                member_proposal_ids=p.member_proposal_ids
+                + (detector[joined[k]].proposal.proposal_id,),
+            )
     if add_unmatched_detector:
         taken = set(joined.values())
         for j, d in enumerate(detector):
-            if j not in taken:
+            if (
+                j not in taken
+                and d.proposal.score >= unmatched_detector_min_score
+                and int(d.members.sum()) >= unmatched_detector_min_points
+            ):
                 out.append(_alone(d.proposal, next_id()))
     return out
 

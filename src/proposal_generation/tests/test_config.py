@@ -20,13 +20,15 @@ def test_shipped_configs_load():
 
 
 def test_wato_profile_is_the_default_with_the_rigs_canonical_lidar():
-    """lidar_preprocessing.wato.yaml groups frames on lidar_cc; nothing else
-    may drift from the default profile."""
+    """WATO uses the centre LiDAR and enables supplemental BEVFusion proposals."""
     default = load_config(str(CONFIG_DIR / "proposal_generation.yaml")).model_dump()
     wato = load_config(str(CONFIG_DIR / "proposal_generation.wato.yaml")).model_dump()
     assert wato["frames"]["canonical_lidar"] == "lidar_cc"
     assert default["frames"]["canonical_lidar"] is None
     wato["frames"]["canonical_lidar"] = None
+    assert wato["fusion_detector"]["enabled"] is True
+    assert default["fusion_detector"]["enabled"] is False
+    wato["fusion_detector"]["enabled"] = False
     assert wato == default
 
 

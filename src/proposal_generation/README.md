@@ -10,8 +10,9 @@ Measurements behind the defaults: `docs/proposal_generation_measurements.md`.
 
 ## How a proposal is made
 
-Per frame — lidar_preprocessing's frame_sync tick: a `lidar_cc` sweep and the
-corner sweeps matched to it on WATO, one sweep on a single-LiDAR bag:
+Per frame — lidar_preprocessing's frame_sync tick: one `lidar_cc` sweep on
+the current WATO profile (historical multi-LiDAR inputs can contain matched
+corner sweeps):
 
 - **`lidar_mos`**: each Step F cluster passing the gates (`motion_score > 1`,
   `n_sources ≥ 2`, `frac_persistent < 0.5`; `docs/lidar_preprocessing_measurements.md`)
@@ -70,14 +71,19 @@ corner sweeps matched to it on WATO, one sweep on a single-LiDAR bag:
   a box fit to both point sets, with the lifted class. Every other box is
   fused on its own, class-less if it has none, so each object either source
   found has one fused row. A fusion_detector box then joins the object it
-  shares the most points with by the same rule, one to one; the object takes
-  the detector's box (refitting would discard the sides it predicts), keeps
-  the lifted class if any (else the detector's) and averages the members'
-  scores. A detector box no object matched is fused on its own when
-  `fusion_detector.add_unmatched`. `member_proposal_ids` lists the source rows.
+  shares the most points with by the same rule, one to one. The matched
+  object's geometry, class, score, point count and camera evidence remain
+  those of the motion/lifted sources; the detector adds provenance only.
+  An unmatched detector box can add an object when `fusion_detector.add_unmatched`,
+  score ≥ `unmatched_min_score` (0.6, the tracker birth threshold) and point
+  count ≥ `unmatched_min_points` (5 non-ground returns, the lifted minimum).
+  `member_proposal_ids` lists the source rows. Raw low-score or unsupported
+  detector proposals remain available for auditing but do not become new
+  fused objects.
 
 Scores are placeholders until per-source reliability is measured: lidar_mos
-`min(1, motion_score / 2)`, lifted `lift_confidence`, fused the members' mean.
+`min(1, motion_score / 2)`, lifted `lift_confidence`, fused the independent
+members' mean (detector-only objects keep the detector score).
 Boxes are yaw-only and undirected (heading mod π). Neighbouring chunks overlap
 by 6 s and both label the shared span; tracking links them.
 
@@ -226,3 +232,10 @@ Set `lifted.support_method: scan_clusters` to opt in. Under that method,
 substitutes largest-group filtering for rejected matches. The legacy radius
 fields are only used with `support_method: largest_group`. Ground masks are
 required for either method: proposal points remain non-ground.
+
+## Calibration identity
+
+Proposal generation preserves the calibration identity of lifting and detector
+inputs and rejects mixed identities or stale cached outputs. Camera overlays
+choose `calibration_source: recorded|validated` (default recorded) and check
+that it matches the proposal inputs. See [camera calibration](../camera_calibration/README.md).

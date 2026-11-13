@@ -17,7 +17,8 @@ from typing import Optional
 import numpy as np
 from PIL import Image, ImageDraw
 
-from wato_common.artifacts.calibration import Calibration
+from wato_common.artifact_store import chunk_root
+from wato_common.artifacts import calibration_refinement as camera_calibration
 from wato_common.artifacts.frame_index import CameraFrame, FrameIndex
 from wato_common.geometry import CameraModel, invert_se3, project_points
 from wato_common.tracking import box_corners_3d
@@ -94,7 +95,11 @@ def write_camera(
     """Every `every`-th image of each camera (all cameras unless `cameras`)."""
     view = data.load(cfg, bag_id, chunk_id, show)
     ref_of_sweep = {s: f.reference_sweep_id for f in view.frames for s in f.sweep_ids}
-    calib = Calibration.load(bag_id)
+    selection = camera_calibration.resolve(bag_id, cfg.calibration_source, cameras)
+    camera_calibration.require_upstream(
+        selection, [f"{chunk_root(bag_id, chunk_id)}/manifest_proposal_generation.json"]
+    )
+    calib = selection.calibration
     out = Path(out_dir or data.default_dir(bag_id, chunk_id, f"proposals_cam_{show}"))
     written = []
     for cam_id, frames in FrameIndex.load(bag_id, chunk_id).by_camera().items():
@@ -111,7 +116,7 @@ def write_camera(
             n = draw_boxes(img, boxes, cam.model_for_image(img.size), cam_T_world, show)
             ImageDraw.Draw(img).text(
                 (10, 10),
-                f"{cam_id} seq {frame.camera_seq} · {n} {show} boxes",
+                f"{cam_id} seq {frame.camera_seq} · {n} {show} boxes · calibration={selection.source}",
                 fill=(255, 255, 255),
             )
             path = out / cam_id / f"{frame.camera_seq:06d}.jpg"

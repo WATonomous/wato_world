@@ -138,15 +138,19 @@ class FusionDetectorConfig(BaseModel):
             c: c for c in ("car", "truck", "bus", "motorcycle", "bicycle", "pedestrian")
         }
     )
-    # A detector box no other source matched becomes a fused row of its own
-    # (an object only the model found). False: detector boxes only reshape
-    # objects the other sources found.
+    # An unmatched detector can add recall. Matched detections supply
+    # provenance only, preserving the other sources' box/class/score/support.
     add_unmatched: bool = True
+    # New objects need the existing tracker's detector birth confidence and
+    # actual non-ground returns. Low-score raw detections remain auditable.
+    unmatched_min_score: float = Field(default=0.6, ge=0.0, le=1.0)
+    unmatched_min_points: int = Field(default=5, ge=1)
 
 
 class ComponentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    calibration_source: Literal["recorded", "validated"] = "recorded"
     frames: FramesConfig = Field(default_factory=FramesConfig)
     lidar_mos: LidarMosConfig = Field(default_factory=LidarMosConfig)
     lifted: LiftedConfig = Field(default_factory=LiftedConfig)
