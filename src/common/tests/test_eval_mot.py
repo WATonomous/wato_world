@@ -5,7 +5,15 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from wato_common.eval.mot import MotFrame, clear, distance_similarity, hota, identity
+from wato_common.eval.mot import (
+    IdSwitch,
+    MotFrame,
+    clear,
+    distance_similarity,
+    hota,
+    id_switches,
+    identity,
+)
 
 
 def _frames(gt_xy, tracks):
@@ -74,6 +82,18 @@ def test_clear_keeps_the_previous_pair_over_a_closer_box():
     f = _frames([0, 1], [[("a", 0)], [("a", 1.5), ("b", 1.0)]])
     c = clear(f)
     assert (c["IDSW"], c["TP"], c["FP"]) == (0, 2, 1)
+
+
+def test_id_switches_are_the_events_clear_counts():
+    # a → b is a hand-over; after an untracked frame, b → c is a switch
+    # against the last track matched, not the previous frame's.
+    f = _frames(
+        [0, 1, 2, 3, 4],
+        [[("a", 0)], [("b", 1)], [("b", 9)], [("c", 3)], [("c", 4)]],
+    )
+    events = id_switches(f)
+    assert len(events) == clear(f)["IDSW"] == 2
+    assert events == [IdSwitch(1, "g", "a", "b"), IdSwitch(3, "g", "b", "c")]
 
 
 def test_empty_frames_count_misses_and_false_positives():

@@ -2,10 +2,11 @@
 
 Each fused row is one detection. Its member rows say what backs it: a
 lidar_mos member is Step F motion evidence, a lifted member carries SAM2's
-instance id (the matching key) and its confidence, a fusion_detector member
+instance id (the matching key), its masklets and its confidence, a fusion_detector member
 carries BEVFusion's score. A detection is strong when lidar_mos and lifted
-agree on it, its lift is confident, or its detector score is high (config
-`strong`). The detector and lifting share cameras, so their agreement alone
+agree on it, its lift is confident, or it is detector-only with a high score
+(config `strong`). Matched detector scores never promote independent evidence.
+The detector and lifting share cameras, so their agreement alone
 doesn't count as two sources. A box backed only by the detector starts a
 track only when scored high enough (ByteTrack's birth rule); otherwise it can
 only extend one.
@@ -46,6 +47,15 @@ class Detection:
     has_lidar_mos: bool
     detector_score: Optional[float] = None  # its fusion_detector member's
     can_birth: bool = True  # may start a track when no track takes it
+    masklets: tuple[str, ...] = ()  # its lifted member's masklets (appearance)
+
+    @property
+    def detector_only(self) -> bool:
+        return (
+            self.detector_score is not None
+            and self.key is None
+            and not self.has_lidar_mos
+        )
 
     @property
     def box(self) -> Box3D:
@@ -86,8 +96,8 @@ def detection(
         and (lift.lift_confidence or 0.0) >= cfg.min_lift_confidence
         and (lift_points or 0) >= cfg.min_lift_points
     )
-    detected = det is not None and det.score >= cfg.min_detector_score
     detector_only = det is not None and lift is None and not has_mos
+    detected = detector_only and det.score >= cfg.min_detector_score
     return Detection(
         proposal=fused,
         strong=two_source or confident or detected,
@@ -96,14 +106,15 @@ def detection(
         has_lidar_mos=has_mos,
         detector_score=det.score if det is not None else None,
         can_birth=not detector_only or det.score >= cfg.min_detector_birth_score,
+        masklets=lift.supporting_masklet_ids if lift is not None else (),
     )
 
 
 def suppress_duplicates(
     dets: list[Detection], cfg: DuplicatesConfig
 ) -> list[Detection]:
-    """CenterPoint's circle NMS over one frame's detections (config
-    `duplicates`): in rank order, each kept box drops the lower-ranked boxes
+    """CenterPoint's circle NMS, independent boxes before detector-only additions
+    (config `duplicates`): each kept box drops lower-ranked boxes
     of its class group whose BEV centres lie within sqrt(min_radius) of it.
     Boxes with no class, or a class in no group, are always kept."""
     radius = {c: g.min_radius for g in cfg.groups for c in g.classes}
@@ -111,6 +122,7 @@ def suppress_duplicates(
     order = sorted(
         range(len(dets)),
         key=lambda i: (
+            dets[i].detector_only,
             not dets[i].strong,
             -(dets[i].proposal.lidar_point_count or 0),
             i,

@@ -327,3 +327,41 @@ def test_history_records_the_filter_velocity():
     (track,) = trk.all_tracks()
     assert track.history[0].velocity == (0.0, 0.0, 0.0)
     assert track.history[-1].velocity[0] == pytest.approx(10.0, abs=1.0)
+
+
+def test_member_cost_admits_a_pair_the_shape_gates_refuse_within_the_distance_gate():
+    """tracking's appearance ReID: evidence that two boxes are one object
+    stands in for the overlap a one-sided box doesn't have."""
+    a = _box(cx=0.0, cy=0.0, l=4.0, w=1.8)
+    b = _box(cx=0.0, cy=0.9, l=0.3, w=1.8)  # a sliver beside a: gates refuse
+    asked = []
+
+    def cost(det, trk):
+        asked.append((tuple(det), tuple(trk)))
+        return 0.1 if "same" in det and "same" in trk else None
+
+    trk = MultiObjectTracker(member_cost=cost)
+    trk.step(0.0, [a], members=[("same",)])
+    assert trk.step(0.1, [b], members=[("same", "new")]) == [0]
+    # The track now carries every member it took.
+    assert trk.step(0.2, [b], members=[("new",)]) == [1]
+    assert asked[-1] == (("new",), ("same", "new"))
+    # Never past the distance gate (T_d = 2 m): the pair isn't even priced.
+    asked.clear()
+    assert trk.step(0.3, [_box(cx=30.0)], members=[("same",)]) == [2]
+    assert asked == []
+
+
+def test_member_cost_picks_between_two_tracks_in_gate():
+    trk = MultiObjectTracker(
+        member_cost=lambda det, trk: 0.0 if set(det) & set(trk) else None
+    )
+    trk.step(0.0, [_box(cx=0.0), _box(cx=1.0)], members=[("a",), ("b",)])
+    # One box, nearer track 0, that looks like track 1's object.
+    assert trk.step(0.1, [_box(cx=0.4)], members=[("b",)]) == [1]
+
+
+def test_without_members_member_cost_changes_nothing():
+    trk = MultiObjectTracker(member_cost=lambda det, trk: 0.0)
+    trk.step(0.0, [_box(cx=0.0)])
+    assert trk.step(0.1, [_box(cx=0.0, cy=0.9, l=0.3, w=1.8)]) == [1]

@@ -3,7 +3,8 @@
 Tracks over proposal_generation's fused boxes, one chunk at a time, linked
 across the spans neighbouring chunks share into the bag's tracks, and what
 each track is: its class, and whether it is parked or moving. CPU only.
-DINOv2 ReID comes later. Measurements: `docs/tracking_measurements.md`.
+Appearance ReID from perception_2d's DINOv2 descriptors is built in and off
+by default ("Appearance"). Measurements: `docs/tracking_measurements.md`.
 
 ## How a track is made
 
@@ -12,10 +13,11 @@ step; then the chunks' tracks are linked and judged:
 
 - **Detections.** A fused row is a detection. It is *strong* when two sources
   agree on it (a lidar_mos + lifted pair), its lifted box has confidence ≥
-  0.5 and ≥ 20 retained original seed points, or its `fusion_detector` member
-  scores ≥ 0.5 (ByteTrack's high-score split, the car's tracker on BEVFusion).
+  0.5 and ≥ 20 retained original seed points, or it is detector-only with
+  score ≥ 0.5 (ByteTrack's high-score split).
   A detector box agreeing with a lifted one is not two sources: both rest on
-  the cameras. A box backed only by the detector starts a track only when it
+  the cameras. A matched detector never promotes weak independent evidence
+  to strong. A box backed only by the detector starts a track only when it
   scores ≥ 0.6 (ByteTrack's new-track threshold); below that it can only
   extend a track. Scan-cluster additions supply
   geometry, not camera evidence. Legacy proposals without the separate seed
@@ -23,7 +25,8 @@ step; then the chunks' tracks are linked and judged:
   frames) is its key.
 - **Duplicates.** Before association, each frame's boxes go through
   CenterPoint's circle NMS: a box within 2 m of a higher-ranked car box (3.46 m
-  truck, 3.16 m bus) is dropped, ranked strong first, then by LiDAR points. A
+  truck, 3.16 m bus) is dropped. Motion/lifted boxes rank before detector-only
+  additions; within each tier, strong first, then by LiDAR points. A
   second box on one object, about 1 m beside the box its track takes and not
   overlapping it, would otherwise start a second track. Pedestrians and
   two-wheelers aren't suppressed (CenterPoint's pedestrian radius removed real
@@ -32,7 +35,8 @@ step; then the chunks' tracks are linked and judged:
   which Step F scores motion with, with SimpleTrack's cost: 1 − GIoU (3D),
   matched by the Hungarian method if GIoU > −0.5. GIoU, unlike IoU, still
   ranks a one-sided sliver beside its track's whole box. Tracking adds three
-  cues: strong boxes are matched before weak ones (SimpleTrack); a box with the
+  cues: motion/lifted detections match before detector-only additions, with
+  strong before weak within each tier (SimpleTrack); a box with the
   track's last key costs less; and such a box is held only to a 2 m centre
   distance, since a one-sided box's overlap swings as its visible face
   changes. A missed track coasts until the chunk ends (Immortal Tracker);
@@ -45,6 +49,8 @@ step; then the chunks' tracks are linked and judged:
   both predicted); one to one by the blossom algorithm, repeated until
   nothing fuses. Known, different classes are never fused; tracks sharing a
   lifted instance fuse whatever their overlap when within 2 m.
+- **Appearance** (`appearance.py`, off by default; below): two tracks whose
+  masklets look alike count as sharing an identity in the re-link.
 - **Linking across chunks** (below): a chunk's track and the next chunk's
   that agree in their shared span are one track of the bag.
 - **Motion state**, over the whole linked track, one frame per instant:
@@ -59,6 +65,44 @@ step; then the chunks' tracks are linked and judged:
 lidar_preprocessing's `motion_clusters.parquet` `track_hint_id` is chunk-local
 and geometry-only; tracking doesn't use it. Step F's evidence reaches a track
 through its fused rows (`frac_lidar_mos`).
+
+## Appearance
+
+A box has an identity only while one SAM2 masklet lasts. When the object
+changes camera, or SAM2 loses it and a later detection starts a new masklet,
+geometry alone decides whether the new box continues the track. With
+`appearance.enabled`, perception_2d's descriptors (one unit vector per masklet
+per image, `masklet_embeddings.npz`) add what the two masklets look like:
+
+- **Distance** between two masklets: the smallest cosine distance over their
+  descriptor pairs, each masklet keeping at most `budget` (100) descriptors
+  spread over its images. This is DeepSORT's gallery and GIAOTracker's
+  GlobalLink cost; a track's gallery is the masklets of every box it took.
+- **Use** (BoT-SORT's fusion): a pair that is within the association's 2 m
+  distance gate and looks alike (distance under θ_emb) is feasible whatever
+  its overlap, at cost min(geometric cost, distance / 2). Appearance never
+  admits a pair past the distance gate and never penalises one. `relink`
+  (default) applies it to two tracks that never exist at once;
+  `association` applies it per frame and is off: it doubled the night
+  scene's ID switches.
+- **θ_emb** is calibrated per bag, since no published value fits these
+  descriptors (BoT-SORT read its own off the distance histograms of matching
+  and non-matching pairs). The bag labels its own pairs: two masklets lifting
+  merged into one instance are one object; two of one class in one image
+  with different instances are two. θ_emb is the distance at which both are
+  wrong equally often; the manifest records it with both pair counts and
+  error rates. A bag with no pair of either kind raises: set
+  `appearance.max_cosine_distance` instead. That rule has no published
+  precedent as a whole; the two parts do (BoT-SORT's histograms; Kuo et al.,
+  CVPR 2010, for labelling pairs from a tracker's own output).
+
+It is off by default because it does not pay yet on the scenes with ground
+truth: most ID switches there are between two tracks alive at once on one
+object, which no re-identification joins (`docs/tracking_measurements.md`,
+"Appearance"). A bag tracked before the descriptors existed gets them from
+`./watod run perception_2d embed --bag <bag_id>`; tracking raises without
+them. Descriptors are chunk-local like every id, so linking across chunks
+does not use them.
 
 ## Run
 
@@ -77,7 +121,10 @@ precision, true and false tracks, fragmentation, TrackEval's association
 metrics (AssRe: one object split over tracks; AssPr: one track over objects;
 AssA, HOTA, IDF1, IDSW, Frag; `wato_common.eval.mot`), purity (tracks
 switching objects), seams (objects crossing a chunk seam kept in one track),
-and the parked / moving confusion. Without ground truth (WATO) it reports
+the parked / moving confusion, and each IDSW's cause as SimpleTrack splits
+them (early termination: the old track had no box that frame; wrong
+association: it was matched elsewhere), with flags for a detector-only birth,
+a geometry-source change and a duplicate birth. Without ground truth (WATO) it reports
 instance splits only: the lifted instances whose rows land in several tracks.
 
 ## Output

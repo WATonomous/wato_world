@@ -14,6 +14,7 @@ identity.py), on one sequence, at one similarity threshold:
   pairs (score + 1000 · same id), then maximises similarity. IDSW counts a
   ground-truth object matched to a different tracker id than its last one;
   Frag counts an object's untracked → tracked transitions after its first.
+  id_switches lists the IDSW events themselves, for attributing their causes.
 - **Identity.** One global id-to-id mapping maximising matched detections:
   IDF1 = IDTP / (IDTP + ½IDFP + ½IDFN). An object split into k tracks earns
   credit for its best-mapped one only.
@@ -117,14 +118,29 @@ def hota(frames: Sequence[MotFrame], alpha: float = 0.5) -> dict:
     return out
 
 
-def clear(frames: Sequence[MotFrame], threshold: float = 0.5) -> dict:
-    """MOTA, IDSW and Frag (TrackEval clear.py)."""
+@dataclass(frozen=True)
+class IdSwitch:
+    """One IDSW as clear() counts it: at frame index `frame`, ground-truth
+    object `gt_id` is matched to `tracker_id`, not to `previous_tracker_id`,
+    the last tracker id it was matched to (in any earlier frame)."""
+
+    frame: int
+    gt_id: Hashable
+    previous_tracker_id: Hashable
+    tracker_id: Hashable
+
+
+def _clear(frames: Sequence[MotFrame], threshold: float) -> tuple[dict, list[IdSwitch]]:
+    """TrackEval clear.py's matching, with the IDSW events it counts."""
     data, n_gt, n_tr = _indexed(frames)
     prev_tracker = np.full(n_gt, np.nan)  # last tracker id each gt matched
     prev_step = np.full(n_gt, np.nan)  # tracker id in the previous frame
     frag_count = np.zeros(n_gt)
+    tracker_name: dict[int, Hashable] = {}
+    events: list[IdSwitch] = []
     tp = fn = fp = idsw = 0
-    for g, t, sim in data:
+    for k, (f, (g, t, sim)) in enumerate(zip(frames, data)):
+        tracker_name.update(zip(t.tolist(), f.tracker_ids))
         if len(g) == 0:
             fp += len(t)
             continue
@@ -139,7 +155,17 @@ def clear(frames: Sequence[MotFrame], threshold: float = 0.5) -> dict:
         rows, cols = rows[ok], cols[ok]
         mg, mt = g[rows], t[cols]
         prev = prev_tracker[mg]
-        idsw += int(np.sum(~np.isnan(prev) & (mt != prev)))
+        switched = ~np.isnan(prev) & (mt != prev)
+        idsw += int(np.sum(switched))
+        for r in np.flatnonzero(switched):
+            events.append(
+                IdSwitch(
+                    frame=k,
+                    gt_id=f.gt_ids[rows[r]],
+                    previous_tracker_id=tracker_name[int(prev[r])],
+                    tracker_id=f.tracker_ids[cols[r]],
+                )
+            )
         not_before = np.isnan(prev_step)
         prev_tracker[mg] = mt
         prev_step[:] = np.nan
@@ -149,7 +175,7 @@ def clear(frames: Sequence[MotFrame], threshold: float = 0.5) -> dict:
         fn += len(g) - len(rows)
         fp += len(t) - len(rows)
     n_gt_dets = tp + fn
-    return dict(
+    counts = dict(
         TP=tp,
         FN=fn,
         FP=fp,
@@ -157,6 +183,17 @@ def clear(frames: Sequence[MotFrame], threshold: float = 0.5) -> dict:
         Frag=int(np.sum(frag_count[frag_count > 0] - 1)),
         MOTA=(n_gt_dets - fn - fp - idsw) / max(1, n_gt_dets),
     )
+    return counts, events
+
+
+def clear(frames: Sequence[MotFrame], threshold: float = 0.5) -> dict:
+    """MOTA, IDSW and Frag (TrackEval clear.py)."""
+    return _clear(frames, threshold)[0]
+
+
+def id_switches(frames: Sequence[MotFrame], threshold: float = 0.5) -> list[IdSwitch]:
+    """Every IDSW clear() counts, in frame order."""
+    return _clear(frames, threshold)[1]
 
 
 def identity(frames: Sequence[MotFrame], threshold: float = 0.5) -> dict:

@@ -243,3 +243,118 @@ drops those fragments (`docs/proposal_generation_measurements.md`,
 "Fragments"): 8 duplicates left on scene-1100, 5 on scene-0061, mostly
 pedestrian boxes 0.5-1.3 m apart, which may also be two people walking
 together.
+
+## Appearance
+
+2026-11-12. Both nuScenes GT scenes and scene-0061 as two chunks, on the
+2026-11-07 `*_new` arms' masks and proposals (isolated roots, scripts and
+results: `data/artifacts/eval_runs/2026-11-12_appearance/`). Two small
+scenes, one of them at night (scene-1100): not WATO accuracy.
+
+### Which descriptor
+
+How well a descriptor tells one object's masklets (another camera, or a new
+masklet after SAM2 lost it) from those of same-class objects that come
+within 3 m of it. AUC over masklet pairs labelled through nuScenes GT (106
+same / 258 different pairs on scene-0061, 59 / 51 on scene-1100), 16 images
+per masklet, DINOv2 ViT-L/14 throughout
+(`descriptor_variants/`):
+
+| Descriptor | Compared by | scene-0061 | scene-1100 |
+|---|---|---|---|
+| CLS of the bbox crop, Resize(224) + CenterCrop(224) (before) | mean per masklet (before) | 0.65 | 0.66 |
+| same | closest pair | 0.73 | 0.78 |
+| CLS of the crop resized to a 224 square | mean per masklet | 0.72 | 0.71 |
+| same | closest pair | 0.83 | 0.89 |
+| patch tokens under the mask, 224 square (FFA; now) | mean per masklet | 0.80 | 0.70 |
+| same | closest pair (now) | 0.90 | 0.87 |
+| FFA at 336 (the papers' size) | closest pair | 0.90 | 0.89 |
+| CLS of the crop with the background zeroed, 336 | closest pair | 0.81 | 0.80 |
+
+- Keeping every image's descriptor and comparing by the closest pair is
+  worth more than any change of descriptor (+0.08 to +0.18).
+- The centre crop cost about 0.1: it cuts the ends off a wide or tall object.
+- FFA and the square crop's CLS are level over the two scenes (FFA's paper
+  finds the same split on its own data). FFA is kept because the mask picks
+  its tokens: two overlapping masks in one bounding box get different
+  descriptors, and the CLS of the crop cannot tell them apart.
+- 224 and 336 are level; 224 costs 2.25× fewer tokens.
+- Across cameras the descriptors are much weaker at night: against every
+  same-class object of the scene, cross-camera pairs score 0.96 on
+  scene-0061 and 0.70 on scene-1100, same-camera pairs 1.00 and 0.89.
+
+### The threshold
+
+θ_emb calibrated from the bag's own pairs (`appearance.calibrate`), against
+the same equal-error rule on GT-labelled pairs (16 images per masklet, class
+groups): 0.135 against 0.151 on scene-0061, 0.153 against 0.150 on
+scene-1100. The pipeline's own labels put the threshold where ground truth
+does. As tracking runs it (every image, up to 100 per masklet, same class
+only):
+
+| | scene-0061 | scene-1100 | scene-0061, two chunks |
+|---|---|---|---|
+| θ_emb | 0.116 | 0.126 | 0.114 |
+| same-object / different-object pairs | 80 / 1,003 | 29 / 251 | — |
+| pairs on the wrong side, each kind | 19% / 18% | 31% / 31% | — |
+
+At that threshold a fifth (scene-0061) to a third (scene-1100, night) of
+different objects sharing an image look alike, which is why appearance only
+counts inside the distance gate.
+
+### What it changes
+
+Current tracker (GIoU cost, never-terminating tracks, circle NMS, STWO),
+appearance off against on in each place:
+
+| scene-0061 | off | re-link (default when on) | association | both |
+|---|---|---|---|---|
+| IDSW | 25 | 25 | 26 | 25 |
+| IDF1 | 0.411 | 0.412 | 0.404 | 0.407 |
+| AssRe / AssPr | 0.481 / 0.925 | 0.483 / 0.920 | 0.469 / 0.917 | 0.470 / 0.915 |
+| tracks per object (in one) | 1.51 (0.65) | 1.51 (0.65) | 1.47 (0.65) | 1.44 (0.67) |
+| tracks switching objects | 0.086 | 0.105 | 0.089 | 0.091 |
+
+| scene-1100 | off | re-link | association | both |
+|---|---|---|---|---|
+| IDSW | 7 | 6 | 15 | 15 |
+| IDF1 | 0.667 | 0.675 | 0.667 | 0.667 |
+| AssRe / AssPr | 0.780 / 0.974 | 0.791 / 0.974 | 0.781 / 0.953 | 0.781 / 0.953 |
+| tracks per object (in one) | 1.42 (0.62) | 1.38 (0.65) | 1.58 (0.58) | 1.58 (0.58) |
+| tracks switching objects | 0.061 | 0.062 | 0.121 | 0.121 |
+
+| scene-0061, two chunks | off | re-link | association | both |
+|---|---|---|---|---|
+| IDSW | 25 | 24 | 24 | 23 |
+| IDF1 | 0.415 | 0.416 | 0.413 | 0.418 |
+| AssRe / AssPr | 0.485 / 0.924 | 0.485 / 0.924 | 0.491 / 0.919 | 0.492 / 0.915 |
+| seam crossings kept in one track | 11 / 13 | 11 / 13 | 11 / 13 | 11 / 13 |
+
+Frame recall and precision don't move (appearance changes identities, not
+boxes). In the re-link it is within noise of off; in the per-frame
+association it doubles scene-1100's switches, by handing a track a
+look-alike neighbour inside the 2 m gate. Hence off by default, and
+association off when on.
+
+### Why it changes so little
+
+Each ID switch of the appearance-off run, by whether the old and the new
+track ever exist at once, and what their masklets say (`switch_diag.py`):
+
+| | scene-0061 | scene-1100 |
+|---|---|---|
+| ID switches | 25 | 7 |
+| between two tracks alive at once | 19 | 7 |
+| … that share a masklet / look alike / look different | 6 / 6 / 7 | 2 / 5 / 0 |
+| one track after the other | 6 | 0 |
+| … that share a masklet / look alike / look different | 2 / 2 / 2 | — |
+
+Re-identification joins a track that ended to one that starts later. Three
+quarters of scene-0061's switches and all of scene-1100's are instead
+between two tracks running side by side on one object, which neither the
+association nor the re-link may fuse (their lives overlap). In 19 of those
+26 the two tracks share a masklet or look alike: the evidence that they are
+one object is there, but the step that would use it (fusing concurrent
+duplicate tracks) does not exist. The four sequential switches appearance
+or a shared masklet could join have gaps of 1.3-2.9 s and 1.6-3.4 m, outside
+the re-link's 1 s horizon or its 2 m gate.

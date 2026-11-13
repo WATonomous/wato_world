@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from dataclasses import replace
 from pydantic import ValidationError
 
 from wato_common.artifacts.proposals import Proposal
@@ -171,3 +172,52 @@ def test_other_evidence_lets_a_low_scored_detector_box_start_a_track():
     assert detection(
         fused, {p.proposal_id: p for p in (lift, det)}, StrongConfig()
     ).can_birth
+
+
+@pytest.mark.parametrize("source", ["lifted", "lidar_mos"])
+def test_a_detector_cannot_promote_weak_independent_evidence(source):
+    from wato_tracking.detections import detection
+
+    independent = _member(
+        "lifted-m3-000000" if source == "lifted" else "mos-0",
+        source,
+        score=0.1,
+        lift_confidence=0.1,
+    )
+    det = _member("det-0", "fusion_detector", score=0.99)
+    fused = _member(
+        "fused-0",
+        "fused",
+        member_proposal_ids=(independent.proposal_id, det.proposal_id),
+    )
+    d = detection(fused, {p.proposal_id: p for p in (independent, det)}, StrongConfig())
+    assert not d.strong
+    assert not d.two_source
+
+
+def test_detector_only_box_cannot_suppress_independent_geometry():
+    primary = _det(0.0, points=5, pid="primary")
+    supplemental = replace(
+        _det(0.5, strong=True, points=500, pid="detector"), detector_score=0.99
+    )
+    assert _ids(suppress_duplicates([supplemental, primary], DuplicatesConfig())) == [
+        "primary"
+    ]
+
+
+def test_detector_only_box_cannot_take_a_track_from_independent_evidence():
+    from wato_tracking import tracker
+    from wato_tracking.config import AssociationConfig
+    from wato_tracking.detections import DetFrame
+
+    initial = _det(0.0, pid="initial")
+    primary = _det(0.8, pid="primary")
+    supplemental = replace(_det(0.1, strong=True, pid="detector"), detector_score=0.99)
+    tracks = tracker.run(
+        [
+            DetFrame(0, 0, (initial,)),
+            DetFrame(1, 100_000_000, (primary, supplemental)),
+        ],
+        AssociationConfig(),
+    )
+    assert [o.det.proposal.proposal_id for o in tracks[0]] == ["initial", "primary"]

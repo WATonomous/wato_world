@@ -1,16 +1,19 @@
 """Tracks over one chunk's detections, with wato_common.tracking.
 
 The same Kalman filter Step F scores motion with, Chen's cost or SimpleTrack's
-GIoU, plus the cues tracking adds: strong detections are matched first, a
+GIoU, plus the cues tracking adds: independent detections match before detector
+additions, strong first within each tier, a
 shared lifted instance id lowers a pair's cost, tracks may coast until the
-chunk ends (config `association`), and a low-scored detector-only box never
-starts a track (config `strong`).
+chunk ends (config `association`), a low-scored detector-only box never
+starts a track (config `strong`), and, with `member_cost`, a box whose
+masklets look like a track's may continue it (appearance.py).
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Callable, Optional, Sequence
 
 import numpy as np
 
@@ -31,8 +34,17 @@ class Observation:
     velocity: tuple[float, float, float]  # the filter's velocity then, m/s
 
 
-def run(frames: list[DetFrame], cfg: AssociationConfig) -> list[list[Observation]]:
-    """Every track's observations in time order, tracks by creation."""
+def run(
+    frames: list[DetFrame],
+    cfg: AssociationConfig,
+    member_cost: Optional[
+        Callable[[Sequence[str], Sequence[str]], Optional[float]]
+    ] = None,
+) -> list[list[Observation]]:
+    """Every track's observations in time order, tracks by creation.
+
+    member_cost: appearance.Appearance.member_cost, or None for geometry and
+    instance ids alone."""
     if not frames:
         return []
     t = np.array([f.t_ns for f in frames], dtype=np.int64)
@@ -52,6 +64,7 @@ def run(frames: list[DetFrame], cfg: AssociationConfig) -> list[list[Observation
         else max(1, math.ceil(cfg.max_coast_s / max(period, 1e-3))),
         key_bonus=cfg.instance_bonus,
         key_opens_shape_gates=cfg.instance_opens_shape_gates,
+        member_cost=member_cost,
     )
     for f in frames:
         tracker.step(
@@ -60,6 +73,8 @@ def run(frames: list[DetFrame], cfg: AssociationConfig) -> list[list[Observation
             strong=[d.strong for d in f.dets],
             keys=[d.key for d in f.dets],
             can_birth=[d.can_birth for d in f.dets],
+            priority=[int(d.detector_only) for d in f.dets],
+            members=[d.masklets for d in f.dets] if member_cost else None,
         )
     return [
         [

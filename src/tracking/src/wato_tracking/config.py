@@ -54,9 +54,9 @@ class DuplicatesConfig(BaseModel):
     # vehicle classes: [car] 4, [truck] 12, [bus] 10. Its [motorcycle,
     # bicycle] 0.85 and [pedestrian] 0.175 heads are left out: on scene-1100
     # the pedestrian one removed real neighbours (docs/tracking_measurements.md).
-    # A box with no class (lidar_mos only) is in no group. Ranked strong
-    # first, then by LiDAR points: CenterPoint ranks by detector score, and the
-    # fused score is the same for every box.
+    # A box with no class (lidar_mos only) is in no group. Independent boxes
+    # precede detector-only additions; within each tier rank strong first,
+    # then by LiDAR points.
     enabled: bool = True
     groups: list[DuplicateGroup] = Field(
         default_factory=lambda: [
@@ -99,6 +99,34 @@ class RelinkConfig(BaseModel):
     shared_instance: bool = True
 
 
+class AppearanceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Appearance ReID from perception_2d's masklet descriptors (appearance.py):
+    # two boxes whose masklets look alike, within the association's distance
+    # gate, may be one object whatever their overlap, at BoT-SORT's cost
+    # min(geometric, d_cos / 2). Needs masklet_embeddings.npz on every chunk
+    # (perception_2d, or its `embed` command on a bag tracked earlier).
+    # Off: on the nuScenes GT scenes it changes little, because most ID
+    # switches there are between two tracks alive at once, which no ReID
+    # joins (docs/tracking_measurements.md).
+    enabled: bool = False
+    # Where it counts. relink: two tracks that never exist at once and look
+    # alike fuse when their states are within the distance gate.
+    # association: a box may continue a track it looks like, per frame; off,
+    # since it doubled the ID switches of the night scene, where the
+    # descriptors separate objects poorly.
+    relink: bool = True
+    association: bool = False
+    # Descriptors kept per masklet, evenly over its images: DeepSORT's gallery
+    # budget (nn_budget = 100).
+    budget: int = Field(default=100, ge=1)
+    # θ_emb: two masklets look alike under this cosine distance. None:
+    # calibrated on the bag's own masklet pairs (appearance.calibrate), since
+    # no published value fits these descriptors.
+    max_cosine_distance: Optional[float] = Field(default=None, gt=0.0, le=2.0)
+
+
 class StrongConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -110,7 +138,8 @@ class StrongConfig(BaseModel):
     # box can't take a track a strong one fits.
     min_lift_confidence: float = 0.5
     min_lift_points: int = 20
-    # A box backed by a fusion_detector row scored at least this is strong:
+    # A detector-only box scored at least this is strong; a matched detector
+    # never promotes its motion/lifted evidence:
     # ByteTrack's high-score split (track_thresh), the value the car's tracker
     # runs on BEVFusion (wato_monorepo tracking params.yaml). Lower-scored
     # detector boxes are matched only after the strong ones, as ByteTrack's
@@ -173,6 +202,7 @@ class ComponentConfig(BaseModel):
     association: AssociationConfig = Field(default_factory=AssociationConfig)
     duplicates: DuplicatesConfig = Field(default_factory=DuplicatesConfig)
     relink: RelinkConfig = Field(default_factory=RelinkConfig)
+    appearance: AppearanceConfig = Field(default_factory=AppearanceConfig)
     strong: StrongConfig = Field(default_factory=StrongConfig)
     motion: MotionConfig = Field(default_factory=MotionConfig)
     filter: FilterConfig = Field(default_factory=FilterConfig)

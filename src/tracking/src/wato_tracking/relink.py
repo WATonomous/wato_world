@@ -35,8 +35,12 @@ categories apart); and two tracks that share a lifted instance (SAM2 followed
 one object through both) may be fused whatever their IoU, when their states
 at t are within the association's distance gate (shared_instance), as the
 per-frame association lets a shared instance open its shape gates. A pair
-admitted that way costs 0. Only observed frames are output, as before: a
-fused track's gaps are not filled in.
+admitted that way costs 0. With `member_cost` (appearance.py), two tracks
+whose masklets look alike are admitted the same way, at the smaller of their
+IoU cost and BoT-SORT's appearance cost: GIAOTracker's GlobalLink
+(arXiv 2202.11983 §3.2) links tracklets under an appearance, a time and a
+space threshold, here θ_emb, the horizon and the distance gate. Only observed
+frames are output, as before: a fused track's gaps are not filled in.
 """
 
 from __future__ import annotations
@@ -44,7 +48,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional, Sequence
 
 import networkx as nx
 import numpy as np
@@ -65,6 +69,7 @@ from wato_tracking.tracker import Observation
 log = logging.getLogger(__name__)
 
 _SIMILARITY = {"iou_bev": iou_bev, "iou_3d": iou_3d, "giou_3d": giou_3d}
+MemberCost = Callable[[Sequence[str], Sequence[str]], Optional[float]]
 
 
 @dataclass
@@ -80,6 +85,7 @@ class _Tracklet:
     v_bwd: list[np.ndarray]
     cls: Optional[str] = None
     keys: frozenset = field(default_factory=frozenset)
+    masklets: tuple[str, ...] = ()  # of every observation, first seen first
 
     @property
     def first(self) -> float:
@@ -156,6 +162,7 @@ def _tracklet(order: int, obs: list[Observation], t0_ns: int) -> _Tracklet:
         v_bwd=_backward_velocities(t, [o.det.box for o in obs]),
         cls=track_class(obs),
         keys=frozenset(o.det.key for o in obs if o.det.key is not None),
+        masklets=tuple(dict.fromkeys(m for o in obs for m in o.det.masklets)),
     )
 
 
@@ -171,6 +178,7 @@ def _fuse(a: _Tracklet, b: _Tracklet) -> _Tracklet:
         v_bwd=first.v_bwd + second.v_bwd,
         cls=track_class(obs),
         keys=a.keys | b.keys,
+        masklets=tuple(dict.fromkeys(first.masklets + second.masklets)),
     )
 
 
@@ -179,6 +187,7 @@ def _sweep(
     times: np.ndarray,
     cfg: RelinkConfig,
     max_centre_dist_m: float,
+    member_cost: Optional[MemberCost],
 ) -> tuple[list[_Tracklet], int]:
     """One pass over the frames; returns the tracklets and the fusions made."""
     h = cfg.horizon_s
@@ -213,10 +222,16 @@ def _sweep(
             if sa is None or sb is None:
                 continue
             cost = 1.0 - similarity(sa, sb)
-            if cfg.shared_instance and A.keys & B.keys:
-                d = math.dist((sa.cx, sa.cy, sa.cz), (sb.cx, sb.cy, sb.cz))
-                if d <= max_centre_dist_m:
-                    cost = 0.0
+            near = (
+                math.dist((sa.cx, sa.cy, sa.cz), (sb.cx, sb.cy, sb.cz))
+                <= max_centre_dist_m
+            )
+            if cfg.shared_instance and A.keys & B.keys and near:
+                cost = 0.0
+            elif member_cost and near and A.masklets and B.masklets:
+                alike = member_cost(A.masklets, B.masklets)
+                if alike is not None:
+                    cost = min(cost, alike)
             if cost < cfg.max_cost:
                 g.add_edge(a, b, weight=cfg.max_cost - cost)
         for a, b in nx.max_weight_matching(g):
@@ -231,9 +246,12 @@ def relink(
     frames: list[DetFrame],
     cfg: RelinkConfig,
     max_centre_dist_m: float,
+    member_cost: Optional[MemberCost] = None,
 ) -> list[list[Observation]]:
     """The chunk's tracks with every STWO match fused, ordered by their
-    earliest original track (config `relink`)."""
+    earliest original track (config `relink`). member_cost:
+    appearance.Appearance.member_cost, or None for geometry and instance ids
+    alone."""
     if len(tracks) < 2 or not frames:
         return tracks
     t0 = frames[0].t_ns
@@ -241,7 +259,7 @@ def relink(
     tracklets = [_tracklet(i, obs, t0) for i, obs in enumerate(tracks)]
     total = sweeps = 0
     while True:
-        tracklets, n = _sweep(tracklets, times, cfg, max_centre_dist_m)
+        tracklets, n = _sweep(tracklets, times, cfg, max_centre_dist_m, member_cost)
         sweeps += 1
         total += n
         if n == 0:

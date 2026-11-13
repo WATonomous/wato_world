@@ -28,6 +28,13 @@ tracking:
     class_consistent: true           # never fuse two known, different classes
     shared_instance: true            # same lifted instance: fuse within max_centre_dist_m
 
+  appearance:                        # ReID from perception_2d's masklet descriptors
+    enabled: false                   # needs masklet_embeddings.npz on every chunk
+    relink: true                     # look-alike tracks fuse within max_centre_dist_m
+    association: false               # per-frame use: hurt the night scene
+    budget: 100                      # descriptors kept per masklet (DeepSORT's gallery)
+    max_cosine_distance: null        # θ_emb; null: calibrated on the bag's own pairs
+
   strong:                            # matched to tracks before weak boxes
     min_lift_confidence: 0.5         # a lone lifted box this confident...
     min_lift_points: 20              # ...with this many retained seed points

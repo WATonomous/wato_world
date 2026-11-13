@@ -1,7 +1,7 @@
 [project]
 name = "wato-world-tracking"
 version = "0.1.0"
-description = "4D tracking with 3D Kalman filtering, masklet association, and DINOv2 ReID."
+description = "4D tracking with 3D Kalman filtering, masklet association, and optional DINOv2 ReID."
 requires-python = ">=3.11"
 dependencies = [
     "wato-world-common",
