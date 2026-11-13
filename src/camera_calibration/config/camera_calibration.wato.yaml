@@ -1,0 +1,15 @@
+camera_calibration:
+  # Opt in with --enable for experiments. Pipeline rollout waits for an
+  # independently qualified validation profile and measurements.
+  enabled: false
+  sampling:
+    lidar_id: lidar_cc
+  solver:
+    # rotation_only is an explicit constrained alternative when position is
+    # trusted; it still needs the same independent validation.
+    motion_model: rigid
+  validation:
+    # Automatic validated use stays
+    # unavailable until independent correspondence/control measurements qualify
+    # a named profile. These initial limits are experimental, not certified.
+    qualified: false

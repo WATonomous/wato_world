@@ -1,6 +1,8 @@
 # proposal_generation on the WATO rig: proposal_generation.yaml with the
 # canonical LiDAR of lidar_preprocessing.wato.yaml's frame_sync.
 proposal_generation:
+  # validated requires a qualified, current camera_calibration result.
+  calibration_source: recorded
   frames:
     canonical_lidar: lidar_cc
 
@@ -39,3 +41,14 @@ proposal_generation:
   fusion:
     min_shared_points: 5
     min_shared_fraction: 0.3
+
+  # detection_3d's BEVFusion boxes as a third source (detector.py); needs
+  # detection_3d to have run. Measurements: docs/detection_3d_measurements.md.
+  fusion_detector:
+    enabled: true
+    min_score: 0.08              # the car's confidence_threshold
+    ego_suppression_radius_m: 2.5  # the car's ego zone
+    class_map: {car: car, truck: truck, bus: bus, motorcycle: motorcycle, bicycle: bicycle, pedestrian: pedestrian}
+    add_unmatched: true          # new objects only; matches preserve the other sources
+    unmatched_min_score: 0.6     # tracker's detector birth threshold
+    unmatched_min_points: 5      # non-ground LiDAR support, as for lifted boxes

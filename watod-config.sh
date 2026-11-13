@@ -10,6 +10,7 @@
 ## bind-mounts (live editing inside the container).
 ##
 ## Possible values:
+##   - camera_calibration    : per-bag camera extrinsic candidates and validation
 ##   - ingest                : decode rosbags into Parquet/JSON/PNG/NPZ artifacts
 ##   - perception_2d         : GroundingDINO + SAM2 video tracker + DA-V2 depth + DINOv2 embeddings
 ##   - semantic_lifting      : occlusion-aware LiDAR label lifting from 2D masks + metric depth

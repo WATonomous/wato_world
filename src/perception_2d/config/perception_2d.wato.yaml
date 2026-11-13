@@ -1,3 +1,6 @@
+# Camera extrinsics: validated requires a qualified camera_calibration result.
+calibration_source: recorded
+
 # perception_2d for the WATO rig (ingest.wato*.yaml bags): perception_2d.yaml
 # plus the rig's ego mask; a test fails if anything else drifts.
 #   ./watod run perception_2d --bag <wato_bag> \
@@ -100,7 +103,8 @@ tracking:
   # session each), halving a window that OOMs down to min_sub_clip_frames,
   # then raising if it still cannot fit (never publish a camera with gaps).
   # Object ids reset between windows. `tracking` associates objects by their
-  # 3D boxes, not masklet ids; nothing reads the DINOv2 embeddings yet.
+  # 3D boxes, not masklet ids (and, with its `appearance` on, by the
+  # embeddings below).
   sub_clip_frames: 150
   min_sub_clip_frames: 16
   # SAM2 latches a lost object's id onto a similar nearby object within a few
@@ -227,8 +231,10 @@ depth:
   sky_mask_top_fraction: 0.3
   output_dtype: "float16"
 
-# DINOv2 embeddings per masklet, kept for a later `tracking` ReID (no
-# component reads them yet).
+# One DINOv2 appearance descriptor per masklet per embedded image
+# (masklet_embeddings.npz), for `tracking`'s ReID: the patch tokens under the
+# mask, averaged (models/embeddings.py). every_k_frames: every k-th image of a
+# camera; 0 turns the pass off.
 embeddings:
   model: "dinov2_vitl14"
   every_k_frames: 1

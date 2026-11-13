@@ -80,6 +80,37 @@ def run_cmd(
     )
 
 
+@main.command("embed")
+@click.option("--bag", "bag_id", required=True, help="bag_id or bag path.")
+@click.option(
+    "--chunk", "chunk_id", default=None, help="optional chunk_id; default: all chunks."
+)
+@click.option(
+    "--config",
+    "config_path",
+    default="/ws/src/perception_2d/config/perception_2d.yaml",
+    help="config whose embeddings block is used.",
+)
+@click.option(
+    "--force", is_flag=True, default=False, help="re-embed chunks that have a file."
+)
+def embed_cmd(bag_id: str, chunk_id: str | None, config_path: str, force: bool) -> None:
+    """Write masklet_embeddings.npz for chunks already tracked.
+
+    Recomputes the appearance descriptors tracking's ReID reads from the
+    masks on disk, without re-running the detector or SAM2: for a bag tracked
+    before the file existed.
+    """
+    from wato_perception_2d.pipeline import embed
+
+    embed(
+        load_config(config_path),
+        bag_id=_resolve_bag_id(bag_id),
+        chunk_id=chunk_id,
+        force=force,
+    )
+
+
 @main.command("ego-mask")
 @click.option("--bag", "bag_id", required=True, help="bag_id or bag path.")
 @click.option(

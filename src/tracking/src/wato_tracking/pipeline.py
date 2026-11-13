@@ -1,7 +1,10 @@
 """tracking pipeline orchestrator.
 
-1. Per chunk: its fused proposals as per-frame detections (detections.py), and
-   tracks over them (tracker.py), named "<chunk_id>-<n>".
+1. Per chunk: its fused proposals as per-frame detections (detections.py),
+   tracks over them (tracker.py), and the tracks that never exist at once
+   fused where they are one object (relink.py), named "<chunk_id>-<n>". With
+   `appearance` on, both also read perception_2d's masklet descriptors
+   (appearance.py), under one threshold calibrated over the bag.
 2. Each chunk's tracks linked to the next chunk's across the span they share
    (stitch.py). A chain of linked tracks is one track of the bag, named after
    its first.
@@ -26,13 +29,16 @@ from wato_common import manifest as common_manifest
 from wato_common.artifact_store import (
     chunk_root,
     chunks_index_path,
+    masklet_embeddings_path,
     proposals_path,
     track_summaries_path,
     tracks_path,
 )
 from wato_common.artifacts import proposals, tracks
+from wato_common.artifacts import calibration_refinement as camera_calibration
 from wato_common.artifacts.tracks import TrackFrame, TrackSummary
-from wato_tracking import detections, stitch, summary, tracker
+from wato_tracking import appearance, detections, relink, stitch, summary, tracker
+from wato_tracking.appearance import Calibration, MemberCost
 from wato_tracking.config import ComponentConfig
 from wato_tracking.io import load_chunks
 from wato_tracking.tracker import Observation
@@ -40,12 +46,45 @@ from wato_tracking.tracker import Observation
 log = logging.getLogger(__name__)
 
 
+def bag_appearance(
+    cfg: ComponentConfig, bag_id: str, chunk_ids: list[str]
+) -> tuple[dict[str, MemberCost], Optional[Calibration]]:
+    """Each chunk's appearance cost (config `appearance`), and the calibration
+    behind its threshold; ({}, None) with appearance off."""
+    if not cfg.appearance.enabled:
+        return {}, None
+    return appearance.for_bag(
+        bag_id,
+        chunk_ids,
+        cfg.appearance.budget,
+        cfg.appearance.max_cosine_distance,
+    )
+
+
 def track_chunk(
-    cfg: ComponentConfig, bag_id: str, chunk_id: str
+    cfg: ComponentConfig,
+    bag_id: str,
+    chunk_id: str,
+    member_cost: Optional[MemberCost] = None,
 ) -> list[list[Observation]]:
-    """The chunk's tracks, each its observations in time order."""
-    det_frames = detections.frames(proposals.read(bag_id, chunk_id), cfg.strong)
-    out = tracker.run(det_frames, cfg.association)
+    """The chunk's tracks, each its observations in time order. member_cost:
+    the chunk's entry of bag_appearance, None without appearance."""
+    det_frames = detections.frames(
+        proposals.read(bag_id, chunk_id), cfg.strong, cfg.duplicates
+    )
+    out = tracker.run(
+        det_frames,
+        cfg.association,
+        member_cost if cfg.appearance.association else None,
+    )
+    if cfg.relink.enabled:
+        out = relink.relink(
+            out,
+            det_frames,
+            cfg.relink,
+            cfg.association.max_centre_dist_m,
+            member_cost if cfg.appearance.relink else None,
+        )
     log.info("chunk %s: %d frames, %d tracks", chunk_id, len(det_frames), len(out))
     return out
 
@@ -136,7 +175,11 @@ def link_and_summarize(
 
 
 def _write_chunk_manifest(
-    bag_id: str, chunk_id: str, config_path: Optional[str]
+    bag_id: str,
+    chunk_id: str,
+    config_path: Optional[str],
+    cfg: ComponentConfig,
+    calibration: Optional[Calibration],
 ) -> None:
     """Best-effort: never fails a run that succeeded."""
     root = chunk_root(bag_id, chunk_id)
@@ -151,12 +194,22 @@ def _write_chunk_manifest(
                 "manifest_proposal_generation": (
                     f"{root}/{common_manifest.component_manifest_name('proposal_generation')}"
                 ),
+                **(
+                    {"masklet_embeddings": masklet_embeddings_path(bag_id, chunk_id)}
+                    if cfg.appearance.enabled
+                    else {}
+                ),
             },
             outputs={
                 "tracks": tracks_path(bag_id),
                 "track_summaries": track_summaries_path(bag_id),
             },
             config_path=config_path,
+            extra=(
+                {"appearance_calibration": dataclasses.asdict(calibration)}
+                if calibration is not None
+                else None
+            ),
             filename=common_manifest.component_manifest_name("tracking"),
         )
     except Exception:  # noqa: BLE001
@@ -179,6 +232,17 @@ def run(
         raise FileNotFoundError(
             f"No chunks found for bag {bag_id!r} — run ingest first."
         )
+    camera_calibration.bind_inherited_outputs(
+        bag_id,
+        None,
+        "tracking",
+        [
+            f"{chunk_root(bag_id, c['chunk_id'])}/manifest_proposal_generation.json"
+            for c in index
+        ],
+        force=force,
+        existing_outputs=tracks.exists(bag_id),
+    )
     if tracks.exists(bag_id) and not force:
         log.info("bag %s already tracked — skipping (use --force)", bag_id)
         return
@@ -189,11 +253,14 @@ def run(
             f"bag {bag_id!r}: no proposals.parquet for chunks {missing} "
             "(run proposal_generation)"
         )
-    per_chunk = {cid: track_chunk(cfg, bag_id, cid) for cid in chunk_ids}
+    costs, calibration = bag_appearance(cfg, bag_id, chunk_ids)
+    per_chunk = {
+        cid: track_chunk(cfg, bag_id, cid, costs.get(cid)) for cid in chunk_ids
+    }
     frames, summaries = link_and_summarize(cfg, index, per_chunk)
     tracks.write(bag_id, frames, summaries)
     for cid in chunk_ids:
-        _write_chunk_manifest(bag_id, cid, config_path)
+        _write_chunk_manifest(bag_id, cid, config_path, cfg, calibration)
     log.info(
         "tracking complete for bag %s: %d chunks, %d tracks",
         bag_id,

@@ -3,6 +3,10 @@
 Written by proposal_generation; read by tracking (the fused rows) and by
 evaluation of each source (all rows) once they exist.
 
+Sources: lidar_mos (Step F motion clusters), lifted (semantic_lifting
+instances), fusion_detector (detection_3d's BEVFusion boxes, camera + LiDAR)
+and lidar_detector (a LiDAR-only detector; none writes it yet).
+
 On disk, per chunk:
 
   proposals.parquet
@@ -35,7 +39,7 @@ from wato_common.schemas import (
 )
 
 FUSED = "fused"
-SOURCES = ("lidar_mos", "lifted", "lidar_detector")
+SOURCES = ("lidar_mos", "lifted", "fusion_detector", "lidar_detector")
 PROVENANCES = SOURCES + (FUSED,)
 
 _LIST_FIELDS = {

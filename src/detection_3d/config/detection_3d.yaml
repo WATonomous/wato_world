@@ -1,0 +1,39 @@
+# detection_3d: BEVFusion (camera + LiDAR), the model the car runs, on every
+# frame. nuScenes rig; detection_3d.wato.yaml is the WATO car's.
+# Every field is documented in src/wato_detection_3d/config.py.
+detection_3d:
+  # validated requires a qualified, current camera_calibration result.
+  calibration_source: recorded
+  model:
+    # The car's resnet50_trt11_int8 (wato_monorepo bevfusion params.yaml):
+    # README "Model files" installs it.
+    dir: /data/models/bevfusion/resnet50_trt11_int8
+    precision: int8                    # LiDAR backbone, as the car
+    sha256:
+      camera.backbone.onnx: 9d08cd562600fa73d1131d65b60c20645c6f2781338cd232185a1b235aae46da
+      camera.vtransform.onnx: 526ebb75b6015a18904df03bb98fbe893092adcd869c0864ce2a10da51a96cc9
+      fuser.onnx: e3467df2a4680a90c9fb568f6e5608d0e583d4fa586bacc77a1cb38275ac9df0
+      head.bbox.onnx: 4df99f8ee3da00ed60221003bd859c9794295dd818b06f96ee0597c7b2dadf2d
+      lidar.backbone.xyz.onnx: e0f8a8f762fc946d1a8194bc086dcc86ee1290647b5efe407aa37fd11ef466f1
+    engine_cache_dir: /data/models/.cache/tensorrt
+
+  frames:
+    canonical_lidar: null              # one LiDAR: each sweep is its own frame
+
+  points:
+    lidars: null                       # the frame's reference LiDAR only
+    past_sweeps: 9                     # BEVFusion's nuScenes sweeps_num
+    max_time_lag_s: 0.5                # ages it was trained on (~0.45 s)
+    remove_close_m: 1.0                # LoadPointsFromMultiSweeps remove_close
+
+  input_frame:
+    # nuScenes: LIDAR_TOP is the training frame itself. (nuscenes_lidar, the
+    # frame rebuilt for other rigs, scores the same on scene-0061.)
+    kind: sensor
+    height_m: 1.84                     # nuScenes LIDAR_TOP above the ground
+
+  image:
+    principal_row_px: 490.4            # nuScenes cameras' mean cy (1600x900)
+
+  # nuScenes order: front, front-right, front-left, back, back-left, back-right.
+  cameras: [CAM_FRONT, CAM_FRONT_RIGHT, CAM_FRONT_LEFT, CAM_BACK, CAM_BACK_LEFT, CAM_BACK_RIGHT]

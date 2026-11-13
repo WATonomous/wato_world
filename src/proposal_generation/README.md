@@ -1,16 +1,18 @@
 # proposal_generation
 
 3D box proposals from what upstream already produces: lidar_preprocessing's
-Step F moving-object clusters and semantic_lifting's labelled instances, one
-box per source and one fused box per object, per frame. CPU only. A LiDAR
+Step F moving-object clusters, semantic_lifting's labelled instances and,
+when `fusion_detector.enabled`, detection_3d's BEVFusion boxes; one box per
+source and one fused box per object, per frame. CPU only. A LiDAR-only
 detector is a later source; SLF (fitting shapes to camera masks) runs per
 track in label_refinement.
 Measurements behind the defaults: `docs/proposal_generation_measurements.md`.
 
 ## How a proposal is made
 
-Per frame — lidar_preprocessing's frame_sync tick: a `lidar_cc` sweep and the
-corner sweeps matched to it on WATO, one sweep on a single-LiDAR bag:
+Per frame — lidar_preprocessing's frame_sync tick: one `lidar_cc` sweep on
+the current WATO profile (historical multi-LiDAR inputs can contain matched
+corner sweeps):
 
 - **`lidar_mos`**: each Step F cluster passing the gates (`motion_score > 1`,
   `n_sources ≥ 2`, `frac_persistent < 0.5`; `docs/lidar_preprocessing_measurements.md`)
@@ -55,14 +57,33 @@ corner sweeps matched to it on WATO, one sweep on a single-LiDAR bag:
   support. The total `lidar_point_count` includes geometric additions. Added
   points receive no new camera votes or semantic labels.
   The radius method averages its own candidate's confidence over final support.
+- **`fusion_detector`** (`fusion_detector.enabled`): each detection_3d box with
+  score ≥ 0.08 (the car's `confidence_threshold`), outside the car's 2.5 m
+  ego zone, of a class in `fusion_detector.class_map` (car, truck, bus,
+  motorcycle, bicycle, pedestrian; trailers, construction vehicles, barriers
+  and cones are not relabelled into them). Its box is the model's — centre,
+  size, heading (made undirected here; the directed one stays in
+  `detections_3d`) — not refit to points; `lidar_point_count` counts the
+  frame's non-ground points inside it, `score` is the model's, `cls` the
+  mapped class.
 - **`fused`**: a lidar_mos and a lifted box sharing ≥ 5 LiDAR points, ≥ 30%
   of the smaller one's, are one object (greedy, most shared first, one to one):
   a box fit to both point sets, with the lifted class. Every other box is
   fused on its own, class-less if it has none, so each object either source
-  found has one fused row. `member_proposal_ids` lists the source rows.
+  found has one fused row. A fusion_detector box then joins the object it
+  shares the most points with by the same rule, one to one. The matched
+  object's geometry, class, score, point count and camera evidence remain
+  those of the motion/lifted sources; the detector adds provenance only.
+  An unmatched detector box can add an object when `fusion_detector.add_unmatched`,
+  score ≥ `unmatched_min_score` (0.6, the tracker birth threshold) and point
+  count ≥ `unmatched_min_points` (5 non-ground returns, the lifted minimum).
+  `member_proposal_ids` lists the source rows. Raw low-score or unsupported
+  detector proposals remain available for auditing but do not become new
+  fused objects.
 
 Scores are placeholders until per-source reliability is measured: lidar_mos
-`min(1, motion_score / 2)`, lifted `lift_confidence`, fused the members' mean.
+`min(1, motion_score / 2)`, lifted `lift_confidence`, fused the independent
+members' mean (detector-only objects keep the detector score).
 Boxes are yaw-only and undirected (heading mod π). Neighbouring chunks overlap
 by 6 s and both label the shared span; tracking links them.
 
@@ -98,7 +119,8 @@ separate step after matching.
 ## Run
 
 `ingest`, `lidar_preprocessing` (with its `proposals` step) and
-`semantic_lifting` must have run first.
+`semantic_lifting` must have run first, and `detection_3d` when
+`fusion_detector.enabled`.
 
 Regenerating old owned-mask outputs requires running `perception_2d`, then
 `semantic_lifting`, then `proposal_generation` with `--force` for the same
@@ -156,6 +178,7 @@ owns its format:
 | `ground.npz` | lidar_preprocessing Step C | `ground` (`GroundGrid.height_at`); a sentinel leaves boxes' bottoms as they are |
 | `semantic_lifting/lifted_labels/`, `lifted_instances.parquet` | semantic_lifting | `lifted_labels` |
 | `semantic_lifting/lifted_candidates/` (all independent point-instance claims) | semantic_lifting | `lifted_candidates` |
+| `detections_3d.parquet` (`fusion_detector.enabled` only) | detection_3d | `detections_3d` |
 | `calibration.json`, `frame_index.parquet`, `poses.parquet` (camera viewer only) | ingest | `calibration`, `frame_index.FrameIndex` |
 
 No artifact records lidar_preprocessing's canonical LiDAR, so the config states
@@ -176,10 +199,11 @@ dimensions against calibration. Viewing leaves stored proposal geometry intact.
   `sweep_ids` all its sweeps, `reference_timestamp_ns` its time. `frame_id` is
   None for a sweep frame_sync matched to no canonical sweep (a Step F
   cluster's `-1` maps to None).
-- `provenance` `lidar_mos` / `lifted` / `fused`; tracking reads the fused rows,
-  the source rows stay to measure each source.
+- `provenance` `lidar_mos` / `lifted` / `fusion_detector` / `fused`; tracking
+  reads the fused rows, the source rows stay to measure each source.
 - `cls` is perception_2d's class (`car`, `truck`, `bus`, `motorcycle`,
-  `bicycle`, `pedestrian` under the fixed taxonomy), or None.
+  `bicycle`, `pedestrian` under the fixed taxonomy), else the detector's
+  mapped class, or None.
 - The evidence columns are null except on rows of the source that measures
   them.
 
@@ -208,3 +232,10 @@ Set `lifted.support_method: scan_clusters` to opt in. Under that method,
 substitutes largest-group filtering for rejected matches. The legacy radius
 fields are only used with `support_method: largest_group`. Ground masks are
 required for either method: proposal points remain non-ground.
+
+## Calibration identity
+
+Proposal generation preserves the calibration identity of lifting and detector
+inputs and rejects mixed identities or stale cached outputs. Camera overlays
+choose `calibration_source: recorded|validated` (default recorded) and check
+that it matches the proposal inputs. See [camera calibration](../camera_calibration/README.md).

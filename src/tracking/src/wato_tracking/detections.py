@@ -2,15 +2,26 @@
 
 Each fused row is one detection. Its member rows say what backs it: a
 lidar_mos member is Step F motion evidence, a lifted member carries SAM2's
-instance id (the matching key) and its confidence. A detection is strong when
-two sources agree on it or its lift is confident (config `strong`).
+instance id (the matching key), its masklets and its confidence, a fusion_detector member
+carries BEVFusion's score. A detection is strong when lidar_mos and lifted
+agree on it, its lift is confident, or it is detector-only with a high score
+(config `strong`). Matched detector scores never promote independent evidence.
+The detector and lifting share cameras, so their agreement alone
+doesn't count as two sources. A box backed only by the detector starts a
+track only when scored high enough (ByteTrack's birth rule); otherwise it can
+only extend one.
 
 Only frames with at least one fused row are stepped; a track coasting over
 empty frames is still predicted at each stepped frame's time.
+
+With `duplicates` on, each frame's boxes go through CenterPoint's circle NMS
+first: a second box on one object, beside the box its track takes, would
+otherwise start a second track (IoU 0 at ~1 m, so no overlap rule reaches it).
 """
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Optional
@@ -18,10 +29,13 @@ from typing import Optional
 from wato_common.artifacts import proposals
 from wato_common.artifacts.proposals import Proposal
 from wato_common.schemas import Box3D
-from wato_tracking.config import StrongConfig
+from wato_tracking.config import DuplicatesConfig, StrongConfig
+
+log = logging.getLogger(__name__)
 
 LIFTED = "lifted"
 LIDAR_MOS = "lidar_mos"
+FUSION_DETECTOR = "fusion_detector"
 
 
 @dataclass(frozen=True)
@@ -31,6 +45,17 @@ class Detection:
     key: Optional[str]  # the lifted member's instance id
     two_source: bool
     has_lidar_mos: bool
+    detector_score: Optional[float] = None  # its fusion_detector member's
+    can_birth: bool = True  # may start a track when no track takes it
+    masklets: tuple[str, ...] = ()  # its lifted member's masklets (appearance)
+
+    @property
+    def detector_only(self) -> bool:
+        return (
+            self.detector_score is not None
+            and self.key is None
+            and not self.has_lidar_mos
+        )
 
     @property
     def box(self) -> Box3D:
@@ -56,6 +81,7 @@ def detection(
     members = [by_id[m] for m in fused.member_proposal_ids]
     lift = next((m for m in members if m.provenance == LIFTED), None)
     has_mos = any(m.provenance == LIDAR_MOS for m in members)
+    det = next((m for m in members if m.provenance == FUSION_DETECTOR), None)
     two_source = lift is not None and has_mos
     # Recovered scan geometry must not manufacture strong camera evidence.
     # Before scan refinement the total count was labeled support, so retain
@@ -70,21 +96,70 @@ def detection(
         and (lift.lift_confidence or 0.0) >= cfg.min_lift_confidence
         and (lift_points or 0) >= cfg.min_lift_points
     )
+    detector_only = det is not None and lift is None and not has_mos
+    detected = detector_only and det.score >= cfg.min_detector_score
     return Detection(
         proposal=fused,
-        strong=two_source or confident,
+        strong=two_source or confident or detected,
         key=instance_of(lift.proposal_id) if lift is not None else None,
         two_source=two_source,
         has_lidar_mos=has_mos,
+        detector_score=det.score if det is not None else None,
+        can_birth=not detector_only or det.score >= cfg.min_detector_birth_score,
+        masklets=lift.supporting_masklet_ids if lift is not None else (),
     )
 
 
-def frames(rows: list[Proposal], cfg: StrongConfig) -> list[DetFrame]:
+def suppress_duplicates(
+    dets: list[Detection], cfg: DuplicatesConfig
+) -> list[Detection]:
+    """CenterPoint's circle NMS, independent boxes before detector-only additions
+    (config `duplicates`): each kept box drops lower-ranked boxes
+    of its class group whose BEV centres lie within sqrt(min_radius) of it.
+    Boxes with no class, or a class in no group, are always kept."""
+    radius = {c: g.min_radius for g in cfg.groups for c in g.classes}
+    group = {c: k for k, g in enumerate(cfg.groups) for c in g.classes}
+    order = sorted(
+        range(len(dets)),
+        key=lambda i: (
+            dets[i].detector_only,
+            not dets[i].strong,
+            -(dets[i].proposal.lidar_point_count or 0),
+            i,
+        ),
+    )
+    dropped = [False] * len(dets)
+    for a, i in enumerate(order):
+        ci = dets[i].proposal.cls
+        if dropped[i] or ci not in group:
+            continue
+        pi = dets[i].proposal
+        for j in order[a + 1 :]:
+            pj = dets[j].proposal
+            if dropped[j] or group.get(pj.cls) != group[ci]:
+                continue
+            if (pi.cx - pj.cx) ** 2 + (pi.cy - pj.cy) ** 2 <= radius[ci]:
+                dropped[j] = True
+    return [d for d, x in zip(dets, dropped) if not x]
+
+
+def frames(
+    rows: list[Proposal],
+    cfg: StrongConfig,
+    duplicates: Optional[DuplicatesConfig] = None,
+) -> list[DetFrame]:
     """The chunk's frames with fused rows, in time order."""
     by_id = {p.proposal_id: p for p in rows}
     by_sweep: dict[int, list[Detection]] = defaultdict(list)
     for p in proposals.fused(rows):
         by_sweep[p.sweep_id].append(detection(p, by_id, cfg))
+    if duplicates is not None and duplicates.enabled:
+        n = sum(map(len, by_sweep.values()))
+        by_sweep = {
+            sid: suppress_duplicates(dets, duplicates) for sid, dets in by_sweep.items()
+        }
+        kept = sum(map(len, by_sweep.values()))
+        log.info("duplicates: %d of %d fused boxes suppressed", n - kept, n)
     out = [
         DetFrame(sid, dets[0].proposal.reference_timestamp_ns, tuple(dets))
         for sid, dets in by_sweep.items()

@@ -16,29 +16,50 @@ against later detections using their continued motion prediction.
 Defaults are the paper's (§III-F): α = 1, T_d = 2 m, T_o = 0.95, T_v = 0.7,
 n_old = 5.
 
+`AssociationGates.cost = "giou_3d"` swaps in SimpleTrack's cost instead
+(arXiv 2111.09621 §4.3.1): 1 − GIoU (3D), one gate T_giou (1.5, GIoU > −0.5
+for every class on nuScenes and WOD). IoU is 0 for every pair of disjoint
+boxes; GIoU keeps falling as they move apart, so it still ranks a one-sided
+sliver against the track's whole box.
+
 This tracker is deliberately minimal — geometry only, no appearance, no
 class. lidar_preprocessing uses it as is to score whether a cluster moved.
-The `tracking` component adds two optional cues on top, both off by default:
+The `tracking` component adds optional cues on top, all off by default:
+the GIoU cost; tracks that never retire (n_old None, Immortal Tracker);
 detections flagged strong are matched before weak ones (SimpleTrack's
 two-stage matching, so a weak box can't take a track a strong one fits), and a
 detection whose key (a lifted instance id) equals the track's last key gets
 `key_bonus` off its cost. With `key_opens_shape_gates`, such a pair is held
-only to the distance gate: the shape gates exist to stop a track jumping to a
-neighbour, and a shared upstream identity already rules that out, while a
-one-sided box's IoU and volume swing as its visible face changes.
+only to the distance gate T_d: the shape gates (IoU and volume, or GIoU) exist
+to stop a track jumping to a neighbour, and a shared upstream identity
+already rules that out, while a one-sided box's IoU and volume swing as its
+visible face changes. `member_cost` generalises the key to evidence that is
+not an equal id (tracking's appearance ReID): each detection lists members
+(its masklets), a track keeps those of every detection it took, and the
+callable prices a detection against a track from the two lists. A priced pair
+within T_d is feasible whatever its shape and costs the smaller of its
+geometric cost and that price (BoT-SORT's fusion, arXiv 2206.14651 Eq. 12-13).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Hashable, Optional, Sequence
+from typing import Callable, Hashable, Optional, Sequence
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from wato_common.schemas import Box3D
-from wato_common.tracking.boxes import box_volume, iou_3d
+from wato_common.tracking.boxes import (
+    box_volume,
+    giou_3d,
+    giou_3d_cannot_exceed,
+    iou_3d,
+)
 from wato_common.tracking.kalman import BoxKalmanFilter, KalmanNoise
+
+CHEN = "chen"
+GIOU_3D = "giou_3d"
 
 
 @dataclass(frozen=True)
@@ -49,6 +70,12 @@ class AssociationGates:
     t_d: float = 2.0  # m — max centre distance
     t_o: float = 0.95  # max (1 − IoU)
     t_v: float = 0.7  # max (1 − volume ratio)
+    cost: str = CHEN  # or GIOU_3D: cost 1 − GIoU, gated by t_giou alone
+    t_giou: float = 1.5  # max (1 − GIoU); SimpleTrack's GIoU > −0.5
+
+    def __post_init__(self) -> None:
+        if self.cost not in (CHEN, GIOU_3D):
+            raise ValueError(f"cost {self.cost!r}: expected {CHEN!r} or {GIOU_3D!r}")
 
 
 def cost_terms(det: Box3D, pred: Box3D) -> tuple[float, float, float]:
@@ -66,6 +93,7 @@ def associate(
     gates: AssociationGates = AssociationGates(),
     cost_adjust: Optional[np.ndarray] = None,
     distance_gate_only: Optional[np.ndarray] = None,
+    cost_cap: Optional[np.ndarray] = None,
 ) -> tuple[list[tuple[int, int]], list[int], list[int]]:
     """Hungarian assignment of detections to predicted track boxes.
 
@@ -75,22 +103,47 @@ def associate(
     cost_adjust, (n_dets, n_preds), is added to the cost after gating: it
     reorders feasible pairs and never makes an infeasible one feasible.
     distance_gate_only, (n_dets, n_preds) bool, exempts those pairs from the
-    IoU and volume gates (the distance gate still holds).
+    shape gates (IoU and volume, or GIoU); the distance gate still holds.
+    cost_cap, (n_dets, n_preds), bounds a pair's cost from above before
+    cost_adjust (inf: no bound); it changes no pair's feasibility.
     """
     nd, npred = len(dets), len(preds)
     if nd == 0 or npred == 0:
         return [], list(range(nd)), list(range(npred))
 
-    cost = np.empty((nd, npred))
-    ok = np.empty((nd, npred), dtype=bool)
-    for i, d in enumerate(dets):
-        for j, p in enumerate(preds):
-            c_d, c_o, c_v = cost_terms(d, p)
-            cost[i, j] = gates.alpha_d * c_d + gates.alpha_o * c_o + gates.alpha_v * c_v
-            shape_ok = c_o <= gates.t_o and c_v <= gates.t_v
-            if distance_gate_only is not None and distance_gate_only[i, j]:
-                shape_ok = True
-            ok[i, j] = c_d <= gates.t_d and shape_ok
+    # Pairs that provably fail every gate open to them are skipped; their
+    # cost is never read, so the result is the same as scoring every pair.
+    centre = np.linalg.norm(
+        np.array([[d.cx, d.cy, d.cz] for d in dets])[:, None, :]
+        - np.array([[p.cx, p.cy, p.cz] for p in preds])[None, :, :],
+        axis=2,
+    )
+    exempt = (
+        np.zeros((nd, npred), dtype=bool)
+        if distance_gate_only is None
+        else np.asarray(distance_gate_only, dtype=bool)
+    )
+    near = centre <= gates.t_d
+    if gates.cost == GIOU_3D:
+        hopeless = giou_3d_cannot_exceed(dets, preds, 1.0 - gates.t_giou)
+        candidate = ~hopeless | (exempt & near)
+    else:
+        candidate = centre <= gates.t_d + 1e-9  # c_d is re-checked exactly
+    cost = np.zeros((nd, npred))
+    ok = np.zeros((nd, npred), dtype=bool)
+    for i, j in zip(*np.nonzero(candidate)):
+        d, p = dets[i], preds[j]
+        if gates.cost == GIOU_3D:
+            c = 1.0 - giou_3d(d, p)
+            cost[i, j] = c
+            ok[i, j] = c <= gates.t_giou or (exempt[i, j] and near[i, j])
+            continue
+        c_d, c_o, c_v = cost_terms(d, p)
+        cost[i, j] = gates.alpha_d * c_d + gates.alpha_o * c_o + gates.alpha_v * c_v
+        shape_ok = (c_o <= gates.t_o and c_v <= gates.t_v) or exempt[i, j]
+        ok[i, j] = c_d <= gates.t_d and shape_ok
+    if cost_cap is not None:
+        cost = np.minimum(cost, cost_cap)
     if cost_adjust is not None:
         cost = cost + cost_adjust
     # Gate BEFORE solving so an infeasible pair can't displace a feasible one.
@@ -115,6 +168,7 @@ class TrackObservation:
     det_idx: int  # index into that frame's detection list
     measured: Box3D
     filtered: Box3D
+    velocity: Optional[tuple[float, float, float]] = None  # filtered, m/s
 
 
 @dataclass
@@ -125,29 +179,39 @@ class Track:
     misses: int = 0
     history: list[TrackObservation] = field(default_factory=list)
     last_key: Optional[Hashable] = None  # key of its latest detection, if any
+    # Members of every detection it took (step's `members`), first seen first.
+    members: dict[Hashable, None] = field(default_factory=dict)
 
 
 class MultiObjectTracker:
     """Frame-by-frame tracker: predict → associate → update / birth / expire.
 
     Tracks missing up to `n_old` consecutive frames stay associable (their
-    Kalman prediction keeps coasting); older ones are retired. Every track
-    ever created — retired or live — is available via `all_tracks()`.
+    Kalman prediction keeps coasting); older ones are retired. n_old None
+    never retires a track (Immortal Tracker, arXiv 2111.13672 §3: most ID
+    switches are tracks ended early). Every track ever created — retired or
+    live — is available via `all_tracks()`.
     """
 
     def __init__(
         self,
         gates: AssociationGates = AssociationGates(),
-        n_old: int = 5,
+        n_old: Optional[int] = 5,
         noise: KalmanNoise | None = None,
         key_bonus: float = 0.0,
         key_opens_shape_gates: bool = False,
+        member_cost: Optional[
+            Callable[[Sequence[Hashable], Sequence[Hashable]], Optional[float]]
+        ] = None,
     ) -> None:
         self.gates = gates
-        self.n_old = int(n_old)
+        self.n_old = None if n_old is None else int(n_old)
         self.noise = noise
         self.key_bonus = float(key_bonus)
         self.key_opens_shape_gates = bool(key_opens_shape_gates)
+        # (a detection's members, a track's members) -> the pair's cost on
+        # that evidence, or None when it doesn't say they are one object.
+        self.member_cost = member_cost
         self._live: list[Track] = []
         self._retired: list[Track] = []
         self._next_id = 0
@@ -160,12 +224,22 @@ class MultiObjectTracker:
         *,
         strong: Optional[Sequence[bool]] = None,
         keys: Optional[Sequence[Optional[Hashable]]] = None,
+        can_birth: Optional[Sequence[bool]] = None,
+        priority: Optional[Sequence[int]] = None,
+        members: Optional[Sequence[Sequence[Hashable]]] = None,
     ) -> list[int]:
-        """Process one frame at time t (seconds). Returns track_id per det.
+        """Process one frame at time t (seconds). Returns track_id per det
+        (-1 for a det that neither matched nor started a track).
 
         strong: per det; when given, strong dets are matched first and weak
         ones only to the tracks left. keys: per det (None = no key); a det
         whose key equals a track's last key costs key_bonus less.
+        can_birth: per det; when given, an unmatched det marked False starts
+        no track and is dropped (ByteTrack: a low-score box may extend a
+        track, never start one).
+        priority: optional per-det tiers, smaller first; strong-first matching
+        runs within each tier. Lets independent observations precede priors.
+        members: per det, what member_cost compares (ignored without one).
         """
         self._frame_idx += 1
         preds = [trk.kf.predict(t - trk.last_t) for trk in self._live]
@@ -183,19 +257,48 @@ class MultiObjectTracker:
                     m[r, c] = self._live[ti].last_key == keys[di]
             return m
 
-        stages = (
-            [
-                [i for i in range(len(dets)) if strong[i]],
-                [i for i in range(len(dets)) if not strong[i]],
-            ]
-            if strong is not None
-            else [list(range(len(dets)))]
-        )
+        def member_caps(det_idx: list[int], trk_idx: list[int]) -> Optional[np.ndarray]:
+            """member_cost of each pair within the distance gate; inf elsewhere."""
+            if self.member_cost is None or members is None:
+                return None
+            caps = np.full((len(det_idx), len(trk_idx)), np.inf)
+            for r, di in enumerate(det_idx):
+                if not members[di]:
+                    continue
+                d = dets[di]
+                for c, ti in enumerate(trk_idx):
+                    trk, p = self._live[ti], preds[ti]
+                    if not trk.members:
+                        continue
+                    gap = np.linalg.norm([d.cx - p.cx, d.cy - p.cy, d.cz - p.cz])
+                    if gap > self.gates.t_d:
+                        continue
+                    price = self.member_cost(members[di], list(trk.members))
+                    if price is not None:
+                        caps[r, c] = price
+            return caps if np.isfinite(caps).any() else None
+
+        tiers = [
+            (
+                priority[i] if priority is not None else 0,
+                not strong[i] if strong is not None else False,
+            )
+            for i in range(len(dets))
+        ]
+        stages = [
+            [i for i, tier in enumerate(tiers) if tier == key]
+            for key in sorted(set(tiers))
+        ]
         free_trks = list(range(len(self._live)))
         matches: list[tuple[int, int]] = []
         unmatched_dets: list[int] = []
         for det_idx in stages:
             shared = same_key(det_idx, free_trks)
+            caps = member_caps(det_idx, free_trks)
+            exempt = shared if self.key_opens_shape_gates else None
+            if caps is not None:
+                priced = np.isfinite(caps)
+                exempt = priced if exempt is None else exempt | priced
             m, ud, ut = associate(
                 [dets[i] for i in det_idx],
                 [preds[j] for j in free_trks],
@@ -203,7 +306,8 @@ class MultiObjectTracker:
                 -self.key_bonus * shared
                 if shared is not None and self.key_bonus
                 else None,
-                shared if self.key_opens_shape_gates else None,
+                exempt,
+                caps,
             )
             matches += [(det_idx[d], free_trks[p]) for d, p in m]
             unmatched_dets += [det_idx[d] for d in ud]
@@ -216,10 +320,12 @@ class MultiObjectTracker:
             filtered = trk.kf.update(dets[di])
             trk.misses = 0
             trk.history.append(
-                TrackObservation(self._frame_idx, t, di, dets[di], filtered)
+                TrackObservation(self._frame_idx, t, di, dets[di], filtered, _v(trk.kf))
             )
             if keys is not None:
                 trk.last_key = keys[di] if keys[di] is not None else trk.last_key
+            if members is not None:
+                trk.members.update(dict.fromkeys(members[di]))
             ids[di] = trk.track_id
 
         for ti in unmatched_trks:
@@ -227,19 +333,23 @@ class MultiObjectTracker:
 
         still_live: list[Track] = []
         for trk in self._live:
-            (still_live if trk.misses <= self.n_old else self._retired).append(trk)
+            retire = self.n_old is not None and trk.misses > self.n_old
+            (self._retired if retire else still_live).append(trk)
         self._live = still_live
 
         for di in sorted(unmatched_dets):
+            if can_birth is not None and not can_birth[di]:
+                continue
             kf = BoxKalmanFilter(dets[di], self.noise)
             trk = Track(
                 track_id=self._next_id,
                 kf=kf,
                 last_t=t,
                 last_key=keys[di] if keys is not None else None,
+                members=dict.fromkeys(members[di]) if members is not None else {},
             )
             trk.history.append(
-                TrackObservation(self._frame_idx, t, di, dets[di], kf.box)
+                TrackObservation(self._frame_idx, t, di, dets[di], kf.box, _v(kf))
             )
             self._live.append(trk)
             ids[di] = trk.track_id
@@ -248,3 +358,8 @@ class MultiObjectTracker:
 
     def all_tracks(self) -> list[Track]:
         return sorted(self._retired + self._live, key=lambda trk: trk.track_id)
+
+
+def _v(kf: BoxKalmanFilter) -> tuple[float, float, float]:
+    vx, vy, vz = kf.velocity
+    return float(vx), float(vy), float(vz)

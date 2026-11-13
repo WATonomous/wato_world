@@ -1,0 +1,16 @@
+[project]
+name = "wato-world-camera-calibration"
+version = "0.1.0"
+description = "Per-bag camera extrinsic refinement with independent validation."
+requires-python = ">=3.11"
+dependencies = ["wato-world-common", "numpy>=1.26", "scipy>=1.12", "pillow>=10", "click>=8", "pyyaml>=6", "pydantic>=2"]
+
+[project.scripts]
+wato_camera_calibration = "wato_camera_calibration.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

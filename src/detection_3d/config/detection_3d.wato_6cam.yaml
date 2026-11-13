@@ -1,0 +1,28 @@
+# Explicit legacy profile for bags without PANO_EE/PANO_WW. The regular WATO
+# profile requires all eight top cameras; this profile retains six-view runs.
+detection_3d:
+  calibration_source: recorded
+  model:
+    dir: /data/models/bevfusion/resnet50_trt11_int8
+    precision: int8
+    num_cameras: 6
+    sha256:
+      camera.backbone.onnx: 9d08cd562600fa73d1131d65b60c20645c6f2781338cd232185a1b235aae46da
+      camera.vtransform.onnx: 526ebb75b6015a18904df03bb98fbe893092adcd869c0864ce2a10da51a96cc9
+      fuser.onnx: e3467df2a4680a90c9fb568f6e5608d0e583d4fa586bacc77a1cb38275ac9df0
+      head.bbox.onnx: 4df99f8ee3da00ed60221003bd859c9794295dd818b06f96ee0597c7b2dadf2d
+      lidar.backbone.xyz.onnx: e0f8a8f762fc946d1a8194bc086dcc86ee1290647b5efe407aa37fd11ef466f1
+    engine_cache_dir: /data/models/.cache/tensorrt
+  frames:
+    canonical_lidar: lidar_cc
+  points:
+    lidars: [lidar_cc]
+    past_sweeps: 9
+    max_time_lag_s: 0.5
+    remove_close_m: 1.0
+  input_frame:
+    kind: nuscenes_lidar
+    height_m: 1.84
+  image:
+    principal_row_px: 490.4
+  cameras: [PANO_NN, PANO_NE, PANO_NW, PANO_SS, PANO_SW, PANO_SE]

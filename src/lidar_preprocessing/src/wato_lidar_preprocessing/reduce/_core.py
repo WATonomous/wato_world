@@ -63,6 +63,30 @@ def _voxel_snap_downsample(xyz: np.ndarray, voxel_size: float) -> np.ndarray:
     return (centres + 0.5) * voxel_size
 
 
+def reduce_up_to_date(bag_id: str) -> bool:
+    """global_static_map.npz and global_ground.npz exist and are newer than
+    everything they merge: the chunk index and every chunk's static_map.npz
+    and ground.npz."""
+    outs = [
+        local_path(global_static_map_path(bag_id)),
+        local_path(global_ground_path(bag_id)),
+    ]
+    if not all(os.path.exists(p) for p in outs):
+        return False
+    t_out = min(os.path.getmtime(p) for p in outs)
+    inputs = [chunks_index_path(bag_id)]
+    for row in read_rows(chunks_index_path(bag_id)):
+        inputs += [
+            static_map_path(bag_id, row["chunk_id"]),
+            ground_path(bag_id, row["chunk_id"]),
+        ]
+    for uri in inputs:
+        p = local_path(uri)
+        if os.path.exists(p) and os.path.getmtime(p) > t_out:
+            return False
+    return True
+
+
 def reduce_static_map(bag_id: str, cfg: ComponentConfig) -> str:
     """Merge and downsample all per-chunk static maps for bag_id.
 

@@ -14,9 +14,11 @@ REPOSITORY="${REGISTRY_URL#*/}"
 
 ALL_MODULES=(
     ingest
+    camera_calibration
     perception_2d
     semantic_lifting
     lidar_preprocessing
+    detection_3d
     proposal_generation
     tracking
     label_refinement
@@ -28,6 +30,13 @@ module_json() {
     local module="$1"
 
     case "${module}" in
+        camera_calibration)
+            jq -nc --arg module "${module}" \
+                --arg dockerfile "docker/camera_calibration.Dockerfile" \
+                --arg pkg "wato_camera_calibration" \
+                --arg dir "camera_calibration" \
+                '{module:$module,dockerfile:$dockerfile,pkg:$pkg,dir:$dir}'
+            ;;
         ingest)
             jq -nc --arg module "${module}" \
                 --arg dockerfile "docker/ingest.Dockerfile" \
@@ -54,6 +63,13 @@ module_json() {
                 --arg dockerfile "docker/lidar_preprocessing.Dockerfile" \
                 --arg pkg "wato_lidar_preprocessing" \
                 --arg dir "lidar_preprocessing" \
+                '{module:$module,dockerfile:$dockerfile,pkg:$pkg,dir:$dir}'
+            ;;
+        detection_3d)
+            jq -nc --arg module "${module}" \
+                --arg dockerfile "docker/detection_3d.Dockerfile" \
+                --arg pkg "wato_detection_3d" \
+                --arg dir "detection_3d" \
                 '{module:$module,dockerfile:$dockerfile,pkg:$pkg,dir:$dir}'
             ;;
         proposal_generation)

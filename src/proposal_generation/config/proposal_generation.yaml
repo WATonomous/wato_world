@@ -1,6 +1,8 @@
 # proposal_generation (nuScenes and other single-LiDAR bags).
 # Per-chunk counts behind the defaults: docs/proposal_generation_measurements.md.
 proposal_generation:
+  # validated requires a qualified, current camera_calibration result.
+  calibration_source: recorded
   # Must match lidar_preprocessing's frame_sync.canonical_lidar for the bag.
   frames:
     canonical_lidar: null        # one LiDAR: each sweep is its own frame
@@ -47,3 +49,14 @@ proposal_generation:
   fusion:
     min_shared_points: 5
     min_shared_fraction: 0.3     # of the smaller box's points
+
+  # detection_3d's BEVFusion boxes as a third source (detector.py); needs
+  # detection_3d to have run. Measurements: docs/detection_3d_measurements.md.
+  fusion_detector:
+    enabled: false
+    min_score: 0.08              # the car's confidence_threshold
+    ego_suppression_radius_m: 2.5  # the car's ego zone
+    class_map: {car: car, truck: truck, bus: bus, motorcycle: motorcycle, bicycle: bicycle, pedestrian: pedestrian}
+    add_unmatched: true          # new objects only; matches preserve the other sources
+    unmatched_min_score: 0.6     # tracker's detector birth threshold
+    unmatched_min_points: 5      # non-ground LiDAR support, as for lifted boxes

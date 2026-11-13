@@ -22,8 +22,9 @@ ground maps, and recall-oriented motion proposals.
 `python -m wato_lidar_preprocessing reduce | iwu | proposals --bag <bag>`.
 
 WATO bags must be ingested with `ingest.wato.yaml` / `ingest.wato_6cam.yaml` /
-`ingest.wato_no_lidar_nw.yaml` (per-corner LiDAR topics), then processed with
-`lidar_preprocessing.wato.yaml`.
+`ingest.wato_no_lidar_nw.yaml` (only `/lidar_cc/velodyne_points`), then
+processed with `lidar_preprocessing.wato.yaml`. Historical measurements using
+corner scanners describe the older multi-LiDAR setup.
 
 ## Steps
 
@@ -37,7 +38,12 @@ F  motion_proposals/  per-point source bits + HDBSCAN clusters with motion featu
 ```
 
 A chunk counts as done when its summary exists, so a run after a Step B change
-needs `--force`.
+needs `--force`. `run`'s bag-level steps skip when their output is newer than
+everything it read: D when both global maps are newer than every chunk's
+`static_map.npz` / `ground.npz`, E when `global_iwu.npz` is newer than the
+global static map and every chunk's `lidar_proc_index.parquet`, F per chunk
+(below); `--force` re-runs them. The `reduce` and `iwu` subcommands always
+run.
 
 ### Two dynamic artifacts — which one to read
 

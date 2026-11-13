@@ -8,6 +8,12 @@ Bag preparation:
                       header skew, camera_info pairing, extrinsics, profile).
   trim-bag            Cut an MCAP bag to the window every topic records in.
 
+Debugging:
+  debug-bag           Copy the source bag with the bag's proposals, tracks and
+                      refined labels added as MarkerArray topics, and
+                      optionally masks and depth as per-camera images, for
+                      Foxglove / RViz.
+
 Debug and rerun commands:
   inspect-bag         Read topics and duration without writing artifacts.
   register            Write bag-level metadata.
@@ -195,6 +201,124 @@ def trim_bag_cmd(
             indent=2,
         )
     )
+
+
+@main.command("debug-bag")
+@click.option(
+    "--bag",
+    "bag_id",
+    required=True,
+    help="Bag id in the artifact tree; its proposals, tracks and refined labels "
+    "(whichever exist) become the new topics.",
+)
+@click.option(
+    "--chunk",
+    "chunk_id",
+    default=None,
+    help="Only this chunk: its rows over its whole decoded window, and "
+    "the source cut to that window. Default: the whole bag, each instant from "
+    "the chunk that owns it.",
+)
+@click.option(
+    "--source",
+    default=None,
+    type=click.Path(exists=True),
+    help="Source bag (default: the one ingest read, bag_meta.json's source_path).",
+)
+@click.option(
+    "--static-topic",
+    "static_topics",
+    multiple=True,
+    help="With --chunk: a topic copied whole, every message at its original "
+    "log time, as trim-bag does: a /tf_static latched once at the start. It "
+    "stretches the output's timeline to the source's; WATO republishes "
+    "/tf_static at 1 Hz, so the window already has it.",
+)
+@click.option(
+    "--out",
+    "out_path",
+    default=None,
+    help="Output .mcap (default: $BAG_ROOT/debug/<bag>[_<chunk>]_debug.mcap).",
+)
+@click.option(
+    "--compression",
+    default="none",
+    show_default=True,
+    type=click.Choice(["none", "zstd", "lz4"]),
+    help="Output chunk compression.",
+)
+@click.option("--overwrite", is_flag=True, help="Replace an existing output.")
+@click.option(
+    "--masks",
+    is_flag=True,
+    help="Add /wato_world/masks/<cam>: each camera image with perception_2d's "
+    "masklets drawn on it, stamped as its source image.",
+)
+@click.option(
+    "--depth",
+    is_flag=True,
+    help="Add /wato_world/depth/<cam>: perception_2d's metric depth per camera "
+    "image, coloured on a 1-100 m log scale, stamped as its source image.",
+)
+@click.option(
+    "--workers",
+    default=min(16, os.cpu_count() or 1),
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Processes drawing --masks / --depth images.",
+)
+def debug_bag_cmd(
+    bag_id: str,
+    chunk_id: str | None,
+    source: str | None,
+    static_topics: tuple[str, ...],
+    out_path: str | None,
+    compression: str,
+    overwrite: bool,
+    masks: bool,
+    depth: bool,
+    workers: int,
+) -> None:
+    """Copy the source bag with the bag's proposals, tracks and refined labels
+    added as MarkerArray topics (/wato_world/..., in the ego frame), and
+    optionally perception_2d's masks and depth as per-camera images."""
+    from wato_ingest import debug_bag, debug_images
+    from wato_ingest.inputs import trim
+
+    if static_topics and chunk_id is None:
+        click.echo("debug-bag: --static-topic needs --chunk", err=True)
+        sys.exit(2)
+    try:
+        if out_path is None:
+            src = (
+                debug_bag.resolve_mcap_file(source)
+                if source
+                else debug_bag.source_bag(bag_id)
+            )
+            out_dir = os.path.join(os.environ.get("BAG_ROOT", "/data/bags"), "debug")
+            out_path = str(debug_bag.default_output(src, out_dir, chunk_id))
+        result = debug_bag.debug_bag(
+            bag_id,
+            out_path,
+            chunk_id=chunk_id,
+            source=source,
+            static_topics=static_topics,
+            compression=compression,
+            overwrite=overwrite,
+            image_layers=tuple(
+                layer
+                for layer, on in (
+                    (debug_images.MASKS, masks),
+                    (debug_images.DEPTH, depth),
+                )
+                if on
+            ),
+            workers=workers,
+        )
+    except (debug_bag.DebugBagError, trim.TrimError) as e:
+        click.echo(f"debug-bag: {e}", err=True)
+        sys.exit(1)
+    click.echo(json.dumps(dataclasses.asdict(result), indent=2))
 
 
 # ---------------------------------------------------------------------------
@@ -397,12 +521,19 @@ def manifest_cmd(bag_path: str, bag_id: str, chunk_id: str, config_path: str) ->
     help="Path to a pre-authored calibration.json to freeze.",
 )
 @click.option("--config", "config_path", default="/ws/src/ingest/config/ingest.yaml")
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="re-ingest chunks whose manifest.json already exists.",
+)
 def run_cmd(
     bag_path: str,
     bag_id: str | None,
     only_chunk: str | None,
     calib_source: str | None,
     config_path: str,
+    force: bool,
 ) -> None:
     """Full pass: register, validate, chunk, decode, frame-index, quality, manifest."""
     cfg = load_config(config_path)
@@ -413,7 +544,13 @@ def run_cmd(
         bag_id=bag_id,
         calibration_source=calib_source,
         only_chunk=only_chunk,
+        force=force,
     )
+    if not results:
+        click.echo(
+            "nothing to ingest: every chunk has its manifest (--force re-ingests)"
+        )
+        return
     click.echo("")
     click.echo(
         f"bag: {results[0].bag_id}  ({len(results)} chunk{'s' if len(results) != 1 else ''})"

@@ -32,8 +32,6 @@ topics:
   lidars:
     # Per-sensor sweeps, NOT the merged /lidar/all/points_merged cloud.
     lidar_cc: /lidar_cc/velodyne_points   # centre VLP-32C (canonical)
-    lidar_ne: /lidar_ne/velodyne_points   # corner VLP-16
-    lidar_nw: /lidar_nw/velodyne_points   # corner VLP-16
   pose: /world_modeling/liso/odometry
   tf_static: /tf_static
 

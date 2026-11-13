@@ -261,12 +261,13 @@ class DepthConfig(BaseModel):
 
 
 class EmbeddingConfig(BaseModel):
-    """DINOv2 appearance embeddings, kept for a later `tracking` ReID (unread today)."""
+    """DINOv2 appearance descriptors per masklet per embedded image, read by
+    `tracking`'s ReID (models/embeddings.py)."""
 
     model_config = ConfigDict(extra="allow")
 
     model: str = "dinov2_vitl14"
-    every_k_frames: int = 1  # images
+    every_k_frames: int = 1  # every k-th image of a camera; 0: no descriptors
 
 
 # Cache of {synonym(lowercased): canonical class}, keyed by prompts_path, so
@@ -303,6 +304,7 @@ _FALLBACK_CONCEPTS: list[tuple[str, str]] = [
 class ComponentConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    calibration_source: Literal["recorded", "validated"] = "recorded"
     discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
     detection: DetectionConfig = Field(default_factory=DetectionConfig)
     segmentation: SegmentationConfig = Field(default_factory=SegmentationConfig)

@@ -40,12 +40,14 @@ from wato_common.artifact_store import (
     detections_2d_path,
     frame_index_path,
     local_path,
+    masklet_embeddings_path,
     masks_2d_dir,
     poses_path,
     tracklets_2d_path,
 )
 from wato_common.artifacts import depth, masklets
-from wato_common.artifacts.calibration import Calibration, CameraCalibration
+from wato_common.artifacts.calibration import CameraCalibration
+from wato_common.artifacts import calibration_refinement as camera_calibration
 from wato_common.artifacts.frame_index import CameraFrame, FrameIndex
 from wato_common.geometry import invert_se3
 from wato_perception_2d.config import ComponentConfig
@@ -75,6 +77,7 @@ from wato_perception_2d.models.detector import (
     detector_importable,
 )
 from wato_perception_2d.models.discovery import Florence2Discovery
+from wato_perception_2d.models import embeddings
 from wato_perception_2d.models.embeddings import check_model as check_dino_model
 from wato_perception_2d.models.yolo_detector import (
     YoloDetector,
@@ -423,6 +426,17 @@ def _process_chunk(
     DA-V2 (depth) and the detector + SAM2 (tracking) are never built at the same
     time, so only one heavy model set occupies the GPU at once.
     """
+    selection = camera_calibration.resolve(bag_id, cfg.calibration_source)
+    camera_calibration.bind_outputs(
+        bag_id,
+        chunk_id,
+        "perception_2d",
+        selection,
+        force=force,
+        existing_outputs=_chunk_complete(bag_id, chunk_id)
+        or os.path.isdir(local_path(depth_2d_dir(bag_id, chunk_id)))
+        or os.path.isdir(_partial_dir(bag_id, chunk_id)),
+    )
     if force:
         # Start the chunk clean. Mask dirs are named by masklet_id, which is new
         # each run, so without this a rerun leaves the previous run's masks
@@ -442,7 +456,7 @@ def _process_chunk(
     n_images = sum(len(v) for v in frames_by_cam.values())
     if not n_images:
         log.warning("chunk %s: empty frame index — skipping", chunk_id)
-        _write_empty(bag_id, chunk_id)
+        _write_empty(cfg, bag_id, chunk_id)
         return
 
     # There are frames to track: confirm SAM2 + the detector import before the
@@ -468,7 +482,9 @@ def _process_chunk(
     _check_tracking_weights(cfg, detector)
     check_sam2_cuda_extension(device)
 
-    calib = Calibration.load(bag_id)
+    calib = camera_calibration.resolve(
+        bag_id, cfg.calibration_source, frames_by_cam
+    ).calibration
     calibration = {cam_id: calib.camera(cam_id) for cam_id in calib.cameras}
 
     partial_dir = _partial_dir(bag_id, chunk_id)
@@ -490,7 +506,7 @@ def _process_chunk(
         # through tracking.
         clear_lidar_caches(bag_id, chunk_id)
 
-    # PASS 2 — tracking. Detector + SAM2 (+ DINOv2) only; DA-V2's VRAM is freed.
+    # PASS 2 — tracking. Detector + SAM2 only; DA-V2's VRAM is freed.
     all_masklets = _run_tracking_pass(
         cfg,
         bag_id,
@@ -503,7 +519,9 @@ def _process_chunk(
         device,
     )
 
-    _write_masklets(bag_id, chunk_id, all_masklets, cfg.synonym_to_class_map())
+    # PASS 3 — appearance descriptors from the masks just written, then the
+    # tables that mark the chunk complete.
+    _write_masklets(cfg, bag_id, chunk_id, all_masklets, frames_by_cam, device)
     log.info("chunk %s: wrote %d masklets", chunk_id, len(all_masklets))
 
     # Final parquets committed — the per-camera resume cache is now redundant.
@@ -667,8 +685,6 @@ def _run_tracking_pass(
                 chunk_id=chunk_id,
                 cam_id=cam_id,
                 tracker_backend=cfg.segmentation.backend,
-                dino_model=cfg.embeddings.model,
-                dino_every_k=cfg.embeddings.every_k_frames,
                 device=device,
                 redetect_every_k=cfg.detection.redetect_every_k,
                 iou_match_threshold=cfg.tracking.iou_match_threshold,
@@ -719,11 +735,6 @@ def _run_tracking_pass(
 
 
 def _masklet_record(mkl: Masklet, syn2cls: dict[str, str]) -> masklets.MaskletRecord:
-    dino_path: Optional[str] = None
-    if mkl.dino_feature is not None:
-        dino_path = masklets.write_dino_feature(
-            mkl.bag_id, mkl.chunk_id, mkl.masklet_id, mkl.dino_feature
-        )
     return masklets.MaskletRecord(
         masklet_id=mkl.masklet_id,
         cam_id=mkl.cam_id,
@@ -733,20 +744,96 @@ def _masklet_record(mkl: Masklet, syn2cls: dict[str, str]) -> masklets.MaskletRe
         frames_present=tuple(mkl.frames_present),
         raw_phrase=mkl.cls,
         det_score=mkl.score,
-        dino_feature_path=dino_path,
         tracker_backend=mkl.tracker_backend,
     )
 
 
-def _write_masklets(
-    bag_id: str, chunk_id: str, all_masklets: list[Masklet], syn2cls: dict[str, str]
+def _write_embeddings(
+    cfg: ComponentConfig,
+    bag_id: str,
+    chunk_id: str,
+    records: list[masklets.MaskletRecord],
+    frames_by_cam: dict[str, list[CameraFrame]],
+    device: str,
 ) -> None:
-    masklets.write(
-        bag_id, chunk_id, [_masklet_record(m, syn2cls) for m in all_masklets]
+    """PASS 3: one appearance descriptor per (masklet, embedded image), from
+    the masks the tracking pass wrote (models/embeddings.py)."""
+    found = embeddings.embed_chunk(
+        bag_id,
+        chunk_id,
+        records,
+        frames_by_cam,
+        model_name=cfg.embeddings.model,
+        every_k_frames=cfg.embeddings.every_k_frames,
+        device=device,
+    )
+    masklets.write_embeddings(bag_id, chunk_id, found)
+    log.info(
+        "chunk %s: %d descriptors over %d of %d masklets",
+        chunk_id,
+        len(found),
+        len(set(found.masklet_ids.tolist())),
+        len(records),
     )
 
 
-def _write_empty(bag_id: str, chunk_id: str) -> None:
+def _write_masklets(
+    cfg: ComponentConfig,
+    bag_id: str,
+    chunk_id: str,
+    all_masklets: list[Masklet],
+    frames_by_cam: dict[str, list[CameraFrame]],
+    device: str,
+) -> None:
+    """The chunk's descriptors, then its tables: the tables mark the chunk
+    complete, so a run that stops in between is redone, not left without
+    descriptors."""
+    syn2cls = cfg.synonym_to_class_map()
+    records = [_masklet_record(m, syn2cls) for m in all_masklets]
+    if cfg.embeddings.every_k_frames > 0:
+        _write_embeddings(cfg, bag_id, chunk_id, records, frames_by_cam, device)
+    masklets.write(bag_id, chunk_id, records)
+
+
+def embed(
+    cfg: ComponentConfig,
+    *,
+    bag_id: str,
+    chunk_id: Optional[str] = None,
+    force: bool = False,
+) -> None:
+    """Write the descriptors of chunks already tracked, from their masks on
+    disk: a chunk tracked before masklet_embeddings.npz existed, or with
+    another descriptor. Masks, tables and the chunk's manifest are untouched;
+    the file names the model and pooling that made it.
+    """
+    if cfg.embeddings.every_k_frames <= 0:
+        raise ValueError("embeddings.every_k_frames is 0: embeddings are off")
+    chunks = load_chunks(bag_id)
+    if chunk_id:
+        chunks = [c for c in chunks if c["chunk_id"] == chunk_id]
+    if not chunks:
+        raise FileNotFoundError(f"no chunk {chunk_id or ''} for bag {bag_id!r}")
+    check_dino_model(cfg.embeddings.model)
+    device = _default_device()
+    for chunk in chunks:
+        cid = chunk["chunk_id"]
+        if not _chunk_complete(bag_id, cid):
+            raise FileNotFoundError(
+                f"chunk {cid}: no masklets to embed (run perception_2d first)"
+            )
+        if masklets.embeddings_exist(bag_id, cid) and not force:
+            log.info("chunk %s already embedded — skipping (use --force)", cid)
+            continue
+        frames_by_cam = FrameIndex.load(bag_id, cid).by_camera()
+        _write_embeddings(
+            cfg, bag_id, cid, masklets.read(bag_id, cid), frames_by_cam, device
+        )
+
+
+def _write_empty(cfg: ComponentConfig, bag_id: str, chunk_id: str) -> None:
+    if cfg.embeddings.every_k_frames > 0:
+        _write_embeddings(cfg, bag_id, chunk_id, [], {}, "cpu")
     masklets.write(bag_id, chunk_id, [])
 
 
@@ -827,6 +914,11 @@ def _write_chunk_manifest(
                 "detections_2d": detections_2d_path(bag_id, chunk_id),
                 "tracklets_2d": tracklets_2d_path(bag_id, chunk_id),
                 "masks_2d": masks_2d_dir(bag_id, chunk_id),
+                **(
+                    {"masklet_embeddings": masklet_embeddings_path(bag_id, chunk_id)}
+                    if cfg.embeddings.every_k_frames > 0
+                    else {}
+                ),
                 "depth_2d": depth_2d_dir(bag_id, chunk_id),
                 "depth_stats": depth_stats_path(bag_id, chunk_id),
                 **(
@@ -893,6 +985,19 @@ def run(
     )
     log.info("=" * 70)
 
+    selection = camera_calibration.resolve(bag_id, cfg.calibration_source)
+    for chunk in chunks:
+        cid = chunk["chunk_id"]
+        camera_calibration.bind_outputs(
+            bag_id,
+            cid,
+            "perception_2d",
+            selection,
+            force=force,
+            existing_outputs=_chunk_complete(bag_id, cid)
+            or os.path.isdir(local_path(depth_2d_dir(bag_id, cid)))
+            or os.path.isdir(_partial_dir(bag_id, cid)),
+        )
     device = _default_device()
 
     # Florence-2 and the detector load their weights lazily (in the tracking

@@ -1,0 +1,38 @@
+# detection_3d on the WATO rig: detection_3d.yaml with the canonical LiDAR of
+# lidar_preprocessing.wato.yaml's frame_sync and all eight top cameras.
+# Every field is documented in src/wato_detection_3d/config.py.
+detection_3d:
+  # validated requires a qualified, current camera_calibration result.
+  calibration_source: recorded
+  model:
+    # The car's resnet50_trt11_int8 (wato_monorepo bevfusion params.yaml):
+    # README "Model files" installs it.
+    dir: /data/models/bevfusion/resnet50_trt11_int8_8cam
+    precision: int8                    # LiDAR backbone, as the car
+    num_cameras: 8
+    sha256:
+      camera.backbone.onnx: 2fb57dd27265ffb9582e8e6076c426cb8136e5f44040f50869a7d8716fbda411
+      camera.vtransform.onnx: 526ebb75b6015a18904df03bb98fbe893092adcd869c0864ce2a10da51a96cc9
+      fuser.onnx: e3467df2a4680a90c9fb568f6e5608d0e583d4fa586bacc77a1cb38275ac9df0
+      head.bbox.onnx: 4df99f8ee3da00ed60221003bd859c9794295dd818b06f96ee0597c7b2dadf2d
+      lidar.backbone.xyz.onnx: e0f8a8f762fc946d1a8194bc086dcc86ee1290647b5efe407aa37fd11ef466f1
+    engine_cache_dir: /data/models/.cache/tensorrt
+
+  frames:
+    canonical_lidar: lidar_cc
+
+  points:
+    lidars: [lidar_cc]                 # exclude corner and merged clouds
+    past_sweeps: 9                     # BEVFusion's nuScenes sweeps_num
+    max_time_lag_s: 0.5                # ages it was trained on (~0.45 s)
+    remove_close_m: 1.0                # LoadPointsFromMultiSweeps remove_close
+
+  input_frame:
+    kind: nuscenes_lidar               # the training frame (sensor: the car's)
+    height_m: 1.84                     # nuScenes LIDAR_TOP above the ground
+
+  image:
+    principal_row_px: 490.4            # nuScenes cameras' mean cy (1600x900)
+
+  # Native eight-view encoder and pooling, with each camera's own calibration.
+  cameras: [PANO_NN, PANO_NE, PANO_EE, PANO_SE, PANO_SS, PANO_SW, PANO_WW, PANO_NW]

@@ -34,12 +34,12 @@ MODULES_DIR="${WATO_WORLD_DIR}/modules"
 # Module registry.  Each module declares which base flavor it FROM's so we
 # only build the bases that are actually needed.
 # ---------------------------------------------------------------------------
-ALL_MODULES=(ingest perception_2d semantic_lifting lidar_preprocessing proposal_generation tracking label_refinement open_vocab_discovery student_training)
+ALL_MODULES=(ingest camera_calibration perception_2d semantic_lifting lidar_preprocessing detection_3d proposal_generation tracking label_refinement open_vocab_discovery student_training)
 
 base_flavor_for() {
     case "$1" in
         ingest|semantic_lifting|lidar_preprocessing|proposal_generation|tracking) echo "cpu" ;;
-        perception_2d|label_refinement|open_vocab_discovery|student_training) echo "cuda" ;;
+        perception_2d|detection_3d|label_refinement|open_vocab_discovery|student_training) echo "cuda" ;;
         *) echo "" ;;
     esac
 }
@@ -85,6 +85,9 @@ Commands:
   down [SERVICE|all]       Stop containers.
   run MODULE --bag BAG [ARGS...]
                            One-shot module run.
+  pipeline --bag BAG [--profile NAME] [--force STAGES] [--from STAGE] [--to STAGE]
+                           Every stage on one bag, skipping work already done;
+                           --force re-runs those stages and every later one.
   test [MODULE] [ARGS...]  Run pytest inside the module's dev container.
   <docker-compose-cmd>     Passthrough (ps, logs, pull, exec, ...).
 
@@ -97,6 +100,7 @@ Examples:
   watod up                 # brings up ingest_dev
   watod -t ingest_dev      # shell into the ingest dev container
   watod run ingest --bag /data/bags/scene-0001.mcap
+  watod pipeline --bag /data/bags/scene-0001.mcap --force tracking
 EOF
 }
 
@@ -237,6 +241,9 @@ case "${COMMAND}" in
         ;;
     run)
         exec bash "${SCRIPTS_DIR}/watod-run.sh" "$@"
+        ;;
+    pipeline)
+        exec bash "${SCRIPTS_DIR}/watod-pipeline.sh" "$@"
         ;;
     test)
         exec bash "${SCRIPTS_DIR}/watod-test.sh" "$@"

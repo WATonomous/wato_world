@@ -25,6 +25,12 @@ runs:
       with:
         files: src/common/**
 
+    - name: Find changed files inside src/camera_calibration
+      id: changed-files-camera-calibration
+      uses: tj-actions/changed-files@v42
+      with:
+        files: src/camera_calibration/**
+
     - name: Find changed files inside src/ingest
       id: changed-files-ingest
       uses: tj-actions/changed-files@v42
@@ -42,6 +48,12 @@ runs:
       uses: tj-actions/changed-files@v42
       with:
         files: src/lidar_preprocessing/**
+
+    - name: Find changed files inside src/detection_3d
+      id: changed-files-detection-3d
+      uses: tj-actions/changed-files@v42
+      with:
+        files: src/detection_3d/**
 
     - name: Find changed files inside src/proposal_generation
       id: changed-files-proposal-generation
@@ -76,10 +88,12 @@ runs:
     - name: Create list of changed modules
       id: output-changes
       env:
+        CAMERA_CALIBRATION_CHANGED: ${{ steps.changed-files-camera-calibration.outputs.any_changed }}
         ALL_CHANGED: ${{ steps.changed-files-outside-src.outputs.any_changed == 'true' || steps.changed-files-common.outputs.any_changed == 'true' }}
         INGEST_CHANGED: ${{ steps.changed-files-ingest.outputs.any_changed }}
         PERCEPTION_2D_CHANGED: ${{ steps.changed-files-perception-2d.outputs.any_changed }}
         LIDAR_PREPROCESSING_CHANGED: ${{ steps.changed-files-lidar-preprocessing.outputs.any_changed }}
+        DETECTION_3D_CHANGED: ${{ steps.changed-files-detection-3d.outputs.any_changed }}
         PROPOSAL_GENERATION_CHANGED: ${{ steps.changed-files-proposal-generation.outputs.any_changed }}
         TRACKING_CHANGED: ${{ steps.changed-files-tracking.outputs.any_changed }}
         LABEL_REFINEMENT_CHANGED: ${{ steps.changed-files-label-refinement.outputs.any_changed }}

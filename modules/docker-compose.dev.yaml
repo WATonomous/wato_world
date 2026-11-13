@@ -26,8 +26,9 @@ services:
       - ${WATO_WORLD_DIR}/src/common:/ws/src/common
       - ${WATO_WORLD_DIR}/src/ingest:/ws/src/ingest
       - ${WATO_WORLD_DIR}/data/bags:/data/bags:ro
-      # trim-bag's output; the rest of /data/bags stays read-only.
+      # trim-bag's and debug-bag's outputs; the rest of /data/bags stays read-only.
       - ${WATO_WORLD_DIR}/data/bags/trimmed:/data/bags/trimmed
+      - ${WATO_WORLD_DIR}/data/bags/debug:/data/bags/debug
       - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
       - ${WATO_WORLD_DIR}/config:/config:ro
 
@@ -58,6 +59,23 @@ services:
       - ${WATO_WORLD_DIR}/config:/config:ro
       - /tmp/.X11-unix:/tmp/.X11-unix
       - /mnt/wslg:/mnt/wslg
+
+  camera_calibration_dev:
+    profiles: ["camera_calibration_dev"]
+    extends:
+      file: docker-compose.yaml
+      service: camera_calibration
+    build:
+      target: develop
+      args: { USERNAME: "${USERNAME}", USER_UID: "${SETUID}", USER_GID: "${SETGID}", CLAUDE_CODE: "${CLAUDE_CODE}" }
+    image: "${CAMERA_CALIBRATION_IMAGE}:dev_${TAG}"
+    command: sleep infinity
+    volumes:
+      - ${WATO_WORLD_DIR}/src/common:/ws/src/common
+      - ${WATO_WORLD_DIR}/src/camera_calibration:/ws/src/camera_calibration
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/config:/config:ro
+
 
   semantic_lifting_dev:
     profiles: ["semantic_lifting_dev"]
@@ -101,6 +119,24 @@ services:
       - ${WATO_WORLD_DIR}/config:/config:ro
       - /tmp/.X11-unix:/tmp/.X11-unix
       - /mnt/wslg:/mnt/wslg
+
+  detection_3d_dev:
+    profiles: ["detection_3d_dev"]
+    extends:
+      file: docker-compose.yaml
+      service: detection_3d
+    build:
+      target: develop
+      args: { USERNAME: "${USERNAME}", USER_UID: "${SETUID}", USER_GID: "${SETGID}", CLAUDE_CODE: "${CLAUDE_CODE}" }
+    image: "${DETECTION_3D_IMAGE}:dev_${TAG}"
+    command: sleep infinity
+    volumes:
+      - ${WATO_WORLD_DIR}/src/common:/ws/src/common
+      - ${WATO_WORLD_DIR}/src/detection_3d:/ws/src/detection_3d
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/data/models:/data/models:ro
+      - ${WATO_WORLD_DIR}/data/models/.cache/tensorrt:/data/models/.cache/tensorrt
+      - ${WATO_WORLD_DIR}/config:/config:ro
 
   proposal_generation_dev:
     profiles: ["proposal_generation_dev"]

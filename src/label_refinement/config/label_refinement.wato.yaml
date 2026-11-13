@@ -2,6 +2,8 @@
 # LiDAR of lidar_preprocessing.wato.yaml's frame_sync. Every field is
 # documented in src/wato_label_refinement/config.py.
 label_refinement:
+  # validated requires a qualified, current camera_calibration result.
+  calibration_source: recorded
   frames:
     canonical_lidar: lidar_cc
 

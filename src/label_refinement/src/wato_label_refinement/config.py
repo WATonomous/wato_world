@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -195,6 +195,7 @@ class SlfConfig(BaseModel):
 class ComponentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    calibration_source: Literal["recorded", "validated"] = "recorded"
     frames: FramesConfig = Field(default_factory=FramesConfig)
     parked: ParkedConfig = Field(default_factory=ParkedConfig)
     moving: MovingConfig = Field(default_factory=MovingConfig)

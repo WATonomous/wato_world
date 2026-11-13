@@ -493,7 +493,9 @@ class MaskletRow(BaseModel):
     score: float
     frames_present: str  # JSON list[int] — camera_seq values where mask is present
     mask_path: str  # path to directory of per-frame mask PNG files
-    dino_feature_path: Optional[str] = None  # DINOv2 embedding NPZ
+    # Unused: rows written before masklet_embeddings.npz name a per-masklet
+    # mean embedding here; nothing reads it.
+    dino_feature_path: Optional[str] = None
     # detector + SAM2 fields
     raw_phrase: str = ""  # raw detector label before canonicalisation
     det_score: float = 0.0  # detector (× SAM2 mask) confidence
@@ -641,6 +643,134 @@ LIFTED_STATS_SCHEMA = pa.schema(
 
 
 # ---------------------------------------------------------------------------
+# detection_3d — a learned 3D detector's boxes (one per frame × box).
+# ---------------------------------------------------------------------------
+
+
+class Detection3DRow(BaseModel):
+    """One row per box a learned 3D detector returned for one frame.
+
+    A frame is lidar_preprocessing's frame_sync group, keyed on its reference
+    sweep as ProposalRow is. Every box the model returned is kept, whatever
+    its score or class: thresholds belong to the consumer
+    (proposal_generation), so they change without re-running the GPU stage.
+
+    The box is stored twice: in the world frame in the pipeline's convention
+    (centre; l along heading, which is directed: the model predicts a front),
+    and exactly as the model returned it in its input frame (model_*), whose
+    pose is the frame row's world_T_model.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    detection_id: str  # unique within the chunk
+    bag_id: str
+    chunk_id: str
+    sweep_id: int  # the frame's reference sweep
+    frame_id: Optional[int]  # lidar_proc_index's; None for an unmatched sweep
+    reference_timestamp_ns: int  # the reference sweep's
+    cx: float
+    cy: float
+    cz: float
+    w: float
+    l: float  # noqa: E741 — domain term: length, matches parquet w/l/h column triplet
+    h: float
+    heading: float  # radians, world frame, directed
+    vx: float  # m/s, world frame: the model's velocity head
+    vy: float
+    class_id: int  # the model's class index
+    cls: str  # the model's own name for class_id (detections_3d.CLASSES)
+    score: float
+    # As returned, in the model's input frame: the vendor decoder's position,
+    # size and rotation, converted by wato_detection_3d.geometry.
+    model_x: float
+    model_y: float
+    model_z: float
+    model_w: float
+    model_l: float
+    model_h: float
+    model_rot: float
+    model_vx: float
+    model_vy: float
+
+
+DETECTION_3D_SCHEMA = pa.schema(
+    [
+        pa.field("detection_id", pa.string()),
+        pa.field("bag_id", pa.string()),
+        pa.field("chunk_id", pa.string()),
+        pa.field("sweep_id", pa.int64()),
+        pa.field("frame_id", pa.int64()),
+        pa.field("reference_timestamp_ns", pa.int64()),
+        pa.field("cx", pa.float64()),
+        pa.field("cy", pa.float64()),
+        pa.field("cz", pa.float64()),
+        pa.field("w", pa.float64()),
+        pa.field("l", pa.float64()),
+        pa.field("h", pa.float64()),
+        pa.field("heading", pa.float64()),
+        pa.field("vx", pa.float64()),
+        pa.field("vy", pa.float64()),
+        pa.field("class_id", pa.int64()),
+        pa.field("cls", pa.string()),
+        pa.field("score", pa.float64()),
+        pa.field("model_x", pa.float64()),
+        pa.field("model_y", pa.float64()),
+        pa.field("model_z", pa.float64()),
+        pa.field("model_w", pa.float64()),
+        pa.field("model_l", pa.float64()),
+        pa.field("model_h", pa.float64()),
+        pa.field("model_rot", pa.float64()),
+        pa.field("model_vx", pa.float64()),
+        pa.field("model_vy", pa.float64()),
+    ]
+)
+
+
+class Detection3DFrameRow(BaseModel):
+    """One row per frame detection_3d considered: run, or skipped and why.
+
+    status "ok": the model ran on input_sweep_ids' points and one image per
+    camera (camera_timestamps_ns, in the config's camera order); its boxes
+    are the Detection3DRows of this sweep_id, possibly none. Any other
+    status names why the frame was skipped (detail says more).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    bag_id: str
+    chunk_id: str
+    sweep_id: int
+    frame_id: Optional[int]
+    reference_timestamp_ns: int
+    status: str  # "ok" | "no_pose" | "missing_camera" | "no_points"
+    detail: Optional[str] = None
+    input_sweep_ids: str = "[]"  # JSON list[int]
+    n_points: int = 0
+    camera_timestamps_ns: str = "[]"  # JSON list[int]
+    # JSON list of 16 floats, row-major: the model's input frame at the
+    # reference time, in the world; "[]" unless status is "ok".
+    world_T_model: str = "[]"
+
+
+DETECTION_3D_FRAME_SCHEMA = pa.schema(
+    [
+        pa.field("bag_id", pa.string()),
+        pa.field("chunk_id", pa.string()),
+        pa.field("sweep_id", pa.int64()),
+        pa.field("frame_id", pa.int64()),
+        pa.field("reference_timestamp_ns", pa.int64()),
+        pa.field("status", pa.string()),
+        pa.field("detail", pa.string()),
+        pa.field("input_sweep_ids", pa.string()),
+        pa.field("n_points", pa.int64()),
+        pa.field("camera_timestamps_ns", pa.string()),
+        pa.field("world_T_model", pa.string()),
+    ]
+)
+
+
+# ---------------------------------------------------------------------------
 # proposal_generation — 3D box proposals (one per frame × object × source).
 # ---------------------------------------------------------------------------
 
@@ -657,7 +787,8 @@ class ProposalRow(BaseModel):
     Every source's proposals are rows, and so are fusion's: provenance
     "lidar_mos" (lidar_preprocessing Step F motion clusters; MotionClusterRow
     shares the box columns), "lifted" (a box around one semantic_lifting
-    instance's points), "lidar_detector" or "fused". (SLF fits shapes per
+    instance's points), "fusion_detector" (a detection_3d BEVFusion box, its
+    geometry the model's), "lidar_detector" or "fused". (SLF fits shapes per
     track in label_refinement, not per frame here.) A fused row lists
     the source rows it merges in member_proposal_ids; source rows stay so each
     source's reliability can be measured. tracking reads the fused rows. List
@@ -685,11 +816,14 @@ class ProposalRow(BaseModel):
     # Radians, world frame. lidar_mos rows keep MotionClusterRow's undirected
     # (mod pi) heading.
     heading: float
-    # perception_2d's class (e.g. "car", "truck", "pedestrian"), carried by
-    # semantic_lifting; None when no lifted instance supports the box.
+    # The pipeline's taxonomy (e.g. "car", "truck", "pedestrian"):
+    # perception_2d's class carried by semantic_lifting, else on a
+    # fusion_detector row (and a fused row it alone classes) the detector's,
+    # mapped by proposal_generation's fusion_detector.class_map; None when
+    # neither supports the box.
     cls: Optional[str]
     score: float
-    # "lidar_mos" | "lifted" | "lidar_detector" | "fused"
+    # "lidar_mos" | "lifted" | "fusion_detector" | "lidar_detector" | "fused"
     provenance: str
     lidar_point_count: Optional[int] = (
         None  # total geometric support, including recovery

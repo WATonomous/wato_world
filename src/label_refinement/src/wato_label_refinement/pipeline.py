@@ -41,6 +41,7 @@ from wato_common.artifact_store import (
 from wato_common.artifacts import ground as ground_artifact
 from wato_common.artifacts import refined_labels, tracks
 from wato_common.artifacts.calibration import Calibration
+from wato_common.artifacts import calibration_refinement as camera_calibration
 from wato_common.artifacts.ground import GroundGrid
 from wato_common.artifacts.lidar_sweeps import ProcessedSweeps
 from wato_common.artifacts.refined_labels import (
@@ -382,6 +383,27 @@ def run(
 ) -> None:
     """Refine every track of the bag. Skips when refined labels exist unless
     force=True."""
+    upstream_identity = camera_calibration.bind_from_bag_stage(
+        bag_id,
+        "label_refinement",
+        "tracking",
+        force=force,
+        existing_outputs=refined_labels.exists(bag_id),
+    )
+    if cfg.calibration_source == "validated":
+        selection = camera_calibration.resolve(bag_id, cfg.calibration_source)
+        if upstream_identity != selection.identity():
+            raise ValueError(
+                "tracking outputs use another or unknown camera calibration; rerun upstream stages"
+            )
+        camera_calibration.bind_outputs(
+            bag_id,
+            None,
+            "label_refinement",
+            selection,
+            force=force,
+            existing_outputs=refined_labels.exists(bag_id),
+        )
     if refined_labels.exists(bag_id) and not force:
         log.info("bag %s already refined — skipping (use --force)", bag_id)
         return
@@ -415,7 +437,27 @@ def run(
     calib = None
     selected: dict[str, list[views.View]] = {}
     if slf_tracks:
-        calib = Calibration.load(bag_id)
+        selection = camera_calibration.resolve(bag_id, cfg.calibration_source)
+        if upstream_identity is not None and upstream_identity != selection.identity():
+            raise ValueError(
+                "tracking outputs use different camera calibration; rerun upstream stages"
+            )
+        camera_calibration.require_upstream(
+            selection,
+            [
+                f"{chunk_root(bag_id, cid)}/manifest_perception_2d.json"
+                for cid in chunk_ids
+            ],
+        )
+        camera_calibration.bind_outputs(
+            bag_id,
+            None,
+            "label_refinement",
+            selection,
+            force=force,
+            existing_outputs=refined_labels.exists(bag_id),
+        )
+        calib = selection.calibration
         chunks = {cid: views.Chunk.load(bag_id, cid, frames) for cid in chunk_ids}
         for tid in slf_tracks:
             sel = views.select(

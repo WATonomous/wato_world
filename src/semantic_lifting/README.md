@@ -170,3 +170,12 @@ The sweep ↔ camera window is ingest's
 - A sweep's world NPZ must carry `ground_mask` (ground never occludes and is
   never labeled); a sweep
   without one stops the run.
+
+## Camera calibration source
+
+`calibration_source: recorded` is the default. `validated` requests the
+camera-calibration stage's accepted result and fails on missing, stale,
+unqualified or failed-camera evidence. Keep this choice consistent across
+camera-dependent stages. Output/cache identities reject mixing calibrations;
+rerun depth and downstream processing with `--force` after a change. See
+[the calibration module](../camera_calibration/README.md).

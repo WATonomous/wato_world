@@ -11,19 +11,23 @@ add_module() {
 if [[ "${ALL_CHANGED}" == "true" ]]; then
     echo "::notice:: Detected shared or non-src changes; testing all modules"
     add_module ingest
+    add_module camera_calibration
     add_module perception_2d
     add_module semantic_lifting
     add_module lidar_preprocessing
+    add_module detection_3d
     add_module proposal_generation
     add_module tracking
     add_module label_refinement
     add_module open_vocab_discovery
     add_module student_training
 else
+    [[ "${CAMERA_CALIBRATION_CHANGED:-false}" == "true" ]] && add_module camera_calibration
     [[ "${INGEST_CHANGED}" == "true" ]] && add_module ingest
     [[ "${PERCEPTION_2D_CHANGED}" == "true" ]] && add_module perception_2d
     [[ "${SEMANTIC_LIFTING_CHANGED}" == "true" ]] && add_module semantic_lifting
     [[ "${LIDAR_PREPROCESSING_CHANGED}" == "true" ]] && add_module lidar_preprocessing
+    [[ "${DETECTION_3D_CHANGED}" == "true" ]] && add_module detection_3d
     [[ "${PROPOSAL_GENERATION_CHANGED}" == "true" ]] && add_module proposal_generation
     [[ "${TRACKING_CHANGED}" == "true" ]] && add_module tracking
     [[ "${LABEL_REFINEMENT_CHANGED}" == "true" ]] && add_module label_refinement

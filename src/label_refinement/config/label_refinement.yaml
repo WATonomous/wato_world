@@ -1,6 +1,8 @@
 # label_refinement (nuScenes and other single-LiDAR bags). Every field is
 # documented in src/wato_label_refinement/config.py.
 label_refinement:
+  # validated requires a qualified, current camera_calibration result.
+  calibration_source: recorded
   frames:
     canonical_lidar: null        # as proposal_generation's frames.canonical_lidar
 
