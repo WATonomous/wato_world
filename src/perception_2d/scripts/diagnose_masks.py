@@ -112,7 +112,6 @@ def main():
         cam_id=args.cam,
         tracker_backend=args.backend,
         device=device,
-        dino_every_k=0,
         redetect_every_k=cfg.detection.redetect_every_k,
         ego_mask=ego,
         ego_max_fraction=cfg.ego_mask.max_fraction,

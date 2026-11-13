@@ -17,9 +17,8 @@ predictor to segment + propagate each detected box into a tracked masklet:
      untracked area (default) or SAM 3's mask IoU. Those that pass get a fresh
      obj_id via ``add_new_points_or_box``; the rest are dropped.
   3. ``propagate_in_video`` forward to the next keyframe, recording per-object
-     masks → ``_Track`` → ``Masklet`` (per-frame PNGs written on a thread pool,
-     DINOv2 features every k frames batched over the frame's objects). Each
-     mask loses the ego vehicle's pixels and its specks (``_drop_islands``).
+     masks → ``_Track`` → ``Masklet`` (per-frame PNGs written on a thread
+     pool). Each mask loses the ego vehicle's pixels and its specks (``_drop_islands``).
      Independent masks may overlap: their competing pixel claims survive to
      lifting and geometric refinement. A track ends when SAM2 loses its object
      for ``drop_lost_after_frames`` frames, its mask lies on the ego vehicle,
@@ -33,8 +32,7 @@ predictor to segment + propagate each detected box into a tracked masklet:
 Cost: SAM2 runs memory attention per *object* per frame and keeps every object
 it was given, so without pruning cost and VRAM grow with every object ever
 detected. Removing ended tracks at the next keyframe bounds that. SAM2 runs
-under ``autocast_dtype`` (bfloat16 by default); the detector and DINOv2 stay
-float32.
+under ``autocast_dtype`` (bfloat16 by default); the detector stays float32.
 
 Object ids reset between OOM windows and chunks, and a re-detected object whose
 track ended starts a new masklet. Cross-camera and cross-chunk identity belongs
@@ -72,7 +70,6 @@ from wato_common.artifacts.frame_index import CameraFrame
 from wato_perception_2d.fusion.masklet import Masklet
 from wato_perception_2d.config import MaskRefinementConfig
 from wato_perception_2d.models.detector import Concept, Detection
-from wato_perception_2d.models.embeddings import extract_dino_features
 from wato_perception_2d.models.mask_refinement import (
     KeyframeMaskRefiner,
     stability_scores,
@@ -90,7 +87,6 @@ class _Track:
         "score",
         "frames_present",
         "mask_writes",
-        "dino_accum",
         "held",
     )
 
@@ -102,7 +98,6 @@ class _Track:
         # Pending PNG writes, parallel to frames_present; each resolves to the
         # mask's path.
         self.mask_writes: list[Future] = []
-        self.dino_accum: list[np.ndarray] = []
         # A tentative track's masks, (camera_seq, packed bits, shape), written
         # once it is confirmed.
         self.held: list[tuple[int, np.ndarray, tuple[int, int]]] = []
@@ -326,7 +321,7 @@ def _iter_in(ctx_factory, gen):
 
     SAM2's ``propagate_in_video`` is a generator: each ``next`` does a frame's
     work. Entering the context per step (rather than around the consumer's
-    loop) keeps the loop body — the DINOv2 forward — out of it.
+    loop) keeps the loop body (mask filtering, PNG encoding) out of it.
     """
     try:
         while True:
@@ -476,8 +471,6 @@ def track_camera(
     chunk_id: str,
     cam_id: str,
     tracker_backend: str,
-    dino_model: str = "dinov2_vitl14",
-    dino_every_k: int = 5,
     device: str = "cuda",
     redetect_every_k: int = 10,
     iou_match_threshold: float = 0.5,
@@ -559,8 +552,6 @@ def track_camera(
         bag_id=bag_id,
         chunk_id=chunk_id,
         cam_id=cam_id,
-        dino_model=dino_model,
-        dino_every_k=dino_every_k,
         device=device,
         redetect_every_k=redetect_every_k,
         iou_match_threshold=iou_match_threshold,
@@ -673,8 +664,6 @@ def _track_window(
     bag_id: str,
     chunk_id: str,
     cam_id: str,
-    dino_model: str,
-    dino_every_k: int,
     device: str,
     redetect_every_k: int,
     iou_match_threshold: float,
@@ -700,12 +689,12 @@ def _track_window(
     """Detect + propagate over one (windowed) frame range in a single session.
 
     Every failure propagates: a CUDA OOM so the caller can retry in smaller
-    windows, anything else (a missing detector or DINOv2 checkpoint, a failed
+    windows, anything else (a missing detector checkpoint, a failed
     mask write) to stop the run, since returning the tracks so far would write
     a camera with no or partial masklets that looks complete. New
     objects are introduced segment-by-segment between keyframes; ``frame_offset``
-    is the window's start index in the full clip, used for the DINOv2 sampling
-    cadence and log lines (mask filenames use the absolute camera_seq).
+    is the window's start index in the full clip, used for log lines and
+    diagnostics (mask filenames use the absolute camera_seq).
     ``quality_events`` (None: off) collects track_camera's diagnostics.
     """
     n = len(frames)
@@ -1067,15 +1056,10 @@ def _track_window(
                         obj_meta,
                         present,
                         support.tentative,
-                        frame_offset + f,
                         seq_by_index[f],
-                        images[f],
                         writer,
                         bag_id,
                         chunk_id,
-                        dino_model,
-                        dino_every_k,
-                        device,
                     )
                 if f < record_stop and quality_events is not None:
                     saved = {oid: int(m.sum()) for oid, m in present}
@@ -1391,22 +1375,16 @@ def _record_frame(
     obj_meta: dict[int, tuple[str, float]],
     present: list[tuple[int, np.ndarray]],
     tentative: dict[int, int],
-    frame_index_abs: int,
     camera_seq: int,
-    image_rgb: np.ndarray,
     writer: ThreadPoolExecutor,
     bag_id: str,
     chunk_id: str,
-    dino_model: str,
-    dino_every_k: int,
-    device: str,
 ) -> None:
     """Append one frame's non-empty masks to their tracks.
 
     Mask PNGs are queued on ``writer`` (PIL releases the GIL while encoding, so
     they overlap the next frame's GPU work); a ``tentative`` track's are held
-    until it is confirmed (``_flush_held``). On DINOv2 frames every present
-    object is embedded in one batched forward.
+    until it is confirmed (``_flush_held``).
     """
     for obj_id, mask in present:
         track = tracks.get(obj_id)
@@ -1428,15 +1406,6 @@ def _record_frame(
                 mask,
             )
         )
-    if dino_every_k > 0 and frame_index_abs % dino_every_k == 0:
-        # A failure raises: a configured embedding must not go silently
-        # missing, and a missing model would fail on every frame.
-        feats = extract_dino_features(
-            image_rgb, [m for _, m in present], dino_model, device
-        )
-        for (obj_id, _), feat in zip(present, feats):
-            if feat is not None:
-                tracks[obj_id].dino_accum.append(feat)
 
 
 def _flush_held(
@@ -1477,11 +1446,6 @@ def _tracks_to_masklets(
 def _track_to_masklet(
     track: _Track, bag_id: str, chunk_id: str, cam_id: str, tracker_backend: str
 ) -> Masklet:
-    dino = (
-        np.mean(track.dino_accum, axis=0).astype(np.float32)
-        if track.dino_accum
-        else None
-    )
     # Re-sort the (frames_present, mask_paths) pair by camera_seq so the masklet
     # is time-ordered regardless of yield order.
     order = sorted(
@@ -1498,6 +1462,5 @@ def _track_to_masklet(
         score=track.score,
         frames_present=frames_present,
         mask_paths=mask_paths,
-        dino_feature=dino,
         tracker_backend=tracker_backend,
     )

@@ -1,8 +1,9 @@
 # perception_2d
 
 Per camera: a detector boxes keyframes, SAM2.1 with DAM4SAM memory tracks each box
-into a masklet (one per physical object), DINOv2 embeds each masklet, and Depth
-Anything V2 gives a metric depth map per image, fitted to static LiDAR.
+into a masklet (one per physical object), DINOv2 describes each masklet's
+appearance in every image, and Depth Anything V2 gives a metric depth map per
+image, fitted to static LiDAR.
 Cross-camera identity is left to the `tracking` component.
 
 ## Running
@@ -19,6 +20,7 @@ Then, after ingest and lidar_preprocessing:
 ```bash
 ./watod run perception_2d --bag <bag_id> [--chunk <chunk_id>] [--force]
 ./watod run perception_2d viz --bag <bag_id> [--chunk <chunk_id> --cam <cam_id>]
+./watod run perception_2d embed --bag <bag_id> [--chunk <chunk_id>] [--force]  # descriptors only
 ./watod run perception_2d ego-mask --bag <bag_id> [--config <yaml>]   # see "Ego mask"
 ./watod run perception_2d compare --bag <bag_id> --baseline <root>    # see "Comparing two runs"
 ./watod test perception_2d
@@ -26,6 +28,11 @@ Then, after ingest and lidar_preprocessing:
 
 WATO bags (`ingest.wato*.yaml`) take the rig's config, which adds the car's
 ego mask: `--config /ws/src/perception_2d/config/perception_2d.wato.yaml`.
+
+`embed` writes `masklet_embeddings.npz` for chunks already tracked, from their
+masks on disk, without the detector or SAM2 (minutes per chunk): for a bag
+tracked before the file existed, or after a change to the descriptor. It
+leaves masks, tables and the chunk's manifest as they are.
 
 A chunk whose output parquets exist is skipped. Each camera's masklets are
 checkpointed, so an aborted run resumes per camera. `--force` discards those
@@ -37,7 +44,7 @@ chunk is recomputed only with `--force`, whatever the config.
 
 ## How a chunk runs
 
-Two passes, so the heavy models never share VRAM:
+Three passes; depth and tracking never share VRAM:
 
 1. **Depth.** DA-V2 outputs relative *disparity*, so the fit is in inverse-depth
    space, `1/depth = scale·disparity + shift`, by RANSAC with inliers judged in
@@ -102,16 +109,30 @@ Two passes, so the heavy models never share VRAM:
      reverse order. It stops where the forward rules would end the track read
      backwards (`drop_lost_after_frames` empty masks, the ego vehicle) or where
      its mask's bbox fails the `untracked_area` test against the masks
-     recorded there, since that object is already tracked. Back-filled images
-     get no DINOv2 embedding.
+     recorded there, since that object is already tracked.
 
    On CUDA OOM the camera is retried in windows of `sub_clip_frames`, halved
    down to `min_sub_clip_frames`; an OOM at that floor raises rather than
    publish a camera with gaps, and so does a failed late prompt or correction.
    SAM2 runs under `autocast_dtype` (bfloat16); the detector and DINOv2 stay
    float32. Retaining competing tracks can increase per-object memory attention,
-   active mask memory, PNG writes and DINOv2 work until detector support or
-   absent-mask checks end them. The existing OOM window retries still apply.
+   active mask memory and PNG writes until detector support or absent-mask
+   checks end them. The existing OOM window retries still apply.
+
+3. **Embeddings** (`models/embeddings.py`), from the masks pass 2 wrote: one
+   appearance descriptor per masklet per image (every
+   `embeddings.every_k_frames`-th image of a camera), for `tracking`'s ReID.
+   The descriptor is Foreground Feature Averaging
+   ([Kotar et al.](https://arxiv.org/abs/2311.00750); the code path of
+   [NIDS-Net](https://github.com/YoungSean/NIDS-Net)): the mask's bounding-box
+   crop resized to a 224 px square, DINOv2's patch tokens under the mask
+   averaged, L2-normalised. The mask picks the tokens, so two objects sharing
+   a bounding box differ, and the square resize keeps the ends of a wide car
+   that a centre crop cuts off. Every image keeps its own descriptor, back-filled
+   ones included: tracking compares two masklets by their closest pair, which
+   separates nearby same-class objects far better than a mean per masklet
+   (`docs/tracking_measurements.md`, "Appearance"). The descriptors are
+   written before the tables that mark the chunk complete.
 
 **One entry per image.** `frame_index` repeats an image once per sweep it is
 nearest to (~4.9× on WATO, ~1.7× on nuScenes); both passes read it through
@@ -121,7 +142,7 @@ at the image's own time. Every frame-counted setting counts images.
 
 Model loading and inference are fail-loud: a detector, SAM2, DINOv2 or DA-V2
 failure stops the run instead of leaving a camera with fewer masklets or no
-embeddings, both of which look like a finished chunk. SAM2 and the detector are
+descriptors, both of which look like a finished chunk. SAM2 and the detector are
 import-checked, and the SAM2, YOLO and DINOv2 weights load-checked on the CPU,
 before each chunk's depth pass, so a missing checkpoint fails in seconds.
 
@@ -248,7 +269,8 @@ In `data/artifacts/raw/<bag_id>/chunks/<chunk_id>/`:
 
 | Artifact | Owner |
 |---|---|
-| `tracklets_2d.parquet`, `detections_2d.parquet`, `masks_2d/<masklet_id>/<camera_seq:06d>.png`, `masks_2d/<masklet_id>/dino_feature.npy` | `wato_common.artifacts.masklets` (consumers use `MaskletIndex`) |
+| `tracklets_2d.parquet`, `detections_2d.parquet`, `masks_2d/<masklet_id>/<camera_seq:06d>.png` | `wato_common.artifacts.masklets` (consumers use `MaskletIndex`) |
+| `masklet_embeddings.npz` | `wato_common.artifacts.masklets` (`read_embeddings`): one unit-norm float16 descriptor per (masklet, embedded image), with the model and pooling that made it; absent with `embeddings.every_k_frames: 0` |
 | `depth_2d/<cam_id>/<camera_seq:06d>.npz` | `wato_common.artifacts.depth`: a missing file means no usable depth; a 0 pixel means no measurement |
 | `manifest_perception_2d.json` | Provenance incl. pinned model revisions, hashed inputs |
 | `mask_quality/<cam_id>.json` | Perception-local mask diagnostics, only with `segmentation.mask_quality` (`mask_quality.py`) |
@@ -343,8 +365,8 @@ the host:
   "Ego mask"). Under the default `perception_2d.yaml` (no ego mask) the rack is
   tracked as a truck.
 - An object occluded for longer than `drop_lost_after_frames` comes back as a
-  new masklet; only `tracking`'s 3D association can rejoin it (no appearance
-  ReID reads the DINOv2 embeddings yet).
+  new masklet; only `tracking` can rejoin it, by its 3D boxes or, with
+  tracking's `appearance` on, by the descriptors.
 - **Birth gate.** `untracked_area` also refuses a real car under a large mask
   of junk (sky, road) until detector support ends that mask (about a second);
   back-fill then recovers the car's earlier images. No published 2D rule
@@ -359,3 +381,12 @@ the host:
 
 Measurements behind these defaults:
 [docs/perception_2d_measurements.md](../../docs/perception_2d_measurements.md).
+
+## Camera calibration source
+
+`calibration_source: recorded` is the default. `validated` requests the
+camera-calibration stage's accepted result and fails on missing, stale,
+unqualified or failed-camera evidence. Keep this choice consistent across
+camera-dependent stages. Output/cache identities reject mixing calibrations;
+rerun depth and downstream processing with `--force` after a change. See
+[the calibration module](../camera_calibration/README.md).

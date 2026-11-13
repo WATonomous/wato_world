@@ -493,7 +493,9 @@ class MaskletRow(BaseModel):
     score: float
     frames_present: str  # JSON list[int] — camera_seq values where mask is present
     mask_path: str  # path to directory of per-frame mask PNG files
-    dino_feature_path: Optional[str] = None  # DINOv2 embedding NPZ
+    # Unused: rows written before masklet_embeddings.npz name a per-masklet
+    # mean embedding here; nothing reads it.
+    dino_feature_path: Optional[str] = None
     # detector + SAM2 fields
     raw_phrase: str = ""  # raw detector label before canonicalisation
     det_score: float = 0.0  # detector (× SAM2 mask) confidence

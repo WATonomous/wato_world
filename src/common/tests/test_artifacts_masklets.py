@@ -35,9 +35,6 @@ def test_round_trip():
         frames_present=(7, 8),
         raw_phrase="car",
         det_score=0.9,
-        dino_feature_path=masklets.write_dino_feature(
-            BAG, CHUNK, "m0", np.ones(4, dtype=np.float32)
-        ),
     )
     ped = masklets.MaskletRecord(
         masklet_id="m1",
@@ -54,7 +51,6 @@ def test_round_trip():
 
     assert masklets.exists(BAG, CHUNK)
     assert masklets.read(BAG, CHUNK) == [car, ped]
-    np.testing.assert_array_equal(np.load(car.dino_feature_path), np.ones(4))
 
     index = masklets.MaskletIndex.load(BAG, CHUNK)
     assert index.at("CAM_FRONT", 8) == [car]
@@ -63,6 +59,76 @@ def test_round_trip():
     for (mid, seq), m in masks.items():
         (rec,) = [r for r in index.records if r.masklet_id == mid]
         np.testing.assert_array_equal(index.mask(rec, seq), m)
+
+
+def _embeddings(**changes) -> masklets.MaskletEmbeddings:
+    f = np.array([[1.0, 0.0, 0.0], [0.0, 0.6, 0.8], [0.0, 1.0, 0.0]])
+    fields = dict(
+        model="dinov2_vitl14",
+        pooling="ffa",
+        masklet_ids=np.array(["m0", "m0", "m1"]),
+        cam_ids=np.array(["CAM_FRONT", "CAM_FRONT", "CAM_BACK"]),
+        camera_seq=np.array([7, 8, 8]),
+        camera_timestamp_ns=np.array([700, 800, 805]),
+        features=f,
+    )
+    return masklets.MaskletEmbeddings(**{**fields, **changes})
+
+
+def test_embeddings_round_trip():
+    assert not masklets.embeddings_exist(BAG, CHUNK)
+    with pytest.raises(FileNotFoundError, match="embed"):
+        masklets.read_embeddings(BAG, CHUNK)
+    wrote = _embeddings()
+    masklets.write_embeddings(BAG, CHUNK, wrote)
+
+    assert masklets.embeddings_exist(BAG, CHUNK)
+    read = masklets.read_embeddings(BAG, CHUNK)
+    assert (read.model, read.pooling, len(read)) == ("dinov2_vitl14", "ffa", 3)
+    assert read.features.dtype == np.float16
+    assert read.camera_seq.dtype == np.int64
+    for name in ("masklet_ids", "cam_ids", "camera_seq", "camera_timestamp_ns"):
+        np.testing.assert_array_equal(getattr(read, name), getattr(wrote, name))
+    np.testing.assert_allclose(read.features, wrote.features, atol=1e-3)
+
+
+def test_chunk_with_nothing_embedded_round_trips():
+    empty = np.zeros(0, dtype=np.int64)
+    masklets.write_embeddings(
+        BAG,
+        CHUNK,
+        _embeddings(
+            masklet_ids=np.zeros(0, dtype=str),
+            cam_ids=np.zeros(0, dtype=str),
+            camera_seq=empty,
+            camera_timestamp_ns=empty,
+            features=np.zeros((0, 3)),
+        ),
+    )
+    assert len(masklets.read_embeddings(BAG, CHUNK)) == 0
+
+
+@pytest.mark.parametrize(
+    "changes, reason",
+    [
+        ({"features": np.ones((3, 3))}, "unit L2 norm"),
+        ({"camera_seq": np.array([7, 8])}, "camera_seq has 2 rows"),
+        ({"pooling": ""}, "no model or pooling"),
+    ],
+)
+def test_malformed_embeddings_are_not_written(changes, reason):
+    with pytest.raises(ArtifactFormatError, match=reason):
+        masklets.write_embeddings(BAG, CHUNK, _embeddings(**changes))
+    assert not masklets.embeddings_exist(BAG, CHUNK)
+
+
+def test_embeddings_file_missing_an_array_raises():
+    path = masklets.write_embeddings(BAG, CHUNK, _embeddings())
+    with np.load(path) as z:
+        kept = {k: z[k] for k in z.files if k != "camera_timestamp_ns"}
+    np.savez(path, **kept)
+    with pytest.raises(ArtifactFormatError, match="camera_timestamp_ns"):
+        masklets.read_embeddings(BAG, CHUNK)
 
 
 def test_frames_present_is_stored_as_a_json_string():
