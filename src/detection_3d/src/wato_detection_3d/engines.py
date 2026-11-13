@@ -142,11 +142,13 @@ def prepare(
         "model_dir": cfg.dir,
         "model_files_sha256": hashes,
         "precision": cfg.precision,
+        "num_cameras": cfg.num_cameras,
         "int8_engines": list(INT8_PLANS) if cfg.precision == "int8" else [],
         "tensorrt": trt.__version__,
         "gpu": gpu(),
         "wato_cuda_bevfusion_commit": os.environ.get("WATO_CUDA_BEVFUSION_COMMIT", ""),
         "cudasm": os.environ.get("WATO_CUDASM", ""),
+        "camera_count_abi": os.environ.get("WATO_BEVFUSION_CAMERA_COUNT_ABI", ""),
     }
     key_src = {
         k: info[k]

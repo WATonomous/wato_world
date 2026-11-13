@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Literal, Optional
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # The ONNX files BEVFusion's TensorRT engines are built from, the car's
 # (wato_monorepo bevfusion_core.cpp): four engines and the LiDAR backbone,
@@ -27,6 +27,8 @@ class ModelConfig(BaseModel):
     dir: str = "/data/models/bevfusion/resnet50_trt11_int8"
     # The LiDAR backbone's precision; the car's default (BEVFusionInputConfig).
     precision: Literal["int8", "fp16"] = "int8"
+    # Must match the exported camera backbone and the runtime's buffers.
+    num_cameras: int = Field(default=6, ge=1)
     # sha256 of each MODEL_FILES file. A different file is a different
     # labeler, so a mismatch stops the run rather than labelling with it.
     sha256: dict[str, str] = Field(default_factory=dict)
@@ -107,22 +109,31 @@ class CameraSyncConfig(BaseModel):
 class ComponentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    calibration_source: Literal["recorded", "validated"] = "recorded"
     model: ModelConfig
     camera_sync: CameraSyncConfig = Field(default_factory=CameraSyncConfig)
     frames: FramesConfig = Field(default_factory=FramesConfig)
     points: PointsConfig = Field(default_factory=PointsConfig)
     input_frame: InputFrameConfig = Field(default_factory=InputFrameConfig)
     image: ImageConfig = Field(default_factory=ImageConfig)
-    # The six cameras, in nuScenes' order: front, front-right, front-left,
-    # back, back-left, back-right. The model takes exactly six.
+    # Ordered physical cameras, exactly model.num_cameras distinct IDs.
     cameras: list[str]
 
     @field_validator("cameras")
     @classmethod
-    def six_cameras(cls, value: list[str]) -> list[str]:
-        if len(value) != 6 or len(set(value)) != 6:
-            raise ValueError(f"cameras must name 6 distinct cameras, got {value}")
+    def distinct_cameras(cls, value: list[str]) -> list[str]:
+        if not value or len(set(value)) != len(value):
+            raise ValueError(f"cameras must name distinct cameras, got {value}")
         return value
+
+    @model_validator(mode="after")
+    def cameras_match_model(self):
+        if len(self.cameras) != self.model.num_cameras:
+            raise ValueError(
+                f"cameras must name {self.model.num_cameras} distinct cameras "
+                "to match model.num_cameras"
+            )
+        return self
 
 
 def load_config(path: str) -> ComponentConfig:

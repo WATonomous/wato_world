@@ -186,11 +186,11 @@ def apply_band(
 
 @dataclass(frozen=True)
 class CameraInputs:
-    images: np.ndarray  # (6, 900, 1600, 3) uint8 RGB
-    camera2lidar: np.ndarray  # (6, 4, 4) model_T_cam
-    intrinsics: np.ndarray  # (6, 4, 4) K padded
-    lidar2image: np.ndarray  # (6, 4, 4) K @ cam_T_model
-    img_aug: np.ndarray  # (6, 4, 4)
+    images: np.ndarray  # (N cameras, 900, 1600, 3) uint8 RGB
+    camera2lidar: np.ndarray  # (N, 4, 4) model_T_cam
+    intrinsics: np.ndarray  # (N, 4, 4) K padded
+    lidar2image: np.ndarray  # (N, 4, 4) K @ cam_T_model
+    img_aug: np.ndarray  # (N, 4, 4)
     timestamps_ns: tuple[int, ...]
 
 
@@ -200,7 +200,7 @@ def camera_inputs(
     model_T_world: np.ndarray,
     cfg: ComponentConfig,
 ) -> CameraInputs:
-    """The six cameras' images and matrices, in cfg.cameras order. Every
+    """All configured cameras' images and matrices, in cfg.cameras order. Every
     frame must carry its pose at the image's time (world_T_ego)."""
     images, c2l, intr, l2i = [], [], [], []
     aug = img_aug_matrix()

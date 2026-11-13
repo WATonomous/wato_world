@@ -17,8 +17,8 @@ def test_shipped_configs_load():
 
 def test_wato_profile_is_the_default_with_the_rigs_lidar_frame_and_cameras():
     """lidar_preprocessing.wato.yaml groups frames on lidar_cc; WATO has no
-    LIDAR_TOP, so the model's frame is rebuilt; its six cameras are the car's.
-    Nothing else may drift from the default profile."""
+    LIDAR_TOP, so the model's frame is rebuilt and the shared encoder is
+    specialized for all eight top cameras."""
     default = load_config(str(CONFIG_DIR / "detection_3d.yaml")).model_dump()
     wato = load_config(str(CONFIG_DIR / "detection_3d.wato.yaml")).model_dump()
     assert wato["frames"]["canonical_lidar"] == "lidar_cc"
@@ -27,12 +27,16 @@ def test_wato_profile_is_the_default_with_the_rigs_lidar_frame_and_cameras():
     assert wato["cameras"] == [
         "PANO_NN",
         "PANO_NE",
-        "PANO_NW",
+        "PANO_EE",
+        "PANO_SE",
         "PANO_SS",
         "PANO_SW",
-        "PANO_SE",
+        "PANO_WW",
+        "PANO_NW",
     ]
-    for key in ("frames", "input_frame", "cameras"):
+    assert wato["model"]["num_cameras"] == 8
+    assert wato["points"]["lidars"] == ["lidar_cc"]
+    for key in ("frames", "input_frame", "cameras", "model", "points"):
         wato[key] = default[key]
     assert wato == default
 
@@ -47,5 +51,5 @@ def test_every_model_file_is_pinned():
 def test_the_model_takes_six_distinct_cameras():
     model = {"sha256": {f: "0" * 64 for f in MODEL_FILES}}
     for cameras in (list("abcde"), list("abcdea")):
-        with pytest.raises(ValidationError, match="6 distinct"):
+        with pytest.raises(ValidationError, match="distinct cameras"):
             ComponentConfig.model_validate({"model": model, "cameras": cameras})

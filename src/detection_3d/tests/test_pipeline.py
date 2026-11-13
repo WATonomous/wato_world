@@ -251,6 +251,23 @@ def test_images_arrive_as_the_models_1600x900_with_their_calibration():
     )
 
 
+def test_native_eight_camera_input_includes_each_views_image_and_calibration(
+    monkeypatch,
+):
+    cameras = CAMS + ["CAM_EAST", "CAM_WEST"]
+    monkeypatch.setitem(globals(), "CAMS", cameras)
+    _write_chunk()
+    fake = _Fake()
+    cfg = _cfg(model={"sha256": {f: "0" * 64 for f in MODEL_FILES}, "num_cameras": 8})
+    _run(cfg, fake)
+    frames, _ = detections_3d.read(BAG, CHUNK)
+    assert len(fake.calls) == 4
+    for _, inputs in fake.calls:
+        assert inputs.images.shape == (8, 900, 1600, 3)
+        assert inputs.camera2lidar.shape == (8, 4, 4)
+    assert all(len(f.camera_timestamps_ns) == 8 for f in frames)
+
+
 def test_a_frame_without_one_cameras_image_is_skipped_and_said_why():
     _write_chunk(cams_missing_after_ms=150)
     _run(_cfg(camera_sync={"max_offset_ms": 60.0}), _Fake())
@@ -278,3 +295,12 @@ def test_completed_chunks_are_skipped_unless_forced():
         make_detector=lambda: (fake, {"model_dir": "m", "model_files_sha256": {}}),
     )
     assert len(fake.calls) == 8
+
+
+def test_cached_detections_reject_changed_sensor_inputs():
+    _write_chunk()
+    fake = _Fake()
+    _run(_cfg(), fake)
+    with pytest.raises(ValueError, match="inputs/model differ"):
+        _run(_cfg(points={"past_sweeps": 0}), fake)
+    assert len(fake.calls) == 4

@@ -24,9 +24,10 @@ class Detector(Protocol):
 
 
 class Bevfusion:
-    def __init__(self, engines: Engines, precision: str):
+    def __init__(self, engines: Engines, precision: str, num_cameras: int = 6):
         import libpybev
 
+        self._num_cameras = num_cameras
         self._core = libpybev.load_bevfusion(
             engines.camera_backbone,
             engines.camera_vtransform,
@@ -34,6 +35,7 @@ class Bevfusion:
             engines.fuser,
             engines.head_bbox,
             precision,
+            num_cameras,
         )
         if self._core is None:
             raise RuntimeError(
@@ -41,6 +43,18 @@ class Bevfusion:
             )
 
     def infer(self, points: np.ndarray, cameras: CameraInputs) -> np.ndarray:
+        if cameras.images.shape != (self._num_cameras, 900, 1600, 3):
+            raise ValueError(f"expected {self._num_cameras} camera images")
+        for matrix in (
+            cameras.camera2lidar,
+            cameras.intrinsics,
+            cameras.lidar2image,
+            cameras.img_aug,
+        ):
+            if matrix.shape != (self._num_cameras, 4, 4):
+                raise ValueError(
+                    f"expected calibration for {self._num_cameras} cameras"
+                )
         # The calibration moves with the ego between each image's time and
         # the frame's, so it is uploaded per frame.
         self._core.update(

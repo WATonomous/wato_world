@@ -1,0 +1,94 @@
+diff --git a/CUDA-BEVFusion/src/bevfusion/bevfusion.cpp b/CUDA-BEVFusion/src/bevfusion/bevfusion.cpp
+index 7e05ff3..72c63ff 100644
+--- a/CUDA-BEVFusion/src/bevfusion/bevfusion.cpp
++++ b/CUDA-BEVFusion/src/bevfusion/bevfusion.cpp
+@@ -43,6 +43,11 @@ class CoreImplement : public Core {
+       printf("Failed to create camera backbone.\n");
+       return false;
+     }
++    if (camera_backbone_->camera_shape()[0] != param.normalize.num_camera ||
++        param.geometry.num_camera != param.normalize.num_camera) {
++      printf("Camera engine, normalization and geometry camera counts must agree.\n");
++      return false;
++    }
+ 
+     camera_bevpool_ =
+         camera::create_bevpool(camera_backbone_->camera_shape(), param.geometry.geometry_dim.x, param.geometry.geometry_dim.y);
+@@ -261,4 +266,4 @@ std::shared_ptr<Core> create_core(const CoreParameter& param) {
+   return instance;
+ }
+ 
+-};  // namespace bevfusion
+\ No newline at end of file
++};  // namespace bevfusion
+diff --git a/CUDA-BEVFusion/src/python.cpp b/CUDA-BEVFusion/src/python.cpp
+index 4b49422..fe60fe4 100644
+--- a/CUDA-BEVFusion/src/python.cpp
++++ b/CUDA-BEVFusion/src/python.cpp
+@@ -72,10 +72,13 @@ class BEVFusion {
+  public:
+   std::shared_ptr<bevfusion::Core> core_;
+   cudaStream_t stream_ = nullptr;
++  int num_camera_ = 6;
+ 
+   static std::shared_ptr<BEVFusion> load_instance(string camera, string vtransform, string lidar, string fuser, string headbbox,
+-                                                  string precision) {
++                                                  string precision, int num_camera = 6) {
+     std::shared_ptr<BEVFusion> instance(new BEVFusion());
++    if (num_camera <= 0) throw py::value_error("num_camera must be positive");
++    instance->num_camera_ = num_camera;
+     if (!instance->load(camera, vtransform, lidar, fuser, headbbox, precision)) {
+       instance.reset();
+     }
+@@ -92,7 +95,7 @@ class BEVFusion {
+     normalization.image_height = 900;
+     normalization.output_width = 704;
+     normalization.output_height = 256;
+-    normalization.num_camera = 6;
++    normalization.num_camera = num_camera_;
+     normalization.resize_lim = 0.48f;
+     normalization.interpolation = bevfusion::camera::Interpolation::Bilinear;
+ 
+@@ -131,7 +134,7 @@ class BEVFusion {
+     geometry.image_height = 256;
+     geometry.feat_width = 88;
+     geometry.feat_height = 32;
+-    geometry.num_camera = 6;
++    geometry.num_camera = num_camera_;
+     geometry.geometry_dim = nvtype::Int3(360, 360, 80);
+ 
+     bevfusion::head::transbbox::TransBBoxParameter transbbox;
+@@ -162,6 +165,11 @@ class BEVFusion {
+   void print() { core_->print(); }
+ 
+   void update(py::array camera2lidar, py::array camera_intrinsics, py::array lidar2image, py::array img_aug_matrix) {
++    for (const auto& matrix : {camera2lidar, camera_intrinsics, lidar2image, img_aug_matrix}) {
++      if (matrix.ndim() != 4 || matrix.shape(0) != 1 || matrix.shape(1) != num_camera_ ||
++          matrix.shape(2) != 4 || matrix.shape(3) != 4)
++        throw py::value_error("calibration must have shape (1, num_camera, 4, 4)");
++    }
+     auto t_lidar2image = convert_to(lidar2image);
+     auto t_img_aug_matrix = convert_to(img_aug_matrix);
+     auto t_camera2lidar = convert_to(camera2lidar);
+@@ -171,6 +179,9 @@ class BEVFusion {
+   }
+ 
+   py::array forward_with_normalization(py::array images, py::array points) {
++    if (images.ndim() != 5 || images.shape(0) != 1 || images.shape(1) != num_camera_ ||
++        images.shape(2) != 900 || images.shape(3) != 1600 || images.shape(4) != 3)
++      throw py::value_error("images must have shape (1, num_camera, 900, 1600, 3)");
+     auto t_points = convert_to(points);
+     auto t_images = convert_to(images);
+ 
+@@ -263,6 +274,8 @@ PYBIND11_MODULE(libpybev, m) {
+       .def("print", &BEVFusion::print)
+       .def("update", &BEVFusion::update);
+ 
+-  m.def("load_bevfusion", BEVFusion::load_instance);
++  m.def("load_bevfusion", BEVFusion::load_instance, py::arg("camera"), py::arg("vtransform"),
++        py::arg("lidar"), py::arg("fuser"), py::arg("headbbox"), py::arg("precision"),
++        py::arg("num_camera") = 6);
+   dlopen("libcustom_layernorm.so", RTLD_NOW);
+-};
+\ No newline at end of file
++};

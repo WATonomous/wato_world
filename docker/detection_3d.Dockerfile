@@ -93,6 +93,11 @@ RUN git clone https://github.com/WATonomous/wato-cuda-bevfusion.git \
     && if [ "${file_size}" -lt 1000000 ]; then echo "libspconv.so is still an LFS pointer" >&2; exit 1; fi
 
 WORKDIR /opt/src/wato-cuda-bevfusion/CUDA-BEVFusion
+# The upstream Python binding fixes camera buffers/geometry at six. Match
+# their size to the exported camera engine, and reject mismatched inputs.
+COPY docker/patches/bevfusion-camera-count.patch /tmp/bevfusion-camera-count.patch
+RUN git apply --check /tmp/bevfusion-camera-count.patch \
+    && git apply /tmp/bevfusion-camera-count.patch
 # Regenerate the ONNX protobuf sources with this image's protoc, so they match
 # the libprotobuf they link against.
 #
@@ -145,7 +150,8 @@ ENV PYTHONPATH=/opt/bevfusion/lib \
     LD_LIBRARY_PATH=/opt/bevfusion/lib \
     WATO_CUDA_BEVFUSION_COMMIT=${WATO_CUDA_BEVFUSION_COMMIT} \
     WATO_TENSORRT_VERSION=${TENSORRT_VERSION} \
-    WATO_CUDASM=${CUDASM}
+    WATO_CUDASM=${CUDASM} \
+    WATO_BEVFUSION_CAMERA_COUNT_ABI=1
 
 # Locked dependency set — see docker/requirements/detection_3d.txt for the
 # rationale and the regeneration procedure.

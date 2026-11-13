@@ -19,6 +19,7 @@ skipped, with the reason, rather than run on partial inputs.
 from __future__ import annotations
 
 import bisect
+import json
 import logging
 import os
 from collections import Counter, OrderedDict
@@ -41,6 +42,7 @@ from wato_common.artifact_store import (
 )
 from wato_common.artifacts import detections_3d
 from wato_common.artifacts.calibration import Calibration
+from wato_common.artifacts import calibration_refinement as camera_calibration
 from wato_common.artifacts.detections_3d import Detection3D, DetectorFrame
 from wato_common.artifacts.frame_index import CameraFrame, FrameIndex
 from wato_common.artifacts.lidar_sweeps import Frame, ProcessedSweeps, WorldSweep
@@ -243,7 +245,9 @@ def process_chunk(
             raise FileNotFoundError(
                 f"chunk {chunk_id!r} of bag {bag_id!r} is missing {name}"
             )
-    calib = Calibration.load(bag_id)
+    calib = camera_calibration.resolve(
+        bag_id, cfg.calibration_source, cfg.cameras
+    ).calibration
     sweeps = ProcessedSweeps.load(bag_id, chunk_id)
     frames = sweeps.frames(cfg.frames.canonical_lidar)
     poses = PoseLookup.load(bag_id, chunk_id)
@@ -282,7 +286,11 @@ def process_chunk(
 
 
 def _write_chunk_manifest(
-    bag_id: str, chunk_id: str, config_path: Optional[str], engine_info: dict
+    bag_id: str,
+    chunk_id: str,
+    config_path: Optional[str],
+    engine_info: dict,
+    cfg: ComponentConfig,
 ) -> None:
     """Record the config, model and inputs behind this chunk's detections.
     Best-effort: never fails a chunk that succeeded. The per-sweep world files
@@ -316,6 +324,7 @@ def _write_chunk_manifest(
             },
             extra={
                 "engines": engine_info,
+                "inference_config": cfg.model_dump(),
                 "unhashed_inputs": {
                     "world_sweeps": lidar_proc_dir(bag_id, chunk_id),
                     "camera_images": f"{root}/cam_*",
@@ -351,6 +360,32 @@ def run(
         chunks = [c for c in chunks if c["chunk_id"] == chunk_id]
         if not chunks:
             raise ValueError(f"chunk_id {chunk_id!r} not found for bag {bag_id!r}")
+    if not force:
+        for c in chunks:
+            cid = c["chunk_id"]
+            if not detections_3d.exists(bag_id, cid):
+                continue
+            path = local_path(chunk_root(bag_id, cid)) + "/manifest_detection_3d.json"
+            saved = {}
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as fh:
+                    saved = json.load(fh).get("inference_config", {})
+            if saved != cfg.model_dump():
+                raise ValueError(
+                    f"chunk {cid}: existing detection_3d inputs/model differ or "
+                    "are unrecorded; rerun detection_3d and downstream stages "
+                    "with --force (sensor changes require --force ingest)."
+                )
+    selection = camera_calibration.resolve(bag_id, cfg.calibration_source, cfg.cameras)
+    for c in chunks:
+        camera_calibration.bind_outputs(
+            bag_id,
+            c["chunk_id"],
+            "detection_3d",
+            selection,
+            force=force,
+            existing_outputs=detections_3d.exists(bag_id, c["chunk_id"]),
+        )
     todo = [
         c["chunk_id"]
         for c in chunks
@@ -368,12 +403,14 @@ def run(
 
         def make_detector():
             prepared = engines.prepare(cfg.model)
-            return model.Bevfusion(prepared, cfg.model.precision), prepared.info
+            return model.Bevfusion(
+                prepared, cfg.model.precision, cfg.model.num_cameras
+            ), prepared.info
 
     detector, info = make_detector()
     for cid in todo:
         process_chunk(cfg, bag_id, cid, detector)
-        _write_chunk_manifest(bag_id, cid, config_path, info)
+        _write_chunk_manifest(bag_id, cid, config_path, info, cfg)
     log.info(
         "detection_3d complete for bag %s: %d processed, %d skipped",
         bag_id,

@@ -118,12 +118,54 @@ Per chunk, through `wato_common.artifacts.detections_3d`:
   it (`model_*`), with the model's class (`CLASSES`, nuScenes' ten) and score.
 
 `manifest_detection_3d.json` records the model files' hashes, the TensorRT
-version, the GPU, the fork commit and the engine directory.
+version, GPU, fork commit, camera-count ABI, engine directory and full resolved
+inference configuration. Existing detections with a different or unrecorded
+configuration require `--force` and a downstream rerun.
 
 ## Configuration
 
 `config/detection_3d.yaml` (nuScenes) and `config/detection_3d.wato.yaml`
-(`canonical_lidar: lidar_cc`, the car's six cameras `PANO_NN, NE, NW, SS, SW,
-SE` in nuScenes order; `PANO_EE` / `PANO_WW` have no nuScenes counterpart).
+(`canonical_lidar: lidar_cc`, `points.lidars: [lidar_cc]`, all eight top cameras
+`PANO_NN, NE, EE, SE, SS, SW, WW, NW`). The WATO profile uses
+`resnet50_trt11_int8_8cam`, with `model.num_cameras: 8`; configuration, ONNX
+shapes, CUDA normalization and geometry must agree. Each view carries its own
+intrinsics and pose-adjusted extrinsics; pooling uses all eight in one pass.
+`detection_3d.wato_6cam.yaml` explicitly retains the original six-view export
+for older recordings without EE/WW; it is selected only by that legacy profile.
 Every field is documented in
 [`config.py`](src/wato_detection_3d/config.py).
+
+## Eight-camera export
+
+Install the six-camera source model above first, then install `onnx==1.17.0`
+in the environment running the export. In the detection image's paths:
+
+```bash
+python3 -m wato_detection_3d.export_cameras \
+  --config /ws/src/detection_3d/config/detection_3d.yaml \
+  --output-dir /data/models/bevfusion/resnet50_trt11_int8_8cam --num-cameras 8
+```
+
+The source hashes are verified. The export specializes five Reshape targets
+and camera-axis annotations; learned tensors and quantization scales stay
+unchanged, and other model graphs are copied unchanged. ONNX shape inference
+and full checking validate the result; `camera_export.json` records both sets
+of hashes. The WATO YAML pins the resulting graph. Rebuild the detection image:
+its checked-in vendor patch sizes Python/CUDA buffers from the camera count
+and rejects mismatched engine/calibration/image shapes. This changes sensor
+coverage without retraining; WATO detection accuracy still needs ground truth.
+
+`scripts/audit_inputs.py --bag <id> --config <wato.yaml> --out <report.json>
+--ablate-cameras` records actual image/sweep inputs and probes every camera
+independently through TensorRT. Full-detector ablations are reported alongside
+repeat noise; deterministic encoder ablations establish per-view processing.
+See [sensor setup](../../docs/sensor_setup.md) for the measured audit.
+
+## Camera calibration source
+
+`calibration_source: recorded` is the default. `validated` requests the
+camera-calibration stage's accepted result and fails on missing, stale,
+unqualified or failed-camera evidence. Keep this choice consistent across
+camera-dependent stages. Output/cache identities reject mixing calibrations;
+rerun depth and downstream processing with `--force` after a change. See
+[the calibration module](../camera_calibration/README.md).
