@@ -87,6 +87,21 @@ def build(
     }
     if extra:
         manifest.update(extra)
+    # Calibration-specific identity also covers resumable depth caches. The
+    # shared artifact reader owns the sidecar encoding and bag/chunk fallback.
+    from wato_common.artifacts.calibration_refinement import output_binding
+
+    binding = output_binding(bag_id, chunk_id, component)
+    if binding:
+        manifest["camera_calibration"] = binding["identity"]
+        if binding.get("calibration_path"):
+            manifest["inputs"]["calibration"] = _describe_input(
+                binding["calibration_path"]
+            )
+        if binding.get("report_path"):
+            manifest["inputs"]["calibration_report"] = _describe_input(
+                binding["report_path"]
+            )
     return manifest
 
 
@@ -126,6 +141,9 @@ def write(
     ensure_local_dir(os.path.dirname(local_path(out_uri)))
     with open(local_path(out_uri), "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2)
+    from wato_common.artifacts.calibration_refinement import finish_output_binding
+
+    finish_output_binding(bag_id, chunk_id, component)
     return out_uri
 
 

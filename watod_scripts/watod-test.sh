@@ -14,6 +14,7 @@ declare -a COMPOSE_FILES=(
 
 ALL_MODULES=(
     ingest
+    camera_calibration
     perception_2d
     semantic_lifting
     lidar_preprocessing

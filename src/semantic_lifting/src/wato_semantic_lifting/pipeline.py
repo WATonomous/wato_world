@@ -53,6 +53,7 @@ from wato_common.artifact_store import (
 )
 from wato_common.artifacts import ArtifactFormatError, lifted_candidates, lifted_labels
 from wato_common.artifacts.calibration import Calibration
+from wato_common.artifacts import calibration_refinement as camera_calibration
 from wato_common.artifacts.frame_index import CameraFrame, FrameIndex
 from wato_common.artifacts.lidar_sweeps import ProcessedSweeps, WorldSweep
 from wato_common.artifacts.masklets import MaskletIndex, MaskletRecord
@@ -409,11 +410,23 @@ def run(
         if not chunks:
             raise ValueError(f"chunk_id {chunk_id!r} not found for bag {bag_id!r}")
 
-    calibration = Calibration.load(bag_id)
+    selection = camera_calibration.resolve(bag_id, cfg.calibration_source)
+    calibration = selection.calibration
 
     n_ok = n_skip = 0
     for chunk in chunks:
         cid = chunk["chunk_id"]
+        camera_calibration.require_upstream(
+            selection, [f"{chunk_root(bag_id, cid)}/manifest_perception_2d.json"]
+        )
+        camera_calibration.bind_outputs(
+            bag_id,
+            cid,
+            "semantic_lifting",
+            selection,
+            force=force,
+            existing_outputs=lifted_labels.exists(bag_id, cid),
+        )
         if not force and lifted_labels.exists(bag_id, cid):
             log.info("chunk %s already complete — skipping (use --force)", cid)
             n_skip += 1

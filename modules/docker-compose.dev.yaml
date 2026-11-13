@@ -60,6 +60,23 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix
       - /mnt/wslg:/mnt/wslg
 
+  camera_calibration_dev:
+    profiles: ["camera_calibration_dev"]
+    extends:
+      file: docker-compose.yaml
+      service: camera_calibration
+    build:
+      target: develop
+      args: { USERNAME: "${USERNAME}", USER_UID: "${SETUID}", USER_GID: "${SETGID}", CLAUDE_CODE: "${CLAUDE_CODE}" }
+    image: "${CAMERA_CALIBRATION_IMAGE}:dev_${TAG}"
+    command: sleep infinity
+    volumes:
+      - ${WATO_WORLD_DIR}/src/common:/ws/src/common
+      - ${WATO_WORLD_DIR}/src/camera_calibration:/ws/src/camera_calibration
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/config:/config:ro
+
+
   semantic_lifting_dev:
     profiles: ["semantic_lifting_dev"]
     extends:

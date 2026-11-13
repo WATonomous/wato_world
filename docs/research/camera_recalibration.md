@@ -30,7 +30,7 @@ same [measurement section](../semantic_lifting_measurements.md#wato-camera-align
 | Car intrinsic files | Sibling monorepo [`camera_calib/config/camera_*.yaml`](../../../wato_monorepo/src/interfacing/calibration/camera_calib/config/), installed as package configuration. [`DEVELOPING.md`](../../../wato_monorepo/src/interfacing/calibration/camera_calib/DEVELOPING.md) describes checkerboard capture and YAML export. |
 | Car image production | [`template_camera_load.yaml`](../../../wato_monorepo/src/perception/perception_bringup/launch/template_camera_load.yaml) loads those files through `camera_info_urls`; Isaac ROS `RectifyNode` emits 1280 × 1024 rectified images; JPEG publishing wraps `image_rect`. |
 | Car extrinsics | [`eve_roof_mount.xacro`](../../../wato_monorepo/src/interfacing/eve_description/urdf/eve_roof_mount.xacro) generates ideal ring mounts and optical-frame rotations; lower-camera mounts are explicitly nominal. [`eve_kia_soul_ev.xacro`](../../../wato_monorepo/src/interfacing/eve_description/urdf/eve_kia_soul_ev.xacro) connects this mount to `base_link`/`base_footprint`. |
-| Offline input selection | [`ingest.wato.yaml`](../../src/ingest/config/ingest.wato.yaml) maps eight `image_rect_compressed`/`camera_info` pairs, three per-scanner clouds, and `base_footprint`; some bags need the six-camera or missing-NW-LiDAR profile, or raw-message `image_rect` topic names. |
+| Offline input selection | [`ingest.wato.yaml`](../../src/ingest/config/ingest.wato.yaml) maps all eight top `image_rect_compressed`/`camera_info` pairs, only `/lidar_cc/velodyne_points`, and `base_footprint`; older six-camera recordings need an explicit reduced profile, and some bags use raw-message `image_rect` topic names. The missing-NW-LiDAR profile is now a compatibility alias. |
 | Offline calibration construction | [`inputs/calibration.py`](../../src/ingest/src/wato_ingest/inputs/calibration.py) reads the first CameraInfo and LiDAR frame IDs, resolves ego-to-sensor TF paths, or imports an authored JSON. It does not estimate calibration. |
 | Frozen artifact contract | [`artifacts/calibration.py`](../../src/common/src/wato_common/artifacts/calibration.py) owns `raw/<bag_id>/calibration.json`: image-space `K`, distortion, dimensions, `ego_T_cam`, and `ego_T_lidar`; raw CameraInfo is provenance. The contract is here, rather than in the general [`schemas.py`](../../src/common/src/wato_common/schemas.py). |
 | Projection and inverse rays | [`camera_model.py`](../../src/common/src/wato_common/geometry/camera_model.py), with the cross-component [camera geometry contract](../camera_geometry_contract.md). |
@@ -314,8 +314,10 @@ contains only voxelized XYZ, so it cannot directly supply this intensity
 objective. Require intensity presence/quality rather than inventing values.
 [Sweep contract](../../src/common/src/wato_common/artifacts/lidar_sweeps.py),
 [map reduction](../../src/lidar_preprocessing/src/wato_lidar_preprocessing/reduce/_core.py).
-This is an integration design inferred from the solver's shared objective;
-it has not been implemented or tested on WATO data.
+This design is now implemented in the optional
+[camera_calibration module](../../src/camera_calibration/README.md), with
+[initial measurements](../camera_calibration_measurements.md). The initial
+WATO fits remain unqualified and unstable; no production correction is accepted.
 
 The adapter can seed `results.init_T_lidar_camera` from the recorded TF
 (`ego_T_cam` when adapted clouds use ego coordinates), then invoke

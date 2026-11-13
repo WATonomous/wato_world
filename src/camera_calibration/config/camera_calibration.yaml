@@ -1,0 +1,4 @@
+camera_calibration:
+  # Generic runs retain recorded calibration. Enable with a rig-specific
+  # LiDAR and measured validation profile; no implicit scanner selection.
+  enabled: false

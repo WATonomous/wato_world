@@ -6,6 +6,24 @@ semantic lifting, SLF view construction and proposal-camera overlays.
 Consumers pass the model rather than extracting focal lengths themselves.
 The older helpers accept a bare K for an explicitly undistorted camera.
 
+## Recorded and refined extrinsics
+
+Ingest's `calibration.json` remains the recorded/imported baseline. The optional
+`camera_calibration` stage runs after LiDAR preprocessing and writes separate
+candidate, effective and validation-report artifacts. It fits camera-to-ego
+transforms from static intensity returns at each image's own time, with camera
+intrinsics, LiDAR transforms and poses fixed.
+
+Camera consumers explicitly choose `calibration_source: recorded` (default)
+or `validated` through `wato_common.artifacts.calibration_refinement`. Validated
+reads require current input/output hashes, a qualified report and a passing
+decision for every required camera; an unchanged transform in effective.json
+alone does not establish validity. Output/cache identities follow the selected
+calibration through downstream stages. Changing it requires depth refitting and
+downstream reruns. See [the module contract](../src/camera_calibration/README.md).
+The shipped profiles currently generate diagnostics only when enabled and are
+not qualified for automatic production calibration.
+
 ## Coordinates and equations
 
 Optical camera axes are right, down, forward. `cam_T_world` maps world points

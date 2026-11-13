@@ -41,6 +41,11 @@ def calibration_path(bag_id: str) -> str:
     return _join(bag_root(bag_id), "calibration.json")
 
 
+def calibration_refinement_dir(bag_id: str) -> str:
+    """Camera-only refinement; calibration.json remains ingest provenance."""
+    return _join(bag_root(bag_id), "camera_calibration")
+
+
 def chunks_index_path(bag_id: str) -> str:
     return _join(bag_root(bag_id), "chunks", "index.parquet")
 
@@ -194,6 +199,10 @@ def detections_2d_path(bag_id: str, chunk_id: str) -> str:
 
 def tracklets_2d_path(bag_id: str, chunk_id: str) -> str:
     return _join(chunk_root(bag_id, chunk_id), "tracklets_2d.parquet")
+
+
+def masklet_embeddings_path(bag_id: str, chunk_id: str) -> str:
+    return _join(chunk_root(bag_id, chunk_id), "masklet_embeddings.npz")
 
 
 def masks_2d_dir(bag_id: str, chunk_id: str) -> str:

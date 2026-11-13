@@ -144,6 +144,56 @@ services:
   # =====================================================================
   # semantic_lifting
   # =====================================================================
+  camera_calibration_source:
+    profiles: ["camera_calibration_pre"]
+    build:
+      context: ..
+      dockerfile: docker/camera_calibration.Dockerfile
+      target: source
+      cache_from:
+        - "${CAMERA_CALIBRATION_IMAGE}:source_${TAG}"
+    image: "${CAMERA_CALIBRATION_IMAGE}:source_${TAG}"
+
+  camera_calibration_deps:
+    profiles: ["camera_calibration_pre"]
+    build:
+      context: ..
+      dockerfile: docker/camera_calibration.Dockerfile
+      target: dependencies
+      cache_from:
+        - "${CAMERA_CALIBRATION_IMAGE}:deps_${TAG}"
+    image: "${CAMERA_CALIBRATION_IMAGE}:deps_${TAG}"
+
+  camera_calibration:
+    profiles: ["camera_calibration"]
+    init: true
+    user: "${SETUID}:${SETGID}"
+    build:
+      context: ..
+      dockerfile: docker/template.Dockerfile
+      target: deploy
+      args:
+        MODULE_SOURCE: "${CAMERA_CALIBRATION_IMAGE}:source_${TAG}"
+        MODULE_DEPS: "${CAMERA_CALIBRATION_IMAGE}:deps_${TAG}"
+        COMPONENT_PACKAGE_DIR: camera_calibration
+        COMPONENT_PACKAGE: wato_camera_calibration
+        # Build provenance — baked into the image by
+        # docker/template.Dockerfile, read back at runtime by
+        # wato_common.provenance so every artifact records the source
+        # revision that produced it. Values come from modules/.env.
+        WATO_GIT_COMMIT: "${WATO_GIT_COMMIT:-}"
+        WATO_GIT_DIRTY: "${WATO_GIT_DIRTY:-false}"
+        WATO_BUILD_TIME: "${WATO_BUILD_TIME:-}"
+      cache_from:
+        - "${CAMERA_CALIBRATION_IMAGE}:${TAG}"
+    image: "${CAMERA_CALIBRATION_IMAGE}:${TAG}"
+    environment:
+      - ARTIFACT_ROOT_URI=${ARTIFACT_ROOT_URI}
+    volumes:
+      - ${WATO_WORLD_DIR}/data/artifacts:/data/artifacts
+      - ${WATO_WORLD_DIR}/config:/config:ro
+
+  # =====================================================================
   semantic_lifting_source:
     profiles: ["semantic_lifting_pre"]
     build:
