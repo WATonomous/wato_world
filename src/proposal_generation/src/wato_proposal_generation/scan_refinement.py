@@ -15,8 +15,11 @@ adaptation from per-camera masks to this pipeline's merged instance labels.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import chain
 
 import numpy as np
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
 from scipy.spatial import cKDTree
 
 from wato_proposal_generation.config import ScanRefinementConfig
@@ -38,58 +41,51 @@ class RefinedMask:
 def _dbscan(
     xyz: np.ndarray, tree: cKDTree, radius_m: float, min_samples: int
 ) -> np.ndarray:
-    """Standard DBSCAN with on-demand neighborhoods, avoiding an N² matrix.
+    """Standard DBSCAN as connected components of the core graph.
 
-    Counts include self. Borders receive labels but never propagate; a sparse
-    chain of non-core points therefore cannot join two core components. Each
-    core neighborhood is expanded once. Dense core chains can still merge.
-    Rebuild the search tree after half its cores have been assigned, excluding
-    them from future searches. This changes work, not connectivity: only
-    unassigned cores can extend a component. Attach borders afterward to the
-    first adjacent core component, matching ordered DBSCAN expansion.
+    Counts include self. A DBSCAN cluster's cores are exactly a connected
+    component of the graph joining cores within radius_m, so components are
+    found in one sparse pass (no per-point Python expansion: on WATO frames
+    of ~13k returns the expansion loop cost ~0.1 s a scale). Borders receive
+    labels but never propagate; a sparse chain of non-core points therefore
+    cannot join two core components. Clusters are numbered by their lowest
+    core index and a border takes its lowest adjacent cluster, matching
+    ordered DBSCAN expansion over the input order.
     """
     core = tree.query_ball_point(xyz, radius_m, p=2, eps=0, return_length=True)
     core = core >= min_samples
     core_indices = np.flatnonzero(core)
-    core_xyz = xyz[core_indices]
-    core_labels = np.full(len(core_indices), -1, np.int64)
-    active = np.arange(len(core_indices))
-    remaining = len(active)
-    core_tree = cKDTree(core_xyz)
-    cluster_id = 0
-    for start in range(len(core_indices)):
-        if core_labels[start] >= 0:
-            continue
-        core_labels[start] = cluster_id
-        remaining -= 1
-        pending = [start]
-        while pending and remaining:
-            if remaining * 2 <= len(active):
-                active = np.flatnonzero(core_labels < 0)
-                core_tree = cKDTree(core_xyz[active])
-            current = pending.pop()
-            neighbors = np.asarray(
-                core_tree.query_ball_point(core_xyz[current], radius_m, p=2, eps=0),
-                dtype=np.int64,
-            )
-            neighbors = active[neighbors]
-            unassigned = neighbors[core_labels[neighbors] < 0]
-            core_labels[unassigned] = cluster_id
-            remaining -= len(unassigned)
-            pending.extend(unassigned.tolist())
-        cluster_id += 1
     labels = np.full(len(xyz), -1, np.int64)
+    if not core_indices.size:
+        return labels
+    core_tree = cKDTree(xyz[core_indices])
+    pairs = core_tree.query_pairs(radius_m, p=2, eps=0, output_type="ndarray")
+    n_core = len(core_indices)
+    graph = coo_matrix(
+        (np.ones(len(pairs), np.int8), (pairs[:, 0], pairs[:, 1])),
+        shape=(n_core, n_core),
+    )
+    _, component = connected_components(graph, directed=False)
+    # Renumber components by their lowest core index (expansion order).
+    _, first = np.unique(component, return_index=True)
+    rank = np.empty(len(first), np.int64)
+    rank[np.argsort(first)] = np.arange(len(first))
+    core_labels = rank[component]
     labels[core_indices] = core_labels
-    if core_indices.size:
-        border_indices = np.flatnonzero(~core)
-        # A non-core point has fewer than min_samples neighbors in the full
-        # scan, so these lists stay small without discarding dense core edges.
-        neighbors = cKDTree(core_xyz).query_ball_point(
-            xyz[border_indices], radius_m, p=2, eps=0, return_sorted=False
-        )
-        for index, hits in zip(border_indices, neighbors):
-            if hits:
-                labels[index] = core_labels[hits].min()
+    border_indices = np.flatnonzero(~core)
+    # A non-core point has fewer than min_samples neighbors in the full scan,
+    # so these lists stay small.
+    hits = core_tree.query_ball_point(
+        xyz[border_indices], radius_m, p=2, eps=0, return_sorted=False
+    )
+    lengths = np.fromiter((len(h) for h in hits), np.int64, len(hits))
+    if lengths.any():
+        owner = np.repeat(border_indices, lengths)
+        adjacent = core_labels[np.fromiter(chain.from_iterable(hits), np.int64)]
+        lowest = np.full(len(xyz), np.iinfo(np.int64).max)
+        np.minimum.at(lowest, owner, adjacent)
+        attached = border_indices[lengths > 0]
+        labels[attached] = lowest[attached]
     return labels
 
 

@@ -92,9 +92,11 @@ six published thresholds in their original order, strict IoU acceptance,
 replacement, and unchanged-seed fallback. Implementation choices the paper
 does not specify are Euclidean XYZ radii in metres, `min_samples: 5` (counting
 self), and deterministic scale/input-order ties. DBSCAN expands only through
-core points; a border point does not propagate connectivity. The implementation
-uses the existing SciPy dependency without voxelization, downsampling, or
-temporal accumulation. Refinement uses this pipeline's already merged instance
+core points; a border point does not propagate connectivity. Clusters are the
+connected components of the core graph (one sparse pass per scale, the same
+labels as ordered expansion; a test checks it against a textbook DBSCAN). The
+implementation uses the existing SciPy dependency without voxelization,
+downsampling, or temporal accumulation. Refinement uses this pipeline's already merged instance
 seeds and existing synchronized multi-LiDAR frames; SAL Algorithm 1 instead
 refines per-camera masks before cross-camera fusion on a scan. These are
 adaptations, not a claim of exact SAL reproduction. Ownership follows

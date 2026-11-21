@@ -134,3 +134,46 @@ def test_competing_original_seeds_can_both_refine_against_the_same_bank():
         assert mask.status == "replaced"
         assert mask.iou == pytest.approx(0.6)
         assert mask.point_indices.tolist() == list(range(10))
+
+
+def _ordered_dbscan(xyz, radius, min_samples):
+    """Textbook DBSCAN: expand clusters from cores in input order; a border
+    joins the first cluster that reaches it."""
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(xyz)
+    neighbors = tree.query_ball_point(xyz, radius)
+    core = np.array([len(n) >= min_samples for n in neighbors])
+    labels = np.full(len(xyz), -1, np.int64)
+    cluster = 0
+    for start in range(len(xyz)):
+        if not core[start] or labels[start] >= 0:
+            continue
+        labels[start] = cluster
+        stack = [start]
+        while stack:
+            for q in neighbors[stack.pop()]:
+                if labels[q] < 0:
+                    labels[q] = cluster
+                    if core[q]:
+                        stack.append(q)
+        cluster += 1
+    return labels
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_dbscan_matches_ordered_expansion(seed):
+    """Connected components of the core graph give ordered DBSCAN's labels,
+    numbering and border ties included."""
+    from scipy.spatial import cKDTree
+
+    from wato_proposal_generation.scan_refinement import _dbscan
+
+    rng = np.random.default_rng(seed)
+    blobs = [rng.normal(c, 0.3, (60, 3)) for c in rng.uniform(-4, 4, (6, 3))]
+    xyz = np.concatenate(blobs + [rng.uniform(-6, 6, (80, 3))])
+    xyz = xyz[rng.permutation(len(xyz))]
+    tree = cKDTree(xyz)
+    for radius in (0.25, 0.4, 0.7, 1.2):
+        expected = _ordered_dbscan(xyz, radius, 5)
+        np.testing.assert_array_equal(_dbscan(xyz, tree, radius, 5), expected)
