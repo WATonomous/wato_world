@@ -19,6 +19,7 @@ from PIL import Image
 from wato_common.artifacts.calibration import Calibration
 from wato_common.artifacts.frame_index import CameraFrame
 from wato_common.artifacts.lidar_sweeps import WorldSweep
+from wato_common.geometry import close_to_sensor
 from wato_detection_3d.config import ComponentConfig, ImageConfig, PointsConfig
 from wato_detection_3d.geometry import transform_points
 
@@ -44,7 +45,8 @@ class SweepPoints:
     sweep: WorldSweep
     # The sensor's frame at the sweep's time, from the world; None for the
     # current sweeps, whose close points are kept (LoadPointsFromMultiSweeps
-    # drops them from earlier sweeps only).
+    # drops them from earlier sweeps only) — as far as the world sweep still
+    # has them: lidar_preprocessing's remove_close_m drops them upstream.
     sensor_T_world: Optional[np.ndarray]
 
 
@@ -69,10 +71,7 @@ def assemble_points(
         keep = np.ones(xyz.shape[0], dtype=bool)
         if s.sensor_T_world is not None and cfg.remove_close_m > 0:
             local = transform_points(s.sensor_T_world, xyz)
-            keep &= ~(
-                (np.abs(local[:, 0]) < cfg.remove_close_m)
-                & (np.abs(local[:, 1]) < cfg.remove_close_m)
-            )
+            keep &= ~close_to_sensor(local, cfg.remove_close_m)
         pts = transform_points(model_T_world, xyz[keep])
         inside = np.all((pts >= POINT_RANGE_MIN) & (pts <= POINT_RANGE_MAX), axis=1)
         pts = pts[inside]

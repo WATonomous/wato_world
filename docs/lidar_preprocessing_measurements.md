@@ -6,6 +6,26 @@ cloud within one voxel of a static-map surface, scored with
 `scripts/compare_seg_dynamic.py`. There are no labels, so these are proxies, not
 accuracy.
 
+## Returns on the vehicle itself (2026-11-16)
+
+Raw sweeps in the sensor frame, 20 per chunk:
+
+| Rig | Inside the 1 m square (median / max per sweep) | Within 2.5 m | Of |
+|---|---:|---:|---:|
+| nuScenes scene-0061 LIDAR_TOP | 8,478 / 8,970 | 8,745 | 34,720 |
+| nuScenes scene-1100 LIDAR_TOP | 7,801 / 9,037 | 7,948 | 34,720 |
+| WATO July 7 `lidar_cc`, chunk 0000 | 100 / 109 | 100 | 22,830 |
+| WATO July 7 `lidar_cc`, chunk 0008 | 90 / 98 | 90 | 21,427 |
+
+Plotted, nuScenes' are the roof and sensor mount under the sensor (z −0.25 to
+−0.9 m), the same shape every sweep; WATO's are two short roof-rack strips at
+x ≈ ±0.8 m, z ≈ −0.4 m. Patchwork++ ignores returns under 1 m, so none is
+ground: on nuScenes they were 44% of the non-ground points, a dense blob that
+took a six-scale DBSCAN bank from 0.61 s to 3.8 s per frame. Hence
+`remove_close_m` (README, Step A): 1.0 m on nuScenes, the devkit's default.
+About 260–450 nuScenes returns per sweep remain between 1 and 2.5 m (roof
+edges ahead of the square); the devkit keeps those too.
+
 ## Deskew on the WATO rig (`ring_road_corrected`)
 
 - The Velodyne clouds carry a per-point `time` field, but every value is 0 (all

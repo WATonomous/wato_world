@@ -247,7 +247,10 @@ doesn't load; the trim-bag end-to-end test skips).
   `docs/tracking_measurements.md`; a descriptor change needs `embed --force`
   and a tracking rerun.
 - **Sensor physics lives in `sensor_model.py`** (profiles `vlp32c`, `vlp16`,
-  `hdl32e`), never in YAML.
+  `hdl32e`), never in YAML. Rig geometry does live in YAML: lidar_preprocessing's
+  `remove_close_m` drops the vehicle's own returns (the nuScenes devkit's
+  `remove_close` square; 1.0 m on nuScenes, off on WATO) from every world sweep,
+  so changing it means rerunning from lidar_preprocessing.
 
 ## Ingest
 

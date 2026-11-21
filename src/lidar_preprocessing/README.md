@@ -60,6 +60,15 @@ proposals through `wato_common.artifacts.motion_proposals`.
 
 ### A — Deskew
 
+Before anything else, non-finite returns and, with `remove_close_m` > 0, the
+returns inside the square |x| < r, |y| < r of the sensor frame are dropped
+together, so every per-sweep file indexes the same points. That square is the
+nuScenes devkit's `remove_close`: the vehicle's roof, mount and body, never
+another object, yet non-ground (Patchwork++ ignores returns under 1 m). The
+nuScenes profile uses 1.0 m (~8k of ~34.7k LIDAR_TOP returns per sweep); the
+WATO profile keeps them for now (~90–100 roof-rack returns per `lidar_cc`
+sweep). Changing it changes every world sweep: rerun from this stage.
+
 Each point is placed in the world at its own time: the ego pose is interpolated
 (`wato_common.pose_lookup`) at every per-point timestamp, composed with
 `ego_T_lidar`. Coordinates are float64. Patchwork++ runs per sweep in sensor

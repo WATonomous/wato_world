@@ -27,7 +27,10 @@ LiDAR — the model sees:
   car feeds one sweep, age 0. Here: up to `points.past_sweeps` earlier sweeps
   no older than `points.max_time_lag_s` (the ages it was trained on), from the
   deskewed world sweeps, close points of earlier sweeps removed
-  (LoadPointsFromMultiSweeps' `remove_close`).
+  (LoadPointsFromMultiSweeps' `remove_close`). The current sweep keeps its
+  close points as in training, unless lidar_preprocessing's own
+  `remove_close_m` (nuScenes profile: 1.0 m) already dropped them from every
+  world sweep; the detector's input then differs from training there.
 - **Images at nuScenes geometry.** The model's camera input is a 1600×900
   image it resizes by 0.48 and crops from the bottom. The car resizes WATO's
   1280×1024 by 0.55, so the crop starts at row 558 — at or below every

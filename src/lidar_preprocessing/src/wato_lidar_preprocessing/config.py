@@ -238,6 +238,14 @@ class ComponentConfig(BaseModel):
     # Step A — deskew filter.
     filter_nonfinite_points: bool = True
 
+    # Step A — drop returns within this half-side (m) of the sensor, |x| < r and
+    # |y| < r in the sensor frame: the vehicle's roof, mount and body (the
+    # nuScenes devkit's LidarPointCloud.remove_close square). They are never
+    # another object, yet they are non-ground (Patchwork++ ignores < 1 m) and
+    # would enter every consumer's points. A property of the rig, so YAML; 0.0
+    # keeps every return.
+    remove_close_m: float = Field(default=0.0, ge=0.0)
+
     # Step A — when a sweep has no usable per-point times, synthesize them
     # from azimuth (rotation period and direction from the sensor profile).
     # Without it every point gets the header pose and statics smear.
