@@ -4,6 +4,15 @@ Reads each world-frame sweep NPZ. Sweeps carrying a `ground_mask` contribute
 their ground points to the chunk-level ground cloud, which is then binned
 into a 2D height grid + surface-normal grid.
 
+Only ground within Patchwork++'s first zone of its sweep's sensor
+(`PatchworkParams.inner_zone_m`, 12.1 m at the shipped ranges) enters. Past
+it Patchwork++ runs no height or vertical-plane check, and a patch holding one
+ring's line along a truck's side or a wall passes as level ground: on the
+nuScenes GT scenes 35 % of ground labelled 18-30 m away and 64-83 % beyond
+30 m lies over 0.5 m above the road, and none inside the zone. Under a parked
+vehicle no sweep sees the road, so those returns were the cell's only ground
+(docs/lidar_preprocessing_measurements.md, "Ground grid").
+
 Ground points in a voxel Step B called DYNAMIC are dropped (low-riding movers
 that fooled Patchwork++); every other voxel class passes. Not "keep only
 static": ground returns earn no endpoint hits, so ground voxels are never
@@ -25,6 +34,7 @@ from scipy.ndimage import distance_transform_edt
 from scipy.stats import binned_statistic_2d
 from tqdm import tqdm
 
+from wato_common.artifacts import ArtifactFormatError
 from wato_common.artifacts import ground as ground_artifact
 from wato_common.artifacts.lidar_sweeps import read_world
 from wato_common.artifact_store import (
@@ -48,6 +58,8 @@ class GroundResult:
     ground_path: str
     status: str = "ok"  # "ok" | "skipped_no_ground_mask" | "empty"
     n_dropped_dynamic: int = 0  # rejected by dynamic-voxel intersection
+    # Patchwork++ ground past its first zone from the sweep's sensor.
+    n_beyond_inner_zone: int = 0
 
 
 def _load_dynamic_voxel_set(
@@ -206,6 +218,9 @@ def process_chunk(
     n_classified_pts = 0
     n_with_mask = 0
     n_dropped_dynamic = 0
+    n_beyond_inner_zone = 0
+    n_patchwork_ground = 0
+    inner_zone_m = cfg.patchwork.inner_zone_m
 
     dynamic_keys, classify_origin, classify_voxel_size = _load_dynamic_voxel_set(
         bag_id, chunk_id
@@ -228,7 +243,20 @@ def process_chunk(
         n_classified_pts += int(mask.shape[0])
         if mask.sum() == 0:
             continue
+        if data.origin is None:
+            raise ArtifactFormatError(
+                local_path(row["world_path"]),
+                "ground_mask without the sensor origin Step C measures ground "
+                "range from; re-run lidar_preprocessing with --force",
+            )
         xyz = data.xyz[mask]
+        n_patchwork_ground += xyz.shape[0]
+        near = (
+            np.hypot(xyz[:, 0] - data.origin[0], xyz[:, 1] - data.origin[1])
+            < inner_zone_m
+        )
+        n_beyond_inner_zone += int((~near).sum())
+        xyz = xyz[near]
         n_before = xyz.shape[0]
         xyz = _drop_dynamic_voxel_points(
             xyz,
@@ -261,13 +289,16 @@ def process_chunk(
         ground_pts = np.empty((0, 3), dtype=np.float64)
 
     n_ground = ground_pts.shape[0]
-    n_nonground = n_classified_pts - n_ground - n_dropped_dynamic
+    n_nonground = n_classified_pts - n_patchwork_ground
     log.info(
-        "chunk %s: aggregated ground=%d nonground=%d dropped_dynamic=%d across %d classified sweeps",
+        "chunk %s: aggregated ground=%d nonground=%d dropped_dynamic=%d "
+        "beyond_inner_zone(%.2f m)=%d across %d classified sweeps",
         chunk_id,
         n_ground,
         n_nonground,
         n_dropped_dynamic,
+        inner_zone_m,
+        n_beyond_inner_zone,
         n_with_mask,
     )
 
@@ -279,6 +310,7 @@ def process_chunk(
         status="ok" if n_ground > 0 else "empty",
         n_nonground=n_nonground,
         n_dropped_dynamic=n_dropped_dynamic,
+        n_beyond_inner_zone=n_beyond_inner_zone,
     )
 
 
@@ -291,6 +323,7 @@ def _save_ground(
     status: str = "ok",
     n_nonground: int = 0,
     n_dropped_dynamic: int = 0,
+    n_beyond_inner_zone: int = 0,
 ) -> GroundResult:
     height_grid, normal_grid, grid_origin = _build_height_grid(
         ground_pts, cell_size=params.ground_cell_size_m
@@ -310,4 +343,5 @@ def _save_ground(
         ground_path=out_uri,
         status=status,
         n_dropped_dynamic=int(n_dropped_dynamic),
+        n_beyond_inner_zone=int(n_beyond_inner_zone),
     )

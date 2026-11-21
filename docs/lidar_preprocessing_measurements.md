@@ -26,6 +26,134 @@ took a six-scale DBSCAN bank from 0.61 s to 3.8 s per frame. Hence
 About 260–450 nuScenes returns per sweep remain between 1 and 2.5 m (roof
 edges ahead of the square); the devkit keeps those too.
 
+## Ground grid (2026-11-17)
+
+A parked truck on nuScenes 0061 (GT 19319) had Step C cells 2–5 m above the
+road under it, and label_refinement, which puts a moving track's box bottom
+on the grid, lifted its box 3 m in some frames. The cells held the truck's
+own returns, labelled ground by Patchwork++ in sweeps 18–60 m away: a
+concentric-zone bin there held only raised structure, its lowest-point seeds
+were one ring's line along the truck's side (a line fits a level plane), and
+past its first rings Patchwork++ runs no height check (upstream's comment:
+far patches are too sparse to judge); vertical-plane removal (R-VPF) runs in
+its first zone only. No sweep sees the road under a parked vehicle, so those
+returns were the cell's only ground, and the nearest-cell fill copied them
+to the empty cells around.
+
+Ground returns more than 0.5 m above a grid built from first-zone ground
+(12.125 m at the shipped `min_range` 1 / `max_range` 90), by distance to
+their sweep's sensor:
+
+| Range | nuScenes 0061 | nuScenes 1100 |
+|---|---:|---:|
+| < 12.1 m (first zone) | 0.000 | 0.000 |
+| 12.1–17.7 m | 0.039 | 0.023 |
+| 17.7–30 m | 0.352 | 0.345 |
+| 30–90 m | 0.635 | 0.826 |
+
+Grid against the GT box bottoms (a box stands on the road), offset-free share
+more than 1 m off:
+
+| Grid | 0061 all / vehicles | 1100 all / vehicles |
+|---|---|---|
+| All ground (before) | 0.137 / 0.072 | 0.323 / 0.380 |
+| First-zone ground (now) | 0.025 / 0.004 | 0.070 / 0.021 |
+
+The new grid is no worse at any range (0–20, 20–40, 40 m+), above or below.
+Raised cells (a populated cell over 1 m above the median of its 9×9
+neighbourhood): 0061 7,734 → 23, 1100 2,956 → 10; under the truck 73 → 0.
+
+Patchwork++'s own settings do not fix it. Re-run on 0061 with the library's
+defaults (`uprightness_thr` 0.707 against the shipped 0.101, which the
+monorepo took from upstream's ROS launch file; `th_seeds` / `th_dist` 0.125)
+the raised cells fall to 4,305 but the truck keeps 71; of the returns it
+turns from ground to non-ground over observed road, 34 % lie within 0.15 m
+of it (it rejects whole patches). In its first zone both values give the
+same grid.
+
+Downstream on nuScenes (Step C, then Step F, proposal_generation, tracking,
+label_refinement; IWU byte-identical): refined car IoU 0.31 → 0.34 (0061)
+and 0.31 → 0.36 (1100), moving vehicles 0.38 → 0.39 and 0.32 → 0.36; 0061
+tracks per object 1.42 → 1.33, false tracks 16 → 14. 0061's parked-vehicle
+medians worsen (centre 0.47 → 0.72 m, yaw 4.2 → 9.4°) through one car (GT
+22183): its lifted-only track now starts at sweep 142, not 233, and the one
+parked box over the longer track is 1.5 m longer.
+
+Cost: the grid holds direct observations for a third of the cells (0061
+104,273 → 35,363; WATO July 7, 11 chunks, 4,351,442 → 1,166,132), the rest
+filled from the nearest, so terrain seen only from afar comes out flat. On
+WATO, where raised cells fall from 86,178 to 1,503, that is measured: on the
+old grid's smooth cells (within 0.1 m of their 9×9 median, 78–90 % of them,
+so not truck sides), old − new by distance from the drive path:
+
+| From the path | Chunk 0000 (parked, 10 m driven) | Chunk 0005 (driving) |
+|---|---|---|
+| 0–12 m | +0.00 m (100 % within 0.3 m) | +0.00 m (98 %) |
+| 12–25 m | +0.12 m (56 %) | +0.02 m (79 %) |
+| 25–40 m | +0.20 m (30 %) | +0.14 m (44 %) |
+| 40–60 m | +0.71 m (20 %) | −0.10 m (28 %) |
+| 60 m+ | +1.30 m (12 %) | −0.68 m (8 %) |
+
+Broad smooth surfaces 0.3–1.5 m above or below the road are terrain (lots,
+lawns, slopes), so beyond about 25 m from the path the first-zone grid
+loses it; nuScenes' GT objects are mostly near the road. GroundGrid does
+not resolve it ("GroundGrid against Patchwork++", below).
+
+## GroundGrid against Patchwork++ (2026-11-19)
+
+GroundGrid (Steinke et al., RA-L 2024) builds a terrain map from every
+return rather than from a segmenter's ground: per scan, a cell's 3×3 / 5×5
+patch is ground when its height variance is small and it has enough returns
+(relative to the expected count at that range); its height then joins the
+cell's confidence-weighted estimate, other cells are only lowered to their
+patch minimum, and a spiral pass from the vehicle outward fills low-confidence
+cells from their neighbours. Ported line for line from the reference
+(`dcmlr/groundgrid` master 7d6a5d7, the ROS1 code the paper evaluated) in
+numba, offline: the reference's 120 m × 0.33 m window over a world-fixed
+array, keeping cells the window leaves. Run with the authors' KITTI parameters
+and their HeLiPR Velodyne set, with the horizontal step from `sensor_model.py`
+(hdl32e 0.33°, vlp32c 0.40°); the two sets differ by little anywhere below,
+so KITTI's are shown. At scan time its map is within 0.03 m of the
+first-zone grid within 8 m of the vehicle.
+
+Candidates: Patchwork++ ground at all ranges (`pw_all`, before), first zone
+(`pw_zone`, now), GroundGrid's map (as the reference holds it after the last
+scan; and each cell as of the scan GroundGrid was most confident in it), and
+Step C's binning of GroundGrid's per-point ground. nuScenes 0061, grid under
+each GT box centre against its bottom, offset-free share more than 1 m off
+(all classes; by the box's distance from the drive path):
+
+| Grid | all | 0–20 m | 20–40 m | 40 m+ | spike cells |
+|---|---:|---:|---:|---:|---:|
+| `pw_all` | 0.171 | 0.098 | 0.255 | 0.452 | 7,734 |
+| `pw_zone` | **0.016** | **0.008** | **0.027** | **0.038** | **23** |
+| GroundGrid map, after last scan | 0.347 | 0.312 | 0.381 | 0.493 | 1,808 |
+| GroundGrid map, most confident scan | 0.145 | 0.070 | 0.252 | 0.391 | 9,779 |
+| GroundGrid map at each GT keyframe (by range from the sensor) | 0.228 | 0.033 | 0.241 | 0.380 | |
+| Step C binning of GroundGrid ground | 0.163 | 0.089 | 0.242 | 0.464 | 4,081 |
+
+(spike cell: populated, > 1 m over its 9×9 median.) GroundGrid's misses are
+mostly too high (64–77 %) and mostly not vehicles: past ~20 m a 32-beam
+scanner lays one ring line per 0.33 m cell on a pedestrian or a car, its
+height variance is near zero, and it passes GroundGrid's flatness test — the
+failure that let Patchwork++ beyond its first zone take truck sides for
+ground. Per point, at GT keyframes, GroundGrid labels as many GT-object
+returns (0.3 m above the box bottom) ground as Patchwork++ (0061: 4.7 % against
+4.5 %; beyond 20 m 30 % against 28 %) and more of the road beside GT boxes
+(beyond 20 m 0.95 against 0.83). Scene 1100 does not score terrain: its ego
+poses have z = 0 on a slope while its GT bottoms fall from +0.44 m near the
+path to −1.51 m beyond 40 m, so every grid misses its far boxes by 1.7–2.7 m.
+
+On WATO, GroundGrid keeps far open terrain: on `pw_all`'s smooth cells it is
+within 0.3 m for 82–98 % of them out to 60 m from the path (chunks 0000 /
+0005; `pw_zone` 20–56 %), but has 1,081 / 3,945 spike cells against
+`pw_zone`'s 1 / 141.
+
+The grid is read under objects (box bottoms, Step F's floor), where no
+GroundGrid variant is better than `pw_zone` at any range, so Step C keeps
+first-zone Patchwork++. Far lots and lawns stay flattened to the nearest
+near-road cell.
+
 ## Deskew on the WATO rig (`ring_road_corrected`)
 
 - The Velodyne clouds carry a per-point `time` field, but every value is 0 (all

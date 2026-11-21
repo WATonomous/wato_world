@@ -63,6 +63,7 @@ from tqdm import tqdm
 from wato_common.artifact_store import (
     dynamic_mask_path,
     global_iwu_path,
+    ground_path,
     lidar_proc_index_path,
     lidar_proc_summary_path,
     local_path,
@@ -531,6 +532,7 @@ def proposals_up_to_date(bag_id: str, chunk_id: str) -> bool:
         lidar_proc_summary_path(bag_id, chunk_id),
         lidar_proc_index_path(bag_id, chunk_id),
         static_map_path(bag_id, chunk_id),
+        ground_path(bag_id, chunk_id),  # the height floor
         global_iwu_path(bag_id),
     ):
         p = local_path(uri)

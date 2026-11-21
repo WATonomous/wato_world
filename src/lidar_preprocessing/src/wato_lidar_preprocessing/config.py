@@ -101,6 +101,15 @@ class PatchworkParams(BaseModel):
     verbose: bool = False
     ground_cell_size_m: float = 0.25
 
+    @property
+    def inner_zone_m(self) -> float:
+        """Outer radius of Patchwork++'s first concentric zone (its
+        ``min_range_z2_``: (7 min_range + max_range) / 8). Only there does it
+        run every false-ground check: vertical-plane removal (R-VPF) is zone 0
+        only, and past its first rings any level-looking patch is ground with
+        no height check. Step C builds the ground grid from this zone alone."""
+        return (7.0 * self.min_range + self.max_range) / 8.0
+
     def to_patchwork_dict(self) -> dict[str, Any]:
         """Return kwargs accepted by pypatchworkpp.patchworkpp()."""
         return {

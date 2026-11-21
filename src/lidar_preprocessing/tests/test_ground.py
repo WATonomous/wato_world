@@ -22,7 +22,9 @@ from wato_common.artifact_store import (
 )
 from wato_common.io.parquet_io import write_table
 from wato_common.schemas import PROCESSED_SWEEPS_SCHEMA
-from wato_lidar_preprocessing.config import ComponentConfig
+from wato_common.artifacts import ArtifactFormatError
+from wato_common.artifacts import ground as ground_artifact
+from wato_lidar_preprocessing.config import ComponentConfig, PatchworkParams
 from wato_lidar_preprocessing.ground import _build_height_grid, process_chunk
 
 
@@ -117,10 +119,13 @@ def _write_world_sweep_with_mask(
     sweep_id: int,
     xyz: np.ndarray,
     ground_mask: np.ndarray | None,
+    origin=(0.0, 0.0, 0.0),
 ):
     path = local_path(lidar_world_path(bag_id, chunk_id, sweep_id))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     kwargs = {"x": xyz[:, 0], "y": xyz[:, 1], "z": xyz[:, 2]}
+    if origin is not None:
+        kwargs["origin"] = np.asarray(origin, dtype=np.float64)
     if ground_mask is not None:
         kwargs["ground_mask"] = ground_mask
     np.savez_compressed(path, **kwargs)
@@ -182,11 +187,12 @@ def test_aggregates_per_sweep_ground_masks(tmp_env):
     """Sweeps with ground_mask → ground.npz contains masked points + height grid."""
     bag_id, chunk_id = "bag_g0", "chunk0"
     rng = np.random.default_rng(7)
-    # Each sweep: 100 ground points at z≈0, 50 obstacle points at z=2.
+    # Each sweep: 100 ground points at z≈0 (inside Patchwork++'s first zone
+    # from the sensor at the origin), 50 obstacle points at z=2.
     n_per_sweep = 3
     all_pts: list[np.ndarray] = []
     for sid in range(n_per_sweep):
-        ground_xy = rng.uniform(-10, 10, size=(100, 2))
+        ground_xy = rng.uniform(-8, 8, size=(100, 2))
         ground_z = rng.normal(0.0, 0.02, size=100)
         ground = np.column_stack([ground_xy, ground_z])
         obstacle_xy = rng.uniform(-5, 5, size=(50, 2))
@@ -280,8 +286,8 @@ def test_intersection_drops_dynamic_ground_points(tmp_env):
     """
     bag_id, chunk_id = "bag_g_inter", "chunk0"
     # Two ground points; only the second is in the dynamic voxel set.
-    survivor_pt = np.array([[10.0, 10.0, 0.0]])
-    dynamic_pt = np.array([[100.0, 100.0, 0.0]])
+    survivor_pt = np.array([[5.0, 5.0, 0.0]])
+    dynamic_pt = np.array([[-5.0, -5.0, 0.0]])
     sweep_xyz = np.concatenate([survivor_pt, dynamic_pt], axis=0)
     ground_mask = np.array([True, True])  # both flagged ground by Patchwork++
     _write_world_sweep_with_mask(bag_id, chunk_id, 0, sweep_xyz, ground_mask)
@@ -317,7 +323,7 @@ def test_ground_voxels_not_in_any_class_pass_through(tmp_env):
     """
     bag_id, chunk_id = "bag_g_passthrough", "chunk0"
     rng = np.random.default_rng(11)
-    xy = rng.uniform(-10, 10, size=(200, 2))
+    xy = rng.uniform(-8, 8, size=(200, 2))
     xyz = np.column_stack([xy, np.zeros(200)])
     _write_world_sweep_with_mask(bag_id, chunk_id, 0, xyz, np.ones(200, dtype=bool))
     _write_proc_index(bag_id, chunk_id, [0])
@@ -489,4 +495,66 @@ def test_deskew_estimates_ground_in_sensor_frame(tmp_env):
 
     result = process_chunk(cfg, bag_id, chunk_id)
     assert result.status == "ok"
-    assert result.n_ground > 1000
+    # Ground past Patchwork++'s first zone (12.125 m here) stays out of the grid.
+    r = np.hypot(
+        world_xyz[:, 0] - world["origin"][0], world_xyz[:, 1] - world["origin"][1]
+    )
+    near = r < cfg.patchwork.inner_zone_m
+    assert result.n_ground == int((world["ground_mask"] & near).sum()) > 500
+    assert result.n_beyond_inner_zone == int((world["ground_mask"] & ~near).sum())
+
+
+def _road(cx: float, cy: float, half: float, step: float = 0.2) -> np.ndarray:
+    g = np.arange(-half, half + 1e-9, step)
+    x, y = np.meshgrid(cx + g, cy + g)
+    return np.column_stack([x.ravel(), y.ravel(), np.zeros(x.size)])
+
+
+def test_patchwork_inner_zone_is_its_first_zone_boundary():
+    """Patchwork++'s min_range_z2_ = (7 min_range + max_range) / 8."""
+    assert PatchworkParams(min_range=1.0, max_range=90.0).inner_zone_m == 12.125
+    assert PatchworkParams(min_range=2.7, max_range=80.0).inner_zone_m == 12.3625
+
+
+def test_ground_seen_only_from_beyond_the_inner_zone_is_left_out(tmp_env):
+    """A parked truck: the near sweep sees the road around it but never under
+    it; a sweep 30 m away labels a line of returns along its side, 3 m up, as
+    ground (Patchwork++ runs no height check past its first zone). The grid
+    under the truck must come from the road around it, not from that line
+    (nuScenes 0061: label_refinement boxes 3 m up)."""
+    bag_id, chunk_id = "bag_g_truck", "chunk0"
+    near = _road(0.0, 0.0, 8.0)
+    under_truck = (np.abs(near[:, 0] - 10.0) <= 1.0) & (np.abs(near[:, 1]) <= 1.0)
+    near = near[~under_truck]
+    line = np.column_stack([np.arange(9.2, 10.81, 0.1), np.zeros(17), np.full(17, 3.0)])
+    far_road = _road(40.0, 0.0, 8.0)
+    far = np.concatenate([far_road, line])
+    _write_world_sweep_with_mask(
+        bag_id, chunk_id, 0, near, np.ones(len(near), bool), origin=(0.0, 0.0, 1.8)
+    )
+    _write_world_sweep_with_mask(
+        bag_id, chunk_id, 1, far, np.ones(len(far), bool), origin=(40.0, 0.0, 1.8)
+    )
+    _write_proc_index(bag_id, chunk_id, [0, 1])
+    _write_static_map_covering_all(bag_id, chunk_id, np.concatenate([near, far]))
+
+    result = process_chunk(ComponentConfig(), bag_id, chunk_id)
+    assert result.status == "ok"
+    grid = ground_artifact.read(bag_id, chunk_id)
+    assert abs(float(grid.height_at(np.array([[10.0, 0.0]]))[0])) < 0.05
+    assert result.n_beyond_inner_zone == len(line)
+    assert result.n_ground == len(near) + len(far_road)
+
+
+def test_a_ground_mask_without_its_sensor_origin_raises(tmp_env):
+    """Ground is kept by its distance to the sensor: a world sweep with a
+    ground mask but no origin predates deskew writing one."""
+    bag_id, chunk_id = "bag_g_no_origin", "chunk0"
+    xyz = _road(0.0, 0.0, 2.0)
+    _write_world_sweep_with_mask(
+        bag_id, chunk_id, 0, xyz, np.ones(len(xyz), bool), origin=None
+    )
+    _write_proc_index(bag_id, chunk_id, [0])
+    _write_static_map_covering_all(bag_id, chunk_id, xyz)
+    with pytest.raises(ArtifactFormatError, match="origin"):
+        process_chunk(ComponentConfig(), bag_id, chunk_id)

@@ -179,6 +179,11 @@ doesn't load; the trim-bag end-to-end test skips).
   `--two-pass` is a one-time log-odds prior, not IWU. Step F's box / Kalman /
   association code is `wato_common/tracking/`, for the `tracking` component to
   reuse.
+- **The ground grid is near ground only.** Step C's `ground.npz` (box
+  bottoms, Step F's height floor) holds Patchwork++ ground within its first
+  zone (12.1 m) of each sweep's sensor, other cells filled from the nearest:
+  further out Patchwork++ labels truck sides and walls ground. The per-sweep
+  `ground_mask` still includes them.
 - **Lifted instances are chunk-local merged masklets.** `tracking` (the owner
   of cross-camera identity) runs after semantic_lifting, so lifting merges one
   object's per-camera masklets itself from the LiDAR points they both claim;

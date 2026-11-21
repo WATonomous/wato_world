@@ -134,9 +134,19 @@ every point the filter drops. Tuning is in the
 
 ### C — Ground
 
-Unions the per-sweep Patchwork++ masks, drops ground points in voxels Step B
-called dynamic (low-riding movers), and rasterises a median-Z height grid with
-nearest-filled holes and finite-difference normals. With no ground masks
+Unions the per-sweep Patchwork++ masks, keeping only ground within
+Patchwork++'s first zone of its sweep's sensor (`(7 min_range + max_range) /
+8`, 12.1 m at the shipped ranges), drops ground points in voxels Step B called
+dynamic (low-riding movers), and rasterises a median-Z height grid with
+nearest-filled holes and finite-difference normals. Past its first zone
+Patchwork++ runs no height or vertical-plane check: one ring's line along a
+truck's side or a wall passes as level ground, and under a parked vehicle,
+where no sweep sees the road, those returns were the cell's only ground. The
+grid is the road under every object (box bottoms, Step F's height floor), so
+cells only seen from further away are filled from the nearest near cell
+([measurements](../../docs/lidar_preprocessing_measurements.md), "Ground
+grid"; GroundGrid, RA-L 2024, keeps far terrain but is worse under objects:
+"GroundGrid against Patchwork++"). The per-sweep `ground_mask` is unchanged. With no ground masks
 (Patchwork++ unavailable) it writes a sentinel (`ground_status:
 skipped_no_ground_mask`).
 
