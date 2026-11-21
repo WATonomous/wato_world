@@ -124,3 +124,28 @@ def test_depth_and_masks_at_different_resolutions_are_rejected():
     cache = _cache([_masklet("a", (1,))])
     with pytest.raises(ArtifactFormatError, match="differ"):
         cache.get(_ref(1))
+
+
+def test_rectangle_membership_includes_holes_and_nothing_outside():
+    dense = np.zeros((20, 30), bool)
+    dense[7:10, 12:16] = True
+    dense[8, 13] = False  # a hole: in the rectangle, not the mask
+    mask = MaskClaim.from_mask(4, dense)
+    ui = np.array([12, 13, 15, 11, 16, 12, 12])
+    vi = np.array([7, 8, 9, 7, 7, 6, 10])
+    assert mask.in_rect(ui, vi).tolist() == [
+        True,
+        True,
+        True,
+        False,
+        False,
+        False,
+        False,
+    ]
+    # The mask lies inside its rectangle.
+    assert not (mask.sample(ui, vi) & ~mask.in_rect(ui, vi)).any()
+
+
+def test_an_empty_masks_rectangle_is_empty():
+    mask = MaskClaim.from_mask(0, np.zeros((10, 20), bool))
+    assert mask.in_rect(np.array([0, 10]), np.array([0, 5])).tolist() == [False, False]

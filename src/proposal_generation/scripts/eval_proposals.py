@@ -11,7 +11,9 @@ nearest that instant (within --max-offset-ms) are matched to it
 class-agnostically at each nuScenes centre distance, by range band from the
 ego (wato_common.eval.boxes). A ground-truth box with no non-ground LiDAR
 point in that frame is ignored, as the nuScenes benchmark drops such boxes.
-Per-class recall is reported at --class-distance-m.
+Per-class recall is reported at --class-distance-m. A chunk run with
+lifted.verification also scores its LiDAR-verified lifted rows on their own
+("lifted_verified").
 
 **Proxy** (always): the numbers docs/proposal_generation_measurements.md and
 the motion-proposal review used — Step F clusters per frame, gated lidar_mos
@@ -140,15 +142,26 @@ def score_chunk(
     by_frame: dict[int, list[proposals.Proposal]] = defaultdict(list)
     for p in rows:
         by_frame[p.sweep_id].append(p)
+    # Lifted rows LiDAR verification passed, scored on their own as well
+    # (only when the chunk was run with lifted.verification).
+    verified = any(p.lidar_verified is not None for p in rows)
+    groups = {
+        prov: (lambda p, prov=prov: p.provenance == prov)
+        for prov in proposals.PROVENANCES
+    }
+    if verified:
+        groups["lifted_verified"] = lambda p: p.provenance == "lifted" and bool(
+            p.lidar_verified
+        )
     for inst in instants:
         frame_rows = by_frame.get(inst.frame.reference_sweep_id, [])
-        for prov in proposals.PROVENANCES:
+        for prov, member in groups.items():
             preds = [
                 Scored(
                     _box(p), score=p.score, cls=p.cls, range_m=inst.range_of(p.cx, p.cy)
                 )
                 for p in frame_rows
-                if p.provenance == prov
+                if member(p)
             ]
             for d in DISTANCE_THRESHOLDS_M:
                 tally_frame(

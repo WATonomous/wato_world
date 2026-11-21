@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from wato_proposal_generation.config import (
     LiftedConfig,
     ScanRefinementConfig,
+    VerificationConfig,
     load_config,
 )
 
@@ -54,3 +55,15 @@ def test_invalid_refinement_settings_fail(changes):
 def test_invalid_coverage_thresholds_fail(threshold):
     with pytest.raises(ValidationError):
         LiftedConfig(max_support_iom=threshold)
+
+
+@pytest.mark.parametrize("field", ["min_iou", "min_containment"])
+@pytest.mark.parametrize("value", [-0.1, 1.1, float("nan")])
+def test_invalid_verification_thresholds_fail(field, value):
+    with pytest.raises(ValidationError):
+        VerificationConfig(**{field: value})
+
+
+def test_verification_ships_on_with_sal_and_fgr_thresholds():
+    cfg = VerificationConfig()
+    assert (cfg.enabled, cfg.min_iou, cfg.min_containment) == (True, 0.5, 0.8)

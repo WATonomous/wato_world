@@ -77,6 +77,7 @@ def _chunk() -> list[pr.Proposal]:
             track_life=None,
             lift_confidence=0.8,
             lift_seed_point_count=80,
+            lidar_verified=True,
         ),
         _proposal(
             proposal_id="fused-0",
@@ -105,23 +106,25 @@ def test_record_tracks_the_row_schema():
     assert set(PROPOSAL_SCHEMA.names) == set(ProposalRow.model_fields)
 
 
-def test_legacy_proposals_without_a_seed_count_remain_readable():
+@pytest.mark.parametrize("column", ["lift_seed_point_count", "lidar_verified"])
+def test_legacy_proposals_without_an_optional_column_remain_readable(column):
     pr.write(BAG, CHUNK, _chunk())
     uri = proposals_path(BAG, CHUNK)
-    old_schema = PROPOSAL_SCHEMA.remove(
-        PROPOSAL_SCHEMA.get_field_index("lift_seed_point_count")
-    )
+    old_schema = PROPOSAL_SCHEMA.remove(PROPOSAL_SCHEMA.get_field_index(column))
     write_table(read_rows(uri), old_schema, uri)
-    assert all(p.lift_seed_point_count is None for p in pr.read(BAG, CHUNK))
+    assert all(getattr(p, column) is None for p in pr.read(BAG, CHUNK))
 
 
-def test_missing_existing_columns_are_format_errors():
-    pr.write(BAG, CHUNK, _chunk())
-    uri = proposals_path(BAG, CHUNK)
-    broken_schema = PROPOSAL_SCHEMA.remove(PROPOSAL_SCHEMA.get_field_index("score"))
-    write_table(read_rows(uri), broken_schema, uri)
-    with pytest.raises(ArtifactFormatError, match="missing proposal column 'score'"):
-        pr.read(BAG, CHUNK)
+@pytest.mark.parametrize("proposal_id", ["mos-4", "fused-0"])
+def test_only_lifted_rows_carry_a_verification_verdict(proposal_id):
+    proposals = [
+        dataclasses.replace(p, lidar_verified=False)
+        if p.proposal_id == proposal_id
+        else p
+        for p in _chunk()
+    ]
+    with pytest.raises(ValueError, match="only lifted rows carry lidar_verified"):
+        pr.write(BAG, CHUNK, proposals)
 
 
 @pytest.mark.parametrize(

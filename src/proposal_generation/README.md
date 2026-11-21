@@ -57,6 +57,28 @@ corner sweeps):
   support. The total `lidar_point_count` includes geometric additions. Added
   points receive no new camera votes or semantic labels.
   The radius method averages its own candidate's confidence over final support.
+  **LiDAR verification** (`lifted.verification.enabled`, on by default):
+  does a distinct LiDAR segment back the instance in this frame? A mask says
+  which rays an object covers; its visible returns are the object only if
+  the LiDAR hit it — behind a hedge, too far or between beams, they are the
+  hedge in front or the tree line behind. Against the frame's DBSCAN bank
+  (the `refinement` radii and `min_samples`, built whatever
+  `support_method` is, shared with `scan_clusters`), at each scale the
+  cluster with the best IoU against the instance's seed (its candidate
+  claims) must match it at IoU > 0.5 (SAL A.1) and lie ≥ 0.8 inside the
+  instance's 2D box frustum from lifting (FGR's θ_seg: a segment reaching
+  beyond it belongs to another object); any scale passing verifies it.
+  The verdict is `lidar_verified` on its lifted rows; geometry is unchanged.
+  It is evidence for tracking's confirmation, not a filter: a real object
+  fails it in about a third of frames (docs/research/lidar_verified_lifting.md).
+  `support_method: verified_clusters` (opt-in) boxes a verified instance
+  on the cluster that verified it (the best-IoU passing scale): better
+  boxes on nuScenes 0061, but a sparse object that DBSCAN splits is boxed
+  on its largest piece, so it is not the default
+  (`docs/proposal_generation_measurements.md`, "Boxing the verified
+  segment"). The bank costs
+  ~0.05–0.5 s per WATO frame (about 3.5 min per WATO chunk; `--workers`
+  runs chunks in parallel).
 - **`fusion_detector`** (`fusion_detector.enabled`): each detection_3d box with
   score ≥ 0.08 (the car's `confidence_threshold`), outside the car's 2.5 m
   ego zone, of a class in `fusion_detector.class_map` (car, truck, bus,
@@ -207,20 +229,28 @@ dimensions against calibration. Viewing leaves stored proposal geometry intact.
   `bicycle`, `pedestrian` under the fixed taxonomy), else the detector's
   mapped class, or None.
 - The evidence columns are null except on rows of the source that measures
-  them.
+  them. `lidar_verified` (lifted rows; null with verification off) is the
+  LiDAR verification verdict above; fused rows keep it on their lifted
+  member.
 
 `proposal_refinement.parquet` is a component-local diagnostic table, written
 before the proposals completion marker. It includes EVERY instance/frame
 match, including ones later rejected by box filters: method, status, best scale and
 cluster ID, best IoU, seed/refined/addition/removal counts, whether a proposal
 was emitted after coverage and box gates, and final exclusive geometric/retained-seed
-counts when emitted. The
+counts when emitted; with verification, its verdict for every instance,
+emitted or not (`lidar_verified`, `verify_status` — verified /
+iou_not_above_threshold / containment_below_threshold / no_overlap — and the
+radius, cluster, IoU, containment and size of the best-IoU passing scale, else
+of the best-IoU scale, and
+the frustum's size). The
 manifest records both outputs. No downstream component consumes this table.
 
-Older proposal files without `lift_seed_point_count` remain readable. Their
-original total count serves as labelled evidence in tracking. New lifted rows
-always carry the separate count; fused rows keep evidence on their source
-members.
+Older proposal files without `lift_seed_point_count` or `lidar_verified`
+remain readable, as None. A missing seed count's original total count serves
+as labelled evidence in tracking; a missing verdict stops tracking's
+confirmation, which needs it. New lifted rows always carry the separate
+count; fused rows keep evidence on their source members.
 
 ## Configuration
 
@@ -234,3 +264,6 @@ Set `lifted.support_method: scan_clusters` to opt in. Under that method,
 substitutes largest-group filtering for rejected matches. The legacy radius
 fields are only used with `support_method: largest_group`. Ground masks are
 required for either method: proposal points remain non-ground.
+`lifted.verification` (`enabled`, `min_iou` 0.5, `min_containment` 0.8)
+needs lifting's frustum relation (`lifted_candidates`), present since
+2026-11-17; tracking's `confirmation` needs it on.

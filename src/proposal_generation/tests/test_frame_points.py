@@ -65,6 +65,8 @@ def test_competing_seeds_keep_one_frame_row_per_return_across_scanners():
                 np.array([2, 2, 5], np.int32),
                 np.array(["mA", "loser", "loser"]),
                 np.array([0.9, 0.3, 0.4], np.float32),
+                np.array([2, 2, 5], np.int32),
+                np.array(["mA", "loser", "loser"]),
             ),
         )
     sweeps = lidar_sweeps.ProcessedSweeps.load(BAG, CHUNK)
@@ -85,4 +87,51 @@ def test_owned_labels_cannot_silently_substitute_for_missing_candidates():
     os.remove(local_path(lifted_candidates_path(BAG, CHUNK, 0)))
     sweeps = lidar_sweeps.ProcessedSweeps.load(BAG, CHUNK)
     with pytest.raises(ArtifactFormatError, match="re-run semantic_lifting"):
+        load(BAG, CHUNK, sweeps.frames("lidar_cc")[0], sweeps, np.array([]))
+
+
+def test_frustum_rows_map_across_scanners_like_seeds():
+    """Each scanner's frustum indexes its own world sweep; in the frame they
+    become rows of that sweep's block, and only seeded instances keep one."""
+    stage_chunk()
+    for sid in (0, 1):
+        lifted_candidates.write_sweep(
+            BAG,
+            CHUNK,
+            sid,
+            lifted_candidates.SweepCandidates(
+                np.array([2], np.int32),
+                np.array(["mA"]),
+                np.array([0.9], np.float32),
+                np.array([2, 3, 7, 4], np.int32),
+                np.array(["mA", "mA", "mA", "unseeded"]),
+            ),
+        )
+    sweeps = lidar_sweeps.ProcessedSweeps.load(BAG, CHUNK)
+    fp = load(BAG, CHUNK, sweeps.frames("lidar_cc")[0], sweeps, np.array([]))
+    frustum = fp.frustums()
+    assert set(frustum) == {"mA"}
+    keys = sorted(zip(fp.sweep_id[frustum["mA"]], fp.point_index[frustum["mA"]]))
+    assert keys == [(s, i) for s in (0, 1) for i in (2, 3, 7)]
+
+
+def test_ground_inside_a_frustum_is_a_format_error():
+    stage_chunk()
+    sweeps = lidar_sweeps.ProcessedSweeps.load(BAG, CHUNK)
+    c = lifted_candidates.read_sweep(BAG, CHUNK, 0)
+    lifted_candidates.write_sweep(
+        BAG,
+        CHUNK,
+        0,
+        replace(
+            c,
+            frustum_point_indices=np.r_[c.frustum_point_indices, 130].astype(np.int32),
+            frustum_instance_ids=np.r_[c.frustum_instance_ids, ["mA"]],
+        ),
+    )
+    world = sweeps.world(0)
+    ground = np.zeros(world.n_points, bool)
+    ground[130] = True  # a return of blob D, claimed by no mask
+    lidar_sweeps.write_world(BAG, CHUNK, 0, replace(world, ground_mask=ground))
+    with pytest.raises(ArtifactFormatError, match="ground"):
         load(BAG, CHUNK, sweeps.frames("lidar_cc")[0], sweeps, np.array([]))

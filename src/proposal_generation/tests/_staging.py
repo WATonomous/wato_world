@@ -188,6 +188,9 @@ def stage_chunk(*, with_camera: bool = False) -> None:
                     labeled.astype(np.int32),
                     np.array(ids),
                     np.full(len(ids), 0.9, np.float32),
+                    # The smallest valid frustum: each instance's own claims.
+                    labeled.astype(np.int32),
+                    np.array(ids),
                 ),
             )
             stats.append(

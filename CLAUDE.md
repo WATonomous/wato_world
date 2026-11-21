@@ -190,8 +190,10 @@ doesn't load; the trim-bag end-to-end test skips).
   `lifted_labels` name the instance by its smallest masklet_id and
   `lifted_instances.parquet` lists its masklets and cameras.
   Perception saves independent overlapping masks (`mask_semantics: independent`).
-  Lifting preserves all visible point-instance claims in `lifted_candidates`;
-  `lifted_labels` is a provisional unique view. Proposal generation refines
+  Lifting preserves all visible point-instance claims in `lifted_candidates`,
+  beside each instance's 2D box frustum (every non-ground return in its masks'
+  rectangles, visible or not; claims ⊆ frustum); `lifted_labels` is a
+  provisional unique view. Proposal generation refines
   candidates before exclusive ownership, and only surviving camera seeds
   class motion proposals. When changing ownership or regenerating old owned
   masks, read `docs/research/deferred_3d_mask_ownership.md` for ordering and reruns.
@@ -218,7 +220,13 @@ doesn't load; the trim-bag end-to-end test skips).
   Lifted support has opt-in full non-ground scan-cluster matching. When changing
   refinement or point-count evidence, read `docs/research/sal_scan_cluster_refinement.md`
   for SAL fidelity choices; tracking counts retained camera seeds separately
-  from recovered geometry.
+  from recovered geometry. Lifted rows carry `lidar_verified` with
+  `lifted.verification` on (the default): whether a distinct LiDAR segment
+  backs the instance in that frame (SAL's best-IoU scan cluster > 0.5 lying
+  ≥ 0.8 inside its frustum, FGR); geometry is unchanged. A camera mask's
+  visible returns are the object only if the LiDAR hit it — a car behind a
+  hedge is otherwise boxed on the hedge. When changing verification or
+  confirmation, read `docs/research/lidar_verified_lifting.md`.
 - **detection_3d keeps every box, raw and in the world.** BEVFusion's 200
   boxes per frame, whatever the score or class, keyed on the frame's
   reference `sweep_id`, with `world_T_model` per frame: thresholds, the

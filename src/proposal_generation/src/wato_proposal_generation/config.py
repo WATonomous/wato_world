@@ -6,7 +6,7 @@ import math
 from typing import Any, Literal, Optional
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class FramesConfig(BaseModel):
@@ -66,6 +66,29 @@ class ScanRefinementConfig(BaseModel):
         return values
 
 
+class VerificationConfig(BaseModel):
+    """Does a distinct LiDAR segment back a lifted instance in this frame?
+
+    The bank is the refinement section's (its radii and min_samples), built
+    whatever support_method is. At each scale, the cluster with the best IoU
+    against the instance's seed (its candidate claims) is tested; the instance
+    is verified when some scale passes both tests. Recorded on the lifted
+    rows (lidar_verified) and in proposal_refinement.parquet; geometry is
+    unchanged. docs/research/lidar_verified_lifting.md.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    # SAL Appendix A.1: a lifted mask matches a scan cluster at IoU strictly
+    # above 0.5.
+    min_iou: float = Field(default=0.5, ge=0.0, le=1.0)
+    # FGR (ICRA 2021) Sec. 3.1 theta_seg: a component with less than this
+    # share of its points inside the 2D box frustum belongs to another object
+    # (a hedge strip, a wall, the tree line behind).
+    min_containment: float = Field(default=0.8, ge=0.0, le=1.0)
+
+
 class LiftedConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -73,8 +96,14 @@ class LiftedConfig(BaseModel):
     # chooses support before the same existing box postfilters are applied.
     # SAL remains opt-in: the frozen nuScenes comparison currently loses
     # proposal precision/recall (docs/research/sal_scan_cluster_refinement.md).
-    support_method: Literal["scan_clusters", "largest_group"] = "largest_group"
+    # verified_clusters (opt-in, needs verification): a verified instance's
+    # support is the scan cluster its verdict names (SAL replacement); any
+    # other instance keeps largest_group, never the original seed.
+    support_method: Literal["scan_clusters", "largest_group", "verified_clusters"] = (
+        "largest_group"
+    )
     refinement: ScanRefinementConfig = Field(default_factory=ScanRefinementConfig)
+    verification: VerificationConfig = Field(default_factory=VerificationConfig)
     # Resolve ownership only after independent 3D refinement and box gates.
     # SAL-4D Appendix A.1.1 uses strict IoM > 0.5. Here support size ranks
     # hypotheses within one frame; temporal volume is not accumulated.
@@ -105,6 +134,14 @@ class LiftedConfig(BaseModel):
     fragment_min_ratio: float = 5.0
     # Fewer points than this in a frame: no box.
     min_points: int = Field(default=5, ge=1)
+
+    @model_validator(mode="after")
+    def verified_clusters_need_verification(self) -> "LiftedConfig":
+        if self.support_method == "verified_clusters" and not self.verification.enabled:
+            raise ValueError(
+                "support_method verified_clusters needs verification.enabled"
+            )
+        return self
 
 
 class FusionConfig(BaseModel):

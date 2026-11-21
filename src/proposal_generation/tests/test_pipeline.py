@@ -219,6 +219,8 @@ def test_false_provisional_owner_cannot_erase_true_objects_candidate_support():
                 np.r_[candidates.point_indices, np.arange(6)].astype(np.int32),
                 np.r_[candidates.instance_ids, ["ghost"] * 6],
                 np.r_[candidates.confidences, np.full(6, 1.0)].astype(np.float32),
+                np.r_[candidates.frustum_point_indices, np.arange(6)].astype(np.int32),
+                np.r_[candidates.frustum_instance_ids, ["ghost"] * 6],
             ),
         )
     cfg = _cfg()
@@ -237,3 +239,138 @@ def test_false_provisional_owner_cannot_erase_true_objects_candidate_support():
         assert rows[f"mos-{3 * f}"].supporting_masklet_ids == ("mA",)
     audit = read_rows(proposal_refinement_path(BAG, CHUNK))
     assert all(not r["emitted"] for r in audit if r["instance_id"] == "ghost")
+
+
+def _verifying(method: str = "largest_group") -> ComponentConfig:
+    cfg = _cfg()
+    cfg.lifted.support_method = method
+    return cfg
+
+
+@pytest.mark.parametrize("method", ["largest_group", "scan_clusters"])
+def test_verified_lifted_rows_carry_the_verdict_and_fused_rows_do_not(method):
+    """Cars A and B: every return is claimed and inside the frustum, so each
+    is one distinct segment (IoU near 1, containment 1) whatever boxes it."""
+    stage_chunk()
+    process_chunk(_verifying(method), BAG, CHUNK)
+    rows = proposals.read(BAG, CHUNK)
+    lifted = [p for p in rows if p.provenance == "lifted"]
+    assert lifted and all(p.lidar_verified is True for p in lifted)
+    assert all(p.lidar_verified is None for p in rows if p.provenance != "lifted")
+    audit = read_rows(proposal_refinement_path(BAG, CHUNK))
+    assert {r["verify_status"] for r in audit} == {"verified"}
+    assert all(r["verify_containment"] == 1.0 for r in audit)
+
+
+def test_a_segment_reaching_beyond_the_frustum_is_not_verified():
+    """Restrict car B's claims and frustum to 70% of its returns: the B
+    segment still matches the seed (IoU 0.7 > 0.5) but 30% of it lies outside
+    the frustum, so it belongs to something larger than the mask (FGR)."""
+    stage_chunk()
+    for f in range(N_FRAMES):
+        for sid in (sweep_id(f, "lidar_cc"), sweep_id(f, "lidar_ne")):
+            c = lifted_candidates.read_sweep(BAG, CHUNK, sid)
+            b = np.flatnonzero(c.instance_ids == "mB")
+            drop = b[: int(round(0.3 * b.size))]
+            keep = np.setdiff1d(np.arange(c.point_indices.size), drop)
+            lifted_candidates.write_sweep(
+                BAG,
+                CHUNK,
+                sid,
+                lifted_candidates.SweepCandidates(
+                    c.point_indices[keep],
+                    c.instance_ids[keep],
+                    c.confidences[keep],
+                    c.point_indices[keep],
+                    c.instance_ids[keep],
+                ),
+            )
+    process_chunk(_verifying(), BAG, CHUNK)
+    audit = {
+        r["instance_id"]: r for r in read_rows(proposal_refinement_path(BAG, CHUNK))
+    }
+    assert audit["mA"]["lidar_verified"] is True
+    assert audit["mB"]["verify_status"] == "containment_below_threshold"
+    assert audit["mB"]["verify_containment"] == pytest.approx(0.7, abs=0.05)
+    rows = proposals.read(BAG, CHUNK)
+    assert all(
+        p.lidar_verified is False
+        for p in rows
+        if p.provenance == "lifted" and p.proposal_id.startswith("lifted-mB")
+    )
+
+
+def test_without_verification_the_verdict_is_null():
+    stage_chunk()
+    cfg = _cfg()
+    cfg.lifted.verification.enabled = False
+    process_chunk(cfg, BAG, CHUNK)
+    rows = proposals.read(BAG, CHUNK)
+    assert all(p.lidar_verified is None for p in rows)
+    audit = read_rows(proposal_refinement_path(BAG, CHUNK))
+    assert all(
+        r["lidar_verified"] is None and r["verify_status"] is None for r in audit
+    )
+
+
+def _claim_fraction(instance: str, fraction: float, frustum_all: bool) -> None:
+    """Keep only `fraction` of an instance's claims in every sweep; its
+    frustum keeps all its returns (frustum_all) or only the kept claims."""
+    for f in range(N_FRAMES):
+        for sid in (sweep_id(f, "lidar_cc"), sweep_id(f, "lidar_ne")):
+            c = lifted_candidates.read_sweep(BAG, CHUNK, sid)
+            mine = np.flatnonzero(c.instance_ids == instance)
+            drop = mine[: int(round((1 - fraction) * mine.size))]
+            keep = np.setdiff1d(np.arange(c.point_indices.size), drop)
+            frustum = np.ones(c.frustum_point_indices.size, bool)
+            if not frustum_all:
+                # Only this instance's frustum shrinks, to its kept claims.
+                frustum &= ~(
+                    (c.frustum_instance_ids == instance)
+                    & np.isin(c.frustum_point_indices, c.point_indices[drop])
+                )
+            lifted_candidates.write_sweep(
+                BAG,
+                CHUNK,
+                sid,
+                lifted_candidates.SweepCandidates(
+                    c.point_indices[keep],
+                    c.instance_ids[keep],
+                    c.confidences[keep],
+                    c.frustum_point_indices[frustum],
+                    c.frustum_instance_ids[frustum],
+                ),
+            )
+
+
+def test_verified_clusters_box_the_verifying_segment_and_leave_the_rest():
+    """mA claims 70% of car A, all of it inside its frustum: verified, so its
+    box takes the whole A segment (80 returns per frame). mB claims 70% of B
+    with a frustum of only those: unverified, so largest_group keeps its 70%."""
+    stage_chunk()
+    _claim_fraction("mA", 0.7, frustum_all=True)
+    _claim_fraction("mB", 0.7, frustum_all=False)
+    process_chunk(_verifying("verified_clusters"), BAG, CHUNK)
+    rows = _by_id()
+    audit = {
+        (r["sweep_id"], r["instance_id"]): r
+        for r in read_rows(proposal_refinement_path(BAG, CHUNK))
+    }
+    for f in range(N_FRAMES):
+        ref = sweep_id(f, "lidar_cc")
+        a, b = rows[f"lifted-mA-{ref:06d}"], rows[f"lifted-mB-{ref:06d}"]
+        assert a.lidar_verified and a.lidar_point_count == 80
+        assert a.lift_seed_point_count == 56  # 70% of 80 claimed returns
+        assert audit[(ref, "mA")]["status"] == "verified_cluster"
+        assert not b.lidar_verified and b.lidar_point_count == 56
+        assert audit[(ref, "mB")]["status"] == "largest_group"
+
+
+def test_verified_clusters_need_verification():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="verification"):
+        LiftedConfig(
+            support_method="verified_clusters",
+            verification={"enabled": False},
+        )

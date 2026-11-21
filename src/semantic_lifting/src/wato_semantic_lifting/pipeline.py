@@ -14,9 +14,12 @@ Per chunk, sweeps in time order:
     d. Keep the in-mask points that pass the visibility test (UniLiPs Eq. 1)
        against the depth map up close and the sweep's own LiDAR returns.
     e. Each visible point retains all claiming masklets, weighted by det_score.
+    f. Each mask's 2D box frustum: every non-ground point in its bounding
+       rectangle, visible or not, for proposal_generation's LiDAR verification.
   Then merge one object's masklets across cameras into one instance, from the
   points they both claim (instances.py).
-  Pass 2 — preserve competing point-instance claims in lifted_candidates,
+  Pass 2 — preserve competing point-instance claims and each supported
+  instance's frustum in lifted_candidates,
   and write a provisional unique-label view in lifted_labels (voting.py).
   Geometric refinement and final ownership belong to proposal_generation.
   Then write lifted_instances.parquet and
@@ -70,10 +73,12 @@ from wato_semantic_lifting.stats import build_stats_row
 from wato_semantic_lifting.visibility import lidar_occluder, visible
 from wato_semantic_lifting.voting import (
     Candidates,
+    Frustum,
     Resolved,
     Votes,
     camera_winners,
     candidates,
+    frustum_pairs,
     resolve,
 )
 
@@ -94,6 +99,7 @@ class _SweepVotes:
     votes: Votes
     n_in_any_mask: int
     n_cameras_used: int
+    frustum: Frustum
 
 
 class _ChunkLifter:
@@ -139,6 +145,7 @@ class _ChunkLifter:
         n = int(xyz.shape[0])
         in_mask = np.zeros(n, dtype=bool)
         parts: list[Votes] = []
+        rects: list[Frustum] = []
         n_cameras = 0
         for ref in refs:
             if n == 0:
@@ -159,10 +166,21 @@ class _ChunkLifter:
             n_cameras += 1
             idx = np.flatnonzero(valid)
             ui, vi = pixel_indices(uv[idx], W, H)
+            # Each mask's 2D box frustum: every non-ground return in its
+            # rectangle, visible or not (the occluder in front, the background
+            # behind), on the same pixels as the claims, so a claim is always
+            # in its frustum. Recorded even when no mask pixel holds a return.
+            in_frame = not_ground[idx]
+            for mask in frame.masks:
+                rect = idx[mask.in_rect(ui, vi) & in_frame]
+                if rect.size:
+                    rects.append(
+                        Frustum(rect, np.full(rect.size, mask.label, np.int64))
+                    )
             hit = np.zeros(len(idx), bool)
             for mask in frame.masks:
                 hit |= mask.sample(ui, vi)
-            hit &= not_ground[idx]
+            hit &= in_frame
             if not hit.any():
                 continue
             # Every projected return can occlude, not only the in-mask ones.
@@ -194,7 +212,12 @@ class _ChunkLifter:
                     )
                 )
         return _SweepVotes(
-            sweep.sweep_id, n, Votes.concat(parts), int(in_mask.sum()), n_cameras
+            sweep.sweep_id,
+            n,
+            Votes.concat(parts),
+            int(in_mask.sum()),
+            n_cameras,
+            Frustum.concat(rects),
         )
 
 
@@ -288,12 +311,24 @@ def _process_chunk(
     label_cls = np.array([cls_index[r.cls] for r in records], np.int64)
     instance_ids = np.array([r.masklet_id for r in records], dtype=np.str_)
 
-    # Pass 2: resolve and write.
+    # Pass 2: resolve and write. Candidates first, for every sweep: the
+    # frustum keeps only instances with candidates somewhere in the chunk,
+    # the ones lifted_instances.parquet lists.
+    collected.sort(key=lambda sv: sv.sweep_id)
+    per_sweep_candidates: list[Candidates] = [
+        candidates(sv.votes, label_cls, label_instance) for sv in collected
+    ]
+    supported = np.unique(
+        np.concatenate(
+            [c.instance for c in per_sweep_candidates] + [np.zeros(0, np.int64)]
+        )
+    )
     stats_rows = []
     per_sweep: list[Resolved] = []
-    per_sweep_candidates: list[Candidates] = []
-    for sv in sorted(collected, key=lambda sv: sv.sweep_id):
-        claims = candidates(sv.votes, label_cls, label_instance)
+    n_frustum = 0
+    for sv, claims in zip(collected, per_sweep_candidates):
+        f_points, f_instances = frustum_pairs(sv.frustum, label_instance, supported)
+        n_frustum += f_points.size
         lifted_candidates.write_sweep(
             bag_id,
             chunk_id,
@@ -302,9 +337,10 @@ def _process_chunk(
                 claims.point_idx.astype(np.int32),
                 instance_ids[claims.instance],
                 claims.confidence.astype(np.float32),
+                f_points.astype(np.int32),
+                instance_ids[f_instances],
             ),
         )
-        per_sweep_candidates.append(claims)
         resolved = resolve(camera_winners(sv.votes), label_cls, label_instance)
         _write_sweep_labels(
             bag_id, chunk_id, sv.sweep_id, resolved, instance_ids, classes
@@ -326,12 +362,15 @@ def _process_chunk(
     lifted_labels.write_stats(bag_id, chunk_id, stats_rows)
     log.info(
         "semantic_lifting: chunk %s done — %d sweeps, %d labeled points, "
-        "%d instances (%d spanning cameras), %d frames with masklets but no depth",
+        "%d instances (%d spanning cameras), %d candidate and %d frustum pairs, "
+        "%d frames with masklets but no depth",
         chunk_id,
         len(stats_rows),
         sum(r.point_idx.size for r in per_sweep),
         len(instances),
         sum(len(i.masklet_ids) > 1 for i in instances),
+        sum(c.point_idx.size for c in per_sweep_candidates),
+        n_frustum,
         lifter.frames.n_no_depth,
     )
 

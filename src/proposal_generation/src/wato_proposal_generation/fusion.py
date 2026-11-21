@@ -79,6 +79,7 @@ def _alone(p: Proposal, fused_id: str) -> Proposal:
         track_life=None,
         lift_confidence=None,
         lift_seed_point_count=None,
+        lidar_verified=None,
     )
 
 

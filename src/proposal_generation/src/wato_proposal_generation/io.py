@@ -35,6 +35,15 @@ REFINEMENT_SCHEMA = pa.schema(
         pa.field("emitted", pa.bool_()),
         pa.field("n_box_points", pa.int64()),
         pa.field("n_seed_points_in_box", pa.int64()),
+        # LiDAR verification (verification.py); null when it is off.
+        pa.field("lidar_verified", pa.bool_()),
+        pa.field("verify_status", pa.string()),
+        pa.field("verify_radius_m", pa.float64()),
+        pa.field("verify_cluster_id", pa.int64()),
+        pa.field("verify_iou", pa.float64()),
+        pa.field("verify_containment", pa.float64()),
+        pa.field("n_verify_cluster_points", pa.int64()),
+        pa.field("n_frustum_points", pa.int64()),
     ]
 )
 

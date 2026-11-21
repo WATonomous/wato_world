@@ -843,6 +843,11 @@ class ProposalRow(BaseModel):
     # additions contribute geometry, not camera evidence. Null on other sources
     # and legacy proposals that predate scan refinement.
     lift_seed_point_count: Optional[int] = None
+    # Whether a distinct LiDAR segment backs the instance in this frame
+    # (proposal_generation's verification: SAL's best-IoU scan cluster > 0.5,
+    # lying >= 0.8 inside the masks' 2D box frustum, FGR). Lifted rows only;
+    # null when verification is off and on legacy proposals.
+    lidar_verified: Optional[bool] = None
 
 
 PROPOSAL_SCHEMA = pa.schema(
@@ -874,6 +879,7 @@ PROPOSAL_SCHEMA = pa.schema(
         pa.field("track_life", pa.int64()),
         pa.field("lift_confidence", pa.float64()),
         pa.field("lift_seed_point_count", pa.int64()),
+        pa.field("lidar_verified", pa.bool_()),
     ]
 )
 

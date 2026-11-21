@@ -136,6 +136,39 @@ def test_competing_original_seeds_can_both_refine_against_the_same_bank():
         assert mask.point_indices.tolist() == list(range(10))
 
 
+def test_a_prebuilt_bank_refines_exactly_as_building_one():
+    from wato_proposal_generation.scan_refinement import build_bank
+
+    rng = np.random.default_rng(0)
+    xyz = np.vstack([rng.normal(0, 0.3, (40, 3)), rng.normal(3, 0.3, (40, 3))])
+    seeds = {"a": np.arange(30), "b": np.arange(45, 80)}
+    cfg = ScanRefinementConfig()
+    built = refine_seeds(xyz, seeds, cfg)
+    shared = refine_seeds(
+        xyz, seeds, cfg, bank=build_bank(xyz, cfg.radii_m, cfg.min_samples)
+    )
+    for iid in seeds:
+        assert built[iid].point_indices.tolist() == shared[iid].point_indices.tolist()
+        assert (built[iid].iou, built[iid].radius_m, built[iid].status) == (
+            shared[iid].iou,
+            shared[iid].radius_m,
+            shared[iid].status,
+        )
+
+
+def test_a_disabled_config_ignores_a_supplied_bank():
+    from wato_proposal_generation.scan_refinement import build_bank
+
+    xyz = _line(np.arange(10) * 0.01)
+    bank = build_bank(xyz, (0.5,), 5)
+    result = refine_seeds(
+        xyz, {"i": np.arange(6)}, ScanRefinementConfig(enabled=False), bank=bank
+    )["i"]
+    assert result.status == "disabled" and result.point_indices.tolist() == list(
+        range(6)
+    )
+
+
 def _ordered_dbscan(xyz, radius, min_samples):
     """Textbook DBSCAN: expand clusters from cores in input order; a border
     joins the first cluster that reaches it."""

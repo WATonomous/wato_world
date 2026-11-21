@@ -20,6 +20,17 @@ pair, merging duplicate claims when masklets from different cameras represent
 the same instance. These retained candidates seed proposal_generation's
 geometric refinement, before point ownership is assigned.
 
+Beside the claims, each instance's **2D box frustum**: every non-ground
+return whose pixel falls inside the bounding rectangle of one of its masks,
+visible or not. A claim says a visible return lies in the mask; it does not
+say the return is the object — behind a hedge, too far, or between beams, the
+visible returns are the hedge in front or the tree line behind. The frustum
+lets proposal_generation test that (FGR's segmentation test: a LiDAR segment
+reaching beyond the frustum belongs to another object). It is recorded on the
+claims' own pixels, so every claim is in its instance's frustum, and only for
+instances with claims somewhere in the chunk. On WATO it is about 1.2–2× the
+claims.
+
 Frame caching stores each independent mask as its cropped bounding rectangle,
 with its image-pixel origin. PNGs are loaded and cropped one at a time; the
 cache does not retain a full-resolution image array for every hypothesis.
@@ -143,13 +154,15 @@ Under `chunks/<chunk_id>/semantic_lifting/`, written through
 
 | Artifact | Contents |
 |---|---|
-| `lifted_candidates/<sweep_id:06d>.npz` | Every distinct candidate `(point_indices, instance_ids)` pair and its `confidences` (int32, unicode, float32). Several instances can claim one point. An empty relation is written for sweeps with no claims. |
+| `lifted_candidates/<sweep_id:06d>.npz` | Every distinct candidate `(point_indices, instance_ids)` pair and its `confidences` (int32, unicode, float32). Several instances can claim one point. And each instance's frustum, `(frustum_point_indices, frustum_instance_ids)` (int32, unicode), a superset of its claims. An empty relation is written for sweeps with no claims. |
 | `lifted_labels/<sweep_id:06d>.npz` | Provisional unique labels: `point_indices` (int32, into the sweep's world NPZ), `instance_ids` (the instance's smallest masklet_id) and `classes` (unicode string arrays — load without pickle), `confidences` (float32), `n_supporting_cameras`, `n_disagreeing_cameras` (int32). |
 | `lifted_instances.parquet` | One `LiftedInstanceRow` per candidate-supported instance: `cls`, its `masklet_ids` and `cam_ids` (to find its 2D masks), `n_points_labeled` (distinct candidate points before ownership), `n_sweeps` (sweeps with candidate support). Instance ids are chunk-local. |
 | `lifted_stats.parquet` | One `LiftedStatsRow` per sweep (`sweep_id` int64). Written last: it is the chunk's completion marker. |
 
-The candidates reader rejects missing output, invalid pairs or pickled arrays
-with a rerun instruction. Existing owned-mask artifacts cannot reconstruct
+The candidates reader rejects missing output, invalid pairs, a claim outside
+its frustum or pickled arrays with a rerun instruction; files written before
+the frustum existed (2026-11-17) need `semantic_lifting --force` and the
+stages after it. Existing owned-mask artifacts cannot reconstruct
 losing claims: rerun perception_2d, semantic_lifting and downstream stages with
 `--force`. Labels written before 2026-10-11 (pickled object arrays, and empty)
 are also rejected by the labels reader.

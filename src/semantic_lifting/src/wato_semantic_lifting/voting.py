@@ -58,6 +58,52 @@ class Votes:
 
 
 @dataclass(frozen=True)
+class Frustum:
+    """One sweep's (point, masklet) pairs: every non-ground return whose pixel
+    falls in a mask's bounding rectangle, visible or not."""
+
+    point_idx: np.ndarray  # int64 (F,) index into the sweep's world NPZ
+    label_idx: np.ndarray  # int64 (F,) masklet index (MaskletIndex.records order)
+
+    @classmethod
+    def concat(cls, parts: list["Frustum"]) -> "Frustum":
+        if not parts:
+            return cls.empty()
+        return cls(
+            np.concatenate([p.point_idx for p in parts]),
+            np.concatenate([p.label_idx for p in parts]),
+        )
+
+    @classmethod
+    def empty(cls) -> "Frustum":
+        z = np.zeros(0, np.int64)
+        return cls(z, z)
+
+    def __len__(self) -> int:
+        return int(self.point_idx.shape[0])
+
+
+def frustum_pairs(
+    frustum: Frustum, label_instance: np.ndarray, keep_instances: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """The sweep's unique (point, instance) frustum pairs, sorted, for the
+    instances in ``keep_instances`` (int64 instance indices); masklets merged
+    across cameras share one instance, so their rectangles union."""
+    if not len(frustum):
+        z = np.zeros(0, np.int64)
+        return z, z
+    instances = label_instance[frustum.label_idx]
+    keep = np.isin(instances, keep_instances)
+    if not keep.any():
+        z = np.zeros(0, np.int64)
+        return z, z
+    pairs = np.unique(
+        np.stack([frustum.point_idx[keep], instances[keep]], axis=1), axis=0
+    )
+    return pairs[:, 0], pairs[:, 1]
+
+
+@dataclass(frozen=True)
 class Resolved:
     """One label per voted point, ascending point_idx."""
 

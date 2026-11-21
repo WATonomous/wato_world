@@ -89,8 +89,53 @@ def _dbscan(
     return labels
 
 
+@dataclass(frozen=True)
+class Scale:
+    """One DBSCAN partition of the frame: labels per row (-1 noise) and the
+    size of each cluster."""
+
+    radius_m: float
+    labels: np.ndarray
+    sizes: np.ndarray
+
+
+Bank = list[Scale]
+
+
+def build_bank(xyz: np.ndarray, radii_m: tuple[float, ...], min_samples: int) -> Bank:
+    """The frame's DBSCAN partitions, one per radius in the given order.
+
+    xyz must contain the full NON-GROUND frame, in stable sweep/index order:
+    refinement and verification both index it by frame row.
+    """
+    if not len(xyz):
+        return []
+    tree = cKDTree(xyz)
+    bank = []
+    for radius in radii_m:
+        labels = _dbscan(xyz, tree, radius, min_samples)
+        bank.append(Scale(radius, labels, np.bincount(labels[labels >= 0])))
+    return bank
+
+
+def best_match(seed: np.ndarray, scale: Scale) -> tuple[float, int | None]:
+    """(IoU, cluster id) of the scale's cluster with the highest point-set IoU
+    against the seed's rows; (0.0, None) when every seed row is noise. Equal
+    IoUs keep the lower cluster id."""
+    hits = scale.labels[seed]
+    clusters, intersections = np.unique(hits[hits >= 0], return_counts=True)
+    if not clusters.size:
+        return 0.0, None
+    ious = intersections / (len(seed) + scale.sizes[clusters] - intersections)
+    k = int(np.argmax(ious))
+    return float(ious[k]), int(clusters[k])
+
+
 def refine(
-    xyz: np.ndarray, seeds: dict[str, np.ndarray], cfg: ScanRefinementConfig
+    xyz: np.ndarray,
+    seeds: dict[str, np.ndarray],
+    cfg: ScanRefinementConfig,
+    bank: Bank | None = None,
 ) -> dict[str, RefinedMask]:
     """Refine every nonempty instance against one bank, in shared row indices.
 
@@ -98,16 +143,15 @@ def refine(
     All overlaps use original row indices; no downsampling or coordinate-based
     deduplication changes the IoU denominators. Empty/disabled banks retain
     original support. Disabling never substitutes the former radius filter.
+    ``bank``, when given, is build_bank's for the same xyz and cfg (shared with
+    verification); a disabled config ignores it.
     """
     if not seeds:
         return {}
-    bank: list[tuple[float, np.ndarray, np.ndarray]] = []
-    if cfg.enabled:
-        tree = cKDTree(xyz)
-        for radius in cfg.radii_m:
-            labels = _dbscan(xyz, tree, radius, cfg.min_samples)
-            sizes = np.bincount(labels[labels >= 0])
-            bank.append((radius, labels, sizes))
+    if not cfg.enabled:
+        bank = []
+    elif bank is None:
+        bank = build_bank(xyz, cfg.radii_m, cfg.min_samples)
 
     out = {}
     for iid, seed in sorted(seeds.items()):
@@ -115,18 +159,13 @@ def refine(
         best_radius = None
         best_cluster = None
         best_labels = None
-        for radius, labels, sizes in bank:
-            hits = labels[seed]
-            clusters, intersections = np.unique(hits[hits >= 0], return_counts=True)
-            if not clusters.size:
-                continue
-            ious = intersections / (len(seed) + sizes[clusters] - intersections)
-            k = int(np.argmax(ious))
-            if ious[k] > best_iou:
-                best_iou = float(ious[k])
-                best_radius = radius
-                best_cluster = int(clusters[k])
-                best_labels = labels
+        for scale in bank:
+            iou, cluster = best_match(seed, scale)
+            if cluster is not None and iou > best_iou:
+                best_iou = iou
+                best_radius = scale.radius_m
+                best_cluster = cluster
+                best_labels = scale.labels
         replaced = best_labels is not None and best_iou > cfg.min_iou
         if replaced:
             indices = np.flatnonzero(best_labels == best_cluster)

@@ -3,11 +3,15 @@
 Per chunk, frame by frame (lidar_preprocessing's frame_sync frames, regrouped
 with ProcessedSweeps.frames on the configured canonical LiDAR):
   1. Load all non-ground frame points with their provisional semantic/motion
-     labels and independent lifted candidates. Refine each candidate before
-     resolving 3D ownership; scan_clusters
-     builds the multiscale DBSCAN bank, largest_group retains legacy cleanup.
+     labels, independent lifted candidates and each instance's 2D box
+     frustum. Refine each candidate before resolving 3D ownership;
+     scan_clusters matches against the multiscale DBSCAN bank, largest_group
+     retains legacy cleanup. With lifted.verification, every seeded instance
+     is checked against the same bank: does a distinct LiDAR segment inside
+     its frustum back it (verification.py)?
   2. lifted: coverage suppression, proposed exclusive 3D support, and box gates
-     against accepted owners; commit ownership only after acceptance (lifted.py).
+     against accepted owners; commit ownership only after acceptance
+     (lifted.py). Each box carries its instance's verdict (lidar_verified).
   3. lidar_mos: one box per gated Step F cluster, classed only by camera seed
      points retained by the surviving 3D owners (lidar_mos.py).
   4. fusion_detector (when enabled): one row per kept detection_3d box, with
@@ -58,6 +62,8 @@ from wato_proposal_generation import detector, fusion, lidar_mos, lifted
 from wato_proposal_generation import frame_points as frame_points_mod
 from wato_proposal_generation.config import ComponentConfig
 from wato_proposal_generation.io import load_chunks, write_refinement_audit
+from wato_proposal_generation.scan_refinement import build_bank
+from wato_proposal_generation.verification import verify
 
 log = logging.getLogger(__name__)
 
@@ -118,10 +124,41 @@ def process_chunk(cfg: ComponentConfig, bag_id: str, chunk_id: str) -> dict[str,
 
     rows: list[Proposal] = []
     audit: list[dict] = []
+    lifted_cfg = cfg.lifted
+    verifying = lifted_cfg.verification.enabled
+    n_verified = n_checked = 0
     for frame in frames:
         fp = frame_points_mod.load(bag_id, chunk_id, frame, sweeps, gated_ids)
-        refined = lifted.refine_support(fp, instances, cfg.lifted)
-        lifts = lifted.proposals(frame, fp, ground, instances, cfg.lifted, refined)
+        seeds = fp.seeds()
+        # One DBSCAN bank per frame, shared by SAL refinement and verification.
+        bank = None
+        if seeds and (
+            verifying
+            or (
+                lifted_cfg.support_method == "scan_clusters"
+                and lifted_cfg.refinement.enabled
+            )
+        ):
+            bank = build_bank(
+                fp.xyz, lifted_cfg.refinement.radii_m, lifted_cfg.refinement.min_samples
+            )
+        verdicts = None
+        if verifying:
+            verdicts = verify(
+                {iid: s.point_indices for iid, s in seeds.items()},
+                fp.frustums(),
+                bank or [],
+                fp.n,
+                lifted_cfg.verification,
+            )
+            n_checked += len(verdicts)
+            n_verified += sum(v.verified for v in verdicts.values())
+        refined = lifted.refine_support(
+            fp, instances, lifted_cfg, bank=bank, verdicts=verdicts
+        )
+        lifts = lifted.proposals(
+            frame, fp, ground, instances, lifted_cfg, refined, verdicts
+        )
         semantic = lifted.semantic_view(fp, lifts)
         mos = lidar_mos.proposals(
             frame,
@@ -136,6 +173,7 @@ def process_chunk(cfg: ComponentConfig, bag_id: str, chunk_id: str) -> dict[str,
         for iid, result in refined.items():
             p = by_id.get(f"lifted-{iid}-{frame.reference_sweep_id:06d}")
             shared = np.intersect1d(result.seed_indices, result.point_indices).size
+            v = verdicts.get(iid) if verdicts is not None else None
             audit.append(
                 dict(
                     sweep_id=frame.reference_sweep_id,
@@ -154,6 +192,14 @@ def process_chunk(cfg: ComponentConfig, bag_id: str, chunk_id: str) -> dict[str,
                     n_seed_points_in_box=(
                         p.lift_seed_point_count if p is not None else None
                     ),
+                    lidar_verified=v.verified if v else None,
+                    verify_status=v.status if v else None,
+                    verify_radius_m=v.radius_m if v else None,
+                    verify_cluster_id=v.cluster_id if v else None,
+                    verify_iou=v.iou if v else None,
+                    verify_containment=v.containment if v else None,
+                    n_verify_cluster_points=v.cluster_points if v else None,
+                    n_frustum_points=v.frustum_points if v else None,
                 )
             )
         dets = detector.proposals(
@@ -182,6 +228,14 @@ def process_chunk(cfg: ComponentConfig, bag_id: str, chunk_id: str) -> dict[str,
     proposals.write(bag_id, chunk_id, rows)
     counts = fusion.counts(rows)
     log.info("chunk %s: %d frames, proposals %s", chunk_id, len(frames), counts)
+    if verifying:
+        log.info(
+            "chunk %s: LiDAR verification: %d of %d (frame, instance) hypotheses "
+            "verified",
+            chunk_id,
+            n_verified,
+            n_checked,
+        )
     return counts
 
 

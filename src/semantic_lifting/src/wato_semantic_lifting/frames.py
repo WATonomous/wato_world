@@ -42,13 +42,18 @@ class MaskClaim:
         pixels = mask[y0 : rows[-1] + 1, x0 : cols[-1] + 1].copy()
         return cls(label, x0, y0, pixels)
 
-    def sample(self, ui: np.ndarray, vi: np.ndarray) -> np.ndarray:
-        """Mask membership at image pixels; outside the crop is background."""
+    def in_rect(self, ui: np.ndarray, vi: np.ndarray) -> np.ndarray:
+        """Membership of the mask's bounding rectangle at image pixels: the 2D
+        box frustum, holes and all. An empty mask's rectangle is empty."""
         u, v = ui - self.x0, vi - self.y0
         h, w = self.pixels.shape
-        inside = (u >= 0) & (u < w) & (v >= 0) & (v < h)
+        return (u >= 0) & (u < w) & (v >= 0) & (v < h)
+
+    def sample(self, ui: np.ndarray, vi: np.ndarray) -> np.ndarray:
+        """Mask membership at image pixels; outside the crop is background."""
+        inside = self.in_rect(ui, vi)
         out = np.zeros(ui.shape, bool)
-        out[inside] = self.pixels[v[inside], u[inside]]
+        out[inside] = self.pixels[vi[inside] - self.y0, ui[inside] - self.x0]
         return out
 
 
