@@ -343,6 +343,25 @@ def _write(
     return out_uri
 
 
+def iwu_up_to_date(bag_id: str) -> bool:
+    """global_iwu.npz exists and is newer than everything it read: the global
+    static map, the chunk index and every chunk's lidar_proc_index.parquet."""
+    out = local_path(global_iwu_path(bag_id))
+    if not os.path.exists(out):
+        return False
+    t_out = os.path.getmtime(out)
+    inputs = [global_static_map_path(bag_id), chunks_index_path(bag_id)]
+    inputs += [
+        lidar_proc_index_path(bag_id, row["chunk_id"])
+        for row in read_rows(chunks_index_path(bag_id))
+    ]
+    for uri in inputs:
+        p = local_path(uri)
+        if os.path.exists(p) and os.path.getmtime(p) > t_out:
+            return False
+    return True
+
+
 def run_iwu(cfg: ComponentConfig, bag_id: str) -> IWUResult:
     """Run IWU over the whole bag and write global_iwu.npz."""
     map_path = local_path(global_static_map_path(bag_id))

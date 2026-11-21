@@ -17,6 +17,10 @@ lidar_preprocessing:
   # Step A — deskew.
   # ====================================================================
   filter_nonfinite_points: true
+  # Ego roof and mount: ~8k of ~34.7k LIDAR_TOP returns per sweep lie inside
+  # this square (docs/lidar_preprocessing_measurements.md). 1.0 m is the
+  # nuScenes devkit's remove_close default.
+  remove_close_m: 1.0
   # nuScenes sweeps carry no per-point times; synthesize from azimuth.
   synthesize_per_point_times: true
   require_patchwork: true

@@ -3,9 +3,15 @@
 Dockerized offline 3D auto-labeling pipeline for the WATonomous car (EVE):
 rosbags (cameras + LiDAR + ego pose) in, 3D box tracks with class labels out.
 
+The `wato` profile selects all eight top panoramic cameras and only `lidar_cc`.
+BEVFusion uses the native eight-view export of the shared camera encoder.
+Its matched detections retain the motion/lifted box and evidence; confident,
+point-supported unmatched detections can add objects. Sensor audits, model
+export and rerun instructions: [sensor setup](docs/sensor_setup.md).
+
 ## Architecture
 
-Nine components communicate only through artifacts on disk (`data/artifacts/`). No in-process imports across component boundaries.
+Modules communicate only through artifacts on disk (`data/artifacts/`). No in-process imports across component boundaries.
 
 ```mermaid
 flowchart TD
@@ -27,12 +33,16 @@ flowchart TD
         SL["UniLiPs Eq.1 occlusion test\ncross-camera vote accumulation\nper-point instance labels"]
     end
 
+    subgraph detection_3d["detection_3d  ·  GPU"]
+        DET["BEVFusion\n8 top cameras + lidar_cc\nsupplemental detections"]
+    end
+
     subgraph proposal_gen["proposal_generation  ·  CPU"]
         PG["Step F clusters + lifted-instance boxes\nfusion on shared points\n(later: Segment-Lift-Fit, LiDAR detector)"]
     end
 
     subgraph tracking["tracking  ·  CPU"]
-        TR["3D Kalman filter over fused boxes\nlinked across chunks\n(later: DINOv2 ReID)"]
+        TR["3D Kalman filter over fused boxes\nlinked across chunks\n(optional DINOv2 ReID)"]
     end
 
     subgraph label_ref["label_refinement  ·  GPU"]
@@ -52,9 +62,12 @@ flowchart TD
     ingest -- "lidar_sweeps · poses" --> lidar_prep
     lidar_prep -- "world sweeps · dynamic masks" --> perception_2d
     lidar_prep -- "world sweeps" --> semantic_lifting
+    ingest -- "images · calibration · poses" --> detection_3d
+    lidar_prep -- "lidar_cc world sweeps" --> detection_3d
     perception_2d -- "masks_2d · depth_2d · tracklets_2d" --> semantic_lifting
     semantic_lifting -- "lifted_labels" --> proposal_gen
     lidar_prep -- "world sweeps · ground grid\nmotion proposals" --> proposal_gen
+    detection_3d -- "detections_3d\nmatched provenance · new objects" --> proposal_gen
     proposal_gen -- "3D proposals" --> tracking
     tracking -- "3D tracks" --> label_ref
     tracking -- "rare-class track candidates" --> ovd
@@ -114,6 +127,8 @@ watod up
 
 # 5. Run a component on a bag under data/bags/. Example:
 watod run ingest /data/bags/my_bag
+# ...or every stage in order, each skipping work already done:
+watod pipeline --bag /data/bags/my_bag [--profile wato] [--force tracking]
 
 # 6. Open a dev shell in an active dev container with source bind-mounted.
 # First set ACTIVE_MODULES="perception_2d:dev" in watod-config.local.sh, then:
@@ -135,7 +150,7 @@ watod down all
 | `semantic_lifting` | Occlusion-aware 2D→3D label lifting (UniLiPs Eq.1) | CPU | no |
 | `lidar_preprocessing` | Motion comp, static/dynamic split, ground grid, UniLiPs IWU, recall-oriented motion proposals | CPU | no |
 | `proposal_generation` | Boxes from Step F clusters + lifted instances, fused per object (SLF, LiDAR detector later) | CPU | no |
-| `tracking` | 3D Kalman over fused boxes, linked across chunks (DINOv2 ReID later) | CPU | no |
+| `tracking` | 3D Kalman over fused boxes, linked across chunks (optional DINOv2 appearance ReID, off by default) | CPU | no |
 | `label_refinement` | Multimodal LabelFormer (bootstrap → learned) | CUDA | yes |
 | `open_vocab_discovery` | Rare-class discovery branch | CUDA | yes |
 | `student_training` | BEVFusion / TransFusion student training | CUDA | yes |

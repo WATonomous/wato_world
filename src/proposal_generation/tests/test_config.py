@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from wato_proposal_generation.config import (
     LiftedConfig,
     ScanRefinementConfig,
+    VerificationConfig,
     load_config,
 )
 
@@ -20,13 +21,15 @@ def test_shipped_configs_load():
 
 
 def test_wato_profile_is_the_default_with_the_rigs_canonical_lidar():
-    """lidar_preprocessing.wato.yaml groups frames on lidar_cc; nothing else
-    may drift from the default profile."""
+    """WATO uses the centre LiDAR and enables supplemental BEVFusion proposals."""
     default = load_config(str(CONFIG_DIR / "proposal_generation.yaml")).model_dump()
     wato = load_config(str(CONFIG_DIR / "proposal_generation.wato.yaml")).model_dump()
     assert wato["frames"]["canonical_lidar"] == "lidar_cc"
     assert default["frames"]["canonical_lidar"] is None
     wato["frames"]["canonical_lidar"] = None
+    assert wato["fusion_detector"]["enabled"] is True
+    assert default["fusion_detector"]["enabled"] is False
+    wato["fusion_detector"]["enabled"] = False
     assert wato == default
 
 
@@ -52,3 +55,15 @@ def test_invalid_refinement_settings_fail(changes):
 def test_invalid_coverage_thresholds_fail(threshold):
     with pytest.raises(ValidationError):
         LiftedConfig(max_support_iom=threshold)
+
+
+@pytest.mark.parametrize("field", ["min_iou", "min_containment"])
+@pytest.mark.parametrize("value", [-0.1, 1.1, float("nan")])
+def test_invalid_verification_thresholds_fail(field, value):
+    with pytest.raises(ValidationError):
+        VerificationConfig(**{field: value})
+
+
+def test_verification_ships_on_with_sal_and_fgr_thresholds():
+    cfg = VerificationConfig()
+    assert (cfg.enabled, cfg.min_iou, cfg.min_containment) == (True, 0.5, 0.8)

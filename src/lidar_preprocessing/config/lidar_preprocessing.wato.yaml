@@ -1,8 +1,8 @@
 lidar_preprocessing:
   # ====================================================================
-  # WATO 3-Velodyne rig (VLP-32C centre + 2× VLP-16 corners). Ingest with
+  # WATO centre VLP-32C only. Ingest with
   # ingest.wato.yaml / ingest.wato_6cam.yaml / ingest.wato_no_lidar_nw.yaml
-  # (per-corner LiDAR topics; per_lidar entries for absent LiDARs are unused).
+  # (only /lidar_cc/velodyne_points is selected).
   #   ./watod run lidar_preprocessing --bag <wato_bag> \
   #       --config /ws/src/lidar_preprocessing/config/lidar_preprocessing.wato.yaml
   # ====================================================================
@@ -12,8 +12,6 @@ lidar_preprocessing:
     profile: vlp32c
     per_lidar:
       lidar_cc: vlp32c
-      lidar_ne: vlp16
-      lidar_nw: vlp16
 
   filter_nonfinite_points: true
 
@@ -60,13 +58,13 @@ lidar_preprocessing:
     verbose: false
     ground_cell_size_m: 0.25
 
-  # Group the three per-corner sweeps into one frame per centre-LiDAR tick.
+  # One frame per centre-LiDAR tick.
   frame_sync:
     canonical_lidar: lidar_cc
     tolerance_ms: 25.0
 
   # Steps E/F: as the nuScenes profile. Proposals cluster per frame_sync
-  # frame, so one tick's three sweeps form one object.
+  # frame, using only the centre scanner.
   iwu:
     enabled: true
     update_rate_hz: 4.0

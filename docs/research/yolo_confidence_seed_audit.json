@@ -1,0 +1,402 @@
+{
+  "date": "2026-11-11",
+  "measurement": "Baseline accepted birth seed scores; not precision, recall, or a rerun",
+  "threshold_comparison": "score <= threshold excluded (Ultralytics end-to-end uses strict >)",
+  "scenes": {
+    "nusc0061_new": {
+      "sources": [
+        "data/artifacts/eval_runs/2026-11-07_mask_policy/nusc0061_new/raw/NuScenes_v1_0_mini_scene_0061_0_mcap/chunks/0000/mask_quality/CAM_BACK.json",
+        "data/artifacts/eval_runs/2026-11-07_mask_policy/nusc0061_new/raw/NuScenes_v1_0_mini_scene_0061_0_mcap/chunks/0000/mask_quality/CAM_BACK_LEFT.json",
+        "data/artifacts/eval_runs/2026-11-07_mask_policy/nusc0061_new/raw/NuScenes_v1_0_mini_scene_0061_0_mcap/chunks/0000/mask_quality/CAM_BACK_RIGHT.json",
+        "data/artifacts/eval_runs/2026-11-07_mask_policy/nusc0061_new/raw/NuScenes_v1_0_mini_scene_0061_0_mcap/chunks/0000/mask_quality/CAM_FRONT.json",
+        "data/artifacts/eval_runs/2026-11-07_mask_policy/nusc0061_new/raw/NuScenes_v1_0_mini_scene_0061_0_mcap/chunks/0000/mask_quality/CAM_FRONT_LEFT.json",
+        "data/artifacts/eval_runs/2026-11-07_mask_policy/nusc0061_new/raw/NuScenes_v1_0_mini_scene_0061_0_mcap/chunks/0000/mask_quality/CAM_FRONT_RIGHT.json"
+      ],
+      "effective_config": {
+        "discovery": {
+          "backend": "fixed",
+          "model": "microsoft/Florence-2-large-ft",
+          "min_confidence": 0.3,
+          "sample_every_k": 10,
+          "fixed_classes": [
+            "car",
+            "truck",
+            "bus",
+            "motorcycle",
+            "bicycle",
+            "pedestrian"
+          ]
+        },
+        "detection": {
+          "backend": "yolo",
+          "yolo": {
+            "checkpoint": "/data/models/yolo26x.pt",
+            "conf": 0.25,
+            "iou": 0.7,
+            "imgsz": 1280,
+            "class_map": {
+              "person": "pedestrian",
+              "bicycle": "bicycle",
+              "car": "car",
+              "motorcycle": "motorcycle",
+              "bus": "bus",
+              "truck": "truck"
+            }
+          },
+          "model": "IDEA-Research/grounding-dino-base",
+          "box_threshold": 0.35,
+          "text_threshold": 0.25,
+          "nms_iou": 0.5,
+          "redetect_every_k": 2
+        },
+        "segmentation": {
+          "backend": "dam4sam",
+          "dam4sam": {
+            "update_delta": 2,
+            "memory_min_predicted_iou": 0.5
+          },
+          "checkpoint": "/data/models/sam2.1_hiera_large.pt",
+          "config": "configs/sam2.1/sam2.1_hiera_l.yaml",
+          "refinement": {
+            "enabled": false,
+            "min_predicted_iou": 0.8,
+            "min_stability": 0.95,
+            "stability_offset": 1.0,
+            "multimask_output": false,
+            "interior_point": true,
+            "mask_input_refinement": true,
+            "correct_shape_disagreement": false,
+            "correction_min_mask_iou": 0.5,
+            "correction_below_mask_iou": 0.8
+          },
+          "mask_quality": true
+        },
+        "tracking": {
+          "iou_match_threshold": 0.5,
+          "offload_video_to_cpu": true,
+          "sub_clip_frames": 150,
+          "min_sub_clip_frames": 16,
+          "drop_lost_after_frames": 1,
+          "island_fraction": 0.1,
+          "birth_score": 0.0,
+          "confirm_keyframes": 3,
+          "support_keyframes": 5,
+          "support_min_area": 0.01,
+          "birth_gate": "untracked_area",
+          "birth_untracked_fraction": 0.5,
+          "birth_max_mask_iou": 0.1,
+          "backfill_frames": 20,
+          "reprompt_score": 0.8,
+          "reprompt_below_iou": 0.7,
+          "autocast_dtype": "bfloat16"
+        },
+        "ego_mask": {
+          "image_size": [
+            0,
+            0
+          ],
+          "max_fraction": 0.5,
+          "polygons": {}
+        },
+        "depth": {
+          "enabled": false,
+          "model": "depth-anything-v2-large",
+          "batch_size": 4,
+          "min_lidar_anchors": 30,
+          "ransac_n_iter": 200,
+          "ransac_inlier_threshold_m": 0.5,
+          "fallback_window": 5,
+          "sky_mask_top_fraction": 0.3,
+          "output_dtype": "float16"
+        },
+        "embeddings": {
+          "model": "dinov2_vitl14",
+          "every_k_frames": 1
+        },
+        "prompts_path": "/config/prompts.yaml"
+      },
+      "tested_births": 824,
+      "accepted_seeds": 573,
+      "thresholds": [
+        {
+          "confidence": 0.25,
+          "baseline_seeds_excluded": 0,
+          "excluded_percent": 0.0
+        },
+        {
+          "confidence": 0.35,
+          "baseline_seeds_excluded": 141,
+          "excluded_percent": 24.607329842931936
+        },
+        {
+          "confidence": 0.4,
+          "baseline_seeds_excluded": 194,
+          "excluded_percent": 33.85689354275742
+        },
+        {
+          "confidence": 0.5,
+          "baseline_seeds_excluded": 288,
+          "excluded_percent": 50.261780104712045
+        },
+        {
+          "confidence": 0.6,
+          "baseline_seeds_excluded": 364,
+          "excluded_percent": 63.525305410122165
+        }
+      ],
+      "by_class": {
+        "bicycle": {
+          "total": 8,
+          "excluded": {
+            "0.35": 5,
+            "0.4": 6,
+            "0.5": 7,
+            "0.6": 7
+          }
+        },
+        "bus": {
+          "total": 6,
+          "excluded": {
+            "0.35": 2,
+            "0.4": 2,
+            "0.5": 3,
+            "0.6": 4
+          }
+        },
+        "car": {
+          "total": 175,
+          "excluded": {
+            "0.35": 58,
+            "0.4": 78,
+            "0.5": 109,
+            "0.6": 133
+          }
+        },
+        "motorcycle": {
+          "total": 5,
+          "excluded": {
+            "0.35": 0,
+            "0.4": 1,
+            "0.5": 3,
+            "0.6": 3
+          }
+        },
+        "pedestrian": {
+          "total": 334,
+          "excluded": {
+            "0.35": 65,
+            "0.4": 95,
+            "0.5": 145,
+            "0.6": 191
+          }
+        },
+        "truck": {
+          "total": 45,
+          "excluded": {
+            "0.35": 11,
+            "0.4": 12,
+            "0.5": 21,
+            "0.6": 26
+          }
+        }
+      },
+      "median_box_area_px2_at_035": {
+        "below_or_equal": 932.6503542885184,
+        "above": 2106.5562007780245
+      }
+    },
+    "nusc1100_new": {
+      "sources": [
+        "data/artifacts/eval_runs/2026-11-07_mask_policy/nusc1100_new/raw/NuScenes_v1_0_mini_scene_1100_0_mcap/chunks/0000/mask_quality/CAM_BACK.json",
+        "data/artifacts/eval_runs/2026-11-07_mask_policy/nusc1100_new/raw/NuScenes_v1_0_mini_scene_1100_0_mcap/chunks/0000/mask_quality/CAM_BACK_LEFT.json",
+        "data/artifacts/eval_runs/2026-11-07_mask_policy/nusc1100_new/raw/NuScenes_v1_0_mini_scene_1100_0_mcap/chunks/0000/mask_quality/CAM_BACK_RIGHT.json",
+        "data/artifacts/eval_runs/2026-11-07_mask_policy/nusc1100_new/raw/NuScenes_v1_0_mini_scene_1100_0_mcap/chunks/0000/mask_quality/CAM_FRONT.json",
+        "data/artifacts/eval_runs/2026-11-07_mask_policy/nusc1100_new/raw/NuScenes_v1_0_mini_scene_1100_0_mcap/chunks/0000/mask_quality/CAM_FRONT_LEFT.json",
+        "data/artifacts/eval_runs/2026-11-07_mask_policy/nusc1100_new/raw/NuScenes_v1_0_mini_scene_1100_0_mcap/chunks/0000/mask_quality/CAM_FRONT_RIGHT.json"
+      ],
+      "effective_config": {
+        "discovery": {
+          "backend": "fixed",
+          "model": "microsoft/Florence-2-large-ft",
+          "min_confidence": 0.3,
+          "sample_every_k": 10,
+          "fixed_classes": [
+            "car",
+            "truck",
+            "bus",
+            "motorcycle",
+            "bicycle",
+            "pedestrian"
+          ]
+        },
+        "detection": {
+          "backend": "yolo",
+          "yolo": {
+            "checkpoint": "/data/models/yolo26x.pt",
+            "conf": 0.25,
+            "iou": 0.7,
+            "imgsz": 1280,
+            "class_map": {
+              "person": "pedestrian",
+              "bicycle": "bicycle",
+              "car": "car",
+              "motorcycle": "motorcycle",
+              "bus": "bus",
+              "truck": "truck"
+            }
+          },
+          "model": "IDEA-Research/grounding-dino-base",
+          "box_threshold": 0.35,
+          "text_threshold": 0.25,
+          "nms_iou": 0.5,
+          "redetect_every_k": 2
+        },
+        "segmentation": {
+          "backend": "dam4sam",
+          "dam4sam": {
+            "update_delta": 2,
+            "memory_min_predicted_iou": 0.5
+          },
+          "checkpoint": "/data/models/sam2.1_hiera_large.pt",
+          "config": "configs/sam2.1/sam2.1_hiera_l.yaml",
+          "refinement": {
+            "enabled": false,
+            "min_predicted_iou": 0.8,
+            "min_stability": 0.95,
+            "stability_offset": 1.0,
+            "multimask_output": false,
+            "interior_point": true,
+            "mask_input_refinement": true,
+            "correct_shape_disagreement": false,
+            "correction_min_mask_iou": 0.5,
+            "correction_below_mask_iou": 0.8
+          },
+          "mask_quality": true
+        },
+        "tracking": {
+          "iou_match_threshold": 0.5,
+          "offload_video_to_cpu": true,
+          "sub_clip_frames": 150,
+          "min_sub_clip_frames": 16,
+          "drop_lost_after_frames": 1,
+          "island_fraction": 0.1,
+          "birth_score": 0.0,
+          "confirm_keyframes": 3,
+          "support_keyframes": 5,
+          "support_min_area": 0.01,
+          "birth_gate": "untracked_area",
+          "birth_untracked_fraction": 0.5,
+          "birth_max_mask_iou": 0.1,
+          "backfill_frames": 20,
+          "reprompt_score": 0.8,
+          "reprompt_below_iou": 0.7,
+          "autocast_dtype": "bfloat16"
+        },
+        "ego_mask": {
+          "image_size": [
+            0,
+            0
+          ],
+          "max_fraction": 0.5,
+          "polygons": {}
+        },
+        "depth": {
+          "enabled": false,
+          "model": "depth-anything-v2-large",
+          "batch_size": 4,
+          "min_lidar_anchors": 30,
+          "ransac_n_iter": 200,
+          "ransac_inlier_threshold_m": 0.5,
+          "fallback_window": 5,
+          "sky_mask_top_fraction": 0.3,
+          "output_dtype": "float16"
+        },
+        "embeddings": {
+          "model": "dinov2_vitl14",
+          "every_k_frames": 1
+        },
+        "prompts_path": "/config/prompts.yaml"
+      },
+      "tested_births": 289,
+      "accepted_seeds": 168,
+      "thresholds": [
+        {
+          "confidence": 0.25,
+          "baseline_seeds_excluded": 0,
+          "excluded_percent": 0.0
+        },
+        {
+          "confidence": 0.35,
+          "baseline_seeds_excluded": 55,
+          "excluded_percent": 32.73809523809524
+        },
+        {
+          "confidence": 0.4,
+          "baseline_seeds_excluded": 74,
+          "excluded_percent": 44.04761904761905
+        },
+        {
+          "confidence": 0.5,
+          "baseline_seeds_excluded": 104,
+          "excluded_percent": 61.904761904761905
+        },
+        {
+          "confidence": 0.6,
+          "baseline_seeds_excluded": 117,
+          "excluded_percent": 69.64285714285714
+        }
+      ],
+      "by_class": {
+        "bus": {
+          "total": 4,
+          "excluded": {
+            "0.35": 1,
+            "0.4": 1,
+            "0.5": 1,
+            "0.6": 1
+          }
+        },
+        "car": {
+          "total": 97,
+          "excluded": {
+            "0.35": 32,
+            "0.4": 36,
+            "0.5": 58,
+            "0.6": 69
+          }
+        },
+        "motorcycle": {
+          "total": 3,
+          "excluded": {
+            "0.35": 0,
+            "0.4": 2,
+            "0.5": 2,
+            "0.6": 3
+          }
+        },
+        "pedestrian": {
+          "total": 63,
+          "excluded": {
+            "0.35": 21,
+            "0.4": 34,
+            "0.5": 42,
+            "0.6": 43
+          }
+        },
+        "truck": {
+          "total": 1,
+          "excluded": {
+            "0.35": 1,
+            "0.4": 1,
+            "0.5": 1,
+            "0.6": 1
+          }
+        }
+      },
+      "median_box_area_px2_at_035": {
+        "below_or_equal": 1812.2992753051221,
+        "above": 6048.425507247448
+      }
+    }
+  }
+}

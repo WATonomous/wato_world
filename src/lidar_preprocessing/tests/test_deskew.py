@@ -1443,3 +1443,92 @@ def test_real_time_field_wins_over_stamp_position(tmp_env):
     _moving_sweep("b_real", "c", t_offset_us=[0.0, 0.025], has_point_time=True)
     process_chunk(ComponentConfig(header_stamp_at="sweep_end"), "b_real", "c")
     np.testing.assert_allclose(_world_x("b_real", "c"), [5.0, 0.0], atol=1e-3)
+
+
+def _one_sweep_chunk(bag_id: str, chunk_id: str, **arrays) -> None:
+    """A single raw LIDAR_TOP sweep at an identity pose (lidar == ego == world)."""
+    from wato_common.artifact_store import lidar_sweep_path
+
+    _write_calibration(bag_id)
+    _write_poses(
+        bag_id,
+        chunk_id,
+        [
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "timestamp_ns": 0,
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0,
+                "qx": 0.0,
+                "qy": 0.0,
+                "qz": 0.0,
+                "qw": 1.0,
+                "world_T_ego_flat": _flat(np.eye(4)),
+                "source": "odom",
+                "valid": True,
+            }
+        ],
+    )
+    _write_raw_sweep(bag_id, chunk_id, 0, **arrays)
+    ensure_local_dir(lidar_proc_dir(bag_id, chunk_id))
+    _write_sweep_index(
+        bag_id,
+        chunk_id,
+        [
+            {
+                "bag_id": bag_id,
+                "chunk_id": chunk_id,
+                "lidar_id": "LIDAR_TOP",
+                "sweep_id": 0,
+                "lidar_path": lidar_sweep_path(bag_id, chunk_id, "LIDAR_TOP", 0),
+                "header_timestamp_ns": 0,
+                "record_timestamp_ns": 0,
+                "num_points": int(arrays["x"].shape[0]),
+                "has_ring": False,
+                "has_intensity": "intensity" in arrays,
+                "has_point_time": False,
+                "min_range_m": 0.0,
+                "max_range_m": 10.0,
+                "valid": True,
+                "drop_reason": None,
+            }
+        ],
+    )
+
+
+def _near_sweep():
+    # Inside the 1 m square: (0.5, 0.2) and (-0.9, 0.9) at any height.
+    # Outside it: |x| or |y| >= 1, including one exactly on the edge.
+    x = np.array([0.5, 2.0, -0.9, 0.5, 1.0, np.nan, 4.0], dtype=np.float32)
+    y = np.array([0.2, 0.0, 0.9, 3.0, 0.0, 0.0, 1.0], dtype=np.float32)
+    z = np.array([-0.4, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    intensity = np.arange(7, dtype=np.float32) * 10.0
+    return dict(x=x, y=y, z=z, intensity=intensity)
+
+
+def test_drops_returns_close_to_the_sensor_with_their_attributes(tmp_env):
+    """remove_close_m drops the devkit square in the sensor frame; intensity
+    and the point count stay aligned with the kept points."""
+    bag_id, chunk_id = "bag_close", "chunk0"
+    _one_sweep_chunk(bag_id, chunk_id, **_near_sweep())
+
+    cfg = ComponentConfig(remove_close_m=1.0)
+    results = process_chunk(cfg, bag_id, chunk_id)
+    # Kept: (2,0), (0.5,3), (1,0) on the edge, (4,1); dropped: 2 close + NaN.
+    assert results[0].n_points == 4
+    world = np.load(local_path(lidar_world_path(bag_id, chunk_id, 0)))
+    np.testing.assert_allclose(world["x"], [2.0, 0.5, 1.0, 4.0])
+    np.testing.assert_allclose(world["y"], [0.0, 3.0, 0.0, 1.0])
+    np.testing.assert_allclose(world["intensity"], [10.0, 30.0, 40.0, 60.0])
+    meta = read_rows(lidar_proc_index_path(bag_id, chunk_id))
+    assert meta[0]["n_points_total"] == 4
+
+
+def test_remove_close_zero_keeps_close_returns(tmp_env):
+    bag_id, chunk_id = "bag_keep_close", "chunk0"
+    _one_sweep_chunk(bag_id, chunk_id, **_near_sweep())
+    cfg = ComponentConfig(remove_close_m=0.0)
+    results = process_chunk(cfg, bag_id, chunk_id)
+    assert results[0].n_points == 6  # only the NaN goes

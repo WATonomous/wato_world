@@ -1,11 +1,7 @@
-# wato_ingest configuration — WATO recordings without the lidar_nw scanner.
+# Compatibility profile: the same eight top cameras + lidar_cc as ingest.wato.yaml.
 #
-# ingest.wato.yaml without lidar_nw, for recordings whose
-# /lidar_nw/velodyne_points carries no messages (sensors_2026_07_07-23_01_24_2:
-# 0 messages; calibration would abort on it). Every other value, and its
-# rationale, is ingest.wato.yaml's; change both files together
-# (test_pose_requirements checks they match). lidar_preprocessing.wato.yaml
-# needs no variant: its per_lidar entry for lidar_nw is simply unused.
+# Retained for existing commands using this profile name. Corner scanners
+# are excluded by both profiles; an empty lidar_nw topic no longer matters.
 #
 #   ./watod run ingest /data/bags/<wato_bag>.mcap \
 #       --config /ws/src/ingest/config/ingest.wato_no_lidar_nw.yaml
@@ -36,7 +32,6 @@ topics:
   lidars:
     # Per-sensor sweeps, NOT the merged /lidar/all/points_merged cloud.
     lidar_cc: /lidar_cc/velodyne_points   # centre VLP-32C (canonical)
-    lidar_ne: /lidar_ne/velodyne_points   # corner VLP-16
   pose: /world_modeling/liso/odometry
   tf_static: /tf_static
 

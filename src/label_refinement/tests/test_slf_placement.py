@@ -47,7 +47,9 @@ def test_accepted_slf_positions_match_evaluated_positions_for_the_whole_track(
         )
         for k in range(7)
     ]
-    summary = TrackSummary("t", 7, 0, 600_000_000, "moving", "car", 7, 0, 0, 1, 0.1, 30)
+    summary = TrackSummary(
+        "t", 7, 0, 600_000_000, "moving", "car", 7, 7, 0, 0, 1, 0.1, 30
+    )
     counts = {("t", "0000", k): 30 for k in range(7)}
     ego = np.zeros((7, 2))
     grounds = {"0000": None}
@@ -146,7 +148,9 @@ def test_accepted_fit_writes_its_corrected_headings():
         )
         for k in range(2)
     ]
-    summary = TrackSummary("t", 2, 0, 100_000_000, "moving", "car", 2, 0, 0, 1, 0.1, 30)
+    summary = TrackSummary(
+        "t", 2, 0, 100_000_000, "moving", "car", 2, 2, 0, 0, 1, 0.1, 30
+    )
     box = Box3D(cx=0, cy=0, cz=0.75, w=1.8, l=4.5, h=1.5, heading=3.1)
     phase3 = pipeline.Phase3(
         [box, box], [True, False], None, PERCENTILE, np.zeros((2, 2)), np.zeros((2, 2))

@@ -303,3 +303,102 @@ What would fix the rest: track-consistent shape completion from the observed
 near surface, and ownership checks for weak lifted instances, measured on
 labelled WATO frames. Class dimensions or a far-range depth threshold
 without that would swap one bias for another.
+
+## LiDAR verification of lifted boxes (nuScenes, 2026-11-17)
+
+Both GT scenes rerun from lidar_preprocessing on current code
+(`remove_close_m: 1.0`), then proposal_generation with
+`lifted.verification` on; `eval_proposals.py`'s `lifted_verified` split
+scores only the lifted rows it verified. Class-agnostic, 2 m:
+
+| Scene | Lifted: P / R | Verified lifted only: P / R |
+|---|---|---|
+| 0061 | 0.71 / 0.34 | 0.83 / 0.24 |
+| 1100 | 0.81 / 0.62 | 0.84 / 0.39 |
+
+Of all (frame, instance) hypotheses with seeds, emitted or not, 3,907 of
+16,089 verify on 0061. As a per-frame filter it would cost a third of the
+true lifted boxes, hence its use only as track evidence
+(`docs/tracking_measurements.md`, "Confirmation"). Verification does not
+change geometry: the lifted rows are otherwise identical to the run without
+it. Design and sources: `docs/research/lidar_verified_lifting.md`.
+
+On WATO (`sensors_2026_07_07_23_01_24_2`, 11 chunks), 69,621 of 204,103
+hypotheses verify (0.34). On 958 sampled lifted rows the pipeline's `lidar_verified`
+matches an independent recomputation from the mask PNGs (float pixels, mask
+bounding boxes, returns within 2.5 m of the sensor left out) on 954. The four
+others sit on the 0.8 containment line and differ only in a few returns
+within half a pixel of a rectangle edge: lifting tests a return at its nearest
+pixel, as it samples masks, so that every candidate lies in its frustum. The
+near-sensor returns change no verdict. Building one DBSCAN bank per frame
+raised proposal_generation from 3.4 min to 69 min for the bag (about 6 min a
+chunk, 0.42–0.66 s a frame of ~13k returns, verification itself ~0); semantic_lifting's time is unchanged (31 min), and its frustum adds
+about 1.5 pairs per candidate pair.
+
+Since 2026-11-19 DBSCAN is the connected components of its core graph in
+place of per-point expansion: on 7 sampled chunk-0003 frames, all six scales'
+labels are identical and a frame's bank takes 0.13–0.5 s against 0.43–0.73 s;
+chunk 0005 reruns in 3.5 min with `proposals.parquet` identical to the
+69-minute run's (29,627 rows). Chunks also run in parallel (`--workers`), so
+the bag takes about one chunk's time. Sharing one neighbour search at the
+largest radius across the six scales was 4–10× faster on most frames but
+1.4 s on a dense one, and is not used.
+
+## Boxing the verified segment (`verified_clusters`, nuScenes, 2026-11-17)
+
+`lifted.support_method: verified_clusters` (opt-in): a verified instance's
+support becomes the scan cluster that verified it (SAL replacement); any
+other instance keeps `largest_group`. Against `largest_group`, all with
+verification and tracking's confirmation on. The first run named the
+coarsest passing scale, not SAL's best IoU over all scales; the second
+follows SAL. Which instances verify is the same under both: the defaults
+rerun after the fix reproduces gate A's reports exactly.
+
+| Scene | Support | Frame P / R | Tracks true / false | Tracks per object | IDSW | Moving vehicles: IoU / yaw | Parked vehicles: IoU / centre / yaw |
+|---|---|---|---|---|---|---|---|
+| 0061 | largest_group | 0.80 / 0.33 | 48 / 16 | 1.42 | 20 | 0.38 / 3.4° | 0.31 / 0.47 m / 4.2° |
+| 0061 | verified_clusters, coarsest scale | 0.80 / 0.33 | 47 / 17 | 1.33 | 15 | 0.46 / 2.3° | 0.34 / 0.17 m / 2.2° |
+| 0061 | verified_clusters | 0.80 / 0.34 | 49 / 16 | 1.35 | 15 | 0.43 / 3.2° | 0.34 / 0.17 m / 2.2° |
+| 1100 | largest_group | 0.84 / 0.61 | 29 / 6 | 1.48 | 7 | 0.32 / 3.7° | 0.27 / 1.37 m / 3.0° |
+| 1100 | verified_clusters, coarsest scale | 0.84 / 0.59 | 29 / 6 | 1.60 | 16 | 0.31 / 3.0° | 0.44 / 0.37 m / 6.0° |
+| 1100 | verified_clusters | 0.84 / 0.61 | 29 / 7 | 1.56 | 10 | 0.23 / 3.4° | 0.28 / 1.31 m / 5.6° |
+
+Refined labels, medians over matched GT vehicles (`eval_refined`
+`by_gt_motion`). The all-class refined yaw error is not a box-quality
+measure here: it is mostly pedestrians, whose median is 40–56° in every
+run.
+
+- **Coarsest scale (first run).** 1100 lost one car's recall (22 instants
+  of GT 51753, boxed by a coarse cluster classed as a bus); 0061 lost 12
+  truck instants, including two trucks side by side boxed as one 5.7 m
+  wide.
+- **Point level** (`verified_cluster_points.py`): on verified lifted
+  vehicles matched to GT, the object being the non-ground returns in its GT
+  box grown by 0.25 m, the verifying cluster holds more of the object than
+  `largest_group` at the same precision (0.97–1.00 for both). Recall goes
+  from 0.96 to 1.00 on 0061, and from 0.89 to 0.98 under 20 m on 1100; what
+  the cluster drops lies on the object.
+- **Where it loses: sparse objects.** 1100's moving-vehicle drop is one car
+  (GT 51753, 34 of 97 paired instants, `gate_b2_iou.py`; every other
+  moving car is flat or better). It is about 22 m away at night with 16–21
+  returns, which DBSCAN splits at every scale; the verifying cluster holds
+  57–69 % of them, so its boxes are 1.5 × 0.3 m slivers and its refined
+  yaw error goes from 15° to 75°. It also makes 2 of 1100's 3 extra ID
+  switches (a second track takes it for 2 instants). At 20–40 m on 1100 the
+  cluster's recall is 0.79 against 0.97. On 0061 the same happens to a
+  moving truck at 34–43 m (GT 42496, 6–15 returns, 50–71 % in the
+  cluster): 2 instants lost, its box 2.3 m off.
+- **Two losses on 0061 are not the support.** Truck 59674's lost instants
+  are the eval's greedy match giving its box (1.58 m away) to an
+  ignore-class pushable_pullable 1.28 m away. Truck 19319's IoU (0.41 →
+  0.13) is box height: its track is judged moving, so label_refinement puts
+  each frame's box bottom on the chunk's ground grid under the box centre,
+  and that grid has single 0.25 m cells at +1.8 to +4.2 m among ground at
+  −0.2 m (Patchwork++ ground on the truck's returns, empty cells filled from
+  them). Both runs hit those cells (A from sweep 350, B2 from 310); the
+  verified cluster's recall on this truck is 1.00 against 0.97. Step C has
+  since been fixed (`docs/lidar_preprocessing_measurements.md`, "Ground
+  grid"); these runs predate it.
+
+Better boxes and fewer ID switches on 0061; on 1100 equal but for one
+sparse car, which loses. `largest_group` stays the default.

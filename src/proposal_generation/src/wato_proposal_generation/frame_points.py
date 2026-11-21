@@ -41,6 +41,15 @@ class FramePoints:
     # Sparse independent claims; a return may occur in several seeds. None is
     # only for callers constructing a frame from an exclusive label table.
     lifted_seeds: dict[str, LiftedSeed] | None = None
+    # Each seeded instance's 2D box frustum (frame rows, every non-ground
+    # return inside its masks' rectangles, visible or not), for LiDAR
+    # verification. None for hand-built frames without one.
+    lifted_frustums: dict[str, np.ndarray] | None = None
+
+    def frustums(self) -> dict[str, np.ndarray]:
+        if self.lifted_frustums is None:
+            raise ValueError("this frame was built without lifted frustums")
+        return self.lifted_frustums
 
     def seeds(self) -> dict[str, LiftedSeed]:
         if self.lifted_seeds is not None:
@@ -68,6 +77,7 @@ class FramePoints:
             confidence=np.zeros(0, np.float32),
             cluster_id=np.zeros(0, np.int64),
             lifted_seeds={},
+            lifted_frustums={},
         )
 
 
@@ -88,6 +98,7 @@ def load(
     """
     parts: list[FramePoints] = []
     seed_parts: dict[str, list[LiftedSeed]] = {}
+    frustum_parts: dict[str, list[np.ndarray]] = {}
     offset = 0
     for sid in frame.sweep_ids:
         meta = sweeps.get(sid)
@@ -115,6 +126,7 @@ def load(
         if (
             world.ground_mask[labels.point_indices].any()
             or world.ground_mask[candidates.point_indices].any()
+            or world.ground_mask[candidates.frustum_point_indices].any()
         ):
             raise ArtifactFormatError(
                 meta.world_path,
@@ -138,6 +150,12 @@ def load(
             seed_parts.setdefault(str(iid), []).append(
                 LiftedSeed(at + offset, candidates.confidences[claimed])
             )
+        # Every instance's frustum in this sweep, even one with no seed here:
+        # on a multi-sweep frame its other sweeps' frustum rows still count.
+        for iid in np.unique(candidates.frustum_instance_ids):
+            inside = candidates.frustum_instance_ids == iid
+            at = np.searchsorted(idx, candidates.frustum_point_indices[inside])
+            frustum_parts.setdefault(str(iid), []).append(at + offset)
         cluster_id = clusters[idx].astype(np.int64)
         cluster_id[~np.isin(cluster_id, gated_cluster_ids)] = -1
         parts.append(
@@ -168,5 +186,11 @@ def load(
                 np.concatenate([p.confidences for p in claims]),
             )
             for iid, claims in seed_parts.items()
+        },
+        # Only instances seeded in the frame are ever verified.
+        lifted_frustums={
+            iid: np.concatenate(rows)
+            for iid, rows in frustum_parts.items()
+            if iid in seed_parts
         },
     )

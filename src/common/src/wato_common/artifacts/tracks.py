@@ -18,8 +18,9 @@ so an instant of a shared span can have one row per chunk (schemas.TrackRow).
 Invariants, checked on write and on read: a track has one summary and at
 least one frame; its frames have distinct (chunk_id, sweep_id), at most one
 owned frame per reference_timestamp_ns, and the summary's n_frames (distinct
-instants) and first / last timestamps match them; motion_state is one of
-MOTION_STATES.
+instants) and first / last timestamps match them; 0 <= n_confident <=
+n_frames; motion_state is one of MOTION_STATES. A file missing a column (one
+written before the column existed) raises with a rerun instruction.
 """
 
 from __future__ import annotations
@@ -86,6 +87,7 @@ class TrackSummary:
     motion_state: str
     cls: Optional[str]
     n_strong: int
+    n_confident: int
     frac_two_source: float
     frac_lidar_mos: float
     net_displacement_m: float
@@ -120,6 +122,8 @@ def _problem(frames: list[TrackFrame], summaries: list[TrackSummary]) -> Optiona
         t = [f.reference_timestamp_ns for f in fs]
         if s.n_frames != len(set(t)):
             return f"{where}: n_frames {s.n_frames} but {len(set(t))} instants"
+        if not 0 <= s.n_confident <= s.n_frames:
+            return f"{where}: n_confident {s.n_confident} outside [0, n_frames]"
         if (s.first_timestamp_ns, s.last_timestamp_ns) != (min(t), max(t)):
             return f"{where}: first/last timestamps don't match its frames"
     return None
@@ -143,16 +147,27 @@ def write(bag_id: str, frames: list[TrackFrame], summaries: list[TrackSummary]) 
     )
 
 
+def _columns(row: dict, record, uri: str) -> dict:
+    """The record's fields from a row; a column the file lacks (written before
+    it existed) is a format error naming the rerun, not a default."""
+    try:
+        return {f.name: row[f.name] for f in fields(record)}
+    except KeyError as exc:
+        raise ArtifactFormatError(
+            local_path(uri), f"missing column {exc.args[0]!r}; re-run tracking"
+        ) from None
+
+
 def read(bag_id: str) -> tuple[list[TrackFrame], list[TrackSummary]]:
     """Every track frame (file order) and every track summary of the bag."""
     frames = []
     for row in read_rows(tracks_path(bag_id)):
-        values = {f.name: row[f.name] for f in fields(TrackFrame)}
+        values = _columns(row, TrackFrame, tracks_path(bag_id))
         for name in _LIST_FIELDS:
             values[name] = tuple(decode_str_list(values[name]))
         frames.append(TrackFrame(**values))
     summaries = [
-        TrackSummary(**{f.name: row[f.name] for f in fields(TrackSummary)})
+        TrackSummary(**_columns(row, TrackSummary, track_summaries_path(bag_id)))
         for row in read_rows(track_summaries_path(bag_id))
     ]
     problem = _problem(frames, summaries)

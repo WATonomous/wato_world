@@ -22,8 +22,9 @@ ground maps, and recall-oriented motion proposals.
 `python -m wato_lidar_preprocessing reduce | iwu | proposals --bag <bag>`.
 
 WATO bags must be ingested with `ingest.wato.yaml` / `ingest.wato_6cam.yaml` /
-`ingest.wato_no_lidar_nw.yaml` (per-corner LiDAR topics), then processed with
-`lidar_preprocessing.wato.yaml`.
+`ingest.wato_no_lidar_nw.yaml` (only `/lidar_cc/velodyne_points`), then
+processed with `lidar_preprocessing.wato.yaml`. Historical measurements using
+corner scanners describe the older multi-LiDAR setup.
 
 ## Steps
 
@@ -37,7 +38,12 @@ F  motion_proposals/  per-point source bits + HDBSCAN clusters with motion featu
 ```
 
 A chunk counts as done when its summary exists, so a run after a Step B change
-needs `--force`.
+needs `--force`. `run`'s bag-level steps skip when their output is newer than
+everything it read: D when both global maps are newer than every chunk's
+`static_map.npz` / `ground.npz`, E when `global_iwu.npz` is newer than the
+global static map and every chunk's `lidar_proc_index.parquet`, F per chunk
+(below); `--force` re-runs them. The `reduce` and `iwu` subcommands always
+run.
 
 ### Two dynamic artifacts — which one to read
 
@@ -53,6 +59,15 @@ Consumers read the world sweep and mask through
 proposals through `wato_common.artifacts.motion_proposals`.
 
 ### A — Deskew
+
+Before anything else, non-finite returns and, with `remove_close_m` > 0, the
+returns inside the square |x| < r, |y| < r of the sensor frame are dropped
+together, so every per-sweep file indexes the same points. That square is the
+nuScenes devkit's `remove_close`: the vehicle's roof, mount and body, never
+another object, yet non-ground (Patchwork++ ignores returns under 1 m). The
+nuScenes profile uses 1.0 m (~8k of ~34.7k LIDAR_TOP returns per sweep); the
+WATO profile keeps them for now (~90–100 roof-rack returns per `lidar_cc`
+sweep). Changing it changes every world sweep: rerun from this stage.
 
 Each point is placed in the world at its own time: the ego pose is interpolated
 (`wato_common.pose_lookup`) at every per-point timestamp, composed with
@@ -119,9 +134,19 @@ every point the filter drops. Tuning is in the
 
 ### C — Ground
 
-Unions the per-sweep Patchwork++ masks, drops ground points in voxels Step B
-called dynamic (low-riding movers), and rasterises a median-Z height grid with
-nearest-filled holes and finite-difference normals. With no ground masks
+Unions the per-sweep Patchwork++ masks, keeping only ground within
+Patchwork++'s first zone of its sweep's sensor (`(7 min_range + max_range) /
+8`, 12.1 m at the shipped ranges), drops ground points in voxels Step B called
+dynamic (low-riding movers), and rasterises a median-Z height grid with
+nearest-filled holes and finite-difference normals. Past its first zone
+Patchwork++ runs no height or vertical-plane check: one ring's line along a
+truck's side or a wall passes as level ground, and under a parked vehicle,
+where no sweep sees the road, those returns were the cell's only ground. The
+grid is the road under every object (box bottoms, Step F's height floor), so
+cells only seen from further away are filled from the nearest near cell
+([measurements](../../docs/lidar_preprocessing_measurements.md), "Ground
+grid"; GroundGrid, RA-L 2024, keeps far terrain but is worse under objects:
+"GroundGrid against Patchwork++"). The per-sweep `ground_mask` is unchanged. With no ground masks
 (Patchwork++ unavailable) it writes a sentinel (`ground_status:
 skipped_no_ground_mask`).
 

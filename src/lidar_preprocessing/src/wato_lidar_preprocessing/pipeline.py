@@ -435,17 +435,20 @@ def run_proposals(
         chunk_id: restrict F to one chunk. IWU is bag-level, so it is skipped
             and F uses whatever global_iwu.npz already exists (IWU_EVICTED is
             never set when none does).
-        force: re-run F on chunks whose motion_clusters.parquet is newer than
-            every input it read.
+        force: re-run E even when global_iwu.npz is newer than every input
+            it read, and F on chunks whose motion_clusters.parquet is.
         with_iwu: False skips Step E (the `proposals` subcommand; `iwu` is its
             own subcommand for multi-machine runs).
     """
     if with_iwu and chunk_id is None and cfg.iwu.enabled:
-        log.info("=== bag %s: step E — iwu ===", bag_id)
-        try:
-            iwu_step.run_iwu(cfg, bag_id)
-        except FileNotFoundError as exc:
-            log.warning("bag %s: IWU skipped (%s)", bag_id, exc)
+        if not force and iwu_step.iwu_up_to_date(bag_id):
+            log.info("bag %s: global_iwu.npz up to date — skipping step E", bag_id)
+        else:
+            log.info("=== bag %s: step E — iwu ===", bag_id)
+            try:
+                iwu_step.run_iwu(cfg, bag_id)
+            except FileNotFoundError as exc:
+                log.warning("bag %s: IWU skipped (%s)", bag_id, exc)
 
     if not cfg.motion_proposals.enabled:
         log.info("motion_proposals.enabled=false — skipping step F")

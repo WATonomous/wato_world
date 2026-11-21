@@ -5,7 +5,9 @@ Motion is judged on the whole track (3D Auto Labeling, MS3D), not per cluster
 as Step F does: moving iff the Kalman-filtered centre moved at least
 moving_displacement_m first → last, or at least fast_displacement_m at an
 average of at least fast_speed_mps; "unknown" when the track is too short to
-tell. A track is dropped only when it is both short and weak (Offline-Poly).
+tell. A track is dropped when it is both short and weak (Offline-Poly), and,
+with confirmation on, when it has too few confident instants (MS3D++'s
+retroactive labelling, `confirmed`).
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from typing import Optional
 import numpy as np
 
 from wato_common.artifacts.tracks import MOVING, PARKED, UNKNOWN, TrackSummary
-from wato_tracking.config import FilterConfig, MotionConfig
+from wato_tracking.config import ConfirmationConfig, FilterConfig, MotionConfig
 from wato_tracking.tracker import Observation
 
 
@@ -71,6 +73,7 @@ def summarize(track_id: str, obs: list[Observation], cfg: MotionConfig) -> Track
         motion_state=motion_state(len(obs), net, (max(t) - min(t)) * 1e-9, cfg),
         cls=cls,
         n_strong=sum(o.det.strong for o in obs),
+        n_confident=sum(o.det.confident for o in obs),
         frac_two_source=float(np.mean([o.det.two_source for o in obs])),
         frac_lidar_mos=float(np.mean([o.det.has_lidar_mos for o in obs])),
         net_displacement_m=net,
@@ -83,3 +86,18 @@ def summarize(track_id: str, obs: list[Observation], cfg: MotionConfig) -> Track
 
 def keep(summary: TrackSummary, cfg: FilterConfig) -> bool:
     return summary.n_frames >= cfg.min_frames or summary.n_strong >= cfg.min_strong
+
+
+def required_confident(summary: TrackSummary, cfg: ConfirmationConfig) -> int:
+    """Confident instants the track needs to be a label: a parked vehicle's
+    count, any other vehicle's (moving or too short to tell), or the other
+    classes' (a class-less track is not a vehicle)."""
+    if summary.cls in cfg.vehicle_classes:
+        if summary.motion_state == PARKED:
+            return cfg.min_confident_parked_vehicle
+        return cfg.min_confident_vehicle
+    return cfg.min_confident_other
+
+
+def confirmed(summary: TrackSummary, cfg: ConfirmationConfig) -> bool:
+    return summary.n_confident >= required_confident(summary, cfg)

@@ -19,6 +19,7 @@ SHOW = ("sources", "fused")
 PROVENANCE_RGB = {
     "lidar_mos": (255, 140, 0),
     "lifted": (0, 200, 255),
+    "fusion_detector": (190, 90, 255),
     "lidar_detector": (255, 230, 0),
 }
 # Classes, when the fused rows are shown (semantic_lifting's viewer palette).
@@ -51,7 +52,11 @@ def label(p: Proposal, show: str) -> str:
 def legend(show: str) -> list[tuple[str, tuple[int, int, int]]]:
     if show == "fused":
         return list(CLASS_RGB.items()) + [("none / other", OTHER_RGB)]
-    return [(k, v) for k, v in PROVENANCE_RGB.items() if k in ("lidar_mos", "lifted")]
+    return [
+        (k, v)
+        for k, v in PROVENANCE_RGB.items()
+        if k in ("lidar_mos", "lifted", "fusion_detector")
+    ]
 
 
 @dataclass(frozen=True)

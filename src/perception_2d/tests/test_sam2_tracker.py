@@ -169,8 +169,6 @@ def _track(predictor, detector, n, H, W, stamped=False, **kw):
         chunk_id="chunk0",
         cam_id="cam_front",
         tracker_backend="sam2",
-        dino_model="dinov2_vitl14",
-        dino_every_k=0,  # skip DINOv2 (no torch in test env)
         device="cpu",
         # Detector support and re-prompting off unless a test turns them on,
         # so each test exercises its own rule.
@@ -335,23 +333,17 @@ def test_masklets_carry_the_backend_that_made_them():
     assert {m.tracker_backend for m in masks} == {"dam4sam"}
 
 
-@pytest.mark.parametrize("failing", ["detector", "embeddings"])
-def test_model_failure_propagates(failing, monkeypatch):
-    """Swallowed, a missing checkpoint left a camera with no masklets or no
-    embeddings, which looks like a finished chunk."""
-    from wato_perception_2d.models import sam2_tracker
+def test_model_failure_propagates():
+    """Swallowed, a missing checkpoint left a camera with no masklets, which
+    looks like a finished chunk."""
 
     def unavailable(*_a, **_k):
         raise RuntimeError("checkpoint not found")
 
     detector = _ConstDetector(_two_cars())
-    if failing == "detector":
-        detector.detect = unavailable
-    else:
-        monkeypatch.setattr(sam2_tracker, "extract_dino_features", unavailable)
-
+    detector.detect = unavailable
     with pytest.raises(RuntimeError, match="not found"):
-        _track(_FakePredictor(16, 16), detector, 4, 16, 16, dino_every_k=1)
+        _track(_FakePredictor(16, 16), detector, 4, 16, 16)
 
 
 def test_empty_first_keyframe_does_not_abandon_the_window():

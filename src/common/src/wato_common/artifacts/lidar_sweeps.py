@@ -17,7 +17,9 @@ World sweep — written by lidar_preprocessing; read by perception_2d,
 semantic_lifting (and lidar_preprocessing's later steps):
 
   lidar_proc/<sweep_id:06d>_world.npz        deskewed, world frame
-    x, y, z       float64 (N,)   non-finite raw returns dropped
+    x, y, z       float64 (N,)   non-finite raw returns dropped, and returns
+                                 within the profile's remove_close_m square
+                                 of the sensor (the vehicle itself)
     origin        float64 (3,)   sensor position in the world, mid-sweep
     intensity     float32 (N,)   optional
     ring                  (N,)   optional, as recorded

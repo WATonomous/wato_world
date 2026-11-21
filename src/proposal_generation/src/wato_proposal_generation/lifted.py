@@ -39,7 +39,8 @@ from wato_proposal_generation.boxes import SourceBox, box_of, proposal
 from wato_proposal_generation.config import LiftedConfig
 from wato_proposal_generation.frame_points import FramePoints
 from wato_proposal_generation.overlap import resolve_support
-from wato_proposal_generation.scan_refinement import RefinedMask, refine
+from wato_proposal_generation.scan_refinement import Bank, RefinedMask, refine
+from wato_proposal_generation.verification import Verdict
 
 PROVENANCE = "lifted"
 
@@ -54,22 +55,44 @@ def instance(instances: dict[str, LiftedInstance], iid: str) -> LiftedInstance:
         ) from None
 
 
+VERIFIED_CLUSTER = "verified_cluster"
+
+
 def refine_support(
-    fp: FramePoints, instances: dict[str, LiftedInstance], cfg: LiftedConfig
+    fp: FramePoints,
+    instances: dict[str, LiftedInstance],
+    cfg: LiftedConfig,
+    bank: Optional[Bank] = None,
+    verdicts: Optional[dict[str, Verdict]] = None,
 ) -> dict[str, RefinedMask]:
     """Select the published matcher or legacy cleanup for an explicit ablation.
 
     The legacy method remains separate; it is never a fallback for failed SAL
     matches. Its audit IoU is the retained component's overlap with its seed.
+    ``bank`` is the frame's scan_refinement.build_bank, when already built.
+    verified_clusters replaces a verified instance's support with the cluster
+    its verdict names (its best-IoU passing scale, on ``bank``) and leaves
+    every other instance to largest_group.
     """
     seeds = fp.seeds()
     if cfg.support_method == "scan_clusters":
         return refine(
-            fp.xyz, {iid: s.point_indices for iid, s in seeds.items()}, cfg.refinement
+            fp.xyz,
+            {iid: s.point_indices for iid, s in seeds.items()},
+            cfg.refinement,
+            bank=bank,
         )
+    scales = {scale.radius_m: scale for scale in (bank or [])}
     out = {}
     for iid, claims in sorted(seeds.items()):
         seed = claims.point_indices
+        v = verdicts.get(iid) if verdicts is not None else None
+        if cfg.support_method == "verified_clusters" and v is not None and v.verified:
+            members = np.flatnonzero(scales[v.radius_m].labels == v.cluster_id)
+            out[iid] = RefinedMask(
+                seed, members, v.radius_m, v.cluster_id, v.iou, VERIFIED_CLUSTER
+            )
+            continue
         cls = instance(instances, iid).cls
         radius = cfg.cluster_radius_by_class_m.get(cls, cfg.cluster_radius_m)
         keep = seed[largest_group(fp.xyz[seed], radius)]
@@ -96,7 +119,10 @@ def proposals(
     instances: dict[str, LiftedInstance],
     cfg: LiftedConfig,
     refinements: Optional[dict[str, RefinedMask]] = None,
+    verdicts: Optional[dict[str, Verdict]] = None,
 ) -> list[SourceBox]:
+    """Accepted lifted boxes; each carries its instance's LiDAR verification
+    verdict (lidar_verified) when ``verdicts`` is given, else None."""
     if refinements is None:
         refinements = refine_support(fp, instances, cfg)
     seeds = fp.seeds()
@@ -114,6 +140,7 @@ def proposals(
         confidence = float(
             evidence.confidences.mean()
             if cfg.support_method == "scan_clusters"
+            or refined.status == VERIFIED_CLUSTER
             else evidence.confidences[np.isin(evidence.point_indices, keep)].mean()
         )
         p = proposal(
@@ -129,6 +156,7 @@ def proposals(
             supporting_masklet_ids=inst.masklet_ids,
             lift_confidence=confidence,
             lift_seed_point_count=int(np.intersect1d(idx, keep).size),
+            lidar_verified=(verdicts[iid].verified if verdicts is not None else None),
         )
         return SourceBox(p, members)
 

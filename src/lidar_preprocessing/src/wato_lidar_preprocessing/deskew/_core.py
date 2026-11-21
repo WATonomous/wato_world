@@ -26,7 +26,7 @@ from wato_common.artifact_store import (
     lidar_sweeps_path,
 )
 from wato_common.artifacts.lidar_sweeps import WorldSweep, read_raw, write_world
-from wato_common.geometry import PoseSample, batch_interpolate_poses
+from wato_common.geometry import PoseSample, batch_interpolate_poses, close_to_sensor
 from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.pose_lookup import PoseLookup
 from wato_common.schemas import PROCESSED_SWEEPS_SCHEMA, ProcessedSweepMeta
@@ -244,6 +244,7 @@ def _deskew_sweep(
     ego_T_lidar: np.ndarray,
     filter_nonfinite: bool,
     pw: Optional[Any],
+    remove_close_m: float = 0.0,
     synthesize_per_point_times: bool = False,
     sweep_duration_ns: float = 0.0,
     rotation_dir: str = "ccw",
@@ -266,20 +267,39 @@ def _deskew_sweep(
     ring = raw.ring
     t_offset = raw.t_offset_us
 
+    # One keep mask for every per-point array, before Patchwork++ and before
+    # azimuth time synthesis (its anchor is the first kept point), so the world
+    # sweep and every per-sweep file downstream index the same points.
+    keep = np.ones(x.shape[0], dtype=bool)
     if filter_nonfinite:
         finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
         n_drop = int((~finite).sum())
         if n_drop > 0:
             log.debug("dropped %d non-finite points from %s", n_drop, raw_path)
-            x = x[finite]
-            y = y[finite]
-            z = z[finite]
-            if intensity is not None:
-                intensity = intensity[finite]
-            if ring is not None:
-                ring = ring[finite]
-            if t_offset is not None:
-                t_offset = t_offset[finite]
+        keep &= finite
+    if remove_close_m > 0:
+        # Returns off the roof, the sensor mount and the body: the nuScenes
+        # devkit's remove_close square, in the sensor frame.
+        close = close_to_sensor(np.stack([x, y, z], axis=1), remove_close_m)
+        n_close = int((close & keep).sum())
+        if n_close > 0:
+            log.debug(
+                "dropped %d returns within %.2f m of the sensor from %s",
+                n_close,
+                remove_close_m,
+                raw_path,
+            )
+        keep &= ~close
+    if not keep.all():
+        x = x[keep]
+        y = y[keep]
+        z = z[keep]
+        if intensity is not None:
+            intensity = intensity[keep]
+        if ring is not None:
+            ring = ring[keep]
+        if t_offset is not None:
+            t_offset = t_offset[keep]
 
     n = x.shape[0]
     xyz_lidar = np.stack([x, y, z], axis=1)  # (N, 3)
@@ -452,6 +472,7 @@ def process_chunk(
                 ego_T_lidar=ego_T_lidar,
                 filter_nonfinite=cfg.filter_nonfinite_points,
                 pw=pw,
+                remove_close_m=cfg.remove_close_m,
                 synthesize_per_point_times=cfg.synthesize_per_point_times,
                 sweep_duration_ns=sensor.sweep_duration_ns,
                 rotation_dir=sensor.rotation_dir,

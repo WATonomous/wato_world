@@ -16,7 +16,14 @@ watod test ingest
 ```
 
 `--config` defaults to `ingest.yaml` (nuScenes). `--calibration <file.json>`
-replaces calibration from the bag. Individual steps can be rerun with
+replaces calibration from the bag. A chunk is done when its `manifest.json`
+exists (the last file its ingest writes): a bag whose every chunk is done is
+skipped before anything is written, so a re-run can't replace an authored
+calibration with the bag's; otherwise only the missing chunks are decoded.
+Completed chunks must match the requested camera image and LiDAR topics;
+changed or unrecorded selections raise before anything is reused. `--force`
+re-ingests; sensor changes require regenerating every downstream stage
+(`watod pipeline --force ingest`). Individual steps can be rerun with
 `python -m wato_ingest <cmd>`: `inspect-bag`, `register`,
 `freeze-calibration`, `split`, `decode-chunk`, `build-frame-index`, `quality`,
 `manifest`.
@@ -24,9 +31,9 @@ replaces calibration from the bag. Individual steps can be rerun with
 | Profile | `topics.pose` | `ego_frame` | Use for |
 |---|---|---|---|
 | `ingest.yaml` | `/odom` | `base_link` | nuScenes (default) |
-| `ingest.wato.yaml` | `/world_modeling/liso/odometry` | `base_footprint` | WATO bags with eidos topics |
+| `ingest.wato.yaml` | `/world_modeling/liso/odometry` | `base_footprint` | Eight top pano cameras and only `lidar_cc`; lower cameras and corner LiDARs are excluded. |
 | `ingest.wato_6cam.yaml` | same | same | WATO recordings without `camera_pano_ee` / `camera_pano_ww` (May 30 ring-road tests 2–3, `ring_road_corrected`). Must otherwise match `ingest.wato.yaml`; a test checks it. |
-| `ingest.wato_no_lidar_nw.yaml` | same | same | WATO recordings whose `/lidar_nw/velodyne_points` is empty (`sensors_2026_07_07-23_01_24_2`). Must otherwise match `ingest.wato.yaml`; a test checks it. |
+| `ingest.wato_no_lidar_nw.yaml` | same | same | Compatibility alias of `ingest.wato.yaml`; both select only `lidar_cc`. |
 
 ## Outputs
 
@@ -128,9 +135,66 @@ dropped.
 message, earliest last message] and static topics whole at their original log
 time. It copies with the pinned `mcap` CLI, not rosbag2, whose writer would
 empty custom-type schemas, and checks every topic's message count before the
-output takes its final name. MCAP only. `data/bags/trimmed/` is the one
-read-write mount under `/data/bags`. Re-validating a trimmed bag shows a
-slightly narrower window (1 Hz topics); don't trim again.
+output takes its final name. MCAP only. `data/bags/trimmed/` and
+`data/bags/debug/` are the read-write mounts under `/data/bags`.
+Re-validating a trimmed bag shows a slightly narrower window (1 Hz topics);
+don't trim again.
+
+## Debugging: `debug-bag`
+
+Copies the source bag (`bag_meta.json`'s `source_path`, or `--source`) with
+the bag's boxes added, so Foxglove or RViz shows each box over the LiDAR
+returns and images it came from:
+
+```bash
+./watod run ingest debug-bag --bag <bag_id> [--chunk <chunk_id>] [--masks] [--depth] [--overwrite]
+```
+
+- **Topics**, `visualization_msgs/MarkerArray`, one per layer that exists:
+  `/wato_world/proposals/<provenance>` (`lidar_mos`, `lifted`, `fused`;
+  coloured by class), `/wato_world/tracks` (tracking's boxes as proposed,
+  coloured per track id, so a fragmented object changes colour) and
+  `/wato_world/refined_labels` (label_refinement's boxes, coloured by class,
+  with an arrow where the heading has a front). One message per frame and
+  layer: a DELETEALL per namespace, then a translucent CUBE (`boxes`) and a
+  label (`labels`: class, score, what backs the box; the track id and motion
+  state for tracks and refined labels) per box. A layer with no box in a frame
+  still gets a message, which clears the previous frame's.
+- **Camera layers** (opt-in), `sensor_msgs/CompressedImage` JPEGs, one per
+  camera image ingest decoded, `<cam>` the cam_id in lower case:
+  `--masks` → `/wato_world/masks/<cam>`, the camera image with
+  perception_2d's masklets tinted in a colour per masklet id (an id switch
+  changes colour), outlined and labelled `<class> <masklet_id> <score>`;
+  `--depth` → `/wato_world/depth/<cam>`, perception_2d's metric depth on a
+  fixed 1–100 m log scale (turbo: red near, blue far and beyond; black = no
+  measurement) with the frame's fit status, inliers / anchors and RMSE. Each
+  carries its source image's header stamp, log time and `frame_id`, so it
+  plays in lockstep with `/camera_*/image_rect_compressed` and pairs with the
+  same `camera_info`. Every image gets one (a frame without depth is black,
+  "no depth"), so nothing stale stays on screen. Rendered, not raw: Foxglove's
+  image panel can't layer one image over another, and raw full-resolution
+  depth would add tens of GB to a whole bag; the values stay in the
+  artifacts. `--workers` (default 16) processes draw them; the whole
+  `sensors_2026_07_07-23_01_24_2` bag (49k images per layer) took 28 min with
+  24 workers and `--compression zstd`, and came out 12 GB larger (30 GB).
+- **Frame and time.** Boxes are in the ego frame (`calibration.json`'s
+  `ego_frame`), at the frame's reference time with the pose interpolated there;
+  log time = header stamp = that time. Set the display frame to the ego frame:
+  the bag has no usable TF for the pipeline's world frame (WATO's `/tf` is
+  stamped with wall-clock time, nuScenes' is 2 Hz). A frame with no valid pose
+  is published empty.
+- **Which boxes.** The whole bag, each instant from the chunk that owns it
+  (`wato_common.chunk_spans`; tracks' and refined labels' `owned` rows), as the
+  evals score it; an image by its header stamp, so masklet ids and colours
+  change at a chunk seam. `--chunk`: that chunk's rows and images over its
+  whole decoded window, the source cut to that window, and `--static-topic`
+  copied whole as in `trim-bag` (it stretches the timeline to the source's;
+  WATO republishes `/tf_static` at 1 Hz, so the window has it).
+- **Output.** `data/bags/debug/<bag>[_<chunk>]_debug.mcap` (or `--out`). As
+  `trim-bag`, copies go through the pinned `mcap` CLI, so the source's
+  custom-type schemas survive; only the new topics are written by rosbag2, and
+  their metadata record is dropped so the output carries the source's. A whole
+  WATO bag is copied whole (18 GB); one chunk is ~2.5 GB.
 
 ## Calibration
 

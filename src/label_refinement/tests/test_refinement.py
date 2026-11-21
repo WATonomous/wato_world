@@ -184,6 +184,7 @@ def _write_tracks(frames):
             motion_state=state,
             cls="car",
             n_strong=N,
+            n_confident=N,
             frac_two_source=0.0,
             frac_lidar_mos=0.0,
             net_displacement_m=0.0,

@@ -22,6 +22,7 @@ from wato_lidar_preprocessing.reduce import (
     _voxel_snap_downsample,
     reduce_ground_map,
     reduce_static_map,
+    reduce_up_to_date,
 )
 
 
@@ -222,3 +223,27 @@ def test_reduce_ground_all_missing_writes_sentinel(tmp_env):
     # Sentinel: 1x1 height grid + empty ground_xyz.
     assert data["ground_xyz"].shape == (0, 3)
     assert data["height_grid"].shape == (1, 1)
+
+
+def _age(uri: str, seconds: float) -> None:
+    """Set a file's mtime `seconds` into the past."""
+    p = local_path(uri)
+    t = os.path.getmtime(p) - seconds
+    os.utime(p, (t, t))
+
+
+def test_reduce_is_up_to_date_until_a_chunk_map_is_newer(tmp_env):
+    bag_id = "bag_utd"
+    _write_chunk_index(bag_id, ["chunk0"])
+    _write_static_map(bag_id, "chunk0", np.array([[0.0, 0.0, 0.0]]))
+    cfg = ComponentConfig()
+    assert not reduce_up_to_date(bag_id)  # no global maps yet
+    reduce_static_map(bag_id, cfg)
+    assert not reduce_up_to_date(bag_id)  # global_ground.npz missing
+    reduce_ground_map(bag_id, cfg)
+    for uri in (chunks_index_path(bag_id), static_map_path(bag_id, "chunk0")):
+        _age(uri, 10)
+    assert reduce_up_to_date(bag_id)
+    # A re-processed chunk is newer than the global maps.
+    _age(global_static_map_path(bag_id), 20)
+    assert not reduce_up_to_date(bag_id)

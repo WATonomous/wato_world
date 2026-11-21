@@ -21,6 +21,9 @@ services:
               capabilities: [gpu]
   perception_2d_dev: *gpu-defaults
 
+  detection_3d: *gpu-defaults
+  detection_3d_dev: *gpu-defaults
+
   label_refinement: *gpu-defaults
   label_refinement_dev: *gpu-defaults
 

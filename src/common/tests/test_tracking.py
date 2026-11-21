@@ -9,6 +9,7 @@ import pytest
 
 from wato_common.schemas import Box3D
 from wato_common.tracking import (
+    GIOU_3D,
     AssociationGates,
     BoxKalmanFilter,
     MultiObjectTracker,
@@ -17,7 +18,10 @@ from wato_common.tracking import (
     box_corners_3d,
     cost_terms,
     fit_bev_box,
+    giou_3d,
+    giou_3d_cannot_exceed,
     iou_3d,
+    iou_bev,
     points_in_box,
     wrap_heading_half_pi,
 )
@@ -199,6 +203,20 @@ def test_strong_detections_are_matched_before_weak_ones():
     assert trk2.step(0.1, [weak, strong])[0] == 0
 
 
+def test_a_det_that_may_not_birth_only_extends_tracks():
+    """ByteTrack: a low-score box can continue a track, never start one."""
+    trk = MultiObjectTracker()
+    assert trk.step(0.0, [_box(cx=0.0), _box(cx=20.0)], can_birth=[True, False]) == [
+        0,
+        -1,
+    ]
+    # Matched, it extends the track whatever can_birth says.
+    assert trk.step(0.1, [_box(cx=0.1)], can_birth=[False]) == [0]
+    assert len(trk.all_tracks()) == 1
+    # Unset, every unmatched det starts a track as before.
+    assert trk.step(0.2, [_box(cx=0.2), _box(cx=20.0)]) == [0, 1]
+
+
 def test_a_shared_key_breaks_a_near_tie_but_never_opens_a_gate():
     trk = MultiObjectTracker(key_bonus=1.0)
     trk.step(0.0, [_box(cx=0.0), _box(cx=3.0)], keys=["a", "b"])
@@ -224,3 +242,126 @@ def test_a_shared_key_can_open_the_shape_gates_but_not_the_distance_gate():
     # Without the shared key the shape gates still hold.
     assert opened.step(0.2, [_box(cx=0.0, cy=0.9, l=0.3, w=1.8)], keys=["other"]) == [1]
     assert opened.step(0.3, [_box(cx=5.0)], keys=["k"]) == [2]
+
+
+# --------------------------------------------------------------------------- #
+# GIoU cost, pruning, never-retiring tracks
+# --------------------------------------------------------------------------- #
+
+
+def test_giou_equals_iou_for_a_box_inside_another_and_falls_with_distance():
+    car = _box(l=4.5, w=1.8)
+    sliver = _box(cx=1.0, l=1.0, w=0.2)
+    assert giou_3d(car, car) == pytest.approx(1.0)
+    # The hull is the car's box, so GIoU = IoU = 0.2 / 8.1 (Chen's IoU gate
+    # 0.05 and volume gate 0.3 both reject this pair).
+    assert giou_3d(car, sliver) == pytest.approx(iou_3d(car, sliver))
+    assert giou_3d(car, sliver) == pytest.approx(0.2 / 8.1, abs=1e-6)
+    far = [giou_3d(car, _box(cx=x)) for x in (5.0, 8.0, 20.0)]
+    assert far[0] < 0 and far[0] > far[1] > far[2] > -1.0
+
+
+def test_iou_bev_ignores_height():
+    a, b = _box(), _box(cx=2.0, cz=10.0)
+    assert iou_3d(a, b) == 0.0
+    assert iou_bev(a, b) == pytest.approx(4.0 / 12.0)
+
+
+def test_giou_pruning_never_drops_a_pair_that_passes():
+    rng = np.random.default_rng(0)
+
+    def rand(n):
+        return [
+            _box(
+                cx=rng.uniform(-15, 15),
+                cy=rng.uniform(-15, 15),
+                cz=rng.uniform(0, 2),
+                l=rng.uniform(0.1, 6),
+                w=rng.uniform(0.1, 2.5),
+                h=rng.uniform(0.1, 3),
+                heading=rng.uniform(-math.pi / 2, math.pi / 2),
+            )
+            for _ in range(n)
+        ]
+
+    dets, preds = rand(60), rand(60)
+    for g in (-0.5, -0.31, 0.0):
+        pruned = giou_3d_cannot_exceed(dets, preds, g)
+        assert pruned.any()
+        for i, j in zip(*np.nonzero(pruned)):
+            assert giou_3d(dets[i], preds[j]) < g
+
+
+def test_giou_cost_keeps_a_sliver_chen_splits_off():
+    track = MultiObjectTracker(AssociationGates(cost=GIOU_3D))
+    chen = MultiObjectTracker()
+    for trk in (track, chen):
+        trk.step(0.0, [_box(l=4.5, w=1.8)])
+    sliver = _box(cx=1.0, l=1.0, w=0.2)
+    assert track.step(0.1, [sliver]) == [0]
+    assert chen.step(0.1, [sliver]) == [1]
+    # GIoU < −0.5: a new track.
+    assert track.step(0.2, [_box(cx=12.0)]) == [1]
+
+
+def test_unknown_cost_is_rejected():
+    with pytest.raises(ValueError):
+        AssociationGates(cost="mahalanobis")
+
+
+def test_a_track_that_never_retires_reidentifies_after_a_long_gap():
+    immortal = MultiObjectTracker(n_old=None)
+    mortal = MultiObjectTracker(n_old=5)
+    for trk in (immortal, mortal):
+        trk.step(0.0, [_box()])
+        for k in range(1, 40):
+            trk.step(0.1 * k, [])
+    assert immortal.step(4.0, [_box()]) == [0]
+    assert mortal.step(4.0, [_box()]) == [1]
+
+
+def test_history_records_the_filter_velocity():
+    trk = MultiObjectTracker()
+    for k in range(10):
+        trk.step(0.1 * k, [_box(cx=1.0 * k)])
+    (track,) = trk.all_tracks()
+    assert track.history[0].velocity == (0.0, 0.0, 0.0)
+    assert track.history[-1].velocity[0] == pytest.approx(10.0, abs=1.0)
+
+
+def test_member_cost_admits_a_pair_the_shape_gates_refuse_within_the_distance_gate():
+    """tracking's appearance ReID: evidence that two boxes are one object
+    stands in for the overlap a one-sided box doesn't have."""
+    a = _box(cx=0.0, cy=0.0, l=4.0, w=1.8)
+    b = _box(cx=0.0, cy=0.9, l=0.3, w=1.8)  # a sliver beside a: gates refuse
+    asked = []
+
+    def cost(det, trk):
+        asked.append((tuple(det), tuple(trk)))
+        return 0.1 if "same" in det and "same" in trk else None
+
+    trk = MultiObjectTracker(member_cost=cost)
+    trk.step(0.0, [a], members=[("same",)])
+    assert trk.step(0.1, [b], members=[("same", "new")]) == [0]
+    # The track now carries every member it took.
+    assert trk.step(0.2, [b], members=[("new",)]) == [1]
+    assert asked[-1] == (("new",), ("same", "new"))
+    # Never past the distance gate (T_d = 2 m): the pair isn't even priced.
+    asked.clear()
+    assert trk.step(0.3, [_box(cx=30.0)], members=[("same",)]) == [2]
+    assert asked == []
+
+
+def test_member_cost_picks_between_two_tracks_in_gate():
+    trk = MultiObjectTracker(
+        member_cost=lambda det, trk: 0.0 if set(det) & set(trk) else None
+    )
+    trk.step(0.0, [_box(cx=0.0), _box(cx=1.0)], members=[("a",), ("b",)])
+    # One box, nearer track 0, that looks like track 1's object.
+    assert trk.step(0.1, [_box(cx=0.4)], members=[("b",)]) == [1]
+
+
+def test_without_members_member_cost_changes_nothing():
+    trk = MultiObjectTracker(member_cost=lambda det, trk: 0.0)
+    trk.step(0.0, [_box(cx=0.0)])
+    assert trk.step(0.1, [_box(cx=0.0, cy=0.9, l=0.3, w=1.8)]) == [1]

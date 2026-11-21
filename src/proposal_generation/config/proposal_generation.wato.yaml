@@ -28,6 +28,14 @@ proposal_generation:
       radii_m: [1.2488, 0.8136, 0.6952, 0.594, 0.4353, 0.3221]
       min_samples: 5
       min_iou: 0.5
+    # Does a distinct LiDAR segment back each lifted instance? Uses the
+    # refinement radii/min_samples above whatever support_method is; sets
+    # lidar_verified on lifted rows, geometry unchanged. tracking.confirmation
+    # needs it (docs/research/lidar_verified_lifting.md).
+    verification:
+      enabled: true
+      min_iou: 0.5          # SAL App. A.1: best-IoU scan cluster, strictly above
+      min_containment: 0.8  # FGR Sec. 3.1 theta_seg: share inside the 2D box frustum
     max_height_m:
       car: 3.0
     max_nested_fraction: 0.3
@@ -39,3 +47,14 @@ proposal_generation:
   fusion:
     min_shared_points: 5
     min_shared_fraction: 0.3
+
+  # detection_3d's BEVFusion boxes as a third source (detector.py); needs
+  # detection_3d to have run. Measurements: docs/detection_3d_measurements.md.
+  fusion_detector:
+    enabled: true
+    min_score: 0.08              # the car's confidence_threshold
+    ego_suppression_radius_m: 2.5  # the car's ego zone
+    class_map: {car: car, truck: truck, bus: bus, motorcycle: motorcycle, bicycle: bicycle, pedestrian: pedestrian}
+    add_unmatched: true          # new objects only; matches preserve the other sources
+    unmatched_min_score: 0.6     # tracker's detector birth threshold
+    unmatched_min_points: 5      # non-ground LiDAR support, as for lifted boxes

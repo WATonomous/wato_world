@@ -66,10 +66,19 @@ def _chunk_rows(chunk_id, ks, instance):
         mx = -10.0 + 0.5 * k
         lp, lm = f"lifted-{instance}P-{s:06d}", f"lifted-{instance}M-{s:06d}"
         rows += [
-            _p(lp, s, 0.0, 10.0, "lifted", k=k, lift_confidence=0.9),
+            _p(
+                lp,
+                s,
+                0.0,
+                10.0,
+                "lifted",
+                k=k,
+                lift_confidence=0.9,
+                lidar_verified=True,
+            ),
             _p(f"fused-{s:06d}-0", s, 0.0, 10.0, "fused", [lp], k=k),
             _p(f"mos-{s}", s, mx, 0.0, "lidar_mos", k=k, cls=None, motion_score=2.0),
-            _p(lm, s, mx, 0.0, "lifted", k=k, lift_confidence=0.4),
+            _p(lm, s, mx, 0.0, "lifted", k=k, lift_confidence=0.4, lidar_verified=True),
             _p(f"fused-{s:06d}-1", s, mx, 0.0, "fused", [f"mos-{s}", lm], k=k),
         ]
         if k == 3:
@@ -232,3 +241,187 @@ def test_motion_state_rules():
     assert summary.motion_state(300, 1.3, 19.0, cfg) == "moving"
     # Jitter on a short track: fast but not far.
     assert summary.motion_state(8, 0.3, 0.35, cfg) == "parked"
+
+
+# --------------------------------------------------------------------------
+# MS3D++ retroactive confirmation (config `confirmation`).
+
+
+def _object_rows(chunk_id, objects, frames=range(N)):
+    """Fused proposals for each object in each frame k of `frames` (chunk
+    sweep = position in `frames`). An object is a dict: name, cls, xy(k),
+    mos (a lidar_mos member), lifted (a lifted member), verified (the set of
+    frames whose lift a LiDAR segment backs; None: no verdict at all)."""
+    rows = []
+    for s, k in enumerate(frames):
+        for j, o in enumerate(objects):
+            x, y = o["xy"](k)
+            members = []
+            if o.get("mos"):
+                members.append(f"mos-{o['name']}-{s}")
+                rows.append(
+                    _p(
+                        members[-1],
+                        s,
+                        x,
+                        y,
+                        "lidar_mos",
+                        k=k,
+                        cls=None,
+                        motion_score=2.0,
+                    )
+                )
+            if o.get("lifted", True):
+                members.append(f"lifted-i{o['name']}-{s:06d}")
+                verified = o.get("verified")
+                rows.append(
+                    _p(
+                        members[-1],
+                        s,
+                        x,
+                        y,
+                        "lifted",
+                        k=k,
+                        cls=o["cls"],
+                        lift_confidence=0.9,
+                        lidar_verified=None if verified is None else k in verified,
+                    )
+                )
+            rows.append(
+                _p(f"fused-{s:06d}-{j}", s, x, y, "fused", members, k=k, cls=o["cls"])
+            )
+    proposals.write(BAG, chunk_id, rows)
+
+
+def _confirming() -> ComponentConfig:
+    cfg = ComponentConfig()
+    cfg.confirmation.enabled = True
+    return cfg
+
+
+def _parked(name="P", verified=frozenset(range(N)), cls="car"):
+    return dict(
+        name=name,
+        cls=cls,
+        xy=lambda k: (0.0, 10.0),
+        verified=None if verified is None else set(verified),
+    )
+
+
+def _driving(name="M", verified=frozenset(range(N)), mos=False):
+    return dict(
+        name=name,
+        cls="car",
+        xy=lambda k: (-10.0 + 0.5 * k, 0.0),
+        verified=set(verified),
+        mos=mos,
+    )
+
+
+def _judged() -> dict[str, dict]:
+    from wato_common.artifact_store import track_confirmation_path
+    from wato_common.io.parquet_io import read_rows
+
+    rows = read_rows(track_confirmation_path(BAG))
+    return {(r["cls"], r["motion_state"]): r for r in rows}
+
+
+def test_a_camera_only_car_no_lidar_segment_backs_is_unconfirmed():
+    _object_rows("0000", [_parked(verified=()), _driving(mos=True, verified=())])
+    _index((1_000, 1_600, 1_000, 1_600))
+    run(_confirming(), bag_id=BAG)
+    _, summaries = tracks.read(BAG)
+    # The driving car's Step F motion makes every instant confident.
+    assert [(s.motion_state, s.n_confident) for s in summaries] == [("moving", N)]
+    judged = _judged()
+    assert judged[("car", "parked")]["decision"] == "unconfirmed"
+    assert judged[("car", "parked")]["n_lift_unverified"] == N
+    assert judged[("car", "moving")]["decision"] == "kept"
+    assert judged[("car", "moving")]["n_required"] == 7
+
+
+@pytest.mark.parametrize("n_verified, kept", [(2, False), (3, True)])
+def test_a_parked_vehicle_needs_three_confident_instants(n_verified, kept):
+    _object_rows("0000", [_parked(verified=range(n_verified))])
+    _index((1_000, 1_600, 1_000, 1_600))
+    run(_confirming(), bag_id=BAG)
+    _, summaries = tracks.read(BAG)
+    assert len(summaries) == int(kept)
+    assert _judged()[("car", "parked")]["n_confident"] == n_verified
+
+
+@pytest.mark.parametrize("n_verified, kept", [(6, False), (7, True)])
+def test_a_moving_vehicle_needs_seven_confident_instants(n_verified, kept):
+    _object_rows("0000", [_driving(verified=range(n_verified))])
+    _index((1_000, 1_600, 1_000, 1_600))
+    run(_confirming(), bag_id=BAG)
+    assert _judged()[("car", "moving")]["decision"] == (
+        "kept" if kept else "unconfirmed"
+    )
+
+
+def test_a_vehicle_too_short_to_judge_needs_the_moving_count():
+    """Six instants with Step F motion in each: motion "unknown" (< 7), so it
+    needs seven confident instants and cannot have them."""
+    _object_rows("0000", [_driving(mos=True)], frames=range(6))
+    _index((1_000, 1_600, 1_000, 1_600))
+    run(_confirming(), bag_id=BAG)
+    row = _judged()[("car", "unknown")]
+    assert (row["n_confident"], row["n_required"], row["decision"]) == (
+        6,
+        7,
+        "unconfirmed",
+    )
+
+
+def test_a_pedestrian_needs_one_confident_instant_standing_or_not():
+    _object_rows("0000", [_parked(name="W", verified={4}, cls="pedestrian")])
+    _index((1_000, 1_600, 1_000, 1_600))
+    run(_confirming(), bag_id=BAG)
+    (s,) = tracks.read(BAG)[1]
+    assert (s.cls, s.motion_state, s.n_confident) == ("pedestrian", "parked", 1)
+
+
+def test_confident_instants_are_counted_once_across_a_chunk_seam():
+    """Frames 4-7 are in both chunks; each verified once per instant."""
+    _object_rows("0000", [_parked()], frames=range(0, 8))
+    _object_rows("0001", [_parked()], frames=range(4, N))
+    _index((1_000, 1_300, 1_000, 1_350), (1_250, 1_550, 1_200, 1_550))
+    run(_confirming(), bag_id=BAG)
+    (s,) = tracks.read(BAG)[1]
+    assert (s.n_frames, s.n_confident) == (N, N)
+
+
+def test_confirmation_without_verdicts_names_both_fixes():
+    from wato_common.artifacts import ArtifactFormatError
+
+    _object_rows("0000", [_parked(verified=None)])
+    _index((1_000, 1_600, 1_000, 1_600))
+    with pytest.raises(
+        ArtifactFormatError, match="lifted.verification.*confirmation off"
+    ):
+        run(_confirming(), bag_id=BAG)
+
+
+def test_without_confirmation_tracks_are_unchanged_and_still_judged():
+    _stage()
+    cfg = ComponentConfig()
+    cfg.confirmation.enabled = False
+    run(cfg, bag_id=BAG)
+    _, summaries = tracks.read(BAG)
+    assert len(summaries) == 2  # as test_parked_and_moving_cars_...
+    judged = _judged()
+    assert {r["decision"] for r in judged.values()} == {"kept", "short_weak"}
+    assert all(r["n_required"] is None for r in judged.values())
+
+
+def test_the_confirmation_table_is_a_listed_output():
+    import json as _json
+
+    from wato_common.artifact_store import chunk_root, local_path
+
+    _stage()
+    run(ComponentConfig(), bag_id=BAG)
+    with open(local_path(f"{chunk_root(BAG, '0000')}/manifest_tracking.json")) as fh:
+        manifest = _json.load(fh)
+    assert "track_confirmation" in manifest["outputs"]

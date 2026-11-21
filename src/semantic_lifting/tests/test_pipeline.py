@@ -430,3 +430,64 @@ def test_complete_chunks_are_skipped_unless_forced(monkeypatch):
     assert calls == []
     run(ComponentConfig(), bag_id=BAG, force=True)
     assert len(calls) == 1
+
+
+def _frustum() -> list[tuple[int, str]]:
+    c = lifted_candidates.read_sweep(BAG, CHUNK, SWEEP)
+    return sorted(
+        zip(c.frustum_point_indices.tolist(), c.frustum_instance_ids.tolist())
+    )
+
+
+def test_frustum_holds_hidden_points_the_claims_leave_out():
+    """A return at 5 m on point 0's line of sight hides points 0-2: they are
+    no claims, but they are in the mask's rectangle, so in its frustum."""
+    near = np.vstack([POINTS, [[5.0, 0.0, 0.0]]])
+    _stage_chunk(points=near)
+    run(ComponentConfig(), bag_id=BAG)
+    claims = lifted_candidates.read_sweep(BAG, CHUNK, SWEEP, n_points=len(near))
+    assert claims.point_indices.tolist() == [5]
+    # Point 3 lies beside the rectangle, point 4 behind the camera.
+    assert _frustum() == [(i, f"m_{CAM}") for i in (0, 1, 2, 5)]
+
+
+def test_frustum_is_the_rectangle_not_the_mask():
+    """Point 0's pixel is a hole in the mask: no claim, still in the frustum."""
+    _stage_chunk()
+    mask = np.zeros((H, W), bool)
+    mask[16:33, 20:45] = True
+    mask[23:26, 31:34] = False  # around point 0's pixel (32, 24) only
+    masklets.write_mask(BAG, CHUNK, f"m_{CAM}", SEQ, mask)
+    run(ComponentConfig(), bag_id=BAG)
+    claims = lifted_candidates.read_sweep(BAG, CHUNK, SWEEP)
+    assert claims.point_indices.tolist() == [1, 2]
+    assert _frustum() == [(i, f"m_{CAM}") for i in (0, 1, 2)]
+
+
+def test_ground_never_enters_the_frustum():
+    _stage_chunk(ground=(1,))
+    run(ComponentConfig(), bag_id=BAG)
+    assert _frustum() == [(0, f"m_{CAM}"), (2, f"m_{CAM}")]
+
+
+def test_merged_masklets_share_one_frustum_row_per_point():
+    _stage_chunk(cams=(("CAM_A", 0.8), ("CAM_B", 0.6)))
+    cfg = ComponentConfig()
+    cfg.instances.min_shared_points = 3
+    run(cfg, bag_id=BAG)
+    assert _frustum() == [(i, "m_CAM_A") for i in (0, 1, 2)]
+
+
+def test_an_instance_without_claims_has_no_frustum():
+    """A nearer depth-map surface hides every point: no instance is listed,
+    so no frustum rows either."""
+    _stage_chunk(depth_m=5.0)
+    run(ComponentConfig(), bag_id=BAG)
+    assert lifted_labels.read_instances(BAG, CHUNK) == []
+    assert _frustum() == []
+
+
+def test_a_frame_without_depth_records_no_frustum():
+    _stage_chunk(depth_m=None)
+    run(ComponentConfig(), bag_id=BAG)
+    assert _frustum() == []

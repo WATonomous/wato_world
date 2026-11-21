@@ -1,0 +1,537 @@
+{
+  "date": "2026-11-11",
+  "scope": "Current tracker/default config replay on November 7 cached nuScenes proposals; November 11 saved WATO tracks rescored. No upstream rerun or feature-assisted tracker experiment.",
+  "matching": "2 m BEV centre-distance, class-agnostic MOT, 37/38 annotated instants at approximately 2 Hz; not a full benchmark.",
+  "cases": {
+    "nusc0061": {
+      "result_path": "data/artifacts/eval_runs/2026-11-11_tracking_audit/results/nusc0061_current.json",
+      "association": {
+        "DetA": 0.2993421052631579,
+        "AssA": 0.46286644847634045,
+        "AssRe": 0.4809319843390804,
+        "AssPr": 0.9248946718726938,
+        "HOTA": 0.3722303280800595,
+        "IDF1": 0.41139240506329117,
+        "IDSW": 25,
+        "Frag": 52,
+        "MOTA": 0.19319227230910763
+      },
+      "frames": {
+        "n_gt": 1087,
+        "n_pred": 493,
+        "hits": 364,
+        "false_positives": 129,
+        "recall": 0.33486660533578655,
+        "precision": 0.7383367139959433
+      },
+      "fragmentation": {
+        "objects": 43,
+        "mean_tracks_per_object": 1.5116279069767442,
+        "share_in_one_track": 0.6511627906976745
+      },
+      "seams": {
+        "crossings": 0,
+        "kept_in_one_track": null
+      },
+      "switch_causes": {
+        "all": {
+          "n": 25,
+          "early_termination": {
+            "n": 20,
+            "share": 0.8,
+            "new_track_detector_only": 0.0,
+            "geometry_source_changed": 0.0,
+            "duplicate_birth": 0.1,
+            "across_chunks": 0.0,
+            "median_previous_unmatched_s": 0.477345
+          },
+          "wrong_association": {
+            "n": 5,
+            "share": 0.2,
+            "new_track_detector_only": 0.0,
+            "geometry_source_changed": 0.0,
+            "duplicate_birth": 0.2,
+            "across_chunks": 0.0,
+            "median_previous_unmatched_s": 0.049784
+          }
+        },
+        "vehicle": {
+          "n": 6,
+          "early_termination": {
+            "n": 5,
+            "share": 0.8333333333333334,
+            "new_track_detector_only": 0.0,
+            "geometry_source_changed": 0.0,
+            "duplicate_birth": 0.0,
+            "across_chunks": 0.0,
+            "median_previous_unmatched_s": 1.099285
+          },
+          "wrong_association": {
+            "n": 1,
+            "share": 0.16666666666666666,
+            "new_track_detector_only": 0.0,
+            "geometry_source_changed": 0.0,
+            "duplicate_birth": 0.0,
+            "across_chunks": 0.0,
+            "median_previous_unmatched_s": 0.049784
+          }
+        },
+        "pedestrian": {
+          "n": 12,
+          "early_termination": {
+            "n": 8,
+            "share": 0.6666666666666666,
+            "new_track_detector_only": 0.0,
+            "geometry_source_changed": 0.0,
+            "duplicate_birth": 0.125,
+            "across_chunks": 0.0,
+            "median_previous_unmatched_s": 0.927728
+          },
+          "wrong_association": {
+            "n": 4,
+            "share": 0.3333333333333333,
+            "new_track_detector_only": 0.0,
+            "geometry_source_changed": 0.0,
+            "duplicate_birth": 0.25,
+            "across_chunks": 0.0,
+            "median_previous_unmatched_s": 0.05004550000000001
+          }
+        },
+        "two_wheeler": {
+          "n": 7,
+          "early_termination": {
+            "n": 7,
+            "share": 1.0,
+            "new_track_detector_only": 0.0,
+            "geometry_source_changed": 0.0,
+            "duplicate_birth": 0.14285714285714285,
+            "across_chunks": 0.0,
+            "median_previous_unmatched_s": 0.400324
+          },
+          "wrong_association": {
+            "n": 0,
+            "share": 0.0,
+            "new_track_detector_only": null,
+            "geometry_source_changed": null,
+            "duplicate_birth": null,
+            "across_chunks": null,
+            "median_previous_unmatched_s": null
+          }
+        }
+      },
+      "coverage": {
+        "labelled_instants": 37,
+        "instants_without_any_output_track": 0,
+        "gt_observations": 1087,
+        "missed_gt_observations": 723,
+        "recall": 0.3348666053357866,
+        "cared_gt_objects": 79,
+        "ever_matched_objects": 43,
+        "never_matched_objects": 36,
+        "ever_matched_objects_with_one_track": 28,
+        "ever_matched_objects_with_interior_misses": 30,
+        "interior_gap_events": 51,
+        "gap_between_hits_seconds_median": 1.099809,
+        "ever_matched_objects_missing_at_last_cared_instant": 31
+      },
+      "rescored_saved_association": {
+        "DetA": 0.29536208299430433,
+        "AssA": 0.41960974897974734,
+        "AssRe": 0.4275668846215214,
+        "AssPr": 0.9540174471992654,
+        "HOTA": 0.35204660132342613,
+        "IDF1": 0.37814070351758794,
+        "IDSW": 40,
+        "Frag": 51,
+        "MOTA": 0.16651333946642136
+      }
+    },
+    "nusc1100": {
+      "result_path": "data/artifacts/eval_runs/2026-11-11_tracking_audit/results/nusc1100_current.json",
+      "association": {
+        "DetA": 0.543509272467903,
+        "AssA": 0.7717495528921384,
+        "AssRe": 0.7799184341040951,
+        "AssPr": 0.9735231012790068,
+        "HOTA": 0.6476519420335553,
+        "IDF1": 0.66728280961183,
+        "IDSW": 7,
+        "Frag": 32,
+        "MOTA": 0.4700162074554295
+      },
+      "frames": {
+        "n_gt": 617,
+        "n_pred": 465,
+        "hits": 381,
+        "false_positives": 84,
+        "recall": 0.6175040518638574,
+        "precision": 0.8193548387096774
+      },
+      "fragmentation": {
+        "objects": 26,
+        "mean_tracks_per_object": 1.4230769230769231,
+        "share_in_one_track": 0.6153846153846154
+      },
+      "seams": {
+        "crossings": 0,
+        "kept_in_one_track": null
+      },
+      "switch_causes": {
+        "all": {
+          "n": 7,
+          "early_termination": {
+            "n": 5,
+            "share": 0.7142857142857143,
+            "new_track_detector_only": 0.0,
+            "geometry_source_changed": 0.0,
+            "duplicate_birth": 0.6,
+            "across_chunks": 0.0,
+            "median_previous_unmatched_s": 0.399785
+          },
+          "wrong_association": {
+            "n": 2,
+            "share": 0.2857142857142857,
+            "new_track_detector_only": 0.0,
+            "geometry_source_changed": 0.0,
+            "duplicate_birth": 0.0,
+            "across_chunks": 0.0,
+            "median_previous_unmatched_s": 0.05003250000000001
+          }
+        },
+        "vehicle": {
+          "n": 3,
+          "early_termination": {
+            "n": 3,
+            "share": 1.0,
+            "new_track_detector_only": 0.0,
+            "geometry_source_changed": 0.0,
+            "duplicate_birth": 0.3333333333333333,
+            "across_chunks": 0.0,
+            "median_previous_unmatched_s": 0.399785
+          },
+          "wrong_association": {
+            "n": 0,
+            "share": 0.0,
+            "new_track_detector_only": null,
+            "geometry_source_changed": null,
+            "duplicate_birth": null,
+            "across_chunks": null,
+            "median_previous_unmatched_s": null
+          }
+        },
+        "pedestrian": {
+          "n": 2,
+          "early_termination": {
+            "n": 0,
+            "share": 0.0,
+            "new_track_detector_only": null,
+            "geometry_source_changed": null,
+            "duplicate_birth": null,
+            "across_chunks": null,
+            "median_previous_unmatched_s": null
+          },
+          "wrong_association": {
+            "n": 2,
+            "share": 1.0,
+            "new_track_detector_only": 0.0,
+            "geometry_source_changed": 0.0,
+            "duplicate_birth": 0.0,
+            "across_chunks": 0.0,
+            "median_previous_unmatched_s": 0.05003250000000001
+          }
+        },
+        "two_wheeler": {
+          "n": 2,
+          "early_termination": {
+            "n": 2,
+            "share": 1.0,
+            "new_track_detector_only": 0.0,
+            "geometry_source_changed": 0.0,
+            "duplicate_birth": 1.0,
+            "across_chunks": 0.0,
+            "median_previous_unmatched_s": 0.34973150000000003
+          },
+          "wrong_association": {
+            "n": 0,
+            "share": 0.0,
+            "new_track_detector_only": null,
+            "geometry_source_changed": null,
+            "duplicate_birth": null,
+            "across_chunks": null,
+            "median_previous_unmatched_s": null
+          }
+        }
+      },
+      "coverage": {
+        "labelled_instants": 38,
+        "instants_without_any_output_track": 0,
+        "gt_observations": 617,
+        "missed_gt_observations": 236,
+        "recall": 0.6175040518638574,
+        "cared_gt_objects": 27,
+        "ever_matched_objects": 26,
+        "never_matched_objects": 1,
+        "ever_matched_objects_with_one_track": 16,
+        "ever_matched_objects_with_interior_misses": 13,
+        "interior_gap_events": 30,
+        "gap_between_hits_seconds_median": 1.500187,
+        "ever_matched_objects_missing_at_last_cared_instant": 13
+      },
+      "rescored_saved_association": {
+        "DetA": 0.5410764872521246,
+        "AssA": 0.6963052610751701,
+        "AssRe": 0.7025298102316565,
+        "AssPr": 0.9895942408376963,
+        "HOTA": 0.6138032296410036,
+        "IDF1": 0.6231617647058824,
+        "IDSW": 19,
+        "Frag": 33,
+        "MOTA": 0.44408427876823336
+      }
+    },
+    "nusc0061x2": {
+      "result_path": "data/artifacts/eval_runs/2026-11-11_tracking_audit/results/nusc0061x2_current.json",
+      "association": {
+        "DetA": 0.2999178307313065,
+        "AssA": 0.466501606198815,
+        "AssRe": 0.48466305818344463,
+        "AssPr": 0.9240567347416663,
+        "HOTA": 0.37404832543913197,
+        "IDF1": 0.41466498103666244,
+        "IDSW": 25,
+        "Frag": 51,
+        "MOTA": 0.19319227230910763
+      },
+      "frames": {
+        "n_gt": 1087,
+        "n_pred": 495,
+        "hits": 365,
+        "false_positives": 130,
+        "recall": 0.3357865685372585,
+        "precision": 0.7373737373737373
+      },
+      "fragmentation": {
+        "objects": 43,
+        "mean_tracks_per_object": 1.5116279069767442,
+        "share_in_one_track": 0.6744186046511628
+      },
+      "seams": {
+        "crossings": 13,
+        "kept_in_one_track": 0.8461538461538461
+      },
+      "switch_causes": {
+        "all": {
+          "n": 25,
+          "early_termination": {
+            "n": 18,
+            "share": 0.72,
+            "new_track_detector_only": 0.0,
+            "geometry_source_changed": 0.0,
+            "duplicate_birth": 0.05555555555555555,
+            "across_chunks": 0.1111111111111111,
+            "median_previous_unmatched_s": 0.6994990000000001
+          },
+          "wrong_association": {
+            "n": 7,
+            "share": 0.28,
+            "new_track_detector_only": 0.0,
+            "geometry_source_changed": 0.0,
+            "duplicate_birth": 0.14285714285714285,
+            "across_chunks": 0.14285714285714285,
+            "median_previous_unmatched_s": 0.050327000000000004
+          }
+        },
+        "vehicle": {
+          "n": 8,
+          "early_termination": {
+            "n": 7,
+            "share": 0.875,
+            "new_track_detector_only": 0.0,
+            "geometry_source_changed": 0.0,
+            "duplicate_birth": 0.0,
+            "across_chunks": 0.0,
+            "median_previous_unmatched_s": 0.350592
+          },
+          "wrong_association": {
+            "n": 1,
+            "share": 0.125,
+            "new_track_detector_only": 0.0,
+            "geometry_source_changed": 0.0,
+            "duplicate_birth": 0.0,
+            "across_chunks": 0.0,
+            "median_previous_unmatched_s": 0.049784
+          }
+        },
+        "pedestrian": {
+          "n": 11,
+          "early_termination": {
+            "n": 7,
+            "share": 0.6363636363636364,
+            "new_track_detector_only": 0.0,
+            "geometry_source_changed": 0.0,
+            "duplicate_birth": 0.0,
+            "across_chunks": 0.14285714285714285,
+            "median_previous_unmatched_s": 1.400652
+          },
+          "wrong_association": {
+            "n": 4,
+            "share": 0.36363636363636365,
+            "new_track_detector_only": 0.0,
+            "geometry_source_changed": 0.0,
+            "duplicate_birth": 0.25,
+            "across_chunks": 0.25,
+            "median_previous_unmatched_s": 0.05004550000000001
+          }
+        },
+        "two_wheeler": {
+          "n": 6,
+          "early_termination": {
+            "n": 4,
+            "share": 0.6666666666666666,
+            "new_track_detector_only": 0.0,
+            "geometry_source_changed": 0.0,
+            "duplicate_birth": 0.25,
+            "across_chunks": 0.25,
+            "median_previous_unmatched_s": 0.6994990000000001
+          },
+          "wrong_association": {
+            "n": 2,
+            "share": 0.3333333333333333,
+            "new_track_detector_only": 0.0,
+            "geometry_source_changed": 0.0,
+            "duplicate_birth": 0.0,
+            "across_chunks": 0.0,
+            "median_previous_unmatched_s": 0.050336000000000006
+          }
+        }
+      },
+      "coverage": {
+        "labelled_instants": 37,
+        "instants_without_any_output_track": 0,
+        "gt_observations": 1087,
+        "missed_gt_observations": 722,
+        "recall": 0.3357865685372585,
+        "cared_gt_objects": 79,
+        "ever_matched_objects": 43,
+        "never_matched_objects": 36,
+        "ever_matched_objects_with_one_track": 29,
+        "ever_matched_objects_with_interior_misses": 30,
+        "interior_gap_events": 51,
+        "gap_between_hits_seconds_median": 1.099809,
+        "ever_matched_objects_missing_at_last_cared_instant": 31
+      }
+    }
+  },
+  "wato": {
+    "bag_id": "sensors_2026_07_07_23_01_24_2_with_eidos_mcap",
+    "instance_splits": {
+      "instances": 2016,
+      "mean_tracks_per_instance": 1.7013888888888888,
+      "share_in_one_track": 0.5882936507936508,
+      "tracks": 1379,
+      "median_owned_frames": 18.0,
+      "p90_owned_frames": 130.20000000000005
+    }
+  },
+  "feature_integrity": {
+    "nusc0061": {
+      "source_root": "/home/watonomous/brianzheng/wato_world/data/artifacts/eval_runs/2026-11-07_mask_policy/nusc0061_new",
+      "bag": "NuScenes_v1_0_mini_scene_0061_0_mcap",
+      "counts": {
+        "masklets": 573,
+        "with_path": 573,
+        "loaded": 573
+      },
+      "shapes": {
+        "(1024,)": 573
+      },
+      "dtypes": {
+        "float32": 573
+      },
+      "L2_norm_percentiles": {
+        "0": 26.72848892211914,
+        "10": 28.972392654418947,
+        "50": 31.96337890625,
+        "90": 36.374340820312504,
+        "100": 45.282737731933594
+      },
+      "track_rows": 5543,
+      "track_rows_with_dino_feature_path": 0
+    },
+    "nusc1100": {
+      "source_root": "/home/watonomous/brianzheng/wato_world/data/artifacts/eval_runs/2026-11-07_mask_policy/nusc1100_new",
+      "bag": "NuScenes_v1_0_mini_scene_1100_0_mcap",
+      "counts": {
+        "masklets": 168,
+        "with_path": 168,
+        "loaded": 168
+      },
+      "shapes": {
+        "(1024,)": 168
+      },
+      "dtypes": {
+        "float32": 168
+      },
+      "L2_norm_percentiles": {
+        "0": 26.726640701293945,
+        "10": 28.79955463409424,
+        "50": 31.753835678100586,
+        "90": 38.48140029907227,
+        "100": 43.74605178833008
+      },
+      "track_rows": 4941,
+      "track_rows_with_dino_feature_path": 0
+    },
+    "wato": {
+      "source_root": "/home/watonomous/brianzheng/wato_world/data/artifacts",
+      "bag": "sensors_2026_07_07_23_01_24_2_with_eidos_mcap",
+      "counts": {
+        "masklets": 6105,
+        "with_path": 6105,
+        "loaded": 6105
+      },
+      "shapes": {
+        "(1024,)": 6105
+      },
+      "dtypes": {
+        "float32": 6105
+      },
+      "L2_norm_percentiles": {
+        "0": 25.96196174621582,
+        "10": 29.583860015869142,
+        "50": 32.286659240722656,
+        "90": 36.46795349121094,
+        "100": 46.08941650390625
+      },
+      "track_rows": 92228,
+      "track_rows_with_dino_feature_path": 0
+    }
+  },
+  "source_sha256": {
+    "src/tracking/src/wato_tracking/relink.py": "8c0f8f65321b3c0e164314d4b8a6c17ce93abd7396d13a54aded156e05c92532",
+    "src/tracking/src/wato_tracking/pipeline.py": "988044b425901a052dc609c82e352123ceda409f3e6c55396111d05ecbd0313e",
+    "src/tracking/src/wato_tracking/__main__.py": "df8c8d24ca48335346bfc1c95ad05cf471d2901d7c11e1a3e9a605853ebf90dd",
+    "src/tracking/src/wato_tracking/tracker.py": "4cc6cb78841335cf89026ccf094cff2a66e49a170322b8f4c17b24ceb50db741",
+    "src/tracking/src/wato_tracking/cli.py": "a03e3bf944b50b35892de09945d1b6d7e1f865b9bd10ba6db85642f5bd1ca7af",
+    "src/tracking/src/wato_tracking/detections.py": "9e519e2187b76b46e2f9b55a9d923b15bc6bfaa5e34920548aa3703aff50fc63",
+    "src/tracking/src/wato_tracking/summary.py": "a46cf68d2e2666f29294802b086a98d376e9bec50a56dc4a50fbb7a3d60ca61b",
+    "src/tracking/src/wato_tracking/io.py": "14b05894e623fbce058eed80cf78968748cc16fc5fe8f006e17a061324a1dc83",
+    "src/tracking/src/wato_tracking/config.py": "251b6ea37c7e84f42ad6f75ec25102db230cf628949e2f0afae498e8365ca272",
+    "src/tracking/src/wato_tracking/__init__.py": "cf4c69277c53988516bc508261679b98fc94714e5e0af093811224b038d61a1b",
+    "src/tracking/src/wato_tracking/stitch.py": "9ce97c4cb01c98072495430c841340ad7d9f8165fe7f5f3bf9c3072e7f1c55dc",
+    "src/common/src/wato_common/tracking/kalman.py": "23b41a0a663c2d4c1922f18549d7f84121b8f7162fac3917c3239a6aa6530026",
+    "src/common/src/wato_common/tracking/__init__.py": "35b0e01cd5d11a0f2dfc5b72a7bf6ebed48407d811b02146a30ee5cb853ca9b5",
+    "src/common/src/wato_common/tracking/association.py": "23cb22799c9c5b3ed3e2d786f94c7af8b43eff414a179d28eb1856755d858371",
+    "src/common/src/wato_common/tracking/boxes.py": "44fc590ace18b671a4bf78509ea29f89b3f0f8d8fe5b4fd28a5ad7b4c71e66d0",
+    "src/common/src/wato_common/eval/mot.py": "418ae57c734d9a500c5f36e59f54c0e8e27d0126d578a6f03618d451e84228ab",
+    "src/common/src/wato_common/eval/__init__.py": "279d495975455a360b0c1a4ec60d834367fb768f6520aa501dd1cc9b482d8879",
+    "src/common/src/wato_common/eval/instants.py": "a2c4f4bd9a1877774f9c02c50e3e6e8f0a27b4c28efcdea3a8aa219fc01756c2",
+    "src/common/src/wato_common/eval/boxes.py": "d9cf2ec4a8049dcf3563642cfef1a6a59103b91df272c0255aa8fee278abeab4",
+    "src/common/src/wato_common/eval/motion.py": "da770da7829de85dda7642a0c7266a5712cbea56820f8b4e77b0f680a8cce251",
+    "src/tracking/config/tracking.yaml": "7f2fdeb1b6c8e0b0842ab9e839f4a5edcc5e3872811788ca54f11c4f4faee0ec",
+    "src/tracking/scripts/eval_tracks.py": "ef92f278d45d694f12f31e241683eba88387e2d7ab066c6ccba92c555580f2a5"
+  },
+  "evaluation_environment": {
+    "PYTHONHASHSEED": "0"
+  }
+}

@@ -6,7 +6,7 @@ import math
 from typing import Any, Literal, Optional
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class FramesConfig(BaseModel):
@@ -66,6 +66,29 @@ class ScanRefinementConfig(BaseModel):
         return values
 
 
+class VerificationConfig(BaseModel):
+    """Does a distinct LiDAR segment back a lifted instance in this frame?
+
+    The bank is the refinement section's (its radii and min_samples), built
+    whatever support_method is. At each scale, the cluster with the best IoU
+    against the instance's seed (its candidate claims) is tested; the instance
+    is verified when some scale passes both tests. Recorded on the lifted
+    rows (lidar_verified) and in proposal_refinement.parquet; geometry is
+    unchanged. docs/research/lidar_verified_lifting.md.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    # SAL Appendix A.1: a lifted mask matches a scan cluster at IoU strictly
+    # above 0.5.
+    min_iou: float = Field(default=0.5, ge=0.0, le=1.0)
+    # FGR (ICRA 2021) Sec. 3.1 theta_seg: a component with less than this
+    # share of its points inside the 2D box frustum belongs to another object
+    # (a hedge strip, a wall, the tree line behind).
+    min_containment: float = Field(default=0.8, ge=0.0, le=1.0)
+
+
 class LiftedConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -73,8 +96,14 @@ class LiftedConfig(BaseModel):
     # chooses support before the same existing box postfilters are applied.
     # SAL remains opt-in: the frozen nuScenes comparison currently loses
     # proposal precision/recall (docs/research/sal_scan_cluster_refinement.md).
-    support_method: Literal["scan_clusters", "largest_group"] = "largest_group"
+    # verified_clusters (opt-in, needs verification): a verified instance's
+    # support is the scan cluster its verdict names (SAL replacement); any
+    # other instance keeps largest_group, never the original seed.
+    support_method: Literal["scan_clusters", "largest_group", "verified_clusters"] = (
+        "largest_group"
+    )
     refinement: ScanRefinementConfig = Field(default_factory=ScanRefinementConfig)
+    verification: VerificationConfig = Field(default_factory=VerificationConfig)
     # Resolve ownership only after independent 3D refinement and box gates.
     # SAL-4D Appendix A.1.1 uses strict IoM > 0.5. Here support size ranks
     # hypotheses within one frame; temporal volume is not accumulated.
@@ -106,14 +135,53 @@ class LiftedConfig(BaseModel):
     # Fewer points than this in a frame: no box.
     min_points: int = Field(default=5, ge=1)
 
+    @model_validator(mode="after")
+    def verified_clusters_need_verification(self) -> "LiftedConfig":
+        if self.support_method == "verified_clusters" and not self.verification.enabled:
+            raise ValueError(
+                "support_method verified_clusters needs verification.enabled"
+            )
+        return self
+
 
 class FusionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # A lidar_mos and a lifted box are one object when they share this many
-    # LiDAR points in the frame, and this fraction of the smaller one's.
+    # LiDAR points in the frame, and this fraction of the smaller one's; a
+    # fusion_detector box joins an object by the same rule.
     min_shared_points: int = 5
     min_shared_fraction: float = 0.3
+
+
+class FusionDetectorConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Propose detection_3d's BEVFusion boxes (detector.py). Off: the stage
+    # needs no detections_3d and its output is what it was without them.
+    enabled: bool = False
+    # Lower boxes are not proposed: the car's confidence_threshold (wato_monorepo
+    # bevfusion params.yaml), a deployment choice, not a calibrated one.
+    min_score: float = Field(default=0.08, ge=0.0, le=1.0)
+    # A box centred this close (XY, the model's input frame) to its origin is
+    # dropped: the car's ego_suppression_radius, against self-detections and
+    # zero-position outputs.
+    ego_suppression_radius_m: float = Field(default=2.5, ge=0.0)
+    # The model's classes proposed, and their name in the pipeline's taxonomy.
+    # Others (trailer, construction_vehicle, barrier, traffic_cone) stay in
+    # detections_3d only, not relabelled.
+    class_map: dict[str, str] = Field(
+        default_factory=lambda: {
+            c: c for c in ("car", "truck", "bus", "motorcycle", "bicycle", "pedestrian")
+        }
+    )
+    # An unmatched detector can add recall. Matched detections supply
+    # provenance only, preserving the other sources' box/class/score/support.
+    add_unmatched: bool = True
+    # New objects need the existing tracker's detector birth confidence and
+    # actual non-ground returns. Low-score raw detections remain auditable.
+    unmatched_min_score: float = Field(default=0.6, ge=0.0, le=1.0)
+    unmatched_min_points: int = Field(default=5, ge=1)
 
 
 class ComponentConfig(BaseModel):
@@ -123,6 +191,7 @@ class ComponentConfig(BaseModel):
     lidar_mos: LidarMosConfig = Field(default_factory=LidarMosConfig)
     lifted: LiftedConfig = Field(default_factory=LiftedConfig)
     fusion: FusionConfig = Field(default_factory=FusionConfig)
+    fusion_detector: FusionDetectorConfig = Field(default_factory=FusionDetectorConfig)
 
 
 def load_config(path: str) -> ComponentConfig:

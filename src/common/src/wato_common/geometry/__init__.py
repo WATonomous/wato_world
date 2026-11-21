@@ -11,6 +11,7 @@ from wato_common.geometry.projection import (
     project_with_depth,
 )
 from wato_common.geometry.camera_model import CameraModel
+from wato_common.geometry.sensor_frame import close_to_sensor
 from wato_common.geometry.transforms import (
     flatten_se3,
     invert_se3,
@@ -25,6 +26,7 @@ __all__ = [
     "CameraModel",
     "PoseSample",
     "batch_interpolate_poses",
+    "close_to_sensor",
     "flatten_se3",
     "interpolate_pose",
     "invert_se3",

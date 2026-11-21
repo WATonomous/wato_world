@@ -1,16 +1,18 @@
 # proposal_generation
 
 3D box proposals from what upstream already produces: lidar_preprocessing's
-Step F moving-object clusters and semantic_lifting's labelled instances, one
-box per source and one fused box per object, per frame. CPU only. A LiDAR
+Step F moving-object clusters, semantic_lifting's labelled instances and,
+when `fusion_detector.enabled`, detection_3d's BEVFusion boxes; one box per
+source and one fused box per object, per frame. CPU only. A LiDAR-only
 detector is a later source; SLF (fitting shapes to camera masks) runs per
 track in label_refinement.
 Measurements behind the defaults: `docs/proposal_generation_measurements.md`.
 
 ## How a proposal is made
 
-Per frame — lidar_preprocessing's frame_sync tick: a `lidar_cc` sweep and the
-corner sweeps matched to it on WATO, one sweep on a single-LiDAR bag:
+Per frame — lidar_preprocessing's frame_sync tick: one `lidar_cc` sweep on
+the current WATO profile (historical multi-LiDAR inputs can contain matched
+corner sweeps):
 
 - **`lidar_mos`**: each Step F cluster passing the gates (`motion_score > 1`,
   `n_sources ≥ 2`, `frac_persistent < 0.5`; `docs/lidar_preprocessing_measurements.md`)
@@ -55,14 +57,55 @@ corner sweeps matched to it on WATO, one sweep on a single-LiDAR bag:
   support. The total `lidar_point_count` includes geometric additions. Added
   points receive no new camera votes or semantic labels.
   The radius method averages its own candidate's confidence over final support.
+  **LiDAR verification** (`lifted.verification.enabled`, on by default):
+  does a distinct LiDAR segment back the instance in this frame? A mask says
+  which rays an object covers; its visible returns are the object only if
+  the LiDAR hit it — behind a hedge, too far or between beams, they are the
+  hedge in front or the tree line behind. Against the frame's DBSCAN bank
+  (the `refinement` radii and `min_samples`, built whatever
+  `support_method` is, shared with `scan_clusters`), at each scale the
+  cluster with the best IoU against the instance's seed (its candidate
+  claims) must match it at IoU > 0.5 (SAL A.1) and lie ≥ 0.8 inside the
+  instance's 2D box frustum from lifting (FGR's θ_seg: a segment reaching
+  beyond it belongs to another object); any scale passing verifies it.
+  The verdict is `lidar_verified` on its lifted rows; geometry is unchanged.
+  It is evidence for tracking's confirmation, not a filter: a real object
+  fails it in about a third of frames (docs/research/lidar_verified_lifting.md).
+  `support_method: verified_clusters` (opt-in) boxes a verified instance
+  on the cluster that verified it (the best-IoU passing scale): better
+  boxes on nuScenes 0061, but a sparse object that DBSCAN splits is boxed
+  on its largest piece, so it is not the default
+  (`docs/proposal_generation_measurements.md`, "Boxing the verified
+  segment"). The bank costs
+  ~0.05–0.5 s per WATO frame (about 3.5 min per WATO chunk; `--workers`
+  runs chunks in parallel).
+- **`fusion_detector`** (`fusion_detector.enabled`): each detection_3d box with
+  score ≥ 0.08 (the car's `confidence_threshold`), outside the car's 2.5 m
+  ego zone, of a class in `fusion_detector.class_map` (car, truck, bus,
+  motorcycle, bicycle, pedestrian; trailers, construction vehicles, barriers
+  and cones are not relabelled into them). Its box is the model's — centre,
+  size, heading (made undirected here; the directed one stays in
+  `detections_3d`) — not refit to points; `lidar_point_count` counts the
+  frame's non-ground points inside it, `score` is the model's, `cls` the
+  mapped class.
 - **`fused`**: a lidar_mos and a lifted box sharing ≥ 5 LiDAR points, ≥ 30%
   of the smaller one's, are one object (greedy, most shared first, one to one):
   a box fit to both point sets, with the lifted class. Every other box is
   fused on its own, class-less if it has none, so each object either source
-  found has one fused row. `member_proposal_ids` lists the source rows.
+  found has one fused row. A fusion_detector box then joins the object it
+  shares the most points with by the same rule, one to one. The matched
+  object's geometry, class, score, point count and camera evidence remain
+  those of the motion/lifted sources; the detector adds provenance only.
+  An unmatched detector box can add an object when `fusion_detector.add_unmatched`,
+  score ≥ `unmatched_min_score` (0.6, the tracker birth threshold) and point
+  count ≥ `unmatched_min_points` (5 non-ground returns, the lifted minimum).
+  `member_proposal_ids` lists the source rows. Raw low-score or unsupported
+  detector proposals remain available for auditing but do not become new
+  fused objects.
 
 Scores are placeholders until per-source reliability is measured: lidar_mos
-`min(1, motion_score / 2)`, lifted `lift_confidence`, fused the members' mean.
+`min(1, motion_score / 2)`, lifted `lift_confidence`, fused the independent
+members' mean (detector-only objects keep the detector score).
 Boxes are yaw-only and undirected (heading mod π). Neighbouring chunks overlap
 by 6 s and both label the shared span; tracking links them.
 
@@ -71,9 +114,11 @@ six published thresholds in their original order, strict IoU acceptance,
 replacement, and unchanged-seed fallback. Implementation choices the paper
 does not specify are Euclidean XYZ radii in metres, `min_samples: 5` (counting
 self), and deterministic scale/input-order ties. DBSCAN expands only through
-core points; a border point does not propagate connectivity. The implementation
-uses the existing SciPy dependency without voxelization, downsampling, or
-temporal accumulation. Refinement uses this pipeline's already merged instance
+core points; a border point does not propagate connectivity. Clusters are the
+connected components of the core graph (one sparse pass per scale, the same
+labels as ordered expansion; a test checks it against a textbook DBSCAN). The
+implementation uses the existing SciPy dependency without voxelization,
+downsampling, or temporal accumulation. Refinement uses this pipeline's already merged instance
 seeds and existing synchronized multi-LiDAR frames; SAL Algorithm 1 instead
 refines per-camera masks before cross-camera fusion on a scan. These are
 adaptations, not a claim of exact SAL reproduction. Ownership follows
@@ -98,7 +143,8 @@ separate step after matching.
 ## Run
 
 `ingest`, `lidar_preprocessing` (with its `proposals` step) and
-`semantic_lifting` must have run first.
+`semantic_lifting` must have run first, and `detection_3d` when
+`fusion_detector.enabled`.
 
 Regenerating old owned-mask outputs requires running `perception_2d`, then
 `semantic_lifting`, then `proposal_generation` with `--force` for the same
@@ -107,10 +153,13 @@ independent-mask metadata or candidate files raises a rerun instruction.
 
 ```bash
 ./watod run proposal_generation --bag <bag_id> [--chunk <chunk_id>] [--force] \
-    --config /ws/src/proposal_generation/config/proposal_generation.wato.yaml
+    [--workers N] --config /ws/src/proposal_generation/config/proposal_generation.wato.yaml
 ```
 
-Chunks whose `proposals.parquet` exists are skipped unless `--force`. Each
+Chunks whose `proposals.parquet` exists are skipped unless `--force`.
+`--workers N` processes N chunks at once (chunks are independent); a chunk
+that fails doesn't stop the others, and the run then exits non-zero naming
+it. Each
 chunk gets `manifest_proposal_generation.json` (wato_common.manifest): config,
 build provenance, and hashed inputs — the per-sweep files through their
 producers' manifests and indexes. The earlier 8–21 s WATO chunk measurement
@@ -156,6 +205,7 @@ owns its format:
 | `ground.npz` | lidar_preprocessing Step C | `ground` (`GroundGrid.height_at`); a sentinel leaves boxes' bottoms as they are |
 | `semantic_lifting/lifted_labels/`, `lifted_instances.parquet` | semantic_lifting | `lifted_labels` |
 | `semantic_lifting/lifted_candidates/` (all independent point-instance claims) | semantic_lifting | `lifted_candidates` |
+| `detections_3d.parquet` (`fusion_detector.enabled` only) | detection_3d | `detections_3d` |
 | `calibration.json`, `frame_index.parquet`, `poses.parquet` (camera viewer only) | ingest | `calibration`, `frame_index.FrameIndex` |
 
 No artifact records lidar_preprocessing's canonical LiDAR, so the config states
@@ -176,25 +226,34 @@ dimensions against calibration. Viewing leaves stored proposal geometry intact.
   `sweep_ids` all its sweeps, `reference_timestamp_ns` its time. `frame_id` is
   None for a sweep frame_sync matched to no canonical sweep (a Step F
   cluster's `-1` maps to None).
-- `provenance` `lidar_mos` / `lifted` / `fused`; tracking reads the fused rows,
-  the source rows stay to measure each source.
+- `provenance` `lidar_mos` / `lifted` / `fusion_detector` / `fused`; tracking
+  reads the fused rows, the source rows stay to measure each source.
 - `cls` is perception_2d's class (`car`, `truck`, `bus`, `motorcycle`,
-  `bicycle`, `pedestrian` under the fixed taxonomy), or None.
+  `bicycle`, `pedestrian` under the fixed taxonomy), else the detector's
+  mapped class, or None.
 - The evidence columns are null except on rows of the source that measures
-  them.
+  them. `lidar_verified` (lifted rows; null with verification off) is the
+  LiDAR verification verdict above; fused rows keep it on their lifted
+  member.
 
 `proposal_refinement.parquet` is a component-local diagnostic table, written
 before the proposals completion marker. It includes EVERY instance/frame
 match, including ones later rejected by box filters: method, status, best scale and
 cluster ID, best IoU, seed/refined/addition/removal counts, whether a proposal
 was emitted after coverage and box gates, and final exclusive geometric/retained-seed
-counts when emitted. The
+counts when emitted; with verification, its verdict for every instance,
+emitted or not (`lidar_verified`, `verify_status` — verified /
+iou_not_above_threshold / containment_below_threshold / no_overlap — and the
+radius, cluster, IoU, containment and size of the best-IoU passing scale, else
+of the best-IoU scale, and
+the frustum's size). The
 manifest records both outputs. No downstream component consumes this table.
 
-Older proposal files without `lift_seed_point_count` remain readable. Their
-original total count serves as labelled evidence in tracking. New lifted rows
-always carry the separate count; fused rows keep evidence on their source
-members.
+Older proposal files without `lift_seed_point_count` or `lidar_verified`
+remain readable, as None. A missing seed count's original total count serves
+as labelled evidence in tracking; a missing verdict stops tracking's
+confirmation, which needs it. New lifted rows always carry the separate
+count; fused rows keep evidence on their source members.
 
 ## Configuration
 
@@ -208,3 +267,6 @@ Set `lifted.support_method: scan_clusters` to opt in. Under that method,
 substitutes largest-group filtering for rejected matches. The legacy radius
 fields are only used with `support_method: largest_group`. Ground masks are
 required for either method: proposal points remain non-ground.
+`lifted.verification` (`enabled`, `min_iou` 0.5, `min_containment` 0.8)
+needs lifting's frustum relation (`lifted_candidates`), present since
+2026-11-17; tracking's `confirmation` needs it on.

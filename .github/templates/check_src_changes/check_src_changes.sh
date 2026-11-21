@@ -14,6 +14,7 @@ if [[ "${ALL_CHANGED}" == "true" ]]; then
     add_module perception_2d
     add_module semantic_lifting
     add_module lidar_preprocessing
+    add_module detection_3d
     add_module proposal_generation
     add_module tracking
     add_module label_refinement
@@ -24,6 +25,7 @@ else
     [[ "${PERCEPTION_2D_CHANGED}" == "true" ]] && add_module perception_2d
     [[ "${SEMANTIC_LIFTING_CHANGED}" == "true" ]] && add_module semantic_lifting
     [[ "${LIDAR_PREPROCESSING_CHANGED}" == "true" ]] && add_module lidar_preprocessing
+    [[ "${DETECTION_3D_CHANGED}" == "true" ]] && add_module detection_3d
     [[ "${PROPOSAL_GENERATION_CHANGED}" == "true" ]] && add_module proposal_generation
     [[ "${TRACKING_CHANGED}" == "true" ]] && add_module tracking
     [[ "${LABEL_REFINEMENT_CHANGED}" == "true" ]] && add_module label_refinement

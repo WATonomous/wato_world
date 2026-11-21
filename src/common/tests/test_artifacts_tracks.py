@@ -9,7 +9,7 @@ import pytest
 
 from wato_common.artifact_store import track_summaries_path, tracks_path
 from wato_common.artifacts import ArtifactFormatError, tracks as tr
-from wato_common.io.parquet_io import write_table
+from wato_common.io.parquet_io import read_rows, write_table
 from wato_common.schemas import (
     TRACK_SCHEMA,
     TRACK_SUMMARY_SCHEMA,
@@ -59,6 +59,7 @@ def _summary(**overrides) -> tr.TrackSummary:
         motion_state="moving",
         cls="car",
         n_strong=1,
+        n_confident=1,
         frac_two_source=0.5,
         frac_lidar_mos=0.5,
         net_displacement_m=3.0,
@@ -131,6 +132,14 @@ def test_records_track_the_row_schemas():
         ),
         (lambda fs, ss: (fs, [dataclasses.replace(ss[0], n_frames=3)]), "n_frames"),
         (
+            lambda fs, ss: (fs, [dataclasses.replace(ss[0], n_confident=3)]),
+            "n_confident",
+        ),
+        (
+            lambda fs, ss: (fs, [dataclasses.replace(ss[0], n_confident=-1)]),
+            "n_confident",
+        ),
+        (
             lambda fs, ss: (fs, [dataclasses.replace(ss[0], last_timestamp_ns=9)]),
             "timestamps",
         ),
@@ -158,4 +167,15 @@ def test_invariants_are_enforced_on_write_and_read(broken, match):
         track_summaries_path(BAG),
     )
     with pytest.raises(ArtifactFormatError, match=match):
+        tr.read(BAG)
+
+
+def test_summaries_written_before_a_column_existed_name_the_rerun():
+    frames, summaries = _bag()
+    tr.write(BAG, frames, summaries)
+    old = TRACK_SUMMARY_SCHEMA.remove(
+        TRACK_SUMMARY_SCHEMA.get_field_index("n_confident")
+    )
+    write_table(read_rows(track_summaries_path(BAG)), old, track_summaries_path(BAG))
+    with pytest.raises(ArtifactFormatError, match="n_confident.*re-run tracking"):
         tr.read(BAG)

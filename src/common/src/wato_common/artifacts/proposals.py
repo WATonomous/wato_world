@@ -3,6 +3,10 @@
 Written by proposal_generation; read by tracking (the fused rows) and by
 evaluation of each source (all rows) once they exist.
 
+Sources: lidar_mos (Step F motion clusters), lifted (semantic_lifting
+instances), fusion_detector (detection_3d's BEVFusion boxes, camera + LiDAR)
+and lidar_detector (a LiDAR-only detector; none writes it yet).
+
 On disk, per chunk:
 
   proposals.parquet
@@ -13,7 +17,8 @@ On disk, per chunk:
 Invariants, checked on write and on read: proposal_ids are unique; provenance
 is one of PROVENANCES; sweep_id is among sweep_ids; a fused row lists at least
 one member, every member is a non-fused row of the same file and frame (same
-sweep_id), and only fused rows list members.
+sweep_id), and only fused rows list members. lift_seed_point_count and
+lidar_verified appear on lifted rows only.
 """
 
 from __future__ import annotations
@@ -35,7 +40,7 @@ from wato_common.schemas import (
 )
 
 FUSED = "fused"
-SOURCES = ("lidar_mos", "lifted", "lidar_detector")
+SOURCES = ("lidar_mos", "lifted", "fusion_detector", "lidar_detector")
 PROVENANCES = SOURCES + (FUSED,)
 
 _LIST_FIELDS = {
@@ -78,6 +83,14 @@ class Proposal:
     track_life: Optional[int] = None
     lift_confidence: Optional[float] = None
     lift_seed_point_count: Optional[int] = None
+    lidar_verified: Optional[bool] = None
+
+
+# Columns older files lack, read as None: lift_seed_point_count predates scan
+# refinement (labeled support was the total count), lidar_verified predates
+# verification. Every other missing column is a format error rather than
+# silently defaulted evidence.
+_LEGACY_OPTIONAL = ("lift_seed_point_count", "lidar_verified")
 
 
 def _problem(proposals: list[Proposal]) -> Optional[str]:
@@ -104,6 +117,8 @@ def _problem(proposals: list[Proposal]) -> Optional[str]:
                 return (
                     f"{where}: lift_seed_point_count must be within geometric support"
                 )
+        if p.lidar_verified is not None and p.provenance != "lifted":
+            return f"{where}: only lifted rows carry lidar_verified"
         if p.provenance != FUSED:
             if p.member_proposal_ids:
                 return f"{where}: only fused rows list member_proposal_ids"
@@ -143,20 +158,18 @@ def read(bag_id: str, chunk_id: str) -> list[Proposal]:
     uri = proposals_path(bag_id, chunk_id)
     out = []
     for row in read_rows(uri):
-        # Older proposals used labeled support directly and have no seed-count
-        # column. Preserve that explicit legacy case; other missing columns
-        # are still format errors rather than silently defaulted evidence.
         try:
             values = {
                 f.name: row[f.name]
                 for f in fields(Proposal)
-                if f.name != "lift_seed_point_count"
+                if f.name not in _LEGACY_OPTIONAL
             }
         except KeyError as exc:
             raise ArtifactFormatError(
                 local_path(uri), f"missing proposal column {exc.args[0]!r}"
             ) from None
-        values["lift_seed_point_count"] = row.get("lift_seed_point_count")
+        for name in _LEGACY_OPTIONAL:
+            values[name] = row.get(name)
         for name, (_, decode) in _LIST_FIELDS.items():
             values[name] = tuple(decode(values[name]))
         out.append(Proposal(**values))

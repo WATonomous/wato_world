@@ -24,6 +24,7 @@ import pytest
 
 from wato_common.artifact_store import (
     global_iwu_path,
+    ground_path,
     lidar_proc_summary_path,
     local_path,
     motion_clusters_path,
@@ -244,6 +245,19 @@ def test_up_to_date_tracks_inputs(tmp_env):
     sm = local_path(static_map_path(bag, chunk))
     t = os.path.getmtime(local_path(motion_clusters_path(bag, chunk)))
     os.utime(sm, (t + 10, t + 10))
+    assert not proposals_up_to_date(bag, chunk)
+
+
+def test_a_newer_ground_grid_makes_proposals_stale(tmp_env):
+    """Step F reads Step C's grid (its height floor): a rebuilt grid alone
+    must re-run it."""
+    bag, chunk = "bag_mp_ground", "c0"
+    _stage_scene(bag, chunk)
+    process_chunk(_cfg(), bag, chunk)
+    assert proposals_up_to_date(bag, chunk)
+    g = local_path(ground_path(bag, chunk))
+    t = os.path.getmtime(local_path(motion_clusters_path(bag, chunk)))
+    os.utime(g, (t + 10, t + 10))
     assert not proposals_up_to_date(bag, chunk)
 
 

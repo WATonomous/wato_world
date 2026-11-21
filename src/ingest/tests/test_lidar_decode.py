@@ -37,6 +37,13 @@ def _cloud(t_ns: int, n: int = 4):
 def test_sweep_ids_are_unique_across_lidars(tmp_path, monkeypatch):
     monkeypatch.setenv("ARTIFACT_ROOT_URI", f"file://{tmp_path}")
     cfg = load_config(str(CONFIG_DIR / "ingest.wato.yaml"))
+    # Exercise an explicit multi-scanner rig; the shipped WATO profile is CC-only.
+    cfg.topics.lidars.update(
+        {
+            "lidar_ne": "/lidar_ne/velodyne_points",
+            "lidar_nw": "/lidar_nw/velodyne_points",
+        }
+    )
     topic = {lid: t for lid, t in cfg.topics.lidars.items()}
     # Three scanners interleaved in record order, as on the WATO rig.
     stream = [

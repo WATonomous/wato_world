@@ -1,7 +1,7 @@
 # Tracking — tracks over proposal_generation's fused boxes, parked / moving per
 # track. CPU-only: Kalman filtering and Hungarian association in NumPy/SciPy
-# (wato_common.tracking). DINOv2 ReID, when it comes, will need torch and a GPU
-# base.
+# (wato_common.tracking), blossom matching in NetworkX. DINOv2 ReID, when it
+# comes, will need torch and a GPU base.
 #
 # Defines `source` and `dependencies` build stages. The full image
 # (build / deploy / develop) is composed by docker/template.Dockerfile.
@@ -34,8 +34,9 @@ ENV WATO_BASE_IMAGE=${BASE_IMAGE}
 # rationale and the regeneration procedure.
 #
 # Direct intent (the lock file additionally carries the transitive closure):
-#     numpy scipy pillow pyarrow pydantic fsspec click pyyaml
+#     numpy scipy networkx pillow pyarrow pydantic fsspec click pyyaml
 #   numpy/scipy         — Kalman filter, Hungarian assignment, box geometry.
+#   networkx            — blossom matching for re-linking tracks (relink.py).
 #   pillow              — top-down viewer images.
 #   pyarrow             — parquet artifacts (wato_common.io.parquet_io).
 #   pydantic            — config + artifact schemas.
