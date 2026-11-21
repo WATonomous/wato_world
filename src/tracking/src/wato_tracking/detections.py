@@ -6,6 +6,10 @@ instance id (the matching key), its masklets and its confidence, a fusion_detect
 carries BEVFusion's score. A detection is strong when lidar_mos and lifted
 agree on it, its lift is confident, or it is detector-only with a high score
 (config `strong`). Matched detector scores never promote independent evidence.
+A detection is *confident* (tracking's confirmation counts these) when LiDAR
+evidence backs it: a lidar_mos member, a lifted member proposal_generation
+verified against a distinct LiDAR segment, or a detector-only box scored to
+start a track.
 The detector and lifting share cameras, so their agreement alone
 doesn't count as two sources. A box backed only by the detector starts a
 track only when scored high enough (ByteTrack's birth rule); otherwise it can
@@ -48,6 +52,9 @@ class Detection:
     detector_score: Optional[float] = None  # its fusion_detector member's
     can_birth: bool = True  # may start a track when no track takes it
     masklets: tuple[str, ...] = ()  # its lifted member's masklets (appearance)
+    # Its lifted member's LiDAR verification verdict (proposal_generation's
+    # lidar_verified); None without a lifted member or without verification.
+    lift_verified: Optional[bool] = None
 
     @property
     def detector_only(self) -> bool:
@@ -55,6 +62,18 @@ class Detection:
             self.detector_score is not None
             and self.key is None
             and not self.has_lidar_mos
+        )
+
+    @property
+    def confident(self) -> bool:
+        """LiDAR evidence the object exists in this frame, what MS3D++'s
+        retroactive labelling counts: Step F motion, a lift a distinct LiDAR
+        segment backs, or a detector-only box scored to start a track. A
+        matched detector never adds to a lift's evidence."""
+        return (
+            self.has_lidar_mos
+            or self.lift_verified is True
+            or (self.detector_only and self.can_birth)
         )
 
     @property
@@ -91,7 +110,7 @@ def detection(
         lift_points = lift.lift_seed_point_count
         if lift_points is None:
             lift_points = lift.lidar_point_count
-    confident = (
+    confident_lift = (
         lift is not None
         and (lift.lift_confidence or 0.0) >= cfg.min_lift_confidence
         and (lift_points or 0) >= cfg.min_lift_points
@@ -100,13 +119,14 @@ def detection(
     detected = detector_only and det.score >= cfg.min_detector_score
     return Detection(
         proposal=fused,
-        strong=two_source or confident or detected,
+        strong=two_source or confident_lift or detected,
         key=instance_of(lift.proposal_id) if lift is not None else None,
         two_source=two_source,
         has_lidar_mos=has_mos,
         detector_score=det.score if det is not None else None,
         can_birth=not detector_only or det.score >= cfg.min_detector_birth_score,
         masklets=lift.supporting_masklet_ids if lift is not None else (),
+        lift_verified=lift.lidar_verified if lift is not None else None,
     )
 
 

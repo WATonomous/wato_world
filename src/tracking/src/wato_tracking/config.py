@@ -180,6 +180,32 @@ class FilterConfig(BaseModel):
     min_strong: int = 1
 
 
+class ConfirmationConfig(BaseModel):
+    """MS3D++'s retroactive object labelling (Tsai et al. 2023, code defaults
+    in docs/MS3D_PARAMETERS.md, TRACK_FILTERING): a track becomes a label only
+    with enough confident instants (detections.Detection.confident: LiDAR
+    evidence the object exists), and then keeps its whole life. Counted over
+    the linked track, one frame per instant. A vehicle track shorter than
+    motion.min_frames is "unknown" and needs min_confident_vehicle, so with
+    the shipped values every vehicle track under 7 instants is dropped (as
+    MS3D++'s VEH_ALL count does). MS3D++'s USE_STATIC_PED_TRACKS: false is
+    left out: on nuScenes it dropped 31 true standing-pedestrian tracks
+    (docs/research/lidar_verified_lifting.md). Needs proposal_generation's
+    lifted.verification.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    # MIN_DETS_ABOVE_POS_TH_FOR_TRACKS_VEH_ALL.
+    min_confident_vehicle: int = Field(default=7, ge=0)
+    # MIN_DETS_ABOVE_POS_TH_FOR_TRACKS_VEH_STATIC: a parked vehicle.
+    min_confident_parked_vehicle: int = Field(default=3, ge=0)
+    # MIN_DETS_ABOVE_POS_TH_FOR_TRACKS_PED, for every non-vehicle class.
+    min_confident_other: int = Field(default=1, ge=0)
+    vehicle_classes: tuple[str, ...] = ("car", "truck", "bus")
+
+
 class StitchConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -206,6 +232,7 @@ class ComponentConfig(BaseModel):
     strong: StrongConfig = Field(default_factory=StrongConfig)
     motion: MotionConfig = Field(default_factory=MotionConfig)
     filter: FilterConfig = Field(default_factory=FilterConfig)
+    confirmation: ConfirmationConfig = Field(default_factory=ConfirmationConfig)
     stitch: StitchConfig = Field(default_factory=StitchConfig)
 
 

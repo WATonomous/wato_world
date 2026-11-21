@@ -9,18 +9,21 @@
    (stitch.py). A chain of linked tracks is one track of the bag, named after
    its first.
 3. Per track, over one observation per instant (the owning chunk's where both
-   saw it): class, parked / moving / unknown, kept or dropped (summary.py). A
-   track with no owned frame is dropped too: the chunks that label its
-   instants didn't see it.
+   saw it): class, parked / moving / unknown, kept or dropped (summary.py):
+   short and weak, or, with `confirmation`, too few confident instants
+   (MS3D++'s retroactive labelling). A track with no owned frame is dropped
+   too: the chunks that label its instants didn't see it.
 4. Every kept track's frames from every chunk, `owned` set on those in their
    chunk's own half of each shared span (wato_common.chunk_spans).
-Then tracks.parquet + track_summaries.parquet (wato_common.artifacts.tracks),
-bag-level.
+Then track_confirmation.parquet (every judged track's evidence and verdict,
+diagnostics) and tracks.parquet + track_summaries.parquet
+(wato_common.artifacts.tracks), bag-level.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 from typing import Optional
 
@@ -29,17 +32,18 @@ from wato_common import manifest as common_manifest
 from wato_common.artifact_store import (
     chunk_root,
     chunks_index_path,
+    local_path,
     masklet_embeddings_path,
     proposals_path,
+    track_confirmation_path,
     track_summaries_path,
     tracks_path,
 )
-from wato_common.artifacts import proposals, tracks
+from wato_common.artifacts import ArtifactFormatError, proposals, tracks
 from wato_common.artifacts.tracks import TrackFrame, TrackSummary
-from wato_tracking import appearance, detections, relink, stitch, summary, tracker
+from wato_tracking import appearance, detections, io, relink, stitch, summary, tracker
 from wato_tracking.appearance import Calibration, MemberCost
 from wato_tracking.config import ComponentConfig
-from wato_tracking.io import load_chunks
 from wato_tracking.tracker import Observation
 
 log = logging.getLogger(__name__)
@@ -68,9 +72,10 @@ def track_chunk(
 ) -> list[list[Observation]]:
     """The chunk's tracks, each its observations in time order. member_cost:
     the chunk's entry of bag_appearance, None without appearance."""
-    det_frames = detections.frames(
-        proposals.read(bag_id, chunk_id), cfg.strong, cfg.duplicates
-    )
+    rows = proposals.read(bag_id, chunk_id)
+    if cfg.confirmation.enabled:
+        _require_verdicts(bag_id, chunk_id, rows)
+    det_frames = detections.frames(rows, cfg.strong, cfg.duplicates)
     out = tracker.run(
         det_frames,
         cfg.association,
@@ -86,6 +91,22 @@ def track_chunk(
         )
     log.info("chunk %s: %d frames, %d tracks", chunk_id, len(det_frames), len(out))
     return out
+
+
+def _require_verdicts(bag_id: str, chunk_id: str, rows: list) -> None:
+    """Confirmation counts verified lifts: a lifted row without a verdict
+    would silently count as unverified."""
+    missing = sum(
+        p.provenance == detections.LIFTED and p.lidar_verified is None for p in rows
+    )
+    if missing:
+        raise ArtifactFormatError(
+            local_path(proposals_path(bag_id, chunk_id)),
+            f"{missing} lifted rows carry no lidar_verified, which "
+            "confirmation counts: enable proposal_generation's "
+            "lifted.verification and re-run it with --force, or turn "
+            "tracking's confirmation off",
+        )
 
 
 def _frame(
@@ -138,7 +159,9 @@ def link_and_summarize(
 
     frames: list[TrackFrame] = []
     summaries: list[TrackSummary] = []
-    n_weak = n_unowned = n_linked = 0
+    judged: list[dict] = []
+    n_weak = n_unconfirmed = n_unowned = n_linked = 0
+    confirming = cfg.confirmation.enabled
     for chain in joined:
         tid = chain[0].track_id
         rows, obs_at = [], {}
@@ -153,7 +176,15 @@ def link_and_summarize(
         line = [obs_at[(f.chunk_id, f.sweep_id)] for f in tracks.per_instant(rows)]
         s = summary.summarize(tid, line, cfg.motion)
         if not summary.keep(s, cfg.filter):
+            decision = io.SHORT_WEAK
             n_weak += 1
+        elif confirming and not summary.confirmed(s, cfg.confirmation):
+            decision = io.UNCONFIRMED
+            n_unconfirmed += 1
+        else:
+            decision = io.KEPT
+        judged.append(_judgement(s, chain, line, decision, cfg))
+        if decision != io.KEPT:
             continue
         n_linked += len(chain) > 1
         summaries.append(s)
@@ -163,14 +194,47 @@ def link_and_summarize(
     }
     log.info(
         "%d tracks kept (%s), %d of them linked across chunks; dropped: %d short "
-        "weak, %d with no owned frame",
+        "weak, %d unconfirmed, %d with no owned frame",
         len(summaries),
         ", ".join(f"{n} {st}" for st, n in states.items()),
         n_linked,
         n_weak,
+        n_unconfirmed,
         n_unowned,
     )
-    return frames, summaries
+    return frames, summaries, judged
+
+
+def _judgement(
+    s: TrackSummary,
+    chain: list[stitch.ChunkTrack],
+    line: list[Observation],
+    decision: str,
+    cfg: ComponentConfig,
+) -> dict:
+    """The track's row of track_confirmation.parquet."""
+    dets = [o.det for o in line]
+    return dict(
+        track_id=s.track_id,
+        chunk_ids=json.dumps([m.chunk_id for m in chain]),
+        cls=s.cls,
+        motion_state=s.motion_state,
+        n_frames=s.n_frames,
+        first_timestamp_ns=s.first_timestamp_ns,
+        last_timestamp_ns=s.last_timestamp_ns,
+        n_strong=s.n_strong,
+        n_confident=s.n_confident,
+        n_lidar_mos=sum(d.has_lidar_mos for d in dets),
+        n_lift_verified=sum(d.lift_verified is True for d in dets),
+        n_lift_unverified=sum(d.lift_verified is False for d in dets),
+        n_detector_only=sum(d.detector_only and d.can_birth for d in dets),
+        n_required=(
+            summary.required_confident(s, cfg.confirmation)
+            if cfg.confirmation.enabled
+            else None
+        ),
+        decision=decision,
+    )
 
 
 def _write_chunk_manifest(
@@ -202,6 +266,7 @@ def _write_chunk_manifest(
             outputs={
                 "tracks": tracks_path(bag_id),
                 "track_summaries": track_summaries_path(bag_id),
+                "track_confirmation": track_confirmation_path(bag_id),
             },
             config_path=config_path,
             extra=(
@@ -226,7 +291,7 @@ def run(
 
     Skips when the bag's tracks exist unless force=True.
     """
-    index = load_chunks(bag_id)
+    index = io.load_chunks(bag_id)
     if not index:
         raise FileNotFoundError(
             f"No chunks found for bag {bag_id!r} — run ingest first."
@@ -245,7 +310,9 @@ def run(
     per_chunk = {
         cid: track_chunk(cfg, bag_id, cid, costs.get(cid)) for cid in chunk_ids
     }
-    frames, summaries = link_and_summarize(cfg, index, per_chunk)
+    frames, summaries, judged = link_and_summarize(cfg, index, per_chunk)
+    # tracks.parquet is the completion marker: diagnostics come first.
+    io.write_confirmation(bag_id, judged)
     tracks.write(bag_id, frames, summaries)
     for cid in chunk_ids:
         _write_chunk_manifest(bag_id, cid, config_path, cfg, calibration)

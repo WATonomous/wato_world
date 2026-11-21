@@ -304,6 +304,12 @@ def track_summaries_path(bag_id: str) -> str:
     return _join(bag_root(bag_id), "track_summaries.parquet")
 
 
+def track_confirmation_path(bag_id: str) -> str:
+    """tracking's diagnostics: each judged track's evidence and verdict
+    (component-local; no other component reads it)."""
+    return _join(bag_root(bag_id), "track_confirmation.parquet")
+
+
 # ---------------------------------------------------------------------------
 # label_refinement artifacts (bag-level).
 # ---------------------------------------------------------------------------

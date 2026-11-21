@@ -987,6 +987,10 @@ class TrackSummaryRow(BaseModel):
     cls: Optional[str]  # score-weighted vote over its frames' classes
     # Frames whose box was strong: two sources agreed, or a confident lift.
     n_strong: int
+    # Frames with LiDAR evidence the object exists (tracking's confirmation):
+    # a lidar_mos member, a LiDAR-verified lifted member, or a detector-only
+    # box scored to start a track.
+    n_confident: int
     frac_two_source: float  # frames whose fused box merged lidar_mos + lifted
     frac_lidar_mos: float  # frames with a gated Step F cluster (motion evidence)
     net_displacement_m: float  # BEV, Kalman-filtered, first → last few frames
@@ -1004,6 +1008,7 @@ TRACK_SUMMARY_SCHEMA = pa.schema(
         pa.field("motion_state", pa.string()),
         pa.field("cls", pa.string()),
         pa.field("n_strong", pa.int64()),
+        pa.field("n_confident", pa.int64()),
         pa.field("frac_two_source", pa.float64()),
         pa.field("frac_lidar_mos", pa.float64()),
         pa.field("net_displacement_m", pa.float64()),

@@ -221,3 +221,48 @@ def test_detector_only_box_cannot_take_a_track_from_independent_evidence():
         AssociationConfig(),
     )
     assert [o.det.proposal.proposal_id for o in tracks[0]] == ["initial", "primary"]
+
+
+def _detect(*members):
+    from wato_tracking.detections import detection
+
+    fused = _member(
+        "fused-000000-0",
+        "fused",
+        member_proposal_ids=tuple(m.proposal_id for m in members),
+    )
+    return detection(fused, {m.proposal_id: m for m in members}, StrongConfig())
+
+
+@pytest.mark.parametrize(
+    "members, confident",
+    [
+        # Step F motion: LiDAR evidence whatever the lift says.
+        ((_member("mos-1", "lidar_mos"),), True),
+        (
+            (
+                _member("mos-1", "lidar_mos"),
+                _member("lifted-m-000000", "lifted", lidar_verified=False),
+            ),
+            True,
+        ),
+        # A lift is confident only when a distinct LiDAR segment backs it.
+        ((_member("lifted-m-000000", "lifted", lidar_verified=True),), True),
+        ((_member("lifted-m-000000", "lifted", lidar_verified=False),), False),
+        ((_member("lifted-m-000000", "lifted"),), False),  # no verdict
+        # A detector-only box counts when sure enough to start a track...
+        ((_member("det-0", "fusion_detector", score=0.6),), True),
+        ((_member("det-0", "fusion_detector", score=0.59),), False),
+        # ...but never adds to an unverified lift's evidence.
+        (
+            (
+                _member("lifted-m-000000", "lifted", lidar_verified=False),
+                _member("det-0", "fusion_detector", score=0.95),
+            ),
+            False,
+        ),
+    ],
+)
+def test_confident_means_lidar_evidence_the_object_exists(members, confident):
+    d = _detect(*members)
+    assert d.confident is confident

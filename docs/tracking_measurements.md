@@ -358,3 +358,82 @@ one object is there, but the step that would use it (fusing concurrent
 duplicate tracks) does not exist. The four sequential switches appearance
 or a shared masklet could join have gaps of 1.3-2.9 s and 1.6-3.4 m, outside
 the re-link's 1 s horizon or its 2 m gate.
+
+## Confirmation (nuScenes, 2026-11-17)
+
+MS3D++ retroactive labelling (`confirmation`, counts 7 / parked 3 / other 1,
+no static-pedestrian exclusion) over proposals with `lifted.verification`,
+against the same run with confirmation off. Off reproduces the baseline
+exactly (both scenes' `eval_tracks.py` reports identical).
+`eval_tracks.py`, 2 m; refined = `eval_refined.py` on label_refinement's
+boxes:
+
+| Scene | | Frame P / R | Tracks true / false (precision) | HOTA | IDF1 | IDSW | Refined P / R |
+|---|---|---|---|---|---|---|---|
+| 0061 | off | 0.74 / 0.34 | 51 / 37 (0.58) | 0.38 | 0.41 | 25 | 0.76 / 0.35 |
+| 0061 | on | 0.80 / 0.33 | 48 / 16 (0.75) | 0.38 | 0.43 | 20 | 0.82 / 0.34 |
+| 1100 | off | 0.82 / 0.62 | 30 / 12 (0.71) | 0.64 | 0.66 | 8 | 0.84 / 0.62 |
+| 1100 | on | 0.84 / 0.61 | 29 / 6 (0.83) | 0.65 | 0.66 | 7 | 0.86 / 0.61 |
+
+Confirmation removes more than half the false tracks for one to three true
+ones; the recall it costs is at 30–50 m (1100: 0.05 → 0.00 on few objects).
+The planning prototype on the older artifacts predicted the same direction
+(0061: P 0.72 → 0.79, R 0.319 → 0.313). Per-run JSONs:
+`data/artifacts/eval_runs/2026-11-17_gate_a/` (git-ignored).
+
+## Confirmation on WATO (2026-11-17)
+
+`sensors_2026_07_07_23_01_24_2` (rotfix v2 calibration), rerun from
+semantic_lifting with `lifted.verification`, tracking with confirmation off
+and on. Off reproduces the earlier run's 1,160 tracks exactly; on keeps 565.
+By the evidence in most of a track's frames:
+
+| Evidence | Kept | Unconfirmed |
+|---|---|---|
+| camera lift only | 271 | 573 |
+| lift + detector | 186 | 15 |
+| with lidar_mos | 103 | 3 |
+| detector only | 5 | 3 |
+
+Of 16 hand-checked tracks, 9 of the 12 false ones go. Three stay:
+- a car behind a hedge (0008-227), verified on exactly the 3 frames a
+  parked vehicle needs;
+- a wall poster (0005-201);
+- a pedestrian placed by a passing van (0010-182).
+
+Three of the 4 plausible tracks stay; the fourth (0009-372) has 5 frames,
+none verified.
+
+Camera-only tracks are dropped most often near the car and far from it:
+
+| Median range | Unconfirmed / judged |
+|---|---|
+| < 20 m | 101 / 115 (0.88) |
+| 20–40 m | 207 / 315 (0.66) |
+| 40–60 m | 111 / 201 (0.55) |
+| 60–80 m | 71 / 120 (0.59) |
+| ≥ 80 m | 83 / 93 (0.89) |
+
+Overlays (`eval_runs/2026-11-17_gate_a/overlays/`, judged by eye, no GT):
+- **Near drops:** 14 of 16 sampled near (< 20 m) drops are false. Their
+  boxes sit on hedges, signs, trees, the car's own body, or a pole behind a
+  real car.
+- **Far drops:** beyond about 50 m, real cars with a handful of returns go
+  along with the false tracks.
+- **Dropped pedestrians:** 45 pedestrian tracks are dropped and 78 kept. Of
+  16 sampled drops:
+  - about 5 are real people in front of a hedge or storefront;
+  - 6 are false (drivers inside cars, a mannequin, glare, a canopy, a
+    façade).
+
+  The real people fail on IoU (0.1–0.3), for two reasons seen in their
+  points (`phase_d_ped_points.py`, `phase_d_mask_offset.py`):
+  - their returns merge with the hedge or bush they stand against at every
+    SAL scale, down to 0.32 m: the cluster holding them is 2–8 times wider
+    than their mask in the image, and 0–30 % of it falls inside the mask;
+  - their seeds (6–18 returns) also hold returns several metres behind them.
+
+  Where a person does form their own cluster (0002-97, 7–9 returns), 86–100
+  % of it falls inside the mask, so mask-to-LiDAR alignment is not the
+  cause. On nuScenes, confirmation keeps 51 of 53 true non-vehicle tracks
+  and drops 7 of 12 false ones.

@@ -22,7 +22,10 @@ step; then the chunks' tracks are linked and judged:
   extend a track. Scan-cluster additions supply
   geometry, not camera evidence. Legacy proposals without the separate seed
   count use their original total labeled count. Its lifted member's instance id (SAM2's identity across
-  frames) is its key.
+  frames) is its key. It is *confident* when LiDAR evidence backs it: a
+  lidar_mos member, a lifted member proposal_generation verified against a
+  distinct LiDAR segment (`lidar_verified`), or a detector-only box scored to
+  start a track. Only `confirmation` counts these.
 - **Duplicates.** Before association, each frame's boxes go through
   CenterPoint's circle NMS: a box within 2 m of a higher-ranked car box (3.46 m
   truck, 3.16 m bus) is dropped. Motion/lifted boxes rank before detector-only
@@ -59,8 +62,23 @@ step; then the chunks' tracks are linked and judged:
   to cover 1 m); `unknown` under 7 frames. Not MS3D's centre variance, which
   reads a one-sided parked car as moving.
 - **Class**: the score-weighted vote over its frames' classes.
-- **Filter**: a track is dropped only if it is both short (< 5 frames) and
+- **Filter**: a track is dropped if it is both short (< 5 frames) and
   weak (no strong frame).
+- **Confirmation** (`confirmation.enabled`, on by default; needs
+  proposal_generation's `lifted.verification`, and stops on proposals
+  without it): MS3D++'s retroactive
+  labelling. A track is a label only with enough confident instants over the
+  linked track, one frame per instant — a vehicle (car, truck, bus) 7, a
+  parked one 3, any other class 1 (MS3D++'s code defaults) — and then keeps
+  its whole life, including the instants that weren't confident. A camera
+  mask on the hedge in front of a car or the tree line behind it never gets a
+  verified frame, so its track goes. A vehicle track shorter than 7 instants
+  is "unknown" and needs 7, so it always goes. MS3D++ also drops standing
+  pedestrians; that is left out, since on nuScenes it lost 31 true ones.
+  What it costs on WATO: real cars beyond ~50 m with a few returns, and
+  people standing against a hedge or storefront, whose returns merge with it
+  at every scan-cluster scale (`docs/tracking_measurements.md`,
+  "Confirmation on WATO").
 
 lidar_preprocessing's `motion_clusters.parquet` `track_hint_id` is chunk-local
 and geometry-only; tracking doesn't use it. Step F's evidence reaches a track
@@ -139,8 +157,14 @@ Bag-level, through `wato_common.artifacts.tracks`:
   the one its chunk labels (`tracks.per_instant` keeps one per instant).
 - `track_summaries.parquet`: one `TrackSummaryRow` per track, judged over one
   frame per instant: motion state, class, and the evidence behind them
-  (instants, strong frames, two-source and lidar_mos shares, net displacement,
-  centre variance, points per frame).
+  (instants, strong and confident frames, two-source and lidar_mos shares,
+  net displacement, centre variance, points per frame). A summary file
+  without `n_confident` predates it: re-run tracking.
+- `track_confirmation.parquet` (diagnostics, written first; no component
+  reads it): every track that reached its summary, kept or dropped, with its
+  confident instants by kind (lidar_mos, verified lift, detector-only), the
+  unverified lifts, the count it needed and the decision (`kept`,
+  `short_weak`, `unconfirmed`).
 
 Configuration: `config/tracking.yaml`; every field is documented in
 [`config.py`](src/wato_tracking/config.py).

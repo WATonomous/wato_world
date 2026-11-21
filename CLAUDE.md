@@ -43,7 +43,10 @@ per chunk with SimpleTrack's GIoU cost, never-terminating tracks and
 CenterPoint's circle NMS on vehicles, re-linked after the pass by
 Offline-Poly's STWO, then linked across chunks; a parked / moving state per
 track; appearance ReID from perception_2d's masklet descriptors built in and
-off by default; `wato_common.tracking` keeps Chen's cost as the default
+off by default; MS3D++'s retroactive confirmation on LiDAR evidence, with
+proposal_generation's per-frame LiDAR verification of lifted boxes, on by
+default (bags run before them need a rerun from semantic_lifting);
+`wato_common.tracking` keeps Chen's cost as the default
 for Step F); label_refinement has a v0 (one box per parked vehicle, one size and a
 smoothed path per moving track, then SLF's box shape and heading fit per
 track to its masks and points, PyTorch on the GPU); the rest are stubs raising
@@ -248,7 +251,12 @@ doesn't load; the trim-bag end-to-end test skips).
   `tracks.per_instant` keeps one row per instant. A track's `motion_state`
   (moving / parked / unknown) is judged on the whole linked track
   (`src/tracking/README.md`), not by Step F's per-cluster `motion_score`;
-  label_refinement refines it whole.
+  label_refinement refines it whole. With `confirmation` on (the default;
+  needs `lifted.verification`), a track is kept only with enough confident
+  instants — lidar_mos, a verified lift or a detector-only birth-scored box:
+  vehicles 7, parked vehicles 3, others 1 (MS3D++'s retroactive labelling) —
+  and then keeps its whole life; `track_confirmation.parquet` lists every
+  judged track's evidence and decision.
 - **Appearance is per masklet per image, compared by closest pair.**
   perception_2d writes `masklet_embeddings.npz` (unit-norm rows, with the
   model and pooling that made them), read only through

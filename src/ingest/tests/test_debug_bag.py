@@ -58,6 +58,7 @@ def _summary(track_id, state="moving"):
         motion_state=state,
         cls="car",
         n_strong=1,
+        n_confident=1,
         frac_two_source=0.5,
         frac_lidar_mos=0.5,
         net_displacement_m=3.0,

@@ -52,6 +52,21 @@ tracking:
     min_frames: 5
     min_strong: 1
 
+  # MS3D++ retroactive labelling: a track is a label only with this many
+  # confident instants (LiDAR evidence: Step F motion, a lift a LiDAR segment
+  # backs, a detector-only box sure enough to start a track), then keeps its
+  # whole life. MS3D++'s code defaults (TRACK_FILTERING); its static-pedestrian
+  # exclusion is left out (it dropped 31 true standing pedestrians on
+  # nuScenes). Vehicle tracks under motion.min_frames (7) instants are
+  # "unknown" and so always dropped. Needs proposal_generation's
+  # lifted.verification (docs/research/lidar_verified_lifting.md).
+  confirmation:
+    enabled: true
+    min_confident_vehicle: 7          # VEH_ALL
+    min_confident_parked_vehicle: 3   # VEH_STATIC
+    min_confident_other: 1            # PED
+    vehicle_classes: [car, truck, bus]
+
   stitch:                            # link chunk k's tracks to chunk k+1's
     max_centre_dist_m: 1.0           # centres this close at a shared instant agree
     min_agreement: 0.5               # share of the shorter track's span instants
