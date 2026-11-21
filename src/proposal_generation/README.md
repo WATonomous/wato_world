@@ -153,10 +153,13 @@ independent-mask metadata or candidate files raises a rerun instruction.
 
 ```bash
 ./watod run proposal_generation --bag <bag_id> [--chunk <chunk_id>] [--force] \
-    --config /ws/src/proposal_generation/config/proposal_generation.wato.yaml
+    [--workers N] --config /ws/src/proposal_generation/config/proposal_generation.wato.yaml
 ```
 
-Chunks whose `proposals.parquet` exists are skipped unless `--force`. Each
+Chunks whose `proposals.parquet` exists are skipped unless `--force`.
+`--workers N` processes N chunks at once (chunks are independent); a chunk
+that fails doesn't stop the others, and the run then exits non-zero naming
+it. Each
 chunk gets `manifest_proposal_generation.json` (wato_common.manifest): config,
 build provenance, and hashed inputs — the per-sweep files through their
 producers' manifests and indexes. The earlier 8–21 s WATO chunk measurement

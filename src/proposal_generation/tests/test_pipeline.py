@@ -167,6 +167,25 @@ def test_run_skips_done_chunks_and_writes_a_manifest(caplog):
     run(_cfg(), bag_id=BAG, force=True)
 
 
+def test_parallel_run_matches_sequential_and_names_failed_chunks():
+    """Chunks run across workers write what one process writes; a chunk that
+    fails doesn't stop the rest, and the run then raises naming it."""
+    from wato_common.artifact_store import chunks_index_path
+    from wato_common.io.parquet_io import write_table
+    from wato_common.schemas import CHUNK_SCHEMA
+
+    stage_chunk()
+    run(_cfg(), bag_id=BAG)
+    sequential = sorted(read_rows(proposals_path(BAG, CHUNK)), key=str)
+    rows = read_rows(chunks_index_path(BAG))
+    write_table(
+        rows + [dict(rows[0], chunk_id="9999")], CHUNK_SCHEMA, chunks_index_path(BAG)
+    )
+    with pytest.raises(RuntimeError, match="9999"):
+        run(_cfg(), bag_id=BAG, force=True, workers=2)
+    assert sorted(read_rows(proposals_path(BAG, CHUNK)), key=str) == sequential
+
+
 def test_a_canonical_lidar_lidar_preprocessing_did_not_use_fails():
     """Every frame has one lidar_ne sweep too, but Step F stamped its clusters
     with lidar_cc's time."""

@@ -27,8 +27,11 @@ partial proposals file behind.
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
+import traceback
+from concurrent.futures import ProcessPoolExecutor
 from typing import Optional
 
 import numpy as np
@@ -301,6 +304,7 @@ def run(
     bag_id: str,
     chunk_id: Optional[str] = None,
     force: bool = False,
+    workers: int = 1,
     config_path: Optional[str] = None,
 ) -> None:
     """Process one bag (or one chunk) end-to-end.
@@ -308,7 +312,11 @@ def run(
     Skips chunks whose proposals.parquet exists unless force=True.
 
     Args:
+        workers: concurrent worker processes (>=1); chunks are independent.
         config_path: the config behind ``cfg``, hashed into each manifest.
+
+    Raises:
+        RuntimeError: naming every chunk that failed, after the others ran.
     """
     chunks = load_chunks(bag_id)
     if not chunks:
@@ -320,19 +328,58 @@ def run(
         if not chunks:
             raise ValueError(f"chunk_id {chunk_id!r} not found for bag {bag_id!r}")
 
-    n_ok = n_skip = 0
+    n_skip = 0
+    pending: list[str] = []
     for chunk in chunks:
         cid = chunk["chunk_id"]
         if not force and proposals.exists(bag_id, cid):
             log.info("chunk %s already complete — skipping (use --force)", cid)
             n_skip += 1
             continue
-        process_chunk(cfg, bag_id, cid)
-        _write_chunk_manifest(bag_id, cid, config_path, cfg.fusion_detector.enabled)
-        n_ok += 1
-    log.info(
-        "proposal_generation complete for bag %s: %d processed, %d skipped",
-        bag_id,
-        n_ok,
-        n_skip,
+        pending.append(cid)
+
+    worker = functools.partial(
+        _chunk_worker, cfg=cfg, bag_id=bag_id, config_path=config_path
     )
+    if workers <= 1 or len(pending) <= 1:
+        results = [worker(cid) for cid in pending]
+    else:
+        log.info("running %d chunks across %d workers", len(pending), workers)
+        with ProcessPoolExecutor(max_workers=min(workers, len(pending))) as pool:
+            results = list(pool.map(worker, pending))
+    failures = [(cid, err) for cid, ok, err in results if not ok]
+    log.info(
+        "proposal_generation complete for bag %s: %d processed, %d skipped, "
+        "%d failed",
+        bag_id,
+        len(results) - len(failures),
+        n_skip,
+        len(failures),
+    )
+    if failures:
+        for cid, err in failures:
+            log.error("--- chunk %s ---\n%s", cid, err)
+        raise RuntimeError(
+            f"proposal_generation failed on chunk(s) {[c for c, _ in failures]}"
+        )
+
+
+def _chunk_worker(
+    chunk_id: str, cfg: ComponentConfig, bag_id: str, config_path: Optional[str]
+) -> tuple[str, bool, str]:
+    """One chunk, then its manifest. Module-scope so ProcessPoolExecutor can
+    pickle it; returns (chunk_id, ok, error with traceback) so one chunk's
+    failure doesn't stop the rest."""
+    try:
+        process_chunk(cfg, bag_id, chunk_id)
+        _write_chunk_manifest(
+            bag_id, chunk_id, config_path, cfg.fusion_detector.enabled
+        )
+        return (chunk_id, True, "")
+    except Exception as exc:  # noqa: BLE001 — reported and raised by run()
+        log.exception("chunk %s failed", chunk_id)
+        return (
+            chunk_id,
+            False,
+            f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+        )

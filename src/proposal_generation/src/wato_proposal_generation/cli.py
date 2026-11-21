@@ -34,12 +34,26 @@ def main() -> None:
     default=False,
     help="re-run chunks even if their proposals.parquet exists.",
 )
-def run_cmd(bag_id: str, chunk_id: str | None, config_path: str, force: bool) -> None:
+@click.option(
+    "--workers",
+    "workers",
+    default=1,
+    type=int,
+    help="number of concurrent worker processes (default 1 = sequential).",
+)
+def run_cmd(
+    bag_id: str, chunk_id: str | None, config_path: str, force: bool, workers: int
+) -> None:
     cfg = load_config(config_path)
     from wato_proposal_generation.pipeline import run as run_pipeline
 
     run_pipeline(
-        cfg, bag_id=bag_id, chunk_id=chunk_id, force=force, config_path=config_path
+        cfg,
+        bag_id=bag_id,
+        chunk_id=chunk_id,
+        force=force,
+        workers=workers,
+        config_path=config_path,
     )
 
 
