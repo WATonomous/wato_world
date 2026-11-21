@@ -160,12 +160,3 @@ coverage without retraining; WATO detection accuracy still needs ground truth.
 independently through TensorRT. Full-detector ablations are reported alongside
 repeat noise; deterministic encoder ablations establish per-view processing.
 See [sensor setup](../../docs/sensor_setup.md) for the measured audit.
-
-## Camera calibration source
-
-`calibration_source: recorded` is the default. `validated` requests the
-camera-calibration stage's accepted result and fails on missing, stale,
-unqualified or failed-camera evidence. Keep this choice consistent across
-camera-dependent stages. Output/cache identities reject mixing calibrations;
-rerun depth and downstream processing with `--force` after a change. See
-[the calibration module](../camera_calibration/README.md).

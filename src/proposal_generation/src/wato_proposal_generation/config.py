@@ -150,7 +150,6 @@ class FusionDetectorConfig(BaseModel):
 class ComponentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    calibration_source: Literal["recorded", "validated"] = "recorded"
     frames: FramesConfig = Field(default_factory=FramesConfig)
     lidar_mos: LidarMosConfig = Field(default_factory=LidarMosConfig)
     lifted: LiftedConfig = Field(default_factory=LiftedConfig)

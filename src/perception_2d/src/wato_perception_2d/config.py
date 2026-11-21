@@ -304,7 +304,6 @@ _FALLBACK_CONCEPTS: list[tuple[str, str]] = [
 class ComponentConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    calibration_source: Literal["recorded", "validated"] = "recorded"
     discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
     detection: DetectionConfig = Field(default_factory=DetectionConfig)
     segmentation: SegmentationConfig = Field(default_factory=SegmentationConfig)

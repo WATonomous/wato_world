@@ -1,6 +1,3 @@
-# Camera extrinsics: validated requires a qualified camera_calibration result.
-calibration_source: recorded
-
 # perception_2d: 2D detector boxes keyframes; SAM2.1 with DAM4SAM memory
 # tracks each box into a masklet. Schema: config.py.
 

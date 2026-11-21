@@ -232,10 +232,3 @@ Set `lifted.support_method: scan_clusters` to opt in. Under that method,
 substitutes largest-group filtering for rejected matches. The legacy radius
 fields are only used with `support_method: largest_group`. Ground masks are
 required for either method: proposal points remain non-ground.
-
-## Calibration identity
-
-Proposal generation preserves the calibration identity of lifting and detector
-inputs and rejects mixed identities or stale cached outputs. Camera overlays
-choose `calibration_source: recorded|validated` (default recorded) and check
-that it matches the proposal inputs. See [camera calibration](../camera_calibration/README.md).

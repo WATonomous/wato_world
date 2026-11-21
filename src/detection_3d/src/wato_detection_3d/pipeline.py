@@ -42,7 +42,6 @@ from wato_common.artifact_store import (
 )
 from wato_common.artifacts import detections_3d
 from wato_common.artifacts.calibration import Calibration
-from wato_common.artifacts import calibration_refinement as camera_calibration
 from wato_common.artifacts.detections_3d import Detection3D, DetectorFrame
 from wato_common.artifacts.frame_index import CameraFrame, FrameIndex
 from wato_common.artifacts.lidar_sweeps import Frame, ProcessedSweeps, WorldSweep
@@ -245,9 +244,7 @@ def process_chunk(
             raise FileNotFoundError(
                 f"chunk {chunk_id!r} of bag {bag_id!r} is missing {name}"
             )
-    calib = camera_calibration.resolve(
-        bag_id, cfg.calibration_source, cfg.cameras
-    ).calibration
+    calib = Calibration.load(bag_id)
     sweeps = ProcessedSweeps.load(bag_id, chunk_id)
     frames = sweeps.frames(cfg.frames.canonical_lidar)
     poses = PoseLookup.load(bag_id, chunk_id)
@@ -376,16 +373,6 @@ def run(
                     "are unrecorded; rerun detection_3d and downstream stages "
                     "with --force (sensor changes require --force ingest)."
                 )
-    selection = camera_calibration.resolve(bag_id, cfg.calibration_source, cfg.cameras)
-    for c in chunks:
-        camera_calibration.bind_outputs(
-            bag_id,
-            c["chunk_id"],
-            "detection_3d",
-            selection,
-            force=force,
-            existing_outputs=detections_3d.exists(bag_id, c["chunk_id"]),
-        )
     todo = [
         c["chunk_id"]
         for c in chunks

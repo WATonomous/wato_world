@@ -45,7 +45,6 @@ from wato_common.artifact_store import (
     semantic_lifting_dir,
 )
 from wato_common.artifacts import ground as ground_artifact
-from wato_common.artifacts import calibration_refinement as camera_calibration
 from wato_common.artifacts import (
     detections_3d,
     lifted_labels,
@@ -270,21 +269,6 @@ def run(
     n_ok = n_skip = 0
     for chunk in chunks:
         cid = chunk["chunk_id"]
-        upstream_calibration = [
-            f"{chunk_root(bag_id, cid)}/manifest_semantic_lifting.json"
-        ]
-        if cfg.fusion_detector.enabled:
-            upstream_calibration.append(
-                f"{chunk_root(bag_id, cid)}/manifest_detection_3d.json"
-            )
-        camera_calibration.bind_inherited_outputs(
-            bag_id,
-            cid,
-            "proposal_generation",
-            upstream_calibration,
-            force=force,
-            existing_outputs=proposals.exists(bag_id, cid),
-        )
         if not force and proposals.exists(bag_id, cid):
             log.info("chunk %s already complete — skipping (use --force)", cid)
             n_skip += 1

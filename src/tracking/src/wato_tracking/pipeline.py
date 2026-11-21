@@ -35,7 +35,6 @@ from wato_common.artifact_store import (
     tracks_path,
 )
 from wato_common.artifacts import proposals, tracks
-from wato_common.artifacts import calibration_refinement as camera_calibration
 from wato_common.artifacts.tracks import TrackFrame, TrackSummary
 from wato_tracking import appearance, detections, relink, stitch, summary, tracker
 from wato_tracking.appearance import Calibration, MemberCost
@@ -232,17 +231,6 @@ def run(
         raise FileNotFoundError(
             f"No chunks found for bag {bag_id!r} — run ingest first."
         )
-    camera_calibration.bind_inherited_outputs(
-        bag_id,
-        None,
-        "tracking",
-        [
-            f"{chunk_root(bag_id, c['chunk_id'])}/manifest_proposal_generation.json"
-            for c in index
-        ],
-        force=force,
-        existing_outputs=tracks.exists(bag_id),
-    )
     if tracks.exists(bag_id) and not force:
         log.info("bag %s already tracked — skipping (use --force)", bag_id)
         return

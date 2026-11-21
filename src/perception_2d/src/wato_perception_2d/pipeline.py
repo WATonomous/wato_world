@@ -46,8 +46,7 @@ from wato_common.artifact_store import (
     tracklets_2d_path,
 )
 from wato_common.artifacts import depth, masklets
-from wato_common.artifacts.calibration import CameraCalibration
-from wato_common.artifacts import calibration_refinement as camera_calibration
+from wato_common.artifacts.calibration import Calibration, CameraCalibration
 from wato_common.artifacts.frame_index import CameraFrame, FrameIndex
 from wato_common.geometry import invert_se3
 from wato_perception_2d.config import ComponentConfig
@@ -426,17 +425,6 @@ def _process_chunk(
     DA-V2 (depth) and the detector + SAM2 (tracking) are never built at the same
     time, so only one heavy model set occupies the GPU at once.
     """
-    selection = camera_calibration.resolve(bag_id, cfg.calibration_source)
-    camera_calibration.bind_outputs(
-        bag_id,
-        chunk_id,
-        "perception_2d",
-        selection,
-        force=force,
-        existing_outputs=_chunk_complete(bag_id, chunk_id)
-        or os.path.isdir(local_path(depth_2d_dir(bag_id, chunk_id)))
-        or os.path.isdir(_partial_dir(bag_id, chunk_id)),
-    )
     if force:
         # Start the chunk clean. Mask dirs are named by masklet_id, which is new
         # each run, so without this a rerun leaves the previous run's masks
@@ -482,9 +470,7 @@ def _process_chunk(
     _check_tracking_weights(cfg, detector)
     check_sam2_cuda_extension(device)
 
-    calib = camera_calibration.resolve(
-        bag_id, cfg.calibration_source, frames_by_cam
-    ).calibration
+    calib = Calibration.load(bag_id)
     calibration = {cam_id: calib.camera(cam_id) for cam_id in calib.cameras}
 
     partial_dir = _partial_dir(bag_id, chunk_id)
@@ -985,19 +971,6 @@ def run(
     )
     log.info("=" * 70)
 
-    selection = camera_calibration.resolve(bag_id, cfg.calibration_source)
-    for chunk in chunks:
-        cid = chunk["chunk_id"]
-        camera_calibration.bind_outputs(
-            bag_id,
-            cid,
-            "perception_2d",
-            selection,
-            force=force,
-            existing_outputs=_chunk_complete(bag_id, cid)
-            or os.path.isdir(local_path(depth_2d_dir(bag_id, cid)))
-            or os.path.isdir(_partial_dir(bag_id, cid)),
-        )
     device = _default_device()
 
     # Florence-2 and the detector load their weights lazily (in the tracking

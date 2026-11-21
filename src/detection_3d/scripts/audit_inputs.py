@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from wato_common.artifacts import calibration_refinement
+from wato_common.artifacts.calibration import Calibration
 from wato_common.artifacts.frame_index import FrameIndex
 from wato_common.artifacts.lidar_sweeps import ProcessedSweeps
 from wato_common.pose_lookup import PoseLookup
@@ -163,9 +163,7 @@ def main():
     prepared = engines.prepare(cfg.model)
     detector = model.Bevfusion(prepared, cfg.model.precision, cfg.model.num_cameras)
     capture = Capture(detector)
-    calib = calibration_refinement.resolve(
-        args.bag, cfg.calibration_source, cfg.cameras
-    ).calibration
+    calib = Calibration.load(args.bag)
     sweeps = ProcessedSweeps.load(args.bag, args.chunk)
     poses = PoseLookup.load(args.bag, args.chunk)
     images = pipeline._Images(FrameIndex.load(args.bag, args.chunk))

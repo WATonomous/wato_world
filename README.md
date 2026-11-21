@@ -25,10 +25,6 @@ flowchart TD
         LP["motion compensation\nstatic / dynamic split\nground height grid\nUniLiPs IWU · motion proposals"]
     end
 
-    subgraph camera_calibration["camera_calibration  ·  CPU · optional"]
-        CC["camera extrinsic candidates\nindependent validation report"]
-    end
-
     subgraph perception_2d["perception_2d  ·  GPU"]
         P2["YOLO26 / GroundingDINO detector\nSAM2 video tracker\nDepth Anything V2\nDINOv2 embeddings\n(optional Florence-2 discovery)"]
     end
@@ -64,8 +60,6 @@ flowchart TD
     BAG --> ingest
     ingest -- "frame_index · images · poses\ncalibration" --> perception_2d
     ingest -- "lidar_sweeps · poses" --> lidar_prep
-    lidar_prep -- "static intensity returns" --> camera_calibration
-    camera_calibration -- "explicit validated calibration" --> perception_2d
     lidar_prep -- "world sweeps · dynamic masks" --> perception_2d
     lidar_prep -- "world sweeps" --> semantic_lifting
     ingest -- "images · calibration · poses" --> detection_3d
@@ -91,11 +85,6 @@ on which stretches of the pose stream are trustworthy.
 **ingest**, **lidar_preprocessing** and **perception_2d** are implemented end-to-end (and
 **semantic_lifting**'s core lifting algorithm); **proposal_generation** has its first
 sources (Step F clusters, lifted-instance boxes, fusion). The remaining components are stubs.
-
-The optional [camera calibration module](src/camera_calibration/README.md) fits
-per-bag camera mounts after LiDAR preprocessing. It preserves recorded calibration
-and reports failed/insufficient estimates. Profiles are currently disabled and
-unqualified pending independent real-scene validation.
 
 ## Layout
 
@@ -156,7 +145,6 @@ watod down all
 
 | Component | Purpose | Image base | GPU |
 |---|---|---|---|
-| `camera_calibration` | Per-bag extrinsic candidates, independent validation and calibration selection | CPU | no |
 | `ingest` | Decode rosbag → frames + lidar + poses + frame_index | CPU | no |
 | `perception_2d` | YOLO26 or GroundingDINO detector + SAM2 video tracker + Depth Anything V2 + DINOv2 (optional Florence-2 discovery) | CUDA | yes |
 | `semantic_lifting` | Occlusion-aware 2D→3D label lifting (UniLiPs Eq.1) | CPU | no |

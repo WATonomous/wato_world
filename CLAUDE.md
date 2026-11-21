@@ -23,12 +23,12 @@ no `infrastructure`, carla or simulation profiles; config is per component at
 
 ## What this repo is
 
-Offline batch 3D auto-labeling for WATonomous: eleven components, one Docker
+Offline batch 3D auto-labeling for WATonomous: ten components, one Docker
 image each, communicating only through files under `data/artifacts/`
 (Parquet / JSON / PNG / NPZ). No runtime messaging, no database.
 
 ```
-ingest → lidar_preprocessing → camera_calibration → perception_2d → semantic_lifting →
+ingest → lidar_preprocessing → perception_2d → semantic_lifting →
 proposal_generation → tracking → label_refinement / open_vocab_discovery → student_training
          lidar_preprocessing → detection_3d ↗ (BEVFusion boxes into proposal_generation)
 ```
@@ -112,7 +112,7 @@ diagnostics (`segmentation.mask_quality`) are off by default. Details:
 ./watod build                 # pull bases from ghcr, build ACTIVE_MODULES (watod-config.sh)
 ./watod up                    # docker compose up -d
 ./watod -t ingest_dev         # shell into a running dev container
-./watod run <component> --bag <bag> [flags]   # also: validate-bag, trim-bag, debug-bag, reduce, viz, ego-mask, compare, embed, pick
+./watod run <component> --bag <bag> [flags]   # also: validate-bag, trim-bag, debug-bag, reduce, viz, ego-mask, compare, embed
 ./watod pipeline --bag <bag> [--profile wato] [--force <stage>,...] [--from|--to <stage>] [--dry-run]
 ./watod test <component>      # src/common/tests, then the component's, in its dev image
 ./watod down all
@@ -248,27 +248,6 @@ doesn't load; the trim-bag end-to-end test skips).
   and a tracking rerun.
 - **Sensor physics lives in `sensor_model.py`** (profiles `vlp32c`, `vlp16`,
   `hdl32e`), never in YAML.
-
-## Camera calibration
-
-`camera_calibration` runs after LiDAR preprocessing, before detection/depth.
-It uses a pinned Koide NID objective in a headless Ceres runner, fixed camera
-intrinsics/LiDAR mounts/poses, and independent static correspondences for
-validation. Shipped profiles stay disabled and unqualified: current WATO
-fits can be unstable. `./watod run camera_calibration pick` writes a browser
-picker for those correspondences on the report's held-out views; pixel and
-3D point are picked separately and LiDAR is never drawn on the image, so picks
-stay independent of the calibration they judge. When changing calibration selection, validation, cache
-identity or rollout, read `src/camera_calibration/README.md` and
-`docs/camera_calibration_measurements.md`.
-
-Ingest's `calibration.json` stays baseline provenance. Candidate/effective/report
-artifacts live beside it under `camera_calibration/`, read/written only through
-`wato_common.artifacts.calibration_refinement`. Camera consumers explicitly choose
-`calibration_source: recorded|validated`; validated reads reject stale,
-unqualified or failed-camera results. Calibration identities bind resumable
-caches and propagate through proposal/tracking/refinement manifests. Rerun all
-camera-dependent outputs with `--force` after changing their calibration.
 
 ## Ingest
 
@@ -451,3 +430,8 @@ no detector tried finds cones or barriers on WATO
 (`docs/perception_2d_measurements.md`), a class never detected is labelled
 absent everywhere, and SAM 3's case rested on those classes; perception_2d's
 detector-support rules already port its track rules onto SAM2.
+The `camera_calibration` component (per-bag Koide NID extrinsic fits, the
+correspondence picker, `wato_common.artifacts.calibration_refinement` and every
+consumer's `calibration_source: recorded|validated`): its WATO fits were
+unstable and never qualified. Every stage reads ingest's `calibration.json`;
+a corrected calibration enters through `ingest --calibration <file>`.

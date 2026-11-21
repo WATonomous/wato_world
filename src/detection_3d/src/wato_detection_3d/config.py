@@ -109,7 +109,6 @@ class CameraSyncConfig(BaseModel):
 class ComponentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    calibration_source: Literal["recorded", "validated"] = "recorded"
     model: ModelConfig
     camera_sync: CameraSyncConfig = Field(default_factory=CameraSyncConfig)
     frames: FramesConfig = Field(default_factory=FramesConfig)

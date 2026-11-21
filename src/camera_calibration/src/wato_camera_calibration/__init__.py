@@ -1,1 +1,0 @@
-"""Offline camera extrinsic refinement."""

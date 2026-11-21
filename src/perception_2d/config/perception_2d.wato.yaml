@@ -1,6 +1,3 @@
-# Camera extrinsics: validated requires a qualified camera_calibration result.
-calibration_source: recorded
-
 # perception_2d for the WATO rig (ingest.wato*.yaml bags): perception_2d.yaml
 # plus the rig's ego mask; a test fails if anything else drifts.
 #   ./watod run perception_2d --bag <wato_bag> \

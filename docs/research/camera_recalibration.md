@@ -314,10 +314,9 @@ contains only voxelized XYZ, so it cannot directly supply this intensity
 objective. Require intensity presence/quality rather than inventing values.
 [Sweep contract](../../src/common/src/wato_common/artifacts/lidar_sweeps.py),
 [map reduction](../../src/lidar_preprocessing/src/wato_lidar_preprocessing/reduce/_core.py).
-This design is now implemented in the optional
-[camera_calibration module](../../src/camera_calibration/README.md), with
-[initial measurements](../camera_calibration_measurements.md). The initial
-WATO fits remain unqualified and unstable; no production correction is accepted.
+This design was implemented as a `camera_calibration` component (commit
+50261d9) and later removed: its WATO fits were unstable and never qualified,
+and no production correction was accepted.
 
 The adapter can seed `results.init_T_lidar_camera` from the recorded TF
 (`ego_T_cam` when adapted clouds use ego coordinates), then invoke

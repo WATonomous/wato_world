@@ -1,8 +1,6 @@
 # proposal_generation on the WATO rig: proposal_generation.yaml with the
 # canonical LiDAR of lidar_preprocessing.wato.yaml's frame_sync.
 proposal_generation:
-  # validated requires a qualified, current camera_calibration result.
-  calibration_source: recorded
   frames:
     canonical_lidar: lidar_cc
 

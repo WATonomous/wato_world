@@ -1,7 +1,6 @@
 # Explicit legacy profile for bags without PANO_EE/PANO_WW. The regular WATO
 # profile requires all eight top cameras; this profile retains six-view runs.
 detection_3d:
-  calibration_source: recorded
   model:
     dir: /data/models/bevfusion/resnet50_trt11_int8
     precision: int8

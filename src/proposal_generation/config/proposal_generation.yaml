@@ -1,8 +1,6 @@
 # proposal_generation (nuScenes and other single-LiDAR bags).
 # Per-chunk counts behind the defaults: docs/proposal_generation_measurements.md.
 proposal_generation:
-  # validated requires a qualified, current camera_calibration result.
-  calibration_source: recorded
   # Must match lidar_preprocessing's frame_sync.canonical_lidar for the bag.
   frames:
     canonical_lidar: null        # one LiDAR: each sweep is its own frame

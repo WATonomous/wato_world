@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -30,7 +30,6 @@ class InstancesConfig(BaseModel):
 class ComponentConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    calibration_source: Literal["recorded", "validated"] = "recorded"
     visibility: VisibilityConfig = Field(default_factory=VisibilityConfig)
     instances: InstancesConfig = Field(default_factory=InstancesConfig)
 

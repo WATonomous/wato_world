@@ -41,11 +41,6 @@ def calibration_path(bag_id: str) -> str:
     return _join(bag_root(bag_id), "calibration.json")
 
 
-def calibration_refinement_dir(bag_id: str) -> str:
-    """Camera-only refinement; calibration.json remains ingest provenance."""
-    return _join(bag_root(bag_id), "camera_calibration")
-
-
 def chunks_index_path(bag_id: str) -> str:
     return _join(bag_root(bag_id), "chunks", "index.parquet")
 

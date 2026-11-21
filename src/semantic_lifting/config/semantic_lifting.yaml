@@ -1,6 +1,3 @@
-# Camera extrinsics: validated requires a qualified camera_calibration result.
-calibration_source: recorded
-
 # Occlusion test (visibility.py); values measured on the WATO rig in
 # docs/semantic_lifting_measurements.md.
 visibility:

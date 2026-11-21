@@ -2,8 +2,6 @@
 # lidar_preprocessing.wato.yaml's frame_sync and all eight top cameras.
 # Every field is documented in src/wato_detection_3d/config.py.
 detection_3d:
-  # validated requires a qualified, current camera_calibration result.
-  calibration_source: recorded
   model:
     # The car's resnet50_trt11_int8 (wato_monorepo bevfusion params.yaml):
     # README "Model files" installs it.
